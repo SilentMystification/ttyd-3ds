@@ -327,15 +327,26 @@ static void read_vertex(Reader* r, u8 fmt, GxVertex* v) {
 
 /* ---- Encoding a primitive into a recorded display list ---- */
 
+static int s_measure; /* encode_vertex only advances the reader (slot count check) */
+
 static void put_u8(u32 v) {
+    if (s_measure) {
+        return;
+    }
     u8 b = (u8)v;
     gx_dl_put(&b, 1);
 }
 static void put_u16(u32 v) {
+    if (s_measure) {
+        return;
+    }
     u8 b[2] = {(u8)(v >> 8), (u8)v};
     gx_dl_put(b, 2);
 }
 static void put_u32(u32 v) {
+    if (s_measure) {
+        return;
+    }
     u8 b[4] = {(u8)(v >> 24), (u8)(v >> 16), (u8)(v >> 8), (u8)v};
     gx_dl_put(b, 4);
 }
@@ -500,10 +511,33 @@ void GXEnd(void) {
     gx_prim_open = 0;
     Reader r = {s_pipe, NULL, NULL};
     if (gx_dl_recording()) {
-        put_u8((u32)s_prim | s_fmt);
-        put_u16(s_nverts);
+        /* The GameCube records the written bytes and decodes them with the
+         * vertex description in force when the list is called. The port
+         * re-encodes the vertices with the description in force now, which
+         * gives the same bytes when the writes fill it exactly; otherwise
+         * (the game set the description up later) it keeps the raw writes
+         * for the call to decode. */
+        u32 written = (u32)((const PPCWGPipe*)port_gx_wg_ptr - s_pipe);
+        Reader m = {s_pipe, NULL, NULL};
+        s_measure = 1;
         for (u32 i = 0; i < s_nverts; i++) {
-            encode_vertex(&r, s_fmt);
+            encode_vertex(&m, s_fmt);
+        }
+        s_measure = 0;
+        if ((u32)(m.slot - s_pipe) == written) {
+            put_u8((u32)s_prim | s_fmt);
+            put_u16(s_nverts);
+            for (u32 i = 0; i < s_nverts; i++) {
+                encode_vertex(&r, s_fmt);
+            }
+        } else {
+            put_u8(GXDL_OP_RAW_PRIM);
+            put_u8((u32)s_prim | s_fmt);
+            put_u16(s_nverts);
+            put_u32(written);
+            for (u32 i = 0; i < written; i++) {
+                put_u32(s_pipe[i].u32); /* each write's value; u8 and u16 writes use the low bytes */
+            }
         }
     } else if (s_nverts > 0) {
         draw_from_reader(&r, s_prim, s_fmt, s_nverts);
@@ -518,6 +552,11 @@ volatile PPCWGPipe* port_gx_wg_overflow(void) {
 void GXResetWriteGatherPipe(void) {}
 
 /* ---- Command streams (display lists, raw pipe commands) ---- */
+
+/* the display list being run, for the unknown-command report */
+static void* s_list_caller;
+static const u8* s_list_start;
+static u32 s_list_bytes;
 
 static void run_commands(Reader* r, int from_list) {
     for (;;) {
@@ -542,6 +581,22 @@ static void run_commands(Reader* r, int from_list) {
             } else {
                 draw_from_reader(r, (u8)(op & 0xF8), (u8)(op & 7), n);
             }
+            continue;
+        }
+        if (op == GXDL_OP_RAW_PRIM && r->slot == NULL) {
+            u32 pf = rd_u8(r);
+            u32 n = rd_u16(r);
+            u32 count = rd_u32(r);
+            if (count > PIPE_SLOTS || (u32)(r->end - r->p) < count * 4) {
+                PLOG_W("GX: raw primitive of %lu writes runs past its display list", (unsigned long)count);
+                return;
+            }
+            static PPCWGPipe slots[PIPE_SLOTS];
+            for (u32 i = 0; i < count; i++) {
+                slots[i].u32 = rd_u32(r);
+            }
+            Reader sr = {slots, NULL, NULL};
+            draw_from_reader(&sr, (u8)(pf & 0xF8), (u8)(pf & 7), n);
             continue;
         }
         if (op >= GXDL_OP_PORT) {
@@ -575,7 +630,12 @@ static void run_commands(Reader* r, int from_list) {
             rd_u32(r);
             break;
         default:
-            plat_fatal("GX: unknown command %02lx in a %s", (unsigned long)op, from_list ? "display list" : "pipe");
+            if (from_list) {
+                plat_fatal("GX: unknown command %02lx at byte %ld of a %lu-byte display list %p called from %p",
+                           (unsigned long)op, (long)(r->p - 1 - s_list_start), (unsigned long)s_list_bytes,
+                           s_list_start, s_list_caller);
+            }
+            plat_fatal("GX: unknown command %02lx in the pipe", (unsigned long)op);
         }
     }
 }
@@ -602,7 +662,11 @@ void GXCallDisplayList(void* list, u32 nbytes) {
         plat_fatal("GXCallDisplayList inside a display list being recorded");
     }
     Reader r = {NULL, (const u8*)list, (const u8*)list + nbytes};
+    s_list_caller = __builtin_return_address(0);
+    s_list_start = (const u8*)list;
+    s_list_bytes = nbytes;
     run_commands(&r, 1);
+    s_list_caller = NULL;
 }
 
 void GXBeginDisplayList(void* list, u32 size) {

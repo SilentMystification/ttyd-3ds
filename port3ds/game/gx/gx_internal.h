@@ -189,6 +189,8 @@ void gx_dl_put(const void* bytes, u32 n);
 /* Port opcodes for state calls inside a display list (0xC0..0xFF). */
 enum {
     GXDL_OP_PORT = 0xC0,
+    /* a primitive kept as its raw writes: prim|fmt u8, count u16, writes u32, then each write as u32 */
+    GXDL_OP_RAW_PRIM = 0xC1,
 };
 
 /* ---- gx_draw.c ---- */

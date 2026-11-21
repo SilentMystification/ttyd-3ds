@@ -312,10 +312,9 @@ static u32 tex_alloc_slot(void) {
      * memory (VRAM for copy targets) is back before the new one is made. */
     for (u32 i = 1; i < MAX_TEX; i++) {
         TexSlot* t = &s_tex[i];
-        if (t->pending_free && s_frame_counter >= t->free_after_frame) {
-            if (t->target != NULL) {
-                C3D_RenderTargetDelete(t->target);
-            }
+        /* a slot with a render target is released by the render thread
+         * (reap_targets): citro3d deletes targets only outside a frame */
+        if (t->pending_free && t->target == NULL && s_frame_counter >= t->free_after_frame) {
             C3D_TexDelete(&t->tex);
             memset(t, 0, sizeof(*t));
         }
@@ -330,6 +329,21 @@ static u32 tex_alloc_slot(void) {
     }
     LightLock_Unlock(&s_tex_lock);
     return 0;
+}
+
+/* Render thread, between frames: frees the copy targets whose textures were
+ * released (C3D_RenderTargetDelete panics inside a frame). */
+static void reap_targets(void) {
+    LightLock_Lock(&s_tex_lock);
+    for (u32 i = 1; i < MAX_TEX; i++) {
+        TexSlot* t = &s_tex[i];
+        if (t->pending_free && t->target != NULL && s_frame_counter >= t->free_after_frame) {
+            C3D_RenderTargetDelete(t->target);
+            C3D_TexDelete(&t->tex);
+            memset(t, 0, sizeof(*t));
+        }
+    }
+    LightLock_Unlock(&s_tex_lock);
 }
 
 uint32_t plat_gpu_tex_create(uint32_t width, uint32_t height, uint32_t fmt, const void* pixels, uint32_t bytes) {
@@ -630,6 +644,7 @@ static void present(void) {
 
 static void render_record(Record* r) {
     u64 t0 = svcGetSystemTick();
+    reap_targets();
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     C3D_FrameDrawOn(s_efb);
     C3D_BindProgram(&s_prog);

@@ -353,14 +353,28 @@ Each phase ends with a commit, updated docs, and passing tests for everything ea
 
 | Phase | Work | Done when |
 |---|---|---|
-| 0. Tooling | Scripts from section 8 (runners for all three, memcompare skeleton reading `GlobalWork` from Dolphin and paper-cut), Docker image with makerom and bannertool, Windows script, a 3DS hardware probe app (memory modes, core 2 availability, measured L1/L2 and memory bandwidth, QTM mapping through Luma, `svcGetSystemTick` cost), first `.rsf` with a hello-world CIA | Every runner works from a single command; probe results recorded in `docs/PORT_3DS_HARDWARE.md` from your O3DS and N3DS |
+| 0. Tooling | Scripts from section 8 (runners for all three, memcompare skeleton reading `GlobalWork` from Dolphin and paper-cut), Docker image with makerom and bannertool, Windows script, first `.rsf` with a hello-world CIA that installs and runs in Azahar. The hardware probe app (memory modes, core 2 availability, measured L1/L2 and memory bandwidth, QTM mapping through Luma, `svcGetSystemTick` cost) is written here but first run on hardware in phase 8 | Every runner works from a single command; the CIA and the probe run in Azahar |
 | 1. Compile and link | `port3ds/CMakeLists.txt` compiles all game code and MusyX for ARM; static REL linking; the address-check audit; the MWCC-intrinsic and GQR fixes; the GameCube build still matches | Links with only the port SDK left as link errors; that list becomes the phase 3 to 5 work list |
 | 2. Converter | Disc reader, FST, all format schemas, PICA texture conversion, display-list conversion, MusyX banks, manifest; host tool plus tests against paper-cut's decoders | Every file on the US disc converts, and the round-trip tests pass |
-| 3. Platform | OS, DVD, ARAM/ARQ, PAD, CARD, VI; log, crash handler, watchdog, switches, HUD, Select menu | The game reaches its first `GXBegin` on Azahar with logs, and crash tests work on hardware |
+| 3. Platform | OS, DVD, ARAM/ARQ, PAD, CARD, VI; log, crash handler, watchdog, switches, HUD, Select menu | The game reaches its first `GXBegin` on Azahar with logs; the crash handler's self-test path works in Azahar |
 | 4. GX | State tracker, vertex paths, shaders, TEV compiler, textures, EFB copies, fog and blend, bbox, z-texture, indirect, multipass, bounds checks | Logo, title and file select match paper-cut shots; `gor_01` renders |
 | 5. Audio | MusyX `hw_3ds` software backend, streams, DTK; then NDSP voices | Title music and `gor_01` sound effects play; matches paper-cut's audio golden hashes within tolerance |
-| 6. Bring-up | New game to Rogueport, first battle, save and load, partner, menus | Golden set passes on Azahar; the same path runs on N3DS and O3DS hardware without a crash |
-| 7. Functional completion | Map sweep, story sweep, every special effect scene, the remaining regions (JP, PAL with 50 Hz and languages), CIA install path, O3DS 30 Hz experiment | Sweeps clean; game completable; ready for the separate bug-fix and optimization passes |
+| 6. Bring-up | New game to Rogueport, first battle, save and load, partner, menus | Golden set passes on Azahar |
+| 7. Functional completion in Azahar | Map sweep, story sweep, every special effect scene, the remaining regions (JP, PAL with 50 Hz and languages), CIA install path | Sweeps clean in Azahar; game completable in Azahar |
+| 8. First hardware run | Run the probe app and record results in `docs/PORT_3DS_HARDWARE.md`; settle the section 12 assumptions; boot the functional build on the N3DS over 3dslink; crash-handler and watchdog tests on hardware; fix hardware-only faults (hangs, unmapped accesses, cache maintenance) | The phase 6 path runs on the N3DS without a crash or hang; ready for the separate bug-fix and optimization passes |
+
+**No hardware tests happen before phase 8** (decision, 2026-11-21). Until then:
+
+- Azahar is the only target.
+- Code is written to hardware rules anyway, because Azahar accepts things that hang or fault the real console:
+  - every bounds check from section 5.4;
+  - whole-register shader writes;
+  - explicit cache flushes for GPU and DSP buffers;
+  - Azahar's `UnmappedAccess` log lines treated as failures.
+- Nothing depends on an unverified section 12 assumption:
+  - `SystemModeExt` stays at 124MB;
+  - QTM is not used;
+  - core 2 is used, with the core-0 fallback (`gxsync`) kept working.
 
 Performance work inside these phases is limited to what the architecture needs: offline vertex conversion, zero-copy arenas, the core-2 render thread and VFP matrix code. Profiling-driven tuning (L1-sized loop splitting, QTM placement, Thumb/ARM per file, NDSP voices) gets its own pass afterwards, using the profiler from phase 3.
 
@@ -378,7 +392,7 @@ These are asked in the conversation and recorded here with the answers once give
 8. CIA. **Answered:** a unique ID in the homebrew range with product code `CTR-H-TTYD`, and plain original placeholder banner and icon art that can be replaced later.
 9. Git. **Answered:** work on a `port3ds` branch pushed to `SilentMystification/ttyd-3ds`, with PRs into `main` at phase boundaries.
 
-## 12. Unverified assumptions (checked in phase 0)
+## 12. Unverified assumptions (checked on hardware in phase 8)
 
 - **QTM RAM:** whether a homebrew process can map QTM through Luma3DS, how much of it (expected 4 to 6 MiB at 0x1F000000), and whether the GPU can read it. If the GPU cannot, QTM only helps CPU-side hot data such as the TEV and texture caches, collision and effect work.
 - **CIA memory:** whether `SystemModeExt: 178MB` is stable with the HOME Menu on retail N3DS; 124 MB is the fallback.

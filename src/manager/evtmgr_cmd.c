@@ -2,6 +2,8 @@
 // user functions) and the variable read/write helpers evtGetValue/evtSetValue.
 #ifdef TARGET_PORT
 #include "port_addr.h"
+#include "plat/plat.h"
+#include "mario/mariost.h"
 #endif
 #include "manager/evtmgr_cmd.h"
 #include "evt/evt_cmd.h"
@@ -2968,6 +2970,14 @@ EvtWord* evtSearchEndSwitch(EventEntry* entry) {
         ret = cmd;
         argCount = *cmd++ >> 16;
         cmd += argCount;
+#ifdef TARGET_PORT
+        // The GameCube walks on through memory when the switch has no END_SWITCH before the script ends; the
+        // port stops at a bound no script reaches and names the script.
+        if (cmd - (EvtWord*)entry->nextCommand > 0x40000 || !PORT_IS_ADDR(cmd)) {
+            plat_fatal("event: no END_SWITCH after the switch at %p (script restarts from %p, map %s)",
+                       entry->nextCommand, entry->restartFrom, gp != NULL ? gp->currentMapName : "-");
+        }
+#endif
 
         switch (opcode) {
             case OPCODE_END_SCRIPT:
@@ -3003,6 +3013,14 @@ EvtWord* evtSearchCase(EventEntry* entry) {
         ret = cmd;
         argCount = *cmd++ >> 16;
         cmd += argCount;
+#ifdef TARGET_PORT
+        // The GameCube walks on through memory when the switch has no END_SWITCH before the script ends; the
+        // port stops at a bound no script reaches and names the script.
+        if (cmd - (EvtWord*)entry->nextCommand > 0x40000 || !PORT_IS_ADDR(cmd)) {
+            plat_fatal("event: no END_SWITCH after the switch at %p (script restarts from %p, map %s)",
+                       entry->nextCommand, entry->restartFrom, gp != NULL ? gp->currentMapName : "-");
+        }
+#endif
 
         switch (opcode) {
             case OPCODE_END_SCRIPT:

@@ -99,7 +99,16 @@ tools/port3ds/map_sweep.py --area tik --story 30          # one area
 tools/port3ds/map_sweep.py --maps gor_01,hei_00
 ```
 
-It writes the map list to the SD card, runs the game with `sweep=N`, and reads the log. A run that ends early (a crash, a stall, a battle a map starts on entry) is followed by one that resumes after the map being visited. Results are in `build/map-sweep/`: `results.json` (each map `ok`, `timeout`, `stopped`, `crash` or `stall`), `shots/<map>.png`, and for a crash or stall the whole game log in `logs/<map>.txt`. Maps are entered without an entrance, so Mario starts where the map's default position puts him (often below the ground, from where the game's fall recovery lifts him).
+It writes the map list to the SD card, runs the game with `sweep=N`, and reads the log. A run that ends early (a crash, a stall, a battle a map starts on entry) is followed by one that resumes after the map being visited. Results are in `build/map-sweep/`: `results.json` (each map `ok`, `timeout`, `stopped`, `crash`, `stall` or `not in map table`: the storybook's `stg` maps, which the map change cannot enter), `shots/<map>.png`, and for a crash or stall the whole game log in `logs/<map>.txt`. Maps are entered without an entrance, so Mario starts where the map's default position puts him (often below the ground, from where the game's fall recovery lifts him).
+
+### Finding a hang
+
+```sh
+tools/port3ds/hang_probe.py --switches "map=jin_09 story=30 wdog=400" --after "OSLink jin" --wait 6 --samples 4 \
+    --peek 0090e208:2
+```
+
+Runs the game under Azahar's GDB stub, stops it `--wait` seconds after the log matches `--after`, and prints each thread's PC, LR and registers with their functions, the game thread's stack (code addresses found on it), and any `--peek ADDR:SIZE` memory, for each of `--samples` stops 0.5 s apart. `wdog=N` (switch) raises the watchdog's 10 s limit so the probe has time. When a hang shows the game thread not moving at all, look at `build/azahar-last/azahar_log.txt` for `UnmappedAccess` lines first: Azahar lets reads of unmapped memory return zero, where the console would crash.
 
 ## Running the GameCube game in Dolphin
 

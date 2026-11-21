@@ -72,6 +72,10 @@ def run(build, todo, story, frames, party, timeout):
         if m:
             current = m.group(1)
             continue
+        m = re.search(r"sweep: (\S+) not in the map table", line)
+        if m:
+            results[m.group(1)] = {"result": "not in map table", "line": line.strip()}
+            continue
         m = re.search(r"sweep: (\S+) (ok|timeout)", line)
         if m:
             results[m.group(1)] = {"result": m.group(2), "line": line.strip()}
@@ -132,7 +136,7 @@ def main():
         todo = todo[last + 1:]
         print(f"map_sweep: {len(results)}/{len(maps)} maps, {len(todo)} left", flush=True)
     (OUT / "results.json").write_text(json.dumps(results, indent=1, sort_keys=True))
-    bad = {m: r for m, r in results.items() if r["result"] != "ok"}
+    bad = {m: r for m, r in results.items() if r["result"] not in ("ok", "not in map table")}
     for m, r in sorted(bad.items()):
         print(f"{m}: {r['result']}: {r['line']}")
     print(f"map_sweep: {len(results) - len(bad)} of {len(results)} maps ok; results in {OUT}/results.json")

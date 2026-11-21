@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "data/mapdata.h"
 #include "driver/seqdrv.h"
 #include "driver/swdrv.h"
 #include "event.h"
@@ -203,6 +204,12 @@ static void sweep_frame(void) {
             s_sweep_state = 0;
             return;
         }
+        if (mapDataPtr(s_sweep_maps[s_sweep_i]) == NULL) {
+            /* seq_mapchange would read through the NULL (the storybook's stg maps) */
+            PLOG_I("sweep: %s not in the map table", s_sweep_maps[s_sweep_i]);
+            s_sweep_i++;
+            return;
+        }
         if (seq == SEQ_TITLE || (s_sweep_i == 0 && seq == SEQ_GAME)) {
             warp_new_game(s_sweep_story[s_sweep_i], plat_switch_int("party", 1));
         } else if (seq == SEQ_GAME) {
@@ -269,6 +276,10 @@ static void frame_hooks(void) {
     u64 now = plat_ticks();
     st.frames = s_frames;
     st.frame_us = s_frame_start ? (u32)((now - s_frame_start) / (PLAT_TICKS_PER_SEC / 1000000u)) : 0;
+    if (st.frame_us > 2000000u) {
+        PLOG_W("slow frame %lu: %lu ms (map %s)", (unsigned long)s_frames, (unsigned long)(st.frame_us / 1000u),
+               gp != NULL ? gp->currentMapName : "-");
+    }
     st.render_us = g.render_us;
     st.gpu_us = g.gpu_us;
     st.draws = g.draws;

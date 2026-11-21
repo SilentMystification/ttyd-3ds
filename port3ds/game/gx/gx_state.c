@@ -901,7 +901,9 @@ void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
     }
     if ((u32)id < GX_MAX_TEXMAP) {
         const GxTexObj* t = (const GxTexObj*)obj;
-        if (!PORT_IS_ADDR(t->image) || t->format > GX_TF_CMPR) {
+        const int fmt_ok = t->format <= GX_TF_CMPR || t->format == GX_TF_Z8 || t->format == GX_TF_Z16 ||
+                           t->format == GX_TF_Z24X8;
+        if (!PORT_IS_ADDR(t->image) || !fmt_ok) {
             /* never initialised by GXInitTexObj; logged once per caller */
             static void* seen[16];
             void* ra = __builtin_return_address(0);

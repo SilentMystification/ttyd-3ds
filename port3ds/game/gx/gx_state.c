@@ -85,8 +85,11 @@ static void rec(u32 id, const u32* words, u32 n) {
 
 #define F2U(x) (((union { f32 f; u32 u; }){.f = (x)}).u)
 #define U2F(x) (((union { u32 u; f32 f; }){.u = (x)}).f)
+/* Every setter starts with REC/REC0: a primitive still open (no GXEnd) is
+ * drawn first, with the state it was given (see gx_end_open_primitive). */
 #define REC(id, ...)                                         \
     do {                                                     \
+        GX_CLOSE_PRIMITIVE();                                \
         if (gx_dl_recording()) {                             \
             const u32 w_[] = {__VA_ARGS__};                  \
             rec(REC_##id, w_, sizeof(w_) / sizeof(w_[0]));   \
@@ -95,6 +98,7 @@ static void rec(u32 id, const u32* words, u32 n) {
     } while (0)
 #define REC0(id)                         \
     do {                                 \
+        GX_CLOSE_PRIMITIVE();            \
         if (gx_dl_recording()) {         \
             rec(REC_##id, NULL, 0);      \
             return;                      \
@@ -235,6 +239,7 @@ void GXLoadNrmMtxImm(const f32 mtx[3][4], u32 id) {
 }
 
 void GXLoadTexMtxImm(const f32 mtx[][4], u32 id, GXTexMtxType type) {
+    GX_CLOSE_PRIMITIVE();
     int rows = type == GX_MTX3x4 ? 3 : 2;
     REC(LoadTexMtx, id, type, F2U(mtx[0][0]), F2U(mtx[0][1]), F2U(mtx[0][2]), F2U(mtx[0][3]), F2U(mtx[1][0]),
         F2U(mtx[1][1]), F2U(mtx[1][2]), F2U(mtx[1][3]), F2U(rows == 3 ? mtx[2][0] : 0.0f),
@@ -271,6 +276,7 @@ void GXSetCurrentMtx(u32 id) {
 }
 
 void GXSetProjection(const f32 mtx[4][4], GXProjectionType type) {
+    GX_CLOSE_PRIMITIVE();
     gx.proj[0] = (f32)type;
     gx.proj[1] = mtx[0][0];
     gx.proj[3] = mtx[1][1];
@@ -289,6 +295,7 @@ void GXSetProjection(const f32 mtx[4][4], GXProjectionType type) {
 }
 
 void GXSetProjectionv(const f32* ptr) {
+    GX_CLOSE_PRIMITIVE();
     memcpy(gx.proj, ptr, sizeof(gx.proj));
     touch();
 }
@@ -307,6 +314,7 @@ void GXSetViewport(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {
 }
 
 void GXSetViewportJitter(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz, u32 field) {
+    GX_CLOSE_PRIMITIVE();
     /* Field jitter moves the viewport half a line for interlaced output;
      * the 3DS screen is progressive. */
     (void)field;
@@ -316,6 +324,7 @@ void GXSetViewportJitter(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz,
 void GXGetViewportv(f32* vp) { memcpy(vp, gx.vp, sizeof(gx.vp)); }
 
 void GXSetZScaleOffset(f32 scale, f32 offset) {
+    GX_CLOSE_PRIMITIVE();
     gx.zscale = scale;
     gx.zoffset = offset;
     touch();
@@ -338,6 +347,7 @@ void GXGetScissor(u32* left, u32* top, u32* wd, u32* ht) {
 }
 
 void GXSetScissorBoxOffset(s32 x_off, s32 y_off) {
+    GX_CLOSE_PRIMITIVE();
     gx.scissor_off[0] = x_off;
     gx.scissor_off[1] = y_off;
     touch();
@@ -541,6 +551,7 @@ void GXInitLightDir(GXLightObj* lt_obj, f32 nx, f32 ny, f32 nz) {
 void GXInitLightColor(GXLightObj* lt_obj, GXColor color) { ((GxLightObj*)lt_obj)->color = color; }
 
 void GXLoadLightObjImm(const GXLightObj* lt_obj, GXLightID light) {
+    GX_CLOSE_PRIMITIVE();
     const GxLightObj* l = (const GxLightObj*)lt_obj;
     int idx = 31 - __builtin_clz((u32)light & 0xFF);
     if (gx_dl_recording()) {
@@ -630,6 +641,7 @@ void GXSetTevAlphaOp(GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale 
 
 /* GXSetTevOp: the SDK's presets (GXTev.c). */
 void GXSetTevOp(GXTevStageID id, GXTevMode mode) {
+    GX_CLOSE_PRIMITIVE();
     GXTevColorArg carg = id == GX_TEVSTAGE0 ? GX_CC_RASC : GX_CC_CPREV;
     GXTevAlphaArg aarg = id == GX_TEVSTAGE0 ? GX_CA_RASA : GX_CA_APREV;
     switch (mode) {
@@ -752,6 +764,7 @@ void GXSetNumIndStages(u8 nIndStages) {
 }
 
 void GXSetIndTexOrder(GXIndTexStageID ind_stage, GXTexCoordID tex_coord, GXTexMapID tex_map) {
+    GX_CLOSE_PRIMITIVE();
     if ((u32)ind_stage < 4) {
         gx.ind[ind_stage].coord = (u8)tex_coord;
         gx.ind[ind_stage].map = (u8)tex_map;
@@ -760,6 +773,7 @@ void GXSetIndTexOrder(GXIndTexStageID ind_stage, GXTexCoordID tex_coord, GXTexMa
 }
 
 void GXSetIndTexCoordScale(GXIndTexStageID ind_state, GXIndTexScale scale_s, GXIndTexScale scale_t) {
+    GX_CLOSE_PRIMITIVE();
     if ((u32)ind_state < 4) {
         gx.ind[ind_state].scale_s = (u8)scale_s;
         gx.ind[ind_state].scale_t = (u8)scale_t;
@@ -768,6 +782,7 @@ void GXSetIndTexCoordScale(GXIndTexStageID ind_state, GXIndTexScale scale_s, GXI
 }
 
 void GXSetIndTexMtx(GXIndTexMtxID mtx_id, const f32 offset[2][3], s8 scale_exp) {
+    GX_CLOSE_PRIMITIVE();
     int i = (int)mtx_id - GX_ITM_0;
     if (i >= 0 && i < 3) {
         memcpy(gx.ind_mtx[i], offset, sizeof(gx.ind_mtx[i]));
@@ -826,6 +841,7 @@ void GXSetAlphaUpdate(GXBool update_enable) {
 }
 
 void GXSetDstAlpha(GXBool enable, u8 alpha) {
+    GX_CLOSE_PRIMITIVE();
     gx.dst_alpha_enable = enable;
     gx.dst_alpha = alpha;
     touch();
@@ -840,6 +856,7 @@ void GXSetCullMode(GXCullMode mode) {
 void GXGetCullMode(GXCullMode* mode) { *mode = (GXCullMode)gx.cull; }
 
 void GXSetPixelFmt(GXPixelFmt pix_fmt, GXZFmt16 z_fmt) {
+    GX_CLOSE_PRIMITIVE();
     gx.pixel_fmt = (u8)pix_fmt;
     gx.z_fmt = (u8)z_fmt;
     touch();
@@ -857,6 +874,7 @@ void GXSetFog(GXFogType type, f32 startz, f32 endz, f32 nearz, f32 farz, GXColor
 }
 
 void GXSetZTexture(GXZTexOp op, GXTexFmt fmt, u32 bias) {
+    GX_CLOSE_PRIMITIVE();
     gx.ztex_op = (u8)op;
     gx.ztex_fmt = (u8)fmt;
     gx.ztex_bias = bias;
@@ -872,6 +890,7 @@ void GXSetLineWidth(u8 width, GXTexOffset texOffsets) {
 /* ---- Textures (objects live in gx_tex.c; loading a map is state) ---- */
 
 void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
+    GX_CLOSE_PRIMITIVE();
     if (gx_dl_recording()) {
         u32 words[1 + sizeof(GxTexObj) / 4];
         words[0] = (u32)id;
@@ -887,6 +906,7 @@ void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
 }
 
 void GXLoadTlut(GXTlutObj* tlut_obj, u32 tlut_name) {
+    GX_CLOSE_PRIMITIVE();
     if (gx_dl_recording()) {
         u32 words[1 + sizeof(GxTlutObj) / 4];
         words[0] = tlut_name;

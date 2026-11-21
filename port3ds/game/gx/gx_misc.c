@@ -207,6 +207,7 @@ void GXProject(f32 x, f32 y, f32 z, const f32 mtx[3][4], const f32* pm, const f3
 /* ---- Copies ---- */
 
 void GXSetCopyClear(GXColor clear_clr, u32 clear_z) {
+    GX_CLOSE_PRIMITIVE();
     gx.copy_clear_color = clear_clr;
     gx.copy_clear_z = clear_z & 0xFFFFFF;
 }
@@ -222,6 +223,7 @@ void GXSetCopyFilter(GXBool aa, const u8 sample_pattern[12][2], GXBool vf, const
 }
 
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+    GX_CLOSE_PRIMITIVE();
     gx.copy_src[0] = left;
     gx.copy_src[1] = top;
     gx.copy_src[2] = wd;
@@ -243,6 +245,7 @@ f32 GXGetYScaleFactor(u16 efbHeight, u16 xfbHeight) { return (f32)xfbHeight / (f
 void GXSetDispCopyGamma(GXGamma gamma) { (void)gamma; }
 
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+    GX_CLOSE_PRIMITIVE();
     gx.copy_src[0] = left;
     gx.copy_src[1] = top;
     gx.copy_src[2] = wd;
@@ -250,6 +253,7 @@ void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
 }
 
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
+    GX_CLOSE_PRIMITIVE();
     gx.copy_tex_dst[0] = wd;
     gx.copy_tex_dst[1] = ht;
     gx.copy_tex_fmt = (u8)fmt;

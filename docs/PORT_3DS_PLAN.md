@@ -256,6 +256,28 @@ Aurora encodes every GX call into FIFO bytes, parses them again, and lets the GP
 - **CARD:** a real memory card image on SD, stored as `.gci`. It stays big-endian, so saves transfer to and from Dolphin. The game's own `cardmgr.c` handles checksums.
 - **VI:** a frame pacer locked to the 3DS's 59.83 Hz vsync. `VIWaitForRetrace` waits on GSP VBlank. Post- and pre-retrace callbacks run.
 
+### 5.7 Memory placement and QTM
+
+The N3DS extra RAM ("QTM RAM") is 4 MiB at physical 0x1F000000. A process maps it at virtual 0x1E800000 through an ExHeader memory mapping. Azahar emulates it:
+
+- `src/core/memory.h` defines `N3DS_EXTRA_RAM_*`.
+- `src/core/hle/kernel/memory.cpp` maps 4 MiB minus 128 KiB from the ExHeader.
+- `src/video_core/gpu.cpp` translates QTM addresses for command lists, transfers and texture copies.
+
+How the port uses it:
+
+- **CIA:** the `.rsf` requests the mapping. A `qtm_alloc` arena owns the whole region. Every placement goes through one table in `port3ds/sys/memplace.c`, so moving a buffer between QTM, FCRAM linear memory and VRAM is a one-line change.
+- **3dsx:** a 3dsx gets the ExHeader of the title that launched it, so QTM is usually not mapped. At boot the port checks whether the mapping exists (`svcQueryMemory` at 0x1E800000). If it does not, the same table places those buffers in FCRAM. The game runs the same either way; only the speed differs.
+- **First candidates** (traffic that would otherwise go over the FCRAM bus):
+  - the GX record buffer that core 0 writes and core 2 reads every frame;
+  - the per-frame immediate-mode vertex and index arena;
+  - the TEV, combiner and texture-object caches;
+  - map collision data (`hitdrv`);
+  - the NDSP aux and reverb buffers;
+  - the MusyX voice state.
+- Azahar does not model memory timing, so it shows only that QTM placement works, not whether it helps. The final placement is chosen in phase 8 from hardware profiles: bus contention per buffer, A/B toggled by a debug switch.
+- Whether the real GPU can read QTM is checked by the phase 8 probe. Until then, GPU-read buffers placed in QTM keep a linear-memory alternative through the same placement table.
+
 ## 6. Game data: extraction and conversion
 
 The user supplies a G8MJ01, G8ME01 or G8MP01 disc image (ISO, GCM; RVZ and CISO later). The converter:
@@ -342,6 +364,7 @@ Every test is one command that returns a non-zero exit code on failure. All of t
     - `EnableL2Cache: true`
     - `AffinityMask` and `IdealProcessor` so core 2 is available
     - `CoreVersion`
+    - a memory mapping for the N3DS extra RAM at 0x1E800000 (section 5.7)
     - the services list (`ndsp`/`dsp::DSP`, `hid`, `fs:USER`, `ptm:u`, `soc:U`, `ac:u`, `qtm:u`)
     - `FileSystemAccess: DirectSdmc`
   - Original banner and icon art only.
@@ -373,7 +396,7 @@ Each phase ends with a commit, updated docs, and passing tests for everything ea
   - Azahar's `UnmappedAccess` log lines treated as failures.
 - Nothing depends on an unverified section 12 assumption:
   - `SystemModeExt` stays at 124MB;
-  - QTM is not used;
+  - QTM is used through the placement table (section 5.7), which keeps an FCRAM alternative for every buffer;
   - core 2 is used, with the core-0 fallback (`gxsync`) kept working.
 
 Performance work inside these phases is limited to what the architecture needs: offline vertex conversion, zero-copy arenas, the core-2 render thread and VFP matrix code. Profiling-driven tuning (L1-sized loop splitting, QTM placement, Thumb/ARM per file, NDSP voices) gets its own pass afterwards, using the profiler from phase 3.
@@ -394,7 +417,13 @@ These are asked in the conversation and recorded here with the answers once give
 
 ## 12. Unverified assumptions (checked on hardware in phase 8)
 
-- **QTM RAM:** whether a homebrew process can map QTM through Luma3DS, how much of it (expected 4 to 6 MiB at 0x1F000000), and whether the GPU can read it. If the GPU cannot, QTM only helps CPU-side hot data such as the TEV and texture caches, collision and effect work.
+- **QTM RAM on hardware:** Azahar maps 4 MiB minus 128 KiB through the ExHeader, and its GPU reads it. The probe confirms on the N3DS:
+  - the CIA mapping;
+  - what a 3dsx gets under the Homebrew Launcher;
+  - whether the real GPU can read and write QTM;
+  - QTM latency and bandwidth against FCRAM, under load from both CPU cores.
+
+  If the GPU cannot read QTM, the GPU-read buffers move back to linear memory through the placement table, and QTM keeps the CPU-side hot data.
 - **CIA memory:** whether `SystemModeExt: 178MB` is stable with the HOME Menu on retail N3DS; 124 MB is the fallback.
 - **Core 2:** whether it is fully usable at 100% from a CIA and from a 3dsx started through an N3DS title. Your note says about 2.8 cores in total; the probe measures it.
 - **ARM11 performance monitor:** whether its cache-miss counters are readable from userland under Luma. If not, cache work relies on timing.

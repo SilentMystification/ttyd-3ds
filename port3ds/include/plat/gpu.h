@@ -143,6 +143,7 @@ typedef struct {
     uint32_t render_us, gpu_us;
 } PlatGpuStats;
 void plat_gpu_stats(PlatGpuStats* out);
+uint32_t plat_gpu_present_count(void); /* frames presented so far (the shot number) */
 
 /* The next presented frame's EFB to `path` (a PPM file, relative to sdmc:/3ds/ttyd/); ignored while one is pending. */
 void plat_gpu_shot(const char* path);

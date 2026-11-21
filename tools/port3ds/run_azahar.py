@@ -226,6 +226,8 @@ def main():
                                 start_new_session=True)
 
     until = re.compile(args.until) if args.until else None
+    # Periodic lines the game writes even when it is stuck: they do not count as log growth for --stall.
+    idle_lines = re.compile(r"^.*(?:audio: peak|memory now:).*\n?", re.M)
     verdict, reason = None, None
     start = time.monotonic()
     last_size, last_growth = -1, start
@@ -236,8 +238,9 @@ def main():
             text = ""
             if game_log.exists():
                 text = game_log.read_text(errors="replace")
-                if len(text) != last_size:
-                    last_size, last_growth = len(text), now
+                size = len(idle_lines.sub("", text))
+                if size != last_size:
+                    last_size, last_growth = size, now
             if "[CRASH]" in text:
                 verdict, reason = False, "[CRASH] line in game log"
             elif until is not None and until.search(text):

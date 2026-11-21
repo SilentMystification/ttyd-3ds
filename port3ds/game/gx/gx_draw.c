@@ -687,12 +687,15 @@ dumped:
 void gx_draw_frame_begin(void) {
     static u32 frame;
     static int dump_at = -1;
-    static int copy_from, copy_left; /* switch gxdumpcopy=N,K */
+    static int copy_from, copy_left, copy_stride = 1, copy_seen; /* switch gxdumpcopy=N,K[,S] */
     if (dump_at < 0) {
         char buf[32];
         dump_at = plat_switch_int("gxdump", 0);
         if (plat_switch_value("gxdumpcopy", buf, sizeof(buf))) {
-            sscanf(buf, "%d,%d", &copy_from, &copy_left);
+            sscanf(buf, "%d,%d,%d", &copy_from, &copy_left, &copy_stride);
+            if (copy_stride < 1) {
+                copy_stride = 1;
+            }
         }
     }
     frame++;
@@ -702,12 +705,13 @@ void gx_draw_frame_begin(void) {
     }
     /* gxdumpcopy=N,K: from frame N, the next K frames that follow a frame with an EFB copy (GXCopyTex) are dumped
      * and their picture saved as shots/dumpFFFFF.ppm; no frame number needed for a copy-dependent effect */
-    if (copy_left > 0 && copy_from > 0 && frame >= (u32)copy_from && gx_stat_copies > 0) {
+    if (copy_left > 0 && copy_from > 0 && frame >= (u32)copy_from && gx_stat_copies > 0 && copy_seen++ % copy_stride == 0) {
         s_dump = 1;
         copy_left--;
         char path[32];
         snprintf(path, sizeof(path), "shots/dump%05lu.ppm", (unsigned long)frame);
-        PLOG_I("gxdump: frame %lu (copy-triggered, %d left)", (unsigned long)frame, copy_left);
+        PLOG_I("gxdump: frame %lu present %lu (copy-triggered, %d left)", (unsigned long)frame,
+               (unsigned long)plat_gpu_present_count(), copy_left);
         plat_gpu_shot(path);
     }
     gx_stat_draws = gx_stat_vertices = gx_stat_copies = 0;

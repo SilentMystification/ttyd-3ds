@@ -294,7 +294,11 @@ void plat_gpu_copy_tex(uint16_t x, uint16_t y, uint16_t w, uint16_t h, int half,
 
 void plat_gpu_frame_begin(void) {}
 
+static uint32_t s_presents;
+uint32_t plat_gpu_present_count(void) { return s_presents; }
+
 void plat_gpu_frame_end(uint16_t efb_w, uint16_t efb_h) {
+    s_presents++;
     (void)efb_w;
     (void)efb_h;
     rec_put(CMD_FRAME_END, 0);

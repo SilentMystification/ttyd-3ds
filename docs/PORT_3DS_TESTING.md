@@ -110,6 +110,27 @@ tools/port3ds/hang_probe.py --switches "map=jin_09 story=30 wdog=400" --after "O
 
 Runs the game under Azahar's GDB stub, stops it `--wait` seconds after the log matches `--after`, and prints each thread's PC, LR and registers with their functions, the game thread's stack (code addresses found on it), and any `--peek ADDR:SIZE` memory, for each of `--samples` stops 0.5 s apart. `wdog=N` (switch) raises the watchdog's 10 s limit so the probe has time. When a hang shows the game thread not moving at all, look at `build/azahar-last/azahar_log.txt` for `UnmappedAccess` lines first: Azahar lets reads of unmapped memory return zero, where the console would crash.
 
+## Running on the New 3DS
+
+Setup on the console (once):
+
+- Luma3DS with the Homebrew Launcher.
+- The disc image at `sdmc:/3ds/ttyd/game.iso` (1.4 GB: an SD card reader is much faster than ftpd).
+- For sound, `sdmc:/3ds/dspfirm.cdc` from the DSP1 homebrew. Without it the game runs silently and says so in the log.
+
+```sh
+export N3DS_IP=192.168.1.50      # the console's address (System Settings or the Homebrew Launcher's Y screen)
+# Homebrew Launcher: press Y to wait for 3dslink, then:
+tools/port3ds/run_hw.py --switches "wdog=30" --until "warp:|title" --timeout 300
+tools/port3ds/run_hw.py --switches "map=gor_01 wdog=30 padscript=wait*250,a*3" --until "warp: gor_01" --timeout 300
+```
+
+`run_hw.py` sends the `.3dsx` with 3dslink, passing the switches as arguments, and then connects to the game's live log on TCP port 17492. A netloaded game opens that port by itself. It prints and saves every line to `build/hw-last/log.txt` and stops like the Azahar runner. The game also writes `sdmc:/3ds/ttyd/log.txt` and keeps the previous run as `log.old`, so the report of a crash that cut the connection can be fetched with ftpd.
+
+A 3dsx gets the memory of the title the Homebrew Launcher runs in, and it does not get the QTM mapping. If the game reports at boot that the heap or linear heap is too small, install the CIA instead (copy `build/3ds/game/ttyd.cia` to the SD card and install it with FBI) and start it from the HOME Menu. A CIA's switches come from `sdmc:/3ds/ttyd/debug3ds.txt`. Its live log needs the `livelog` switch, and then `run_hw.py --no-send` connects to it.
+
+The probe (`build/3ds/probe/ttyd_probe.3dsx`) shows its results on the top screen and writes `sdmc:/3ds/ttyd/probe.txt`.
+
 ## Running the GameCube game in Dolphin
 
 ```sh
@@ -166,4 +187,3 @@ Results in Azahar (2026-11-21, CIA):
 | `tools/port3ds/memcompare.py`: the same structures read from Dolphin, paper-cut and Azahar and compared field by field. GameCube and 3DS layouts come from the 3DS ELF's debug info (the two layouts are identical apart from byte order); paper-cut values come from its own debug info | 1 |
 | `tools/port3ds/golden.py` | 4 |
 | Story sweeps | 6–7 |
-| Hardware push and log fetch (`N3DS_IP`) | 8 |

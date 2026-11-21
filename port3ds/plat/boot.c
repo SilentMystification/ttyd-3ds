@@ -12,6 +12,7 @@
  *      to close, plat_shutdown() ends the process cleanly.
  */
 #include <errno.h>
+#include <malloc.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,8 @@
 #include <unistd.h>
 
 #include "plat_internal.h"
+
+extern u32 __ctru_heap_size, __ctru_linear_heap_size;
 #include "port3ds_build.h"
 
 #define DATA_DIR "sdmc:/3ds/ttyd"
@@ -39,6 +42,14 @@ static aptHookCookie s_apt_cookie;
 uint64_t plat_ticks(void) { return svcGetSystemTick(); }
 uint32_t plat_uptime_ms(void) { return (uint32_t)((svcGetSystemTick() - s_boot_tick) / (PLAT_TICKS_PER_SEC / 1000u)); }
 int plat_is_new3ds(void) { return s_new3ds; }
+
+/* Heap and linear memory in use, for the requirements checked at boot. */
+void plat_memory_log(const char* when) {
+    struct mallinfo mi = mallinfo();
+    PLOG_I("memory %s: heap %lu KiB in use of %lu (arena %lu), linear %lu KiB free of %lu", when,
+           (unsigned long)(mi.uordblks >> 10), (unsigned long)(__ctru_heap_size >> 10), (unsigned long)(mi.arena >> 10),
+           (unsigned long)(linearSpaceFree() >> 10), (unsigned long)(__ctru_linear_heap_size >> 10));
+}
 uint64_t plat_rtc_ms_since_1900(void) { return osGetTime(); }
 int plat_started_by_netload(void) { return s_netload; }
 const char* plat_build_string(void) { return PORT3DS_BUILD_STRING; }
@@ -127,6 +138,8 @@ void plat_user_error(const char* fmt, ...) {
 }
 
 extern char __end__[];
+#define REQUIRED_HEAP (64u << 20) /* measured peak about 49 MB (field and battle) */
+#define REQUIRED_LINEAR (24u << 20) /* measured peak about 15 MB */
 
 int main(int argc, char** argv) {
     s_boot_tick = svcGetSystemTick();
@@ -164,6 +177,21 @@ int main(int argc, char** argv) {
     plat_log_start_writer();
     plat_crash_init();
     plat_memplace_report();
+
+    /* libctru gives the heap and the linear heap whatever the APPLICATION
+     * region leaves (a 3dsx gets the region of the title it runs in), so
+     * check them against what the game takes at most (measured: see
+     * plat_memory_log) instead of failing an allocation later. Switch
+     * lowmem: try anyway. */
+    PLOG_I("memory: APPLICATION region %lu KiB, heap %lu KiB, linear heap %lu KiB",
+           (unsigned long)(osGetMemRegionSize(MEMREGION_APPLICATION) >> 10), (unsigned long)(__ctru_heap_size >> 10),
+           (unsigned long)(__ctru_linear_heap_size >> 10));
+    if ((__ctru_heap_size < REQUIRED_HEAP || __ctru_linear_heap_size < REQUIRED_LINEAR) && !plat_switch_has("lowmem")) {
+        plat_user_error("  Not enough memory: heap %lu MB (needs %lu),\n  linear %lu MB (needs %lu).\n\n"
+                        "  Install the CIA and start it from the\n  HOME Menu (or use the lowmem switch).",
+                        (unsigned long)(__ctru_heap_size >> 20), (unsigned long)(REQUIRED_HEAP >> 20),
+                        (unsigned long)(__ctru_linear_heap_size >> 20), (unsigned long)(REQUIRED_LINEAR >> 20));
+    }
 
     plat_set_phase("game init");
     ttyd_main();

@@ -254,6 +254,7 @@ static void sweep_frame(void) {
 }
 
 void port_debug_frame(u32 frame);
+void plat_memory_log(const char* when);
 
 static void frame_hooks(void) {
     s_frames++;
@@ -269,6 +270,9 @@ static void frame_hooks(void) {
     }
     warp_switch();
     sweep_frame();
+    if (s_frames % 1800 == 0) {
+        plat_memory_log("now");
+    }
     PlatHudStats st;
     memset(&st, 0, sizeof(st));
     PlatGpuStats g;

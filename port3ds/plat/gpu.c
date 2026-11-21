@@ -402,14 +402,30 @@ uint32_t plat_gpu_tex_read(uint32_t handle, void* rgba8, uint32_t width, uint32_
     u32 tw = tex->width, th = tex->height;
     if (width > tw) width = tw;
     if (height > th) height = th;
-    const u32* src = tex->data;
+    if (tex->fmt != GPU_RGBA8) {
+        PLOG_W("gpu: read of a texture in format %d (only RGBA8 copy targets are read)", (int)tex->fmt);
+        return 0;
+    }
+    /* The GPU wrote this texture: a display transfer copies it to linear
+     * memory and untiles it, and the CPU reads that after invalidating its
+     * cache (a direct read could see stale cache lines on the console, and
+     * VRAM is not kept current in Azahar). */
+    u32* src = (u32*)linearAlloc(tw * th * 4);
+    if (src == NULL) {
+        PLOG_W("gpu: no linear memory to read a %lux%lu texture", (unsigned long)tw, (unsigned long)th);
+        return 0;
+    }
+    GSPGPU_InvalidateDataCache(src, tw * th * 4);
+    C3D_SyncDisplayTransfer((u32*)tex->data, GX_BUFFER_DIM(tw, th), src, GX_BUFFER_DIM(tw, th),
+                            GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                                GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    GSPGPU_InvalidateDataCache(src, tw * th * 4);
     u8* out = rgba8;
     for (u32 y = 0; y < height; y++) {
         for (u32 x = 0; x < width; x++) {
             u32 my = th - 1 - y;
-            u32 idx = ((my >> 3) * (tw >> 3) + (x >> 3)) * 64 + ((x & 1) | ((my & 1) << 1) | ((x & 2) << 1) |
-                                                               ((my & 2) << 2) | ((x & 4) << 2) | ((my & 4) << 3));
-            u32 v = src[idx];
+            u32 v = src[my * tw + x];
             u8* p = out + (y * width + x) * 4;
             p[0] = (u8)(v >> 24);
             p[1] = (u8)(v >> 16);
@@ -417,6 +433,7 @@ uint32_t plat_gpu_tex_read(uint32_t handle, void* rgba8, uint32_t width, uint32_
             p[3] = (u8)v;
         }
     }
+    linearFree(src);
     return width * height * 4;
 }
 

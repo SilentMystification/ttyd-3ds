@@ -14,6 +14,7 @@
  * GameCube's audio interrupt preempts them. It falls back to core 0 when
  * core 1 refuses it.
  */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -44,9 +45,64 @@ static void dsp_frame_callback(void* data) {
     LightEvent_Signal(&s_frame_event);
 }
 
+/* Switch wavdump=N: the first N seconds of output to audio.wav (16-bit
+ * stereo), kept in memory and written once, so the file I/O cannot starve
+ * the DSP while it records. */
+static int16_t* s_wav;
+static uint32_t s_wav_frames, s_wav_max;
+
+static void wav_capture(const int16_t* out) {
+    if (s_wav == NULL || s_wav_frames >= s_wav_max) {
+        return;
+    }
+    uint32_t n = s_buf_frames;
+    if (n > s_wav_max - s_wav_frames) {
+        n = s_wav_max - s_wav_frames;
+    }
+    memcpy(s_wav + s_wav_frames * 2, out, n * 4);
+    s_wav_frames += n;
+    if (s_wav_frames < s_wav_max) {
+        return;
+    }
+    FILE* f = fopen("audio.wav", "wb");
+    if (f != NULL) {
+        uint32_t bytes = s_wav_frames * 4;
+        uint8_t h[44] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'A', 'V', 'E', 'f', 'm', 't', ' ', 16, 0, 0, 0, 1, 0, 2, 0};
+        uint32_t riff = 36 + bytes, rate = s_rate, byte_rate = s_rate * 4;
+        memcpy(h + 4, &riff, 4);
+        memcpy(h + 24, &rate, 4);
+        memcpy(h + 28, &byte_rate, 4);
+        h[32] = 4;
+        h[34] = 16;
+        memcpy(h + 36, "data", 4);
+        memcpy(h + 40, &bytes, 4);
+        fwrite(h, 1, sizeof(h), f);
+        fwrite(s_wav, 4, s_wav_frames, f);
+        fclose(f);
+        PLOG_I("audio: wrote audio.wav (%lu frames)", (unsigned long)s_wav_frames);
+    }
+    free(s_wav);
+    s_wav = NULL;
+}
+
 static void fill_block(int16_t* out) {
     s_fill(out, s_buf_frames);
     s_frames += s_buf_frames;
+    /* the output's peak level, logged every 10 s: a sound check without ears */
+    static int peak;
+    static uint64_t since;
+    for (uint32_t i = 0; i < s_buf_frames * 2; i++) {
+        int v = out[i] < 0 ? -out[i] : out[i];
+        if (v > peak) {
+            peak = v;
+        }
+    }
+    wav_capture(out);
+    if (s_frames - since >= (uint64_t)s_rate * 10) {
+        PLOG_I("audio: peak %d of 32767 over the last 10 s, %lu underruns", peak, (unsigned long)s_underruns);
+        peak = 0;
+        since = s_frames;
+    }
 }
 
 static void ndsp_thread(void* arg) {
@@ -175,6 +231,11 @@ int plat_audio_start(uint32_t rate, uint32_t quantum_frames, PlatAudioFill fill)
     s_rate = rate;
     s_quantum = quantum_frames;
     s_buf_frames = quantum_frames * QUANTA_PER_BUF;
+    int wav_seconds = plat_switch_int("wavdump", 0);
+    if (wav_seconds > 0 && wav_seconds <= 120) {
+        s_wav_max = (uint32_t)wav_seconds * rate;
+        s_wav = malloc(s_wav_max * 4);
+    }
     s_output = start_ndsp();
     if (s_output) {
         s_thread = make_thread(ndsp_thread);

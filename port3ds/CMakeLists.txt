@@ -160,16 +160,21 @@ add_custom_command(
 # SDK sources compiled unchanged: the heap allocator.
 set(TTYD_SDK_SOURCES
     "${TTYD_REPO_DIR}/libs/dolsdk2004/src/os/OSAlloc.c"
-    "${TTYD_REPO_DIR}/libs/dolsdk2004/src/pad/Padclamp.c")
+    "${TTYD_REPO_DIR}/libs/dolsdk2004/src/pad/Padclamp.c"
+    "${TTYD_REPO_DIR}/libs/dolsdk2004/src/gx/GXDraw.c")
 add_library(ttyd_port_game OBJECT ${TTYD_PORT_GAME_SOURCES} ${TTYD_SDK_SOURCES}
     "${TTYD_GEN_DIR}/rel_table.c" "${TTYD_GEN_DIR}/mtx_sdk.c")
 set_source_files_properties(${TTYD_SDK_SOURCES} "${TTYD_GEN_DIR}/mtx_sdk.c" TARGET_DIRECTORY ttyd_port_game
     PROPERTIES COMPILE_OPTIONS "-w")
+# GXDraw.c has a global named index, which newlib declares as a function
+# outside strict ISO C.
+set_source_files_properties("${TTYD_REPO_DIR}/libs/dolsdk2004/src/gx/GXDraw.c" TARGET_DIRECTORY ttyd_port_game
+    PROPERTIES COMPILE_OPTIONS "-w;-std=c99")
 target_compile_options(ttyd_port_game PRIVATE -std=gnu11 -O2 -g -fno-short-enums ${TTYD_PORT_WARNINGS}
     -fno-strict-aliasing -fwrapv -ffp-contract=off -ffunction-sections -fdata-sections
     -include "${CMAKE_CURRENT_LIST_DIR}/include/port3ds_prefix.h")
 target_compile_definitions(ttyd_port_game PRIVATE ${TTYD_DEFINES} PORT3DS_GAME_SIDE=1)
-target_include_directories(ttyd_port_game PRIVATE ${TTYD_INCLUDES})
+target_include_directories(ttyd_port_game PRIVATE ${TTYD_INCLUDES} "${TTYD_REPO_DIR}/libs/dolsdk2004/src/gx")
 
 add_library(ttyd_port_plat OBJECT ${TTYD_PORT_PLAT_SOURCES})
 target_compile_options(ttyd_port_plat PRIVATE -std=gnu11 -O2 -g ${TTYD_PORT_WARNINGS}

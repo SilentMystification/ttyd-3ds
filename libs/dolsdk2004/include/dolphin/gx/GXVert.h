@@ -25,6 +25,22 @@ typedef union {
 
 #ifdef __MWERKS__
 volatile PPCWGPipe GXWGFifo AT_ADDRESS(GXFIFO_ADDR);
+#elif defined(TARGET_PORT)
+// Ports: the write-gather pipe is a run of 8-byte slots in memory. Every write through GXWGFifo (the inline
+// GXPosition/GXColor/GXCmd functions below and direct writes in game code) fills the next slot with one
+// component; the port's GX front end reads each slot with the type the vertex format or command says it has.
+extern volatile PPCWGPipe* port_gx_wg_ptr;
+extern volatile PPCWGPipe* port_gx_wg_end;
+volatile PPCWGPipe* port_gx_wg_overflow(void);
+static inline volatile PPCWGPipe* port_gx_wg_next(void) {
+    volatile PPCWGPipe* p = port_gx_wg_ptr;
+    if (p >= port_gx_wg_end) {
+        p = port_gx_wg_overflow();
+    }
+    port_gx_wg_ptr = p + 1;
+    return p;
+}
+#define GXWGFifo (*port_gx_wg_next())
 #else
 #define GXWGFifo (*(volatile PPCWGPipe *)GXFIFO_ADDR)
 #endif
@@ -114,7 +130,17 @@ FUNC_INDEX8(GXNormal)
 
 // GXColor
 FUNC_4PARAM(GXColor, u8)
+#ifdef TARGET_PORT
+// Ports: one byte per slot, as GXColor4u8 writes it, so the pipe reader sees one layout for direct RGBA8.
+static inline void GXColor1u32(const u32 x) {
+    GXWGFifo.u8 = (u8)(x >> 24);
+    GXWGFifo.u8 = (u8)(x >> 16);
+    GXWGFifo.u8 = (u8)(x >> 8);
+    GXWGFifo.u8 = (u8)x;
+}
+#else
 FUNC_1PARAM(GXColor, u32)
+#endif
 FUNC_3PARAM(GXColor, u8)
 FUNC_1PARAM(GXColor, u16)
 FUNC_INDEX16(GXColor)

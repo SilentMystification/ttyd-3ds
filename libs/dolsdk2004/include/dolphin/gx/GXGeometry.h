@@ -25,6 +25,10 @@ static inline void GXSetTexCoordGen(GXTexCoordID dst_coord, GXTexGenType func, G
 
 void GXBegin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts);
 
+#ifdef TARGET_PORT
+// Ports: the primitive's vertices are decoded and drawn here (the GameCube streams them through the FIFO).
+void GXEnd(void);
+#else
 static inline void GXEnd(void) {
 #if DEBUG
     extern GXBool __GXinBegin;
@@ -35,6 +39,7 @@ static inline void GXEnd(void) {
     __GXinBegin = GX_FALSE;
 #endif
 }
+#endif
 
 void GXSetLineWidth(u8 width, GXTexOffset texOffsets);
 void GXSetPointSize(u8 pointSize, GXTexOffset texOffsets);

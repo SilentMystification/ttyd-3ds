@@ -1224,6 +1224,10 @@ EVT_END()
 
 // Position writes go through a local FIFO pointer (keeps lis 0xcc01 ahead of the loop counters);
 // components are read z, y, x like GXPosition3f32's argument evaluation.
+#ifdef TARGET_PORT
+// Ports: each write goes to the next pipe slot (GXVert.h), so the saved pointer is not used.
+#define YUKA_POSITION(fifo, v) GXPosition3f32((v)->x, (v)->y, (v)->z)
+#else
 #define YUKA_POSITION(fifo, v) \
     {                          \
         f32 _x, _y, _z;        \
@@ -1234,6 +1238,7 @@ EVT_END()
         (fifo)->f32 = _y;      \
         (fifo)->f32 = _z;      \
     }
+#endif
 
 /**
  * Draws the rippling floor as 128 textured quads along the strip, using the captured floor texture.

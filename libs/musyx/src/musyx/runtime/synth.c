@@ -1080,8 +1080,12 @@ u32 synthFXStart(u16 fid,
 int synthCheckFXRealloc(unsigned short fid) {
   struct FX_TAB* fx;            // r31
   unsigned long allocId;        // r30
+#if MUSY_TARGET == MUSY_TARGET_PC
+  u32 currentAllocId;
+#else
   unsigned long currentAllocId; // r1+0x8
 
+#endif
   fx = dataGetFX(fid);
   if (fx == NULL) {
     return 0;

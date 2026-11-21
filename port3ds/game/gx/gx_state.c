@@ -118,6 +118,10 @@ void GXSetVtxDescv(const GXVtxDescList* list) {
     }
 }
 
+void GXGetVtxDesc(GXAttr attr, GXAttrType* type) {
+    *type = (u32)attr < GX_VA_MAX_ATTR ? (GXAttrType)gx.vtx_desc[attr] : GX_NONE;
+}
+
 void GXGetVtxDescv(GXVtxDescList* list) {
     int n = 0;
     for (int a = GX_VA_PNMTXIDX; a <= GX_VA_TEX7; a++) {

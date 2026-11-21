@@ -8,7 +8,10 @@
 extern "C" {
 #endif
 
-typedef enum {
+#ifndef PORT_ENUM_BASE
+#define PORT_ENUM_BASE(type)
+#endif
+typedef enum PORT_ENUM_BASE(int) {
   MAC_STATE_RUNNABLE = 0,
   MAC_STATE_YIELDED,
   MAC_STATE_STOPPED,
@@ -67,7 +70,7 @@ typedef struct SYNTH_QUEUE {
   u8 jobTabIndex;           // offset 0x9, size 0x1
 } SYNTH_QUEUE;
 
-typedef enum {
+typedef enum PORT_ENUM_BASE(int) {
   SYNTH_JOBTYPE_LOW = 0,
   SYNTH_JOBTYPE_ZERO = 1,
   SYNTH_JOBTYPE_EVENT = 2,
@@ -116,8 +119,12 @@ typedef struct CTRL_DEST {
   u8 numSource;
 } CTRL_DEST;
 
+#if defined(TARGET_PC) || defined(TARGET_PORT)
+/* clang ignores MWCC's push/pop; natural alignment for these runtime structs. */
+#else
 #pragma push
 #pragma pack(4)
+#endif
 typedef struct SYNTH_VOICE {
   // total size: 0x404
   SYNTH_QUEUE lowPrecisionJob;            // offset 0x0, size 0xC
@@ -270,7 +277,9 @@ typedef struct synthITDInfo {
   u8 sfx;   // offset 0x1, size 0x1
 } synthITDInfo;
 
+#if !defined(TARGET_PC) && !defined(TARGET_PORT)
 #pragma pop
+#endif
 typedef void (*SYNTH_MESSAGE_CALLBACK)(u32, s32);
 
 extern SND_AUX_CALLBACK synthAuxACallback[8];

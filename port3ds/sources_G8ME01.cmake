@@ -435,12 +435,15 @@ set(TTYD_MUSYX_SOURCES
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/synth_adsr.c
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/synth_vsamples.c
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/s_data.c
+    ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/hw_dspctrl.c
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/hw_volconv.c
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/snd3d.c
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/snd_init.c
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/snd_math.c
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/snd_midictrl.c
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/snd_service.c
+    ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/hardware.c
+    ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/hw_aramdma.c
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/hw_memory.c
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/CheapReverb/creverb_fx.c
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/CheapReverb/creverb.c
@@ -448,6 +451,7 @@ set(TTYD_MUSYX_SOURCES
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/StdReverb/reverb.c
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/Delay/delay_fx.c
     ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/Chorus/chorus_fx.c
+    ${TTYD_REPO_DIR}/libs/musyx/src/musyx/runtime/hw_pcmixer.c
 )
 set(TTYD_RELS aaa aji bom dmo dou eki end gon gor gra hei hom jin jon kpa las moo mri muj nok pik rsh sys tik tou tou2 usu win yuu)
 set(TTYD_REL_aaa_SOURCES

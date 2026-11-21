@@ -12,8 +12,12 @@
 
 u32 vidGetPublicId(u32 voice);
 u32 seqGetInstanceForVoice(u32 vid);
+#if defined(TARGET_PC) || defined(TARGET_PORT)
+void* hwGetSampleExtraData(u32 voice); /* PC port: its real prototype */
+#else
 u32 hwGetSampleExtraData(u32 voice);
 
+#endif
 VS vs;
 
 /**
@@ -76,7 +80,11 @@ static inline void vsFreeBuffer(u8 bufferIndex) {
  * owning sequence and extra data, then asks the application callback (reason 0) to start supplying data.
  * Returns the voice/instance handle, or 0xFFFFFFFF if the voice could not be set up or the callback refused.
  */
+#if MUSY_TARGET == MUSY_TARGET_PC
+u32 vsSampleStartNotify(u32 vid) {
+#else
 u32 vsSampleStartNotify(unsigned long vid) {
+#endif
   u8 voice;
   u8 v1 = vid;
   u8 sb;       // r29
@@ -101,7 +109,12 @@ u32 vsSampleStartNotify(unsigned long vid) {
     } else {
       vs.streamBuffer[sb].info.seqInstID = 0xFFFFFFFF;
     }
+#if defined(TARGET_PC) || defined(TARGET_PORT)
+    /* PC port: a 32-bit field in the callback's info (the game never reads it) */
+    vs.streamBuffer[sb].info.data.extraData = (u32)(uintptr_t)hwGetSampleExtraData(voice);
+#else
     vs.streamBuffer[sb].info.data.extraData = hwGetSampleExtraData(voice);
+#endif
     vs.streamBuffer[sb].smpType = hwGetSampleType(voice);
     vs.streamBuffer[sb].voice = voice;
     if (vs.callback != NULL && vs.callback(0, &vs.streamBuffer[sb].info) == 0) {

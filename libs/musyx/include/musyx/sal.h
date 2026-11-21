@@ -72,7 +72,11 @@ void* salMalloc(u32 len);
 void* salMallocPhysical(u32 len);
 #endif
 void salFree(void* addr);
+#if MUSY_TARGET == MUSY_TARGET_PC
+void salBuildCommandList(signed short* dest, u32 nsDelay);
+#else
 void salBuildCommandList(signed short* dest, unsigned long nsDelay);
+#endif
 void salStartDsp(u16* cmdList);
 void salCtrlDsp(s16* dest);
 u32 salSynthSendMessage(DSPvoice* dsp_vptr, u32 mesg);

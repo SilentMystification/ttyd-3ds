@@ -6,7 +6,9 @@
 #include "musyx/snd.h"
 #include "musyx/stream.h"
 #include "musyx/synth.h"
+#if !defined(TARGET_PC) && !defined(TARGET_PORT) /* ports: no cache maintenance here (see the MUSY_TARGET_PC branches) */
 #include "dolphin/os/OSCache.h"
+#endif
 
 static volatile const u16 itdOffTab[128] = {
     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  1,  1,  1,  1,  1,  1,  2,  2,  2,  2,
@@ -544,7 +546,11 @@ void hwFlushStream(void* base, u32 offset, u32 bytes, u8 hwStreamHandle, void (*
   bytes += (offset & 31);
   offset &= ~31;
   bytes = (bytes + 31) & ~31;
+#if MUSY_TARGET == MUSY_TARGET_PC
+  mram = (size_t)base + offset;
+#else
   mram = (u32)base + offset;
+#endif
 #if MUSY_TARGET == MUSY_TARGET_DOLPHIN
   DCStoreRange((void*)mram, bytes);
 #endif
@@ -615,6 +621,13 @@ void hwSaveSample(void* header, void* data
 #else
   *((u32*)data) = (u32)aramStoreData((void*)*((u32*)data), len);
 #endif
+#elif MUSY_TARGET == MUSY_TARGET_PC
+  /* header: SAMPLE_HEADER**, data: the SDIR entry's void* addr (sample offset in,
+   * ARAM address out). */
+  SAMPLE_HEADER* h = *(SAMPLE_HEADER**)header;
+  u8 type = h->length >> 24;
+  u32 len = convert_length(h->length & 0xFFFFFF, type);
+  *(void**)data = aramStoreData(*(void**)data, len, aramInfo);
 #endif
 }
 

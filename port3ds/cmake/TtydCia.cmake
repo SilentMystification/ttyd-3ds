@@ -42,19 +42,22 @@ function(ttyd_add_cia target)
         OUTPUT "${art}/banner.png" "${art}/icon.png" "${art}/banner.wav"
         COMMAND "${Python3_EXECUTABLE}" -I "${gen}" --title "${ARG_TITLE}" --subtitle "${ARG_SUBTITLE}" --out-dir "${art}"
         DEPENDS "${gen}"
+        VERBATIM
         COMMENT "Generating placeholder art for ${target}")
 
     add_custom_command(
         OUTPUT "${art}/icon.smdh"
         COMMAND "${SMDHTOOL}" --create "${ARG_TITLE}" "${ARG_SHORT_DESC}" "${ARG_AUTHOR}" "${art}/icon.png" "${art}/icon.smdh"
         DEPENDS "${art}/icon.png"
+        VERBATIM
         COMMENT "Building SMDH for ${target}")
 
     set(out_dir "${CMAKE_CURRENT_BINARY_DIR}")
     add_custom_command(
         OUTPUT "${out_dir}/${target}.3dsx"
-        COMMAND "${TOOL_3DSXTOOL}" "$<TARGET_FILE:${target}>" "${out_dir}/${target}.3dsx" --smdh="${art}/icon.smdh"
+        COMMAND "${TOOL_3DSXTOOL}" "$<TARGET_FILE:${target}>" "${out_dir}/${target}.3dsx" "--smdh=${art}/icon.smdh"
         DEPENDS ${target} "${art}/icon.smdh"
+        VERBATIM
         COMMENT "Building ${target}.3dsx")
 
     if(NOT MAKEROM OR NOT BANNERTOOL)
@@ -66,6 +69,7 @@ function(ttyd_add_cia target)
         OUTPUT "${art}/banner.bnr"
         COMMAND "${BANNERTOOL}" makebanner -i "${art}/banner.png" -a "${art}/banner.wav" -o "${art}/banner.bnr"
         DEPENDS "${art}/banner.png" "${art}/banner.wav"
+        VERBATIM
         COMMENT "Building banner for ${target}")
 
     add_custom_command(
@@ -76,6 +80,7 @@ function(ttyd_add_cia target)
                 "-DAPP_TITLE=${ARG_TITLE}" "-DAPP_PRODUCT_CODE=${ARG_PRODUCT_CODE}"
                 "-DAPP_UNIQUE_ID=${ARG_UNIQUE_ID}"
         DEPENDS ${target} "${rsf}" "${art}/icon.smdh" "${art}/banner.bnr"
+        VERBATIM
         COMMENT "Building ${target}.cia")
 
     add_custom_target(${target}_package ALL

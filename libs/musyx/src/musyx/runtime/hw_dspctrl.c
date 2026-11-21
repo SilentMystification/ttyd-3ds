@@ -1,20 +1,20 @@
 /*
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-*/
+ * PC: the DSP command list carries 32-bit handles (salPcPtrHandle), not pointers.*/
+#include "musyx/platform.h"
+#if MUSY_TARGET == MUSY_TARGET_PC
+#include "musyx/hw_pcmixer.h"
+#define DSP_HI(p) (salPcPtrHandle((void*)(p)) >> 16)
+#define DSP_HIX(p) DSP_HI(p)
+#define DSP_LO(p) ((u16)salPcPtrHandle((void*)(p)))
+#define DSP_LO16(p) DSP_LO(p)
+#define DSP_PTRINT(p) ((size_t)(p))
+#else
+#define DSP_HI(p) (u32)p >> 16
+#define DSP_HIX(p) (u32)p >> 0x10
+#define DSP_LO(p) (u32)p
+#define DSP_LO16(p) (u16)(u32)p
+#define DSP_PTRINT(p) (u32)p
+#endif
 #define _MATH_H_
 #include "dolphin/os/OSCache.h"
 #include "musyx/assert.h"
@@ -117,7 +117,7 @@ bool salInitDspCtrl(u8 numVoices, u8 numStudios, u32 defaultStudioDPL2) {
 #if MUSY_TARGET == MUSY_TARGET_DOLPHIN
           DCInvalidateRange(dspITDBuffer, salNumVoices * 64);
 #endif
-          itdPtr = (u32)dspITDBuffer;
+          itdPtr = DSP_PTRINT(dspITDBuffer);
           for (i = 0; i < salNumVoices; ++i) {
             MUSY_DEBUG("Initializing voice %d...\n", i);
             dspVoice[i].state = 0;
@@ -130,12 +130,12 @@ bool salInitDspCtrl(u8 numVoices, u8 numStudios, u32 defaultStudioDPL2) {
             dspVoice[i].pb = salMallocPhysical(sizeof(_PB));
             memset(dspVoice[i].pb, 0, sizeof(_PB));
             dspVoice[i].patchData = salMallocPhysical(0x80);
-            dspVoice[i].pb->currHi = ((u32)dspVoice[i].pb >> 16);
-            dspVoice[i].pb->currLo = (u16)(u32)dspVoice[i].pb;
-            dspVoice[i].pb->update.dataHi = ((u32)dspVoice[i].patchData >> 16);
-            dspVoice[i].pb->update.dataLo = ((u16)(u32)dspVoice[i].patchData);
-            dspVoice[i].pb->itd.bufferHi = ((u32)itdPtr >> 16);
-            dspVoice[i].pb->itd.bufferLo = ((u16)itdPtr);
+            dspVoice[i].pb->currHi = (DSP_HI(dspVoice[i].pb));
+            dspVoice[i].pb->currLo = DSP_LO16(dspVoice[i].pb);
+            dspVoice[i].pb->update.dataHi = (DSP_HI(dspVoice[i].patchData));
+            dspVoice[i].pb->update.dataLo = (DSP_LO16(dspVoice[i].patchData));
+            dspVoice[i].pb->itd.bufferHi = (DSP_HI(itdPtr));
+            dspVoice[i].pb->itd.bufferLo = (DSP_LO16(itdPtr));
             dspVoice[i].itdBuffer = (void*)itdPtr;
             itdPtr += 0x40;
             dspVoice[i].virtualSampleID = 0xFFFFFFFF;
@@ -621,6 +621,23 @@ static inline void AddDpop(s32* sum, s16 delta) {
 /** Works out how to fade the accumulated DC offset of a studio output to zero: the per-sample step is -sum/160 (at most
  * 20 per sample), and the sum is updated by what the ramp will remove this frame. This hides the click when a voice
  * stops mid-waveform. */
+#if MUSY_TARGET == MUSY_TARGET_PC
+/* 'long' is 64-bit on LP64 hosts: the SPB start value is written as its Hi/Lo halves. */
+static void DoDepopFade(void* dspStart, s16* dspDelta, s32* hostSum) {
+  u16* start = dspStart;
+  if (*hostSum <= -160) {
+    *dspDelta = (*hostSum <= -3200) ? 0x14 : (s16)(-*hostSum / 160);
+  } else if (*hostSum >= 160) {
+    *dspDelta = (*hostSum >= 3200) ? -0x14 : (s16)(-*hostSum / 160);
+  } else {
+    *dspDelta = 0;
+  }
+
+  start[0] = (u32)*hostSum >> 16;
+  start[1] = (u16)*hostSum;
+  *hostSum += *dspDelta * 160;
+}
+#else
 static void DoDepopFade(long* dspStart, s16* dspDelta, long* hostSum) {
   if (*hostSum <= -160) {
     *dspDelta = (*hostSum <= -3200) ? 0x14 : (s16)(-*hostSum / 160);
@@ -633,6 +650,7 @@ static void DoDepopFade(long* dspStart, s16* dspDelta, long* hostSum) {
   *dspStart = *hostSum;
   *hostSum += *dspDelta * 160;
 }
+#endif
 
 /** Called when a voice is removed: marks it stopped and adds the DC offset it was outputting, for each mix channel its
  * mixer control enables, to the studio's de-pop sums. */
@@ -671,7 +689,12 @@ static void HandleDepopVoice(DSPstudioinfo* stp, DSPvoice* dsp_vptr) {
 }
 
 /** Recursive quicksort of voices[l..r] by ascending priority. */
+#if MUSY_TARGET == MUSY_TARGET_PC
+/* s32: the caller passes voiceNum - 1 computed in u32 (-1 when empty). */
+static void SortVoices(DSPvoice** voices, s32 l, s32 r) {
+#else
 static void SortVoices(DSPvoice** voices, long l, long r) {
+#endif
   long i;        // r28
   long last;     // r29
   DSPvoice* tmp; // r27
@@ -793,8 +816,8 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
       if ((dspCmdPtr + 3) > (dspCmdMaxPtr - 4)) {
         u16 size; // r1+0x2E
         dspCmdPtr[0] = 13; // MORE
-        dspCmdPtr[1] = (u32)dspCmdMaxPtr >> 16;
-        dspCmdPtr[2] = (u32)dspCmdMaxPtr;
+        dspCmdPtr[1] = DSP_HI(dspCmdMaxPtr);
+        dspCmdPtr[2] = DSP_LO(dspCmdMaxPtr);
         size = (((u32)(dspCmdPtr + 4) - (u32)dspCmdCurBase) + 3) & ~3;
         if (dspCmdLastLoad) {
           dspCmdLastLoad[3] = size;
@@ -809,16 +832,16 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
         dspCmdMaxPtr = dspCmdPtr + 0xC0;
       }
       dspCmdPtr[0] = 0; // SETUP
-      dspCmdPtr[1] = (u32)stp->spb >> 16;
-      dspCmdPtr[2] = (u32)stp->spb;
+      dspCmdPtr[1] = DSP_HI(stp->spb);
+      dspCmdPtr[2] = DSP_LO(stp->spb);
       dspCmdPtr += 3;
       cyclesUsed += 0x2C62;
       for (in = 0; in < stp->numInputs; in++) {
         if ((dspCmdPtr + 6) > (dspCmdMaxPtr - 4)) {
           u16 size; // r1+0x2C
           dspCmdPtr[0] = 0xD; // MORE
-          dspCmdPtr[1] = (u32)dspCmdMaxPtr >> 16;
-          dspCmdPtr[2] = (u32)dspCmdMaxPtr;
+          dspCmdPtr[1] = DSP_HI(dspCmdMaxPtr);
+          dspCmdPtr[2] = DSP_LO(dspCmdMaxPtr);
           size = (((u32)(dspCmdPtr + 4) - (u32)dspCmdCurBase) + 3) & ~3;
           if (dspCmdLastLoad) {
             dspCmdLastLoad[3] = size;
@@ -833,8 +856,8 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
           dspCmdMaxPtr = dspCmdPtr + 0xC0;
         }
         dspCmdPtr[0] = 1; // DL_AND_VOL_MIX
-        dspCmdPtr[1] = (u32)dspStudio[stp->in[in].studio].main[salFrame ^ 1] >> 16;
-        dspCmdPtr[2] = (u32)dspStudio[stp->in[in].studio].main[salFrame ^ 1];
+        dspCmdPtr[1] = DSP_HI(dspStudio[stp->in[in].studio].main[salFrame ^ 1]);
+        dspCmdPtr[2] = DSP_LO(dspStudio[stp->in[in].studio].main[salFrame ^ 1]);
         dspCmdPtr[3] = stp->in[in].vol;
         dspCmdPtr[4] = stp->in[in].volA;
         dspCmdPtr[5] = stp->in[in].volB;
@@ -1375,7 +1398,7 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
             pb->update.updNum[s] = 0;
           }
           pptr = dsp_vptr->patchData;
-          pend = (u16*)((u32)dsp_vptr->patchData + 0x80);
+          pend = (u16*)(DSP_PTRINT(dsp_vptr->patchData) + 0x80);
           if (mix_start != 0) {
             MUSY_ASSERT((pptr + 2) <= pend);
             pptr[0] = 7;
@@ -1502,8 +1525,8 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
               if ((dspCmdPtr + 3) > (dspCmdMaxPtr - 4)) {
                 u16 size; // r1+0x2A
                 dspCmdPtr[0] = 13; // MORE
-                dspCmdPtr[1] = (u32)dspCmdMaxPtr >> 16;
-                dspCmdPtr[2] = (u32)dspCmdMaxPtr;
+                dspCmdPtr[1] = DSP_HI(dspCmdMaxPtr);
+                dspCmdPtr[2] = DSP_LO(dspCmdMaxPtr);
                 size = (((u32)(dspCmdPtr + 4) - (u32)dspCmdCurBase) + 3) & ~3;
                 if (dspCmdLastLoad) {
                   dspCmdLastLoad[3] = size;
@@ -1518,16 +1541,16 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
                 dspCmdMaxPtr = dspCmdPtr + 0xC0;
               }
               dspCmdPtr[0] = 2; // PB_ADDR
-              dspCmdPtr[1] = (u32)pb >> 0x10;
-              dspCmdPtr[2] = (u32)pb;
+              dspCmdPtr[1] = DSP_HIX(pb);
+              dspCmdPtr[2] = DSP_LO(pb);
               dspCmdPtr += 3; // PROCESS
 #ifdef _DEBUG
               dbgActiveVoices++;
 #endif
               procVoiceFlag = 1;
             } else {
-              last_pb->nextHi = (u32)pb >> 16;
-              last_pb->nextLo = (u32)pb;
+              last_pb->nextHi = DSP_HI(pb);
+              last_pb->nextLo = DSP_LO(pb);
 #ifdef _DEBUG
               dbgActiveVoices++;
 #endif
@@ -1542,8 +1565,8 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
         if ((dspCmdPtr + 1) > (dspCmdMaxPtr - 4)) {
           u16 size; // r1+0x28;
           dspCmdPtr[0] = 13; // MORE
-          dspCmdPtr[1] = (u32)dspCmdMaxPtr >> 16;
-          dspCmdPtr[2] = (u32)dspCmdMaxPtr;
+          dspCmdPtr[1] = DSP_HI(dspCmdMaxPtr);
+          dspCmdPtr[2] = DSP_LO(dspCmdMaxPtr);
           size = (((u32)(dspCmdPtr + 4) - (u32)dspCmdCurBase) + 3) & ~3;
           if (dspCmdLastLoad) {
             dspCmdLastLoad[3] = size;
@@ -1569,8 +1592,8 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
         if ((dspCmdPtr + 5) > (dspCmdMaxPtr - 4)) {
           u16 size; // r1+0x26
           dspCmdPtr[0] = 13; // MORE
-          dspCmdPtr[1] = (u32)dspCmdMaxPtr >> 16;
-          dspCmdPtr[2] = (u32)dspCmdMaxPtr;
+          dspCmdPtr[1] = DSP_HI(dspCmdMaxPtr);
+          dspCmdPtr[2] = DSP_LO(dspCmdMaxPtr);
           size = (((u32)(dspCmdPtr + 4) - (u32)dspCmdCurBase) + 3) & ~3;
           if (dspCmdLastLoad) {
             dspCmdLastLoad[3] = size;
@@ -1585,10 +1608,10 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
           dspCmdMaxPtr = dspCmdPtr + 0xC0;
         }
         dspCmdPtr[0] = 4; // MIX_AUXA
-        dspCmdPtr[1] = (u32)stp->auxA[salAuxFrame] >> 16;
-        dspCmdPtr[2] = (u32)stp->auxA[salAuxFrame];
-        dspCmdPtr[3] = (u32)stp->auxA[getAuxFrame] >> 16;
-        dspCmdPtr[4] = (u32)stp->auxA[getAuxFrame];
+        dspCmdPtr[1] = DSP_HI(stp->auxA[salAuxFrame]);
+        dspCmdPtr[2] = DSP_LO(stp->auxA[salAuxFrame]);
+        dspCmdPtr[3] = DSP_HI(stp->auxA[getAuxFrame]);
+        dspCmdPtr[4] = DSP_LO(stp->auxA[getAuxFrame]);
         dspCmdPtr += 5;
       }
       if (stp->type == SND_STUDIO_TYPE_STD) {
@@ -1596,8 +1619,8 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
           if ((dspCmdPtr + 5) > (dspCmdMaxPtr - 4)) {
             u16 size; // r1+0x24
             dspCmdPtr[0] = 13; // MORE
-            dspCmdPtr[1] = (u32)dspCmdMaxPtr >> 16;
-            dspCmdPtr[2] = (u32)dspCmdMaxPtr;
+            dspCmdPtr[1] = DSP_HI(dspCmdMaxPtr);
+            dspCmdPtr[2] = DSP_LO(dspCmdMaxPtr);
             size = (((u32)(dspCmdPtr + 4) - (u32)dspCmdCurBase) + 3) & ~3;
             if (dspCmdLastLoad) {
               dspCmdLastLoad[3] = size;
@@ -1612,18 +1635,18 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
             dspCmdMaxPtr = dspCmdPtr + 0xC0;
           }
           dspCmdPtr[0] = 5; // MIX_AUXB
-          dspCmdPtr[1] = (u32)stp->auxB[salAuxFrame] >> 16;
-          dspCmdPtr[2] = (u32)stp->auxB[salAuxFrame];
-          dspCmdPtr[3] = (u32)stp->auxB[getAuxFrame] >> 16;
-          dspCmdPtr[4] = (u32)stp->auxB[getAuxFrame];
+          dspCmdPtr[1] = DSP_HI(stp->auxB[salAuxFrame]);
+          dspCmdPtr[2] = DSP_LO(stp->auxB[salAuxFrame]);
+          dspCmdPtr[3] = DSP_HI(stp->auxB[getAuxFrame]);
+          dspCmdPtr[4] = DSP_LO(stp->auxB[getAuxFrame]);
           dspCmdPtr += 5;
         }
       } else {
         if ((dspCmdPtr + 5) > (dspCmdMaxPtr - 4)) {
           u16 size; // r1+0x22
           dspCmdPtr[0] = 13; // MORE
-          dspCmdPtr[1] = (u32)dspCmdMaxPtr >> 16;
-          dspCmdPtr[2] = (u32)dspCmdMaxPtr;
+          dspCmdPtr[1] = DSP_HI(dspCmdMaxPtr);
+          dspCmdPtr[2] = DSP_LO(dspCmdMaxPtr);
           size = (((u32)(dspCmdPtr + 4) - (u32)dspCmdCurBase) + 3) & ~3;
           if (dspCmdLastLoad) {
             dspCmdLastLoad[3] = size;
@@ -1638,17 +1661,17 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
           dspCmdMaxPtr = dspCmdPtr + 0xC0;
         }
         dspCmdPtr[0] = 16; // MIX_AUXB_LR
-        dspCmdPtr[1] = (u32)stp->auxB[salFrame] >> 16;
-        dspCmdPtr[2] = (u32)stp->auxB[salFrame];
-        dspCmdPtr[3] = (u32)stp->auxB[salFrame ^ 1] >> 16;
-        dspCmdPtr[4] = (u32)stp->auxB[salFrame ^ 1];
+        dspCmdPtr[1] = DSP_HI(stp->auxB[salFrame]);
+        dspCmdPtr[2] = DSP_LO(stp->auxB[salFrame]);
+        dspCmdPtr[3] = DSP_HI(stp->auxB[salFrame ^ 1]);
+        dspCmdPtr[4] = DSP_LO(stp->auxB[salFrame ^ 1]);
         dspCmdPtr += 5;
       }
       if ((dspCmdPtr + 3) > (dspCmdMaxPtr - 4)) {
         u16 size; // r1+0x20
         dspCmdPtr[0] = 13; // MORE
-        dspCmdPtr[1] = (u32)dspCmdMaxPtr >> 16;
-        dspCmdPtr[2] = (u32)dspCmdMaxPtr;
+        dspCmdPtr[1] = DSP_HI(dspCmdMaxPtr);
+        dspCmdPtr[2] = DSP_LO(dspCmdMaxPtr);
         size = (((u32)(dspCmdPtr + 4) - (u32)dspCmdCurBase) + 3) & ~3;
         if (dspCmdLastLoad) {
           dspCmdLastLoad[3] = size;
@@ -1663,8 +1686,8 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
         dspCmdMaxPtr = dspCmdPtr + 0xC0;
       }
       dspCmdPtr[0] = 6; // UPLOAD_LRS
-      dspCmdPtr[1] = (u32)stp->main[salFrame] >> 16;
-      dspCmdPtr[2] = (u32)stp->main[salFrame];
+      dspCmdPtr[1] = DSP_HI(stp->main[salFrame]);
+      dspCmdPtr[2] = DSP_LO(stp->main[salFrame]);
       dspCmdPtr += 3;
       spb = stp->spb;
       DoDepopFade((long*)&spb->dpopLHi, (s16*)&spb->dpopLDelta, &stp->hostDPopSum.l);
@@ -1682,8 +1705,8 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
   if ((dspCmdPtr + 3) > (dspCmdMaxPtr - 4)) {
     u16 size; // r1+0x1E
     dspCmdPtr[0] = 13; // MORE
-    dspCmdPtr[1] = (u32)dspCmdMaxPtr >> 16;
-    dspCmdPtr[2] = (u32)dspCmdMaxPtr;
+    dspCmdPtr[1] = DSP_HI(dspCmdMaxPtr);
+    dspCmdPtr[2] = DSP_LO(dspCmdMaxPtr);
     size = (((u32)(dspCmdPtr + 4) - (u32)dspCmdCurBase) + 3) & ~3;
     if (dspCmdLastLoad) {
       dspCmdLastLoad[3] = size;
@@ -1698,16 +1721,16 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
     dspCmdMaxPtr = dspCmdPtr + 0xC0;
   }
   dspCmdPtr[0] = 17; // SET_OPPOSITE_LR
-  dspCmdPtr[1] = (u32)dspSurround >> 16;
-  dspCmdPtr[2] = (u32)dspSurround;
+  dspCmdPtr[1] = DSP_HI(dspSurround);
+  dspCmdPtr[2] = DSP_LO(dspSurround);
   dspCmdPtr += 3;
   for (st = 0; st < salMaxStudioNum; st++) {
     if ((dspStudio[st].state == 1) && (dspStudio[st].isMaster != 0)) {
       if ((dspCmdPtr + 3) > (dspCmdMaxPtr - 4)) {
         u16 size; // r1+0x1C
         dspCmdPtr[0] = 13; // MORE
-        dspCmdPtr[1] = (u32)dspCmdMaxPtr >> 16;
-        dspCmdPtr[2] = (u32)dspCmdMaxPtr;
+        dspCmdPtr[1] = DSP_HI(dspCmdMaxPtr);
+        dspCmdPtr[2] = DSP_LO(dspCmdMaxPtr);
         size = (((u32)(dspCmdPtr + 4) - (u32)dspCmdCurBase) + 3) & ~3;
         if (dspCmdLastLoad) {
           dspCmdLastLoad[3] = size;
@@ -1722,8 +1745,8 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
         dspCmdMaxPtr = dspCmdPtr + 0xC0;
       }
       dspCmdPtr[0] = 9; // MIX_AUXB_NOWRITE
-      dspCmdPtr[1] = (u32)dspStudio[st].main[salFrame] >> 16;
-      dspCmdPtr[2] = (u32)dspStudio[st].main[salFrame];
+      dspCmdPtr[1] = DSP_HI(dspStudio[st].main[salFrame]);
+      dspCmdPtr[2] = DSP_LO(dspStudio[st].main[salFrame]);
       dspCmdPtr += 3;
     }
   }
@@ -1731,8 +1754,8 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
     if ((dspCmdPtr + 5) > (dspCmdMaxPtr - 4)) {
       u16 size;
       dspCmdPtr[0] = 13; // MORE
-      dspCmdPtr[1] = (u32)dspCmdMaxPtr >> 16;
-      dspCmdPtr[2] = (u32)dspCmdMaxPtr;
+      dspCmdPtr[1] = DSP_HI(dspCmdMaxPtr);
+      dspCmdPtr[2] = DSP_LO(dspCmdMaxPtr);
       size = (((u32)(dspCmdPtr + 4) - (u32)dspCmdCurBase) + 3) & ~3;
       if (dspCmdLastLoad) {
         dspCmdLastLoad[3] = size;
@@ -1749,15 +1772,15 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
     dspCmdPtr[0] = 18; // COMPRESSOR
     dspCmdPtr[1] = 0x8000;
     dspCmdPtr[2] = 10;
-    dspCmdPtr[3] = (u32)compressorTable >> 16;
-    dspCmdPtr[4] = (u32)compressorTable;
+    dspCmdPtr[3] = DSP_HI(compressorTable);
+    dspCmdPtr[4] = DSP_LO(compressorTable);
     dspCmdPtr += 5;
   }
   if ((dspCmdPtr + 5) > (dspCmdMaxPtr - 4)) {
     u16 size; // r1+0x1A
     dspCmdPtr[0] = 13; // MORE
-    dspCmdPtr[1] = (u32)dspCmdMaxPtr >> 16;
-    dspCmdPtr[2] = (u32)dspCmdMaxPtr;
+    dspCmdPtr[1] = DSP_HI(dspCmdMaxPtr);
+    dspCmdPtr[2] = DSP_LO(dspCmdMaxPtr);
     size = (((u32)(dspCmdPtr + 4) - (u32)dspCmdCurBase) + 3) & ~3;
     if (dspCmdLastLoad) {
       dspCmdLastLoad[3] = size;
@@ -1774,10 +1797,10 @@ void salBuildCommandList(s16* dest, u32 nsDelay) {
   {
     u16 size; // r1+0x18
     dspCmdPtr[0] = 14; // OUTPUT
-    dspCmdPtr[1] = (u32)dspSurround >> 16;
-    dspCmdPtr[2] = (u32)dspSurround;
-    dspCmdPtr[3] = (u32)dest >> 16;
-    dspCmdPtr[4] = (u32)dest;
+    dspCmdPtr[1] = DSP_HI(dspSurround);
+    dspCmdPtr[2] = DSP_LO(dspSurround);
+    dspCmdPtr[3] = DSP_HI(dest);
+    dspCmdPtr[4] = DSP_LO(dest);
     dspCmdPtr += 5;
     *dspCmdPtr++ = 15; // END
     size = (((u32)dspCmdPtr - (u32)dspCmdCurBase) + 3) & ~3;

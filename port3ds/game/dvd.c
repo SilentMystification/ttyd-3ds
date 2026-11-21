@@ -302,3 +302,13 @@ s32 DVDReadPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, s32 p
 
 /* The drive never reports a problem: the image is on the SD card. */
 s32 DVDGetDriveStatus(void) { return DVD_STATE_END; }
+
+/* Disc audio streaming (DTK). TTYD never prepares a stream (sound.c only
+ * stops one), so there is never one to cancel: the command completes at
+ * once, as the drive's does when nothing streams. */
+s32 DVDCancelStream(DVDCommandBlock* block) {
+    if (block != NULL) {
+        block->state = DVD_STATE_END;
+    }
+    return 0;
+}

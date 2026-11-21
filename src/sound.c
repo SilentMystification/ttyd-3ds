@@ -12,6 +12,14 @@
 #include <string.h>
 #if VERSION >= VERSION_US
 #include "mario/mariost.h"
+#endif
+#ifdef TARGET_PORT
+#include "port_musyx_swap.h"
+// The sections between SoundIntOff and SoundIntOn (and the game's inlined copies, which call these on ports).
+void SoundIntOff(void);
+void SoundIntOn(void);
+#endif
+#if VERSION >= VERSION_US
 
 // The AI DMA source as a cached address: the GameCube ORs in 0x80000000 (physical to cached);
 // ports get a usable pointer from AIGetDMAStartAddr already.
@@ -368,6 +376,9 @@ BOOL SoundLoadDVD2(const char* path) {
     if (pointer == NULL) {
         return FALSE;
     }
+#ifdef TARGET_PORT
+    portMusyxSwapPool(pointer, length); // big-endian on the disc
+#endif
     sound.poolData[sound.dataId] = pointer;
 
     sprintf(str, "%s/%s%s", getMarioStDvdRoot(), path, ".proj");
@@ -394,6 +405,9 @@ BOOL SoundLoadDVD2(const char* path) {
     if (pointer == NULL) {
         return FALSE;
     }
+#ifdef TARGET_PORT
+    portMusyxSwapProj(pointer, length); // big-endian on the disc
+#endif
     sound.projData[sound.dataId] = pointer;
 
     sprintf(str, "%s/%s%s", getMarioStDvdRoot(), path, ".sdir");
@@ -420,6 +434,9 @@ BOOL SoundLoadDVD2(const char* path) {
     if (pointer == NULL) {
         return FALSE;
     }
+#ifdef TARGET_PORT
+    portMusyxSwapSdir(pointer, length); // big-endian on the disc
+#endif
     sound.sdirData[sound.dataId] = pointer;
 
     sprintf(str, "%s/%s%s", getMarioStDvdRoot(), path, ".samp");
@@ -518,6 +535,9 @@ BOOL SoundSLibLoadDVD(const char* path) {
     if ((cursor = pointer) == NULL) {
         return FALSE;
     }
+#ifdef TARGET_PORT
+    portMusyxSwapSlib(pointer, length); // big-endian on the disc
+#endif
     sound.slibData[sound.slibId] = pointer;
 
     while (1) {
@@ -654,15 +674,23 @@ static inline void _ssDropStop(void) {
                 sound.slotUsed[stream->slot] = 0;
             }
             stream->flags = 0;
-            if (!sound.interruptDepth) {
-                sound.interrupts = OSDisableInterrupts();
-            }
-            sound.interruptDepth++;
+#ifdef TARGET_PORT
+            SoundIntOff();
 #else
             if (!sound.interruptDepth) {
                 sound.interrupts = OSDisableInterrupts();
             }
             sound.interruptDepth++;
+#endif
+#else
+#ifdef TARGET_PORT
+            SoundIntOff();
+#else
+            if (!sound.interruptDepth) {
+                sound.interrupts = OSDisableInterrupts();
+            }
+            sound.interruptDepth++;
+#endif
             if (stream->flags & SOUND_SS_FLAG_ARAM) {
                 sound.slotUsed[stream->slot] = 0;
             }
@@ -674,11 +702,15 @@ static inline void _ssDropStop(void) {
             if (stream->count == 2) {
                 sndStreamFree(stream->entries[1].streamId);
             }
+#ifdef TARGET_PORT
+            SoundIntOn();
+#else
             if (sound.interruptDepth) {
                 if (!--sound.interruptDepth) {
                     OSRestoreInterrupts(sound.interrupts);
                 }
             }
+#endif
             sound.streamChannel = -1;
         }
     }
@@ -739,15 +771,23 @@ BOOL SoundDropData(void) {
                 sound.slotUsed[stream->slot] = 0;
             }
             stream->flags = 0;
-            if (!sound.interruptDepth) {
-                sound.interrupts = OSDisableInterrupts();
-            }
-            sound.interruptDepth++;
+#ifdef TARGET_PORT
+            SoundIntOff();
 #else
             if (!sound.interruptDepth) {
                 sound.interrupts = OSDisableInterrupts();
             }
             sound.interruptDepth++;
+#endif
+#else
+#ifdef TARGET_PORT
+            SoundIntOff();
+#else
+            if (!sound.interruptDepth) {
+                sound.interrupts = OSDisableInterrupts();
+            }
+            sound.interruptDepth++;
+#endif
             if (stream->flags & SOUND_SS_FLAG_ARAM) {
                 sound.slotUsed[stream->slot] = 0;
             }
@@ -759,11 +799,15 @@ BOOL SoundDropData(void) {
             if (stream->count == 2) {
                 sndStreamFree(stream->entries[1].streamId);
             }
+#ifdef TARGET_PORT
+            SoundIntOn();
+#else
             if (sound.interruptDepth) {
                 if (!(--sound.interruptDepth)) {
                     OSRestoreInterrupts(sound.interrupts);
                 }
             }
+#endif
             sound.streamChannel = -1;
         }
     }
@@ -1060,15 +1104,23 @@ s32 SoundEfxPlayEx(SND_FXID fid, u8 priority, u8 vol, u8 pan) {
         }
     }
     sfx->flags = 0;
+#ifdef TARGET_PORT
+    SoundIntOff();
+#else
     if (!sound.interruptDepth) {
         sound.interrupts = OSDisableInterrupts();
     }
     ++sound.interruptDepth;
+#endif
     sfx->voiceId = sndFXStart(fid, 127, pan);
     sndFXVolume(sfx->voiceId, vol);
+#ifdef TARGET_PORT
+    SoundIntOn();
+#else
     if (sound.interruptDepth && !--sound.interruptDepth) {
         OSRestoreInterrupts(sound.interrupts);
     }
+#endif
     if (sfx->voiceId == SND_ID_ERROR) {
         return -1;
     }
@@ -1404,6 +1456,30 @@ static void _ssDVDReadAsync_cache_next(s32 result, DVDFileInfo* fileInfo);
 static void SoundSSPlayChEx_main(s32 result, DVDFileInfo* fileInfo);
 
 /** Disables interrupts for stream bookkeeping; nests. */
+#ifdef TARGET_PORT
+// The streams' callbacks enter these sections too (_sscallback, from MusyX's frame on the audio interrupt). On the
+// GameCube an interrupt cannot overlap a thread's section, so one depth and one saved state serve all; on the port the
+// interrupt runs on another core, so each host thread keeps its own (an unlocked read of a shared depth could let both
+// in at once).
+static __thread s32 ssIntDepth;
+static __thread BOOL ssIntSaved;
+
+void SoundIntOff(void) {
+    if (!ssIntDepth) {
+        ssIntSaved = OSDisableInterrupts();
+    }
+    ssIntDepth++;
+}
+
+/** Undoes one SoundIntOff, restoring interrupts at the outermost level. */
+void SoundIntOn(void) {
+    if (ssIntDepth) {
+        if (!--ssIntDepth) {
+            OSRestoreInterrupts(ssIntSaved);
+        }
+    }
+}
+#else
 inline void SoundIntOff(void) {
     if (!sound.interruptDepth) {
         sound.interrupts = OSDisableInterrupts();
@@ -1419,6 +1495,7 @@ inline void SoundIntOn(void) {
         }
     }
 }
+#endif
 
 /** Rounds x up to a multiple of 32 bytes (DVD and DMA alignment). */
 static inline u32 _ssAlign32(u32 x) {
@@ -1960,7 +2037,11 @@ static u32 _sscallback(void* p_b1, u32 len1, void* p_b2, u32 p_l2, u32 user) {
         dst = buffer1;
         src16 = (s16*)(entry->loadBuffer[entry->curBuf] + (entry->srcPos & (~1)));
         while (i != 0) {
+#ifdef TARGET_PORT
+            *(dst++) = (s16)portBE16(src16++); // stream PCM16 is big-endian on the disc
+#else
             *(dst++) = *(src16++);
+#endif
             i--;
             stream->samplePos++;
             entry->srcPos += 2;
@@ -1988,7 +2069,11 @@ static u32 _sscallback(void* p_b1, u32 len1, void* p_b2, u32 p_l2, u32 user) {
         i = len2;
         dst = buffer2;
         while (i != 0) {
+#ifdef TARGET_PORT
+            *(dst++) = (s16)portBE16(src16++); // stream PCM16 is big-endian on the disc
+#else
             *(dst++) = *(src16++);
+#endif
             i--;
             stream->samplePos++;
             entry->srcPos += 2;
@@ -2130,6 +2215,9 @@ static void SoundSSPlayChEx_main(s32 result, DVDFileInfo* fileInfo) {
             }
         }
         header = stream->entries[0].buffer;
+#ifdef TARGET_PORT
+        portMusyxSwapStreamHeader(header); // big-endian on the disc
+#endif
         type = header->type;
         stream->freq = header->freq;
         stream->count = header->count;
@@ -2578,7 +2666,11 @@ static void SoundAIDMACallback(void) {
     src = (s16*)sound.dmaBuf;
     dst = (u16*)src;
     while (length != 0) {
+#ifdef TARGET_PORT
+        *dst++ = *(u16*)address; // the port's mixer writes host-order samples
+#else
         *dst++ = (address[0] << 8) | address[1];
+#endif
         address += 2;
         length -= 2;
     }

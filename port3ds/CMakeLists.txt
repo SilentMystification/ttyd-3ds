@@ -133,10 +133,11 @@ file(WRITE "${TTYD_GEN_DIR}/rel_table.c.tmp"
 configure_file("${TTYD_GEN_DIR}/rel_table.c.tmp" "${TTYD_GEN_DIR}/rel_table.c" COPYONLY)
 # Where this version keeps the data ports read from the disc (port_disc_data.h).
 execute_process(COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/gen_disc_data.py"
-    --version ${TTYD_VERSION} "${TTYD_GEN_DIR}/port_disc_data_gen.h" RESULT_VARIABLE _gen_rc)
+    --version ${TTYD_VERSION} "${TTYD_GEN_DIR}/port_disc_data_gen.h.tmp" RESULT_VARIABLE _gen_rc)
 if(NOT _gen_rc EQUAL 0)
     message(FATAL_ERROR "gen_disc_data.py failed")
 endif()
+configure_file("${TTYD_GEN_DIR}/port_disc_data_gen.h.tmp" "${TTYD_GEN_DIR}/port_disc_data_gen.h" COPYONLY)
 file(WRITE "${TTYD_GEN_DIR}/port3ds_build.h.tmp"
     "#define PORT3DS_BUILD_STRING \"#${TTYD_BUILD_COUNT} ${TTYD_BUILD_HASH}\"\n")
 configure_file("${TTYD_GEN_DIR}/port3ds_build.h.tmp" "${TTYD_GEN_DIR}/port3ds_build.h" COPYONLY)
@@ -177,6 +178,10 @@ set_source_files_properties(${TTYD_SDK_SOURCES} "${TTYD_GEN_DIR}/mtx_sdk.c" TARG
 # outside strict ISO C.
 set_source_files_properties("${TTYD_REPO_DIR}/libs/dolsdk2004/src/gx/GXDraw.c" TARGET_DIRECTORY ttyd_port_game
     PROPERTIES COMPILE_OPTIONS "-w;-std=c99")
+# MusyX's bool is a 4-byte typedef only up to C99 (musyx.h); the MusyX
+# hardware layer is compiled as MusyX is.
+set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/game/audio.c" TARGET_DIRECTORY ttyd_port_game
+    PROPERTIES COMPILE_OPTIONS "-std=gnu99")
 target_compile_options(ttyd_port_game PRIVATE -std=gnu11 -O2 -g -fno-short-enums ${TTYD_PORT_WARNINGS}
     -fno-strict-aliasing -fwrapv -ffp-contract=off -ffunction-sections -fdata-sections
     -include "${CMAKE_CURRENT_LIST_DIR}/include/port3ds_prefix.h")

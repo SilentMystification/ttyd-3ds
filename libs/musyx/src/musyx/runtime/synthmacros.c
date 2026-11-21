@@ -8,8 +8,21 @@
 #include "musyx/synthdata.h"
 #include "musyx/sal.h"
 
+#if defined(TARGET_PC) || defined(TARGET_PORT)
 #include <float.h>
+/* ADSR curve fields are little-endian on disc; the GameCube code swaps
+ * 16-bit ones with shifts, which on a little-endian host would undo nothing. */
+static inline u16 adsrLE16(const void* p) {
+  const u8* b = (const u8*)p;
+  return (u16)(b[0] | (b[1] << 8));
+}
+#else
+#include <float.h>
+#endif
 #include <string.h>
+#if MUSY_TARGET == MUSY_TARGET_PC
+#include "musyx/hw_pcmixer.h"
+#endif
 
 static u8 DebugMacroSteps;
 
@@ -151,7 +164,12 @@ static u32 mcmdWait(SYNTH_VOICE* svoice, MSTEP* cstep) {
 
 /** Macro command 0x07: like mcmdWait but the time is in milliseconds. */
 static u32 mcmdWaitMs(SYNTH_VOICE* svoice, MSTEP* cstep) {
+#if defined(TARGET_PC) || defined(TARGET_PORT)
+  /* Byte 6 of the big-endian step: bits 8-15 of para[1] (swapped on load). */
+  cstep->para[1] = (cstep->para[1] & ~0xFF00u) | 0x100u;
+#else
   *((u8*)cstep->para + 6) = 1;
+#endif
   return mcmdWait(svoice, cstep);
 }
 
@@ -727,15 +745,27 @@ static void mcmdSetADSR(SYNTH_VOICE* svoice, MSTEP* cstep) {
 
   if ((adsr_ptr = dataGetCurve(cstep->para[0] >> 8)) != NULL) {
     if (!(u8)(cstep->para[0] >> 24)) {
+#if defined(TARGET_PC) || defined(TARGET_PORT)
+      /* ADSR curves are stored little-endian. */
+      adsr.data.linear.atime = adsrLE16(&adsr_ptr->data.linear.atime);
+      adsr.data.linear.dtime = adsrLE16(&adsr_ptr->data.linear.dtime);
+      adsr.data.linear.slevel = adsrLE16(&adsr_ptr->data.linear.slevel);
+      adsr.data.linear.rtime = adsrLE16(&adsr_ptr->data.linear.rtime);
+#else
       adsr.data.linear.atime = adsr_ptr->data.linear.atime >> 8 | adsr_ptr->data.linear.atime << 8;
       adsr.data.linear.dtime = adsr_ptr->data.linear.dtime >> 8 | adsr_ptr->data.linear.dtime << 8;
       adsr.data.linear.slevel = adsr_ptr->data.linear.slevel >> 8 | adsr_ptr->data.linear.slevel
                                                                         << 8;
       adsr.data.linear.rtime = adsr_ptr->data.linear.rtime >> 8 | adsr_ptr->data.linear.rtime << 8;
+#endif
       hwSetADSR(svoice->id & 0xFF, &adsr, FALSE);
     } else {
+#if defined(TARGET_PC) || defined(TARGET_PORT)
+      sScale = dspDLSVolTab[adsrLE16(&adsr_ptr->data.dls.slevel) >> 5];
+#else
       sScale =
           dspDLSVolTab[(u16)(adsr_ptr->data.dls.slevel >> 8 | adsr_ptr->data.dls.slevel << 8) >> 5];
+#endif
       adsr.data.dls.atime =
           ((u8*)&adsr_ptr->data.dls.atime)[0] << 0 | ((u8*)&adsr_ptr->data.dls.atime)[1] << 8 |
           ((u8*)&adsr_ptr->data.dls.atime)[2] << 16 | ((u8*)&adsr_ptr->data.dls.atime)[3] << 24;
@@ -743,7 +773,11 @@ static void mcmdSetADSR(SYNTH_VOICE* svoice, MSTEP* cstep) {
           ((u8*)&adsr_ptr->data.dls.dtime)[0] << 0 | ((u8*)&adsr_ptr->data.dls.dtime)[1] << 8 |
           ((u8*)&adsr_ptr->data.dls.dtime)[2] << 16 | ((u8*)&adsr_ptr->data.dls.dtime)[3] << 24;
       adsr.data.dls.slevel = 4096.f * sScale;
+#if defined(TARGET_PC) || defined(TARGET_PORT)
+      adsr.data.dls.rtime = adsrLE16(&adsr_ptr->data.dls.rtime);
+#else
       adsr.data.dls.rtime = adsr_ptr->data.dls.rtime >> 8 | adsr_ptr->data.dls.rtime << 8;
+#endif
       ascale =
           ((u8*)&adsr_ptr->data.dls.ascale)[0] << 0 | ((u8*)&adsr_ptr->data.dls.ascale)[1] << 8 |
           ((u8*)&adsr_ptr->data.dls.ascale)[2] << 16 | ((u8*)&adsr_ptr->data.dls.ascale)[3] << 24;
@@ -831,8 +865,13 @@ static void mcmdSetPitchADSR(SYNTH_VOICE* svoice, MSTEP* cstep) {
       (((u8*)&adsr_ptr->data.dls.dtime)[0] << 0) | (((u8*)&adsr_ptr->data.dls.dtime)[1] << 8) |
       (((u8*)&adsr_ptr->data.dls.dtime)[2] << 16) | (((u8*)&adsr_ptr->data.dls.dtime)[3] << 24);
 
+#if defined(TARGET_PC) || defined(TARGET_PORT)
+  adsr.data.dls.slevel = adsrLE16(&adsr_ptr->data.dls.slevel);
+  adsr.data.dls.rtime = adsrLE16(&adsr_ptr->data.dls.rtime);
+#else
   adsr.data.dls.slevel = (adsr_ptr->data.dls.slevel >> 8) | (adsr_ptr->data.dls.slevel << 8);
   adsr.data.dls.rtime = (adsr_ptr->data.dls.rtime >> 8) | (adsr_ptr->data.dls.rtime << 8);
+#endif
   ascale =
       (((u8*)&adsr_ptr->data.dls.ascale)[0] << 0) | (((u8*)&adsr_ptr->data.dls.ascale)[1] << 8) |
       (((u8*)&adsr_ptr->data.dls.ascale)[2] << 16) | (((u8*)&adsr_ptr->data.dls.ascale)[3] << 24);
@@ -2012,6 +2051,10 @@ u32 macStart(u16 macid, u8 priority, u8 maxVoices,
         svoice->setup.midiSet = midiSet;
         svoice->setup.section = section;
       }
+#if MUSY_TARGET == MUSY_TARGET_PC
+      /* the mix category: a sequence's, or the one its effect started in */
+      salPcVoiceCat[voice] = svoice->fxFlag ? salPcCategory(-1) : salPcSeqCat[midiSet];
+#endif
 
       svoice->macroId = macid;
       svoice->allocId = allocId;

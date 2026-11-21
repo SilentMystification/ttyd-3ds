@@ -90,7 +90,7 @@ bool ReverbHICreate(_SND_REVHI_WORK* rev, f32 coloration, f32 time, f32 mix, f32
   return TRUE;
 }
 
-#if 0 // stripped in TTYD
+#if MUSY_TARGET == MUSY_TARGET_PC // stripped in TTYD (needed by reverb_fx.c on PC)
 /**
  * Changes the settings of a high-quality reverb by freeing its delay lines
  * and creating it again (removed from this game build).
@@ -647,7 +647,7 @@ void ReverbHICallback(s32* left, s32* right, s32* surround, SND_AUX_REVERBHI* re
   }
 }
 
-#if 0 // stripped in TTYD
+#if MUSY_TARGET == MUSY_TARGET_PC // stripped in TTYD (needed by reverb_fx.c on PC)
 /**
  * Frees the nine all-pass and nine comb delay lines
  * and the pre-delay buffers of the high-quality reverb (removed from this game build).

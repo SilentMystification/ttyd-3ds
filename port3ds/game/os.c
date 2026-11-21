@@ -130,67 +130,96 @@ void OSTicksToCalendarTime(OSTime ticks, OSCalendarTime* td) {
 /* ---- Interrupts ----
  * On the GameCube, OSDisableInterrupts keeps interrupt handlers (audio DMA,
  * DVD, VI) away from the code that follows. On the port those handlers run
- * on other host threads (audio, file, display), and they take the same
- * recursive lock before they run. The nesting depth is per host thread. */
+ * on other host threads (audio, file, display), and they take one lock
+ * before they run (port_irq_enter). "Interrupts disabled" on a host thread
+ * means that thread holds the lock.
+ *
+ * As MSR[EE] on the GameCube, the state is a flag, not a count: disabling
+ * twice and restoring the first saved state (FALSE) leaves interrupts
+ * disabled, and one OSEnableInterrupts or OSRestoreInterrupts(TRUE)
+ * enables them. A handler's port_irq_leave puts back the state its
+ * port_irq_enter found (as rfi restores MSR). */
 static PlatMutex* s_irq_lock;
-static __thread int s_irq_depth;
+static __thread int s_irq_off;
+static __thread unsigned s_irq_nest;
+static __thread u32 s_irq_saved; /* bit n: interrupts were off at port_irq_enter level n */
+
+static void irq_off(void) {
+    if (!s_irq_off && s_irq_lock != NULL) {
+        plat_mutex_lock(s_irq_lock);
+        s_irq_off = 1;
+    }
+}
+
+static void irq_on(void) {
+    if (s_irq_off) {
+        s_irq_off = 0;
+        plat_mutex_unlock(s_irq_lock);
+    }
+}
 
 BOOL OSDisableInterrupts(void) {
-    if (s_irq_lock == NULL) {
-        return TRUE;
-    }
-    BOOL was_enabled = s_irq_depth == 0;
-    plat_mutex_lock(s_irq_lock);
-    s_irq_depth++;
+    BOOL was_enabled = !s_irq_off;
+    irq_off();
     return was_enabled;
 }
 
 BOOL OSEnableInterrupts(void) {
-    BOOL was_enabled = s_irq_depth == 0;
-    while (s_irq_depth > 0) {
-        s_irq_depth--;
-        plat_mutex_unlock(s_irq_lock);
-    }
+    BOOL was_enabled = !s_irq_off;
+    irq_on();
     return was_enabled;
 }
 
 BOOL OSRestoreInterrupts(BOOL level) {
-    BOOL was_enabled = s_irq_depth == 0;
-    if (level && s_irq_depth > 0) {
-        /* Back to "enabled": undo this thread's whole nesting, as the
-         * hardware MSR[EE] restore does. */
-        OSEnableInterrupts();
+    BOOL was_enabled = !s_irq_off;
+    if (level) {
+        irq_on();
+    } else {
+        irq_off();
     }
     return was_enabled;
 }
 
 void port_irq_enter(void) {
-    plat_mutex_lock(s_irq_lock);
-    s_irq_depth++;
+    if (s_irq_nest >= 32) {
+        plat_fatal("interrupts: handlers nested %u deep", s_irq_nest);
+    }
+    if (s_irq_off) {
+        s_irq_saved |= 1u << s_irq_nest;
+    } else {
+        s_irq_saved &= ~(1u << s_irq_nest);
+    }
+    s_irq_nest++;
+    irq_off();
 }
 
 void port_irq_leave(void) {
-    s_irq_depth--;
-    plat_mutex_unlock(s_irq_lock);
-}
-
-int port_irq_depth(void) { return s_irq_depth; }
-
-/* Releases the interrupt lock completely around a blocking wait (the SDK's
- * OSSleepThread re-enables interrupts while the thread sleeps). */
-int port_irq_release_all(void) {
-    int depth = s_irq_depth;
-    while (s_irq_depth > 0) {
-        s_irq_depth--;
-        plat_mutex_unlock(s_irq_lock);
+    if (s_irq_nest == 0) {
+        plat_fatal("interrupts: port_irq_leave without port_irq_enter");
     }
-    return depth;
+    s_irq_nest--;
+    if (s_irq_saved & (1u << s_irq_nest)) {
+        irq_off();
+    } else {
+        irq_on();
+    }
 }
 
-void port_irq_reacquire(int depth) {
-    while (s_irq_depth < depth) {
-        plat_mutex_lock(s_irq_lock);
-        s_irq_depth++;
+/* 1 while this host thread has interrupts disabled. */
+int port_irq_depth(void) { return s_irq_off; }
+
+/* Releases the interrupt lock around a blocking wait (the SDK's
+ * OSSleepThread re-enables interrupts while the thread sleeps); returns
+ * the state to give port_irq_reacquire. */
+int port_irq_release_all(void) {
+    int was_off = s_irq_off;
+    irq_on();
+    return was_off;
+}
+
+void port_irq_reacquire(int was_off) {
+    if (was_off) {
+        irq_off();
     }
 }
 

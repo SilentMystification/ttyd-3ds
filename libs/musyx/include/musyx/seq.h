@@ -182,8 +182,12 @@ typedef struct SEQ_PATTERN {
   u32 noteData;   // offset 0xC, size 0x4
 } SEQ_PATTERN;
 
+#if defined(TARGET_PC) || defined(TARGET_PORT)
+#pragma pack(push, 1) /* clang ignores MWCC's push/pop */
+#else
 #pragma push
 #pragma pack(1)
+#endif
 typedef struct CHANNEL_DEFAULTS {
   // total size: 0x9
   u8 pbRange; // offset 0x0, size 0x1
@@ -192,8 +196,12 @@ typedef struct CHANNEL_DEFAULTS {
   u32 lpfUpperFrqBoundary; // offset 0x5, size 0x4
 #endif
 } CHANNEL_DEFAULTS;
+#if defined(TARGET_PC) || defined(TARGET_PORT)
+#pragma pack(pop)
+#else
 #pragma pop
 
+#endif
 typedef struct MIDI_CHANNEL_SETUP {
   // total size: 0x5
   u8 program; // offset 0x0, size 0x1

@@ -21,6 +21,9 @@ typedef unsigned long u32;
 typedef unsigned long long u64;
 typedef float f32;
 typedef double f64;
+#elif MUSY_TARGET == MUSY_TARGET_PC && defined(TARGET_PORT)
+// Ports build MusyX's PC target inside the game, so it shares the SDK's types.
+#include <dolphin/types.h>
 #elif MUSY_TARGET == MUSY_TARGET_PC
 typedef signed char s8;
 typedef unsigned char u8;

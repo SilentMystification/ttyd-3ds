@@ -11,6 +11,9 @@
 #include "libc_decls.h"
 
 /** Single-precision sine for this file, routed through the double sin() (as in mapdrv.c). */
+#ifdef TARGET_PORT
+#define sinf eff_sleep_sinf // the C library declares its own sinf
+#endif
 static inline f32 sinf(f32 x) {
     return sin(x);
 }

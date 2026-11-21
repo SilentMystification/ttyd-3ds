@@ -8,6 +8,10 @@
 #include <dolphin/mtx.h>
 #include "eff/n64/eff_stardust_n64.h"
 #include "version.h"
+#ifdef TARGET_PORT // the header's prototypes are skipped on ports (these are static here)
+static void effBreakMain(EffectEntry* effect);
+static void effBreakDisp(CameraId cameraId, EffectEntry* effect);
+#endif
 
 typedef struct EffBreakWork {
     s32 type;     // 0x0

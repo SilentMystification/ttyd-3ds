@@ -301,7 +301,9 @@ void winReInit(void);
 BOOL winCheck(void);
 void winOpenEnable(void);
 void winOpenDisable(void);
+#ifndef TARGET_PORT // static in its .c file (MWCC makes it local; GCC rejects this prototype)
 USER_FUNC(itemUseFunc);
+#endif
 
 void winMain(void);
 

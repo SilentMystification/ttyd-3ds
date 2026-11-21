@@ -37,6 +37,12 @@
 #include "mario/mario_kemuri.h"
 #include "version.h"
 #include <dolphin/pad.h>
+#ifdef TARGET_PORT // the header's prototypes are skipped on ports (these are static here)
+static void marioMakeDispDir(void);
+static void marioRearAnime(void);
+static void marioDispBlur(CameraId camId, void* param);
+static void marioDisp(CameraId camId, void* param);
+#endif
 
 static void marioCtrlOff2Main(void);
 static void marioMoveMain(void);

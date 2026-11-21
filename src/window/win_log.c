@@ -1265,7 +1265,11 @@ const char* winGetMapTplName(void) {
     return "map7.tpl";
 }
 
+#ifndef TARGET_PORT
 double __fabs(double);
+#else
+#define fabs win_log_fabs // the C library declares its own fabs
+#endif
 /** Local fabs on the __fabs intrinsic, used for the map arrows' bobbing offset. */
 static inline double fabs(double x) {
     return __fabs(x);

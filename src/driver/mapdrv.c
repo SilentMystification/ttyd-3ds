@@ -22,6 +22,9 @@
 #include <math.h>
 #include "driver/hitdrv.h"
 /** Single-precision sine for this file, routed through the double sin() of math.h. */
+#ifdef TARGET_PORT
+#define sinf mapdrv_sinf // the C library declares its own sinf
+#endif
 static inline f32 sinf(f32 x) {
     return sin(x);
 }

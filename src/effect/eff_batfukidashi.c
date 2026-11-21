@@ -6,6 +6,10 @@
 #include <dolphin/gx.h>
 #include <dolphin/mtx.h>
 #include <stdio.h>
+#ifdef TARGET_PORT // the header's prototypes are skipped on ports (these are static here)
+static void effCoinFukidashiMain(EffectEntry* effect);
+static void effCoinFukidashiDisp(CameraId cameraId, EffectEntry* effect);
+#endif
 
 typedef struct EffCoinFukidashiWork {
     s32 type;     // 0x0

@@ -16,4 +16,6 @@ USER_FUNC(evt_twoddisp_set_position);
 USER_FUNC(evt_twoddisp_set_base_position);
 USER_FUNC(evt_twoddisp_flag_onoff);
 
+#ifndef TARGET_PORT // static in its .c file (MWCC makes it local; GCC rejects this prototype)
 USER_FUNC(twoddisp_main);
+#endif

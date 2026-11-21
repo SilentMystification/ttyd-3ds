@@ -145,7 +145,9 @@ TEXPalette* env_tpl = NULL;
 s32 tpl_ok = 0;
 
 // local prototypes
+#ifndef TARGET_PORT // static in its .c file (MWCC makes it local; GCC rejects this prototype)
 void _callback(s32 result, DVDFileInfo* fileInfo);
+#endif
 static void envCapture(CameraId camId, void* param);
 static void envCapture2(CameraId camId, void* param);
 static void envDisp(CameraId camId, void* param);

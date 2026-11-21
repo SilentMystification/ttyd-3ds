@@ -1,6 +1,16 @@
 // Declarations of the C library and compiler runtime routines (math, string, sprintf, rand) the code calls.
 #pragma once
 
+#ifdef TARGET_PORT
+// Ports use the host C library's own declarations. rand/srand are the
+// GameCube's (MSL's LCG), provided by the port as ttyd_rand/ttyd_srand.
+#include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+extern unsigned char __lower_map[]; // MSL's tolower table (port: port3ds/sdk/msl.c)
+#else
 #include "libc/stdarg.h"
 
 extern void __div2u();
@@ -27,3 +37,4 @@ extern char* strcpy(char*, const char*);
 extern char* strncpy(char* dst, const char* src, unsigned long n);
 extern double tan(double arg);
 extern int vsprintf(char* string, const char* format, va_list arg);
+#endif

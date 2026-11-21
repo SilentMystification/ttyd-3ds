@@ -17,6 +17,9 @@
 #include "cam_shift.h"
 #include "battle/battle_camera.h"
 #include "version.h"
+#ifdef TARGET_PORT // the header's prototypes are skipped on ports (these are static here)
+static void camLetterBox(void);
+#endif
 
 // NOTE: this is ~roughly 12.5 degrees in radians, ideally it should be MTXDegToRad(12.5) or 5PI/72
 #define DEG_TO_RAD_12_5__1 0.21816612780094147

@@ -125,6 +125,9 @@ u32 hwGlobalActivity();
 void hwSetAUXProcessingCallbacks(u8 studio, SND_AUX_CALLBACK auxA, void* userA,
                                  SND_AUX_CALLBACK auxB, void* userB);
 u8 hwInitStream(u32 len);
+#ifdef TARGET_PORT
+u32 hwGetStreamARAMAddr(u8 hwStreamHandle); // MWCC calls it undeclared (stream.c)
+#endif
 u8 hwGetTimeOffset();
 u32 hwGetVirtualSampleID(u32 v);
 void hwIRQEnterCritical();

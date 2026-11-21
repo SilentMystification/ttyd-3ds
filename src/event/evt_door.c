@@ -28,6 +28,9 @@
 #include "version.h"
 #include "driver/casedrv.h"
 #include "libc_decls.h"
+#ifdef TARGET_PORT // the header's prototypes are skipped on ports (static here)
+static USER_FUNC(door_entry);
+#endif
 
 static USER_FUNC(snd_door_in);
 static USER_FUNC(snd_door_out);

@@ -8,6 +8,10 @@
 #include "memory.h"
 #include <dolphin/gx.h>
 #include <dolphin/mtx.h>
+#ifdef TARGET_PORT // the header's prototypes are skipped on ports (these are static here)
+static void effIndirectMain(EffectEntry* effect);
+static void effIndirectDisp(CameraId cameraId, EffectEntry* effect);
+#endif
 
 typedef struct EffIndirectWork {
     s32 type;         // 0x0

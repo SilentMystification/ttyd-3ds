@@ -4,7 +4,9 @@
 #include "evt/evt_cmd.h"
 #include <dolphin/types.h>
 
+#ifndef TARGET_PORT // static in its .c file (MWCC makes it local; GCC rejects this prototype)
 USER_FUNC(door_entry);
+#endif
 
 extern EvtWord door_close_se[];
 extern EvtWord door_dark[];

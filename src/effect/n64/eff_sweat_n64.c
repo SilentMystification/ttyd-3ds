@@ -8,10 +8,12 @@
 #include <dolphin/gx.h>
 #include <dolphin/mtx.h>
 
+#ifndef TARGET_PORT // ports use the C library's double prototypes (same values: the float is widened)
 // FAKE: local prototype: sin takes a float (libc: double); this file was compiled with it and the header prototype changes the code.
 double sin(float);
 // FAKE: local prototype: cos takes a float (libc: double); this file was compiled with it and the header prototype changes the code.
 double cos(float);
+#endif
 
 static void effSweatMain(EffectEntry* effect);
 static void effSweatDisp(CameraId cameraId, EffectEntry* effect);

@@ -9,6 +9,10 @@
 #include "mario/mariost.h"
 #include "memory.h"
 #include <dolphin/mtx.h>
+#ifdef TARGET_PORT // the header's prototypes are skipped on ports (these are static here)
+static void effIrekaeruMain(EffectEntry* effect);
+static void effIrekaeruDisp(CameraId cameraId, EffectEntry* effect);
+#endif
 #if VERSION >= VERSION_US
 /**
  * Animation group of the partner-swap effect by language

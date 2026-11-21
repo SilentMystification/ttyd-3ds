@@ -20,6 +20,14 @@
 		mtmsr	r5; \
 		isync; }
 
+#elif defined(TARGET_PORT)
+
+// Ports emulate the GQRs (port_fastcast.h), so the scale reaches every later
+// conversion through GQR5 exactly as on the GameCube.
+#include "port_fastcast.h"
+#define HW_SET_GQR5(var) (port_gqr[5] = (var))
+#define HW_ENABLE_MSR_FP_RI() ((void)0)
+
 #else
 
 #define HW_SET_GQR5(var) ((void)(var))

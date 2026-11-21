@@ -302,7 +302,12 @@ The user supplies a G8MJ01, G8ME01 or G8MP01 disc image (ISO, GCM; RVZ and CISO 
    - TPL textures, converted to PICA textures (section 5.4);
    - fonts, `icon.bin`, camera roads, `mono.dat` and ARC archives;
    - MusyX banks, with sample data left as DSP-ADPCM.
-4. Writes the result to `sdmc:/3ds/ttyd/data/<GAMEID>/` with a manifest: file list, sizes, hashes and converter version. The port checks the manifest at boot and refuses mismatched data with a clear message.
+4. Extracts the data that the decomp compiles into code, so the port binary contains none of it:
+   - the memory-card icon, palette and banner, which the matching build extracts from `main.dol` into `build/<version>/include/assets/` and `cardmgr.c` includes;
+   - texture and other data arrays written as words in REL sources (for example `rels/win/src/window/win_04.c`), which are read from the disc's REL at runtime instead.
+
+   Phase 1 lists every such array with a script, and the port build fails if one is compiled in. `dspSlave` (GameCube DSP code) is not needed.
+5. Writes the result to `sdmc:/3ds/ttyd/data/<GAMEID>/` with a manifest: file list, sizes, hashes and converter version. The port checks the manifest at boot and refuses mismatched data with a clear message.
 
 The converter is written in portable C as one library, built twice:
 
@@ -398,7 +403,7 @@ Each phase ends with a commit, updated docs, and passing tests for everything ea
 
 | Phase | Work | Done when |
 |---|---|---|
-| 0. Tooling | Scripts from section 8 (runners for all three, memcompare skeleton reading `GlobalWork` from Dolphin and paper-cut), Docker image with makerom and bannertool, Windows script, first `.rsf` with a hello-world CIA that installs and runs in Azahar. The hardware probe app (memory modes, core 2 availability, measured L1/L2 and memory bandwidth, QTM mapping through Luma, `svcGetSystemTick` cost) is written here but first run on hardware in phase 8 | Every runner works from a single command; the CIA and the probe run in Azahar |
+| 0. Tooling (**done 2026-11-21**; see PORT_3DS_TESTING.md) | Scripts from section 8 (runners for all three, each reading `GlobalWork`; `memcompare.py` moved to phase 1 because it needs the 3DS ELF's layouts), Docker image with makerom and bannertool, Windows script, first `.rsf` with a hello-world CIA that installs and runs in Azahar. The hardware probe app (memory modes, core 2 availability, measured L1/L2 and memory bandwidth, QTM mapping through Luma, `svcGetSystemTick` cost) is written here but first run on hardware in phase 8 | Every runner works from a single command; the CIA and the probe run in Azahar |
 | 1. Compile and link | `port3ds/CMakeLists.txt` compiles all game code and MusyX for ARM; static REL linking; the address-check audit; the MWCC-intrinsic and GQR fixes; the GameCube build still matches | Links with only the port SDK left as link errors; that list becomes the phase 3 to 5 work list |
 | 2. Converter | Disc reader, FST, all format schemas, PICA texture conversion, display-list conversion, MusyX banks, manifest; host tool plus tests against paper-cut's decoders | Every file on the US disc converts, and the round-trip tests pass |
 | 3. Platform | OS, DVD, ARAM/ARQ, PAD, CARD, VI; log, crash handler, watchdog, switches, HUD, Select menu | The game reaches its first `GXBegin` on Azahar with logs; the crash handler's self-test path works in Azahar |

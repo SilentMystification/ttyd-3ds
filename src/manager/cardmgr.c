@@ -14,9 +14,16 @@
 #include "mario/mariost.h"
 
 //.rodata
+#ifdef TARGET_PORT
+// Ports ship no game data: these come from the user's own main.dol at boot (port3ds/sdk/dol_assets.c).
+extern u8 _mariost_icon_tex[0x400];
+extern u8 _mariost_icon_tlut[0x200];
+extern u8 _mariost_banner_tex[0x1800];
+#else
 #include "assets/_mariost_icon_tex.inc"
 #include "assets/_mariost_icon_tlut.inc"
 #include "assets/_mariost_banner_tex.inc"
+#endif
 #include "libc_decls.h"
 /** Name of the game's save file on the memory card, used to find, create and delete it. */
 const char card_file_name[0x14] = "mariost_save_file";

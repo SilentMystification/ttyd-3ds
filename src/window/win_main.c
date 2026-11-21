@@ -82,6 +82,9 @@ static WindowWork* wp;
 #include "icon_ids.h"
 #include "data/party_data.h"
 #include "manager/evtmgr_cmd.h"
+#ifdef TARGET_PORT // the header's prototypes are skipped on ports (static here)
+static USER_FUNC(itemUseFunc);
+#endif
 static void winLectureKeyMask(void);
 // FAKE: the prototype this file was compiled with (u16 icon id; icondrv.h has s16/s32), so callers zero-extend the id
 void iconGetTexObj(GXTexObj* obj, u16 iconId);

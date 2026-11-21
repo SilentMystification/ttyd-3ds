@@ -7,6 +7,10 @@
 #include "memory.h"
 #include <dolphin/mtx.h>
 #include "libc_decls.h"
+#ifdef TARGET_PORT // the header's prototypes are skipped on ports (these are static here)
+static void effHibashiraMain(EffectEntry* effect);
+static void effHibashiraDisp(CameraId cameraId, EffectEntry* effect);
+#endif
 
 typedef struct EffHibashiraWork {
     s32 type;     // 0x0

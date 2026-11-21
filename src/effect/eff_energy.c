@@ -6,6 +6,10 @@
 #include <dolphin/gx.h>
 #include <dolphin/mtx.h>
 #include "version.h"
+#ifdef TARGET_PORT // the header's prototypes are skipped on ports (these are static here)
+static void effEnergyMain(EffectEntry* effect);
+static void effEnergyDisp(CameraId cameraId, EffectEntry* effect);
+#endif
 // US effect texture ids are 0x1C lower for these entries.
 #define EFF_TEX(id) ((id) - VERSION_PICK(0, 0x1C))
 

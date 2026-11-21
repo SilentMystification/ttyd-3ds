@@ -602,8 +602,20 @@ void marioPaperLightOff(void);
 void marioGetScreenPos(Vec position, f32* x, f32* y, f32* z);
 BOOL marioChkInScreen(s32 x, s32 y);
 f32 marioGetScale(void);
+// Defined static in the .c file; MWCC accepts this declaration, GCC does not.
+#ifndef TARGET_PORT
 void marioMakeDispDir(void);
+#endif
+// Defined static in the .c file; MWCC accepts this declaration, GCC does not.
+#ifndef TARGET_PORT
 void marioRearAnime(void);
+#endif
 void marioPreDisp(void);
+// Defined static in the .c file; MWCC accepts this declaration, GCC does not.
+#ifndef TARGET_PORT
 void marioDispBlur(CameraId camId, void* param);
+#endif
+// Defined static in the .c file; MWCC accepts this declaration, GCC does not.
+#ifndef TARGET_PORT
 void marioDisp(CameraId camId, void* param);
+#endif

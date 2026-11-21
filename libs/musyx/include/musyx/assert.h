@@ -3,7 +3,8 @@
 #include "musyx/platform.h"
 #include "musyx/version.h"
 
-#if MUSY_TARGET == MUSY_TARGET_DOLPHIN
+// Ports report through the game's OSPanic/OSReport (the port's crash handler and log).
+#if MUSY_TARGET == MUSY_TARGET_DOLPHIN || defined(TARGET_PORT)
 extern void OSPanic(const char* file, int line, const char* msg, ...);
 extern void OSReport(const char* msg, ...);
 

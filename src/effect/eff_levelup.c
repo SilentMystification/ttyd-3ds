@@ -251,7 +251,11 @@ static void effLevelupDisp(CameraId cameraId, EffectEntry* effect) {
             w = effect->userdata;
             // FAKE: MWCC lvalue cast (not standard C). Every standard form (w = (EffLevelupWork*)((u8*)w + ofs), a u32
             // sum, &((u8*)w)[ofs], *(u8**)&w += ofs) loads userdata into a scratch register instead of w's.
+#ifdef TARGET_PORT
+            w = (EffLevelupWork*)((u8*)w + ofs);
+#else
             (u8*)w += ofs;
+#endif
             dx = xofs;
             dy = -j * 4;
             if (j != 0) {

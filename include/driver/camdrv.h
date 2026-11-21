@@ -128,4 +128,7 @@ void camSetTypePersp(CameraId cameraId);
 void camSetTypeOrtho(CameraId cameraId);
 
 void getScreenPoint(Vec* model, Vec* screen);
+// Defined static in the .c file; MWCC accepts this declaration, GCC does not.
+#ifndef TARGET_PORT
 void camLetterBox(void);
+#endif

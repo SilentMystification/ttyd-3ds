@@ -11,6 +11,9 @@
 #include "evt/evt_twoddisp.h"
 #include "libc_decls.h"
 #include "version.h"
+#ifdef TARGET_PORT // the header's prototypes are skipped on ports (static here)
+static USER_FUNC(twoddisp_main);
+#endif
 
 typedef struct TwodEntry {
     char name[0x10]; // 0x0

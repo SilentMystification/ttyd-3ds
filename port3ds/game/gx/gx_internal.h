@@ -199,7 +199,7 @@ enum {
 void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n);
 void gx_draw_frame_begin(void);
 void gx_draw_frame_end(void);
-extern u32 gx_stat_draws, gx_stat_vertices;
+extern u32 gx_stat_draws, gx_stat_vertices, gx_stat_copies;
 
 /* ---- gx_tex.c ---- */
 /* Converted texture for texture map slot `map` (handle 0 if none). */

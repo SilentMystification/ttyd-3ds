@@ -983,7 +983,8 @@ void plat_gpu_init(void) {
     memset(&s_last_state, 0xFF, sizeof(s_last_state));
     s_shots_every = (u32)plat_switch_int("shots", 0);
     s_shots_left = (u32)plat_switch_int("shotmax", 200);
-    if (s_shots_every) {
+    char dumpcopy[32];
+    if (s_shots_every || plat_switch_value("gxdumpcopy", dumpcopy, sizeof(dumpcopy))) { /* its shots go there too */
         mkdir("shots", 0777);
     }
     s_threaded = !plat_switch_has("gxsync");

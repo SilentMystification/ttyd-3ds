@@ -13,6 +13,7 @@
  * rebuilt when the GX state changed since the last draw.
  */
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "gx_internal.h"
@@ -25,7 +26,7 @@ static int s_units;
 static int s_color_chan;     /* 0: COLOR0A0, 1: COLOR1A1 feeds the raster color */
 static u32 s_built_version = 0xFFFFFFFFu;
 static PlatGpuState s_state;
-u32 gx_stat_draws, gx_stat_vertices;
+u32 gx_stat_draws, gx_stat_vertices, gx_stat_copies;
 int gx_bbox_active;
 
 /* ---- State ---- */
@@ -616,13 +617,13 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
         last_img = img;
         memcpy(last_m, gx.pos_mtx[v[0].pnmtx % GX_POS_MTX_COUNT], sizeof(last_m));
         PLOG_I("gxdump prim %02x n %lu units %d stages %d tev %d tex0 %p fmt %d %dx%d clip %.2f %.2f %.2f %.2f "
-               "col %02x%02x%02x%02x blend %d zc %d atest %d chans %d map %d from %p",
+               "col %02x%02x%02x%02x blend %d zc %d atest %d chans %d map %d from %p draw %lu",
                prim, (unsigned long)n, s_units, s_state.num_stages, gx.num_tev, t0 ? t0->image : NULL,
                t0 ? t0->format : -1, t0 ? t0->width : 0, t0 ? t0->height : 0, (double)s_out[0].v.pos[0],
                (double)s_out[0].v.pos[1], (double)s_out[0].v.pos[2], (double)s_out[0].v.pos[3], s_out[0].v.color[0],
                s_out[0].v.color[1], s_out[0].v.color[2], s_out[0].v.color[3], s_state.blend_mode,
                s_state.color_write, s_state.alpha_test_enable, gx.num_chans, s_units > 0 ? s_unit_map[0] : -1,
-               gx_begin_caller);
+               gx_begin_caller, (unsigned long)gx_stat_draws);
         const f32(*m)[4] = gx.pos_mtx[v[0].pnmtx % GX_POS_MTX_COUNT];
         PLOG_I("gxdump   v0 %.2f %.2f %.2f mtx[%d] %.3f %.3f %.3f %.2f / %.3f %.3f %.3f %.2f / %.3f %.3f %.3f %.2f",
                (double)v[0].pos[0], (double)v[0].pos[1], (double)v[0].pos[2], v[0].pnmtx, (double)m[0][0],
@@ -686,14 +687,29 @@ dumped:
 void gx_draw_frame_begin(void) {
     static u32 frame;
     static int dump_at = -1;
+    static int copy_from, copy_left; /* switch gxdumpcopy=N,K */
     if (dump_at < 0) {
+        char buf[32];
         dump_at = plat_switch_int("gxdump", 0);
+        if (plat_switch_value("gxdumpcopy", buf, sizeof(buf))) {
+            sscanf(buf, "%d,%d", &copy_from, &copy_left);
+        }
     }
     frame++;
     s_dump = dump_at > 0 && frame == (u32)dump_at;
     if (s_dump) {
         PLOG_I("gxdump: frame %lu", (unsigned long)frame);
     }
-    gx_stat_draws = gx_stat_vertices = 0;
+    /* gxdumpcopy=N,K: from frame N, the next K frames that follow a frame with an EFB copy (GXCopyTex) are dumped
+     * and their picture saved as shots/dumpFFFFF.ppm; no frame number needed for a copy-dependent effect */
+    if (copy_left > 0 && copy_from > 0 && frame >= (u32)copy_from && gx_stat_copies > 0) {
+        s_dump = 1;
+        copy_left--;
+        char path[32];
+        snprintf(path, sizeof(path), "shots/dump%05lu.ppm", (unsigned long)frame);
+        PLOG_I("gxdump: frame %lu (copy-triggered, %d left)", (unsigned long)frame, copy_left);
+        plat_gpu_shot(path);
+    }
+    gx_stat_draws = gx_stat_vertices = gx_stat_copies = 0;
     s_built_version = 0xFFFFFFFFu; /* every frame starts with a full state */
 }

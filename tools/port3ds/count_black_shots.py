@@ -32,7 +32,7 @@ def main():
         first = int(args[i + 1])
         del args[i:i + 2]
     d = args[0] if args else "."
-    names = sorted(n for n in os.listdir(d) if n.endswith(".ppm") and int(n[:-4]) >= first)
+    names = sorted(n for n in os.listdir(d) if n.endswith(".ppm") and int("".join(c for c in n if c.isdigit())) >= first)
     bad = 0
     for n in names:
         p = pixels(os.path.join(d, n))

@@ -7,6 +7,9 @@
 # Enforce platform-specific encodings
 *.bat  text eol=crlf
 *.sh   text eol=lf
+*.ps1  text eol=crlf
+Dockerfile text eol=lf
+*.rsf  text eol=lf
 *.sha1 text eol=lf
 
 # decomp-toolkit writes files with LF

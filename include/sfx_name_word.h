@@ -16,4 +16,9 @@ typedef u32 SfxNameWord;
 /* the id a name parameter holds, when SFX_NAME_IS_ID (a direct s32 cast: the
  * SfxNameWord round trip changes register allocation in psndENVSearch) */
 #define SFX_NAME_ID(name) ((s32)(name))
+#ifdef TARGET_PORT
+#include "port_addr.h"
+#define SFX_NAME_IS_ID(name) (!PORT_IS_ADDR(name))
+#else
 #define SFX_NAME_IS_ID(name) (SFX_NAME_ID(name) >= 0)
+#endif

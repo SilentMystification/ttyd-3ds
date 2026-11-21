@@ -1,4 +1,7 @@
 // TPL texture palette helpers (SDK charPipeline): unpack a .tpl and build GXTexObjs from it.
+#ifdef TARGET_PORT
+#include "port_addr.h"
+#endif
 #include <charPipeline/texPalette.h>
 #include <dolphin/gx/GXTexture.h>
 #include <dolphin/os.h>
@@ -18,7 +21,11 @@ void UnpackTexPalette(TEXPalettePtr pal) {
         OSPanic(__FILE__, 0x24, "invalid version number for texture palette\0");
     }
 
+#ifdef TARGET_PORT
+    if (PORT_IS_UNRELOCATED(pal->descriptorArray, pal)) {
+#else
     if ((u32)pal->descriptorArray <= 0x80000000) {
+#endif
         pal->descriptorArray = (TEXDescriptorPtr)((Ptr)pal->descriptorArray + (u32)pal);
         for (i = 0; i < pal->numDescriptors; i++) {
             if (pal->descriptorArray[i].textureHeader) {

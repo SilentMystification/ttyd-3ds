@@ -12,6 +12,14 @@
 #include <string.h>
 #if VERSION >= VERSION_US
 #include "mario/mariost.h"
+
+// The AI DMA source as a cached address: the GameCube ORs in 0x80000000 (physical to cached);
+// ports get a usable pointer from AIGetDMAStartAddr already.
+#ifdef TARGET_PORT
+#define PORT_AI_DMA_ADDR(a) (a)
+#else
+#define PORT_AI_DMA_ADDR(a) ((a) | 0x80000000)
+#endif
 #endif
 
 //.bss
@@ -130,7 +138,7 @@ void SoundInit(void) {
 #endif
     sound.callback = AIRegisterDMACallback(SoundAIDMACallback);
 #if VERSION >= VERSION_US
-    sound.dmaAddress = (u8*)(AIGetDMAStartAddr() | 0x80000000);
+    sound.dmaAddress = (u8*)PORT_AI_DMA_ADDR(AIGetDMAStartAddr());
     sound.dmaLength = AIGetDMALength();
     if (sound.dmaLength > 0x280) {
         while (1)
@@ -2563,7 +2571,7 @@ static void SoundAIDMACallback(void) {
     length = sound.dmaLength;
 #else
     sound.callback();
-    sound.dmaAddress = (u8*)(AIGetDMAStartAddr() | 0x80000000);
+    sound.dmaAddress = (u8*)PORT_AI_DMA_ADDR(AIGetDMAStartAddr());
     sound.dmaLength = length = AIGetDMALength();
     address = sound.dmaAddress;
 #endif

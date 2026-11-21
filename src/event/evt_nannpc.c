@@ -1,4 +1,7 @@
 // Script commands for crowd NPCs (nannpc): many simple sprite NPCs drawn through extdrv.
+#ifdef TARGET_PORT
+#include "port_addr.h"
+#endif
 #include "evt/evt_cmd.h"
 #include "evt/evt_nannpc.h"
 #include "driver/extdrv.h"
@@ -26,7 +29,11 @@ char makestring[16];
  * Demo only: in the other versions the helper's "%06x" literal would move ahead in the string pool even unused.
  */
 static inline char* nanNPCEntryName(char* name) {
+#ifdef TARGET_PORT
+    if (!PORT_IS_ADDR(name)) {
+#else
     if (!((EvtWord)name & 0x80000000)) {
+#endif
         sprintf(makestring, "%06x", name);
         name = makestring;
     }
@@ -60,7 +67,11 @@ static inline NanNPC* nanNPCSearch(char* name) {
     NanNPCWork* w = nanNPCWork;
     for (i = 0; i < w->num; i++) {
         p = &w->npc[i];
+#ifdef TARGET_PORT
+        if (!PORT_IS_ADDR(name)) {
+#else
         if (!((EvtWord)name & 0x80000000)) {
+#endif
             sprintf(makestring, "%06x", name);
             name = makestring;
         }
@@ -491,7 +502,11 @@ USER_FUNC(evt_nannpc_entry) {
         str = nanNPCEntryName((char*)name);
 #else
         str = (char*)name;
+#ifdef TARGET_PORT
+        if (!PORT_IS_ADDR(str)) {
+#else
         if (!(((EvtWord)str) & 0x80000000)) {
+#endif
             sprintf(makestring, "%06x", name);
             str = makestring;
         }

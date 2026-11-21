@@ -1,5 +1,8 @@
 // Event commands: the opcode handlers of the script interpreter (flow control, variables, arithmetic,
 // user functions) and the variable read/write helpers evtGetValue/evtSetValue.
+#ifdef TARGET_PORT
+#include "port_addr.h"
+#endif
 #include "manager/evtmgr_cmd.h"
 #include "evt/evt_cmd.h"
 #include "memory.h"
@@ -2820,7 +2823,11 @@ EvtWord* evtSearchLabel(EventEntry* entry, EvtWord lbl) {
     EvtWord* args = entry->args;
     s32 n;
 
+#ifdef TARGET_PORT
+    if (PORT_IS_ADDR(lbl)) {
+#else
     if (lbl < EVTDAT_ADDR_MAX) {
+#endif
         return (EvtWord*)lbl;
     }
 

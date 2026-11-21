@@ -1,5 +1,8 @@
 // Map driver: loads map.dat (joints, materials, animations), builds the display lists, and animates,
 // culls and draws the map objects.
+#ifdef TARGET_PORT
+#include "port_addr.h"
+#endif
 #include "driver/mapdrv.h"
 #include "driver/animdrv.h"
 #include "driver/arcdrv.h"
@@ -813,7 +816,11 @@ static inline void mapLoadReloc_(MapEntry* entry) {
     u32 k;
     for (k = 0; k < (u32)entry->header.file.relCount; k++) {
         u32* rel = (u32*)((u8*)entry->header.data + entry->header.rel[k]);
+#ifdef TARGET_PORT
+        if (PORT_IS_UNRELOCATED(*rel, entry->header.data)) {
+#else
         if (*rel <= 0x80000000) {
+#endif
             *rel += (u32)entry->header.data;
         }
     }

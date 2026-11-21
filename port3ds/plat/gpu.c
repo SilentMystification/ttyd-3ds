@@ -128,9 +128,16 @@ static void rot_uniforms(void) {
 
 /* ---- Recording (game thread) ---- */
 
+static void flush_segment(void);
+
 static void* rec_put(u16 type, u32 size) {
     Record* r = &s_rec[s_cur];
     u32 need = (u32)sizeof(CmdHead) + ((size + 3u) & ~3u);
+    /* keep room for the end marker; a full record is drawn as a segment */
+    if (type != CMD_SEGMENT_END && type != CMD_FRAME_END && r->used + need + 64 > RECORD_BYTES) {
+        flush_segment();
+        r = &s_rec[s_cur];
+    }
     if (r->used + need > RECORD_BYTES) {
         static int warned;
         if (!warned) {
@@ -171,15 +178,29 @@ static void submit(int present) {
     s_last_fog_hash = 0;
 }
 
+/* The record is full mid-frame: hand it to the render thread as a segment
+ * (drawn, not presented) and go on in the other one, with the current GX
+ * state put back at its start. */
+static void flush_segment(void) {
+    PlatGpuState keep = s_last_state;
+    int have_state = s_rec[s_cur].used != 0;
+    rec_put(CMD_SEGMENT_END, 0);
+    submit(0);
+    if (have_state) {
+        plat_gpu_set_state(&keep);
+    }
+    s_stats_frame.segments++;
+}
+
 PlatGpuVertex* plat_gpu_alloc_vertices(uint32_t count) {
     Record* r = &s_rec[s_cur];
-    if (r->nverts + count > ARENA_VERTICES) {
-        static int warned;
-        if (!warned) {
-            warned = 1;
-            PLOG_E("gpu: vertex arena full (%u vertices): draws dropped this frame", ARENA_VERTICES);
-        }
+    if (count > ARENA_VERTICES) {
+        PLOG_E("gpu: a draw of %lu vertices is larger than the vertex arena", (unsigned long)count);
         return NULL;
+    }
+    if (r->nverts + count > ARENA_VERTICES) {
+        flush_segment();
+        r = &s_rec[s_cur];
     }
     PlatGpuVertex* v = r->verts + r->nverts;
     r->nverts += count;
@@ -270,6 +291,7 @@ void plat_gpu_frame_end(uint16_t efb_w, uint16_t efb_h) {
     s_stats.vertices = s_stats_frame.vertices;
     s_stats.state_changes = s_stats_frame.state_changes;
     s_stats.record_bytes = s_stats_frame.record_bytes;
+    s_stats.segments = s_stats_frame.segments;
     memset(&s_stats_frame, 0, sizeof(s_stats_frame));
     s_frame_counter++;
 }
@@ -552,6 +574,8 @@ static void copy_to_texture(u16 x, u16 y, u16 w, u16 h, u32 handle, u32 dst_w, u
 }
 
 static void take_shot(void);
+static u32 s_shot_due;
+static void capture_efb(void);
 
 /* The top screen's render target, linked to the framebuffer: citro3d
  * transfers it and swaps at C3D_FrameEnd. */
@@ -605,6 +629,9 @@ static void present(void) {
 static void render_record(Record* r) {
     u64 t0 = svcGetSystemTick();
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    if (s_shot_due) {
+        capture_efb();
+    }
     C3D_FrameDrawOn(s_efb);
     C3D_BindProgram(&s_prog);
     C3D_SetAttrInfo(&s_attr);
@@ -707,6 +734,9 @@ uint32_t plat_gpu_peek_argb(uint16_t x, uint16_t y) {
 
 /* ---- Screenshots (switch shots=N: every Nth frame to shots/NNNNN.ppm) ---- */
 
+/* Decides at each present whether this frame is captured; the capture
+ * itself reads the EFB at the start of the next render, when the GPU has
+ * finished the frame (C3D_FRAME_SYNCDRAW) and nothing new is drawn yet. */
 static void take_shot(void) {
     static u32 frame;
     frame++;
@@ -714,29 +744,39 @@ static void take_shot(void) {
         return;
     }
     s_shots_left--;
-    u16 fbw, fbh;
-    gspWaitForVBlank();
-    const u8* fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fbw, &fbh); /* 240 x 400, BGR, rotated */
+    s_shot_due = frame;
+}
+
+/* The EFB (608x480, as the game drew it) to shots/NNNNN.ppm. */
+static void capture_efb(void) {
     char path[48];
-    snprintf(path, sizeof(path), "shots/%05lu.ppm", (unsigned long)frame);
+    snprintf(path, sizeof(path), "shots/%05lu.ppm", (unsigned long)s_shot_due);
+    s_shot_due = 0;
     FILE* f = fopen(path, "wb");
     if (f == NULL) {
         return;
     }
-    fprintf(f, "P6\n400 240\n255\n");
-    static u8 row[400 * 3];
-    for (int sy = 0; sy < 240; sy++) {
-        for (int sx = 0; sx < 400; sx++) {
-            const u8* p = fb + ((size_t)sx * fbw + (fbw - 1 - sy)) * 3;
-            row[sx * 3 + 0] = p[2];
-            row[sx * 3 + 1] = p[1];
-            row[sx * 3 + 2] = p[0];
+    fprintf(f, "P6\n608 480\n255\n");
+    static u8 row[608 * 3];
+    const u32* buf = (const u32*)s_efb->frameBuf.colorBuf;
+    for (int y = 0; y < 480; y++) {
+        for (int x = 0; x < 608; x++) {
+            float tx, ty, tw, th;
+            efb_to_target_rect((float)x, (float)y, 1, 1, &tx, &ty, &tw, &th);
+            u32 px = (u32)tx, py = TARGET_H - 1 - (u32)ty;
+            u32 idx = ((py >> 3) * (TARGET_W >> 3) + (px >> 3)) * 64 + ((px & 1) | ((py & 1) << 1) | ((px & 2) << 1) |
+                                                                        ((py & 2) << 2) | ((px & 4) << 2) | ((py & 4) << 3));
+            u32 v = buf[idx]; /* RGBA8: R in the top byte */
+            row[x * 3 + 0] = (u8)(v >> 24);
+            row[x * 3 + 1] = (u8)(v >> 16);
+            row[x * 3 + 2] = (u8)(v >> 8);
         }
         fwrite(row, 1, sizeof(row), f);
     }
     fclose(f);
-    PLOG_I("shot %s: %lu draws, %lu vertices, %lu states, %lu record bytes", path, (unsigned long)s_stats.draws,
-           (unsigned long)s_stats.vertices, (unsigned long)s_stats.state_changes, (unsigned long)s_stats.record_bytes);
+    PLOG_I("shot %s: %lu draws, %lu vertices, %lu states, %lu record bytes, %lu segments", path,
+           (unsigned long)s_stats.draws, (unsigned long)s_stats.vertices, (unsigned long)s_stats.state_changes,
+           (unsigned long)s_stats.record_bytes, (unsigned long)s_stats.segments);
 }
 
 /* ---- Self-test (switch gputest): orientation pattern ---- */

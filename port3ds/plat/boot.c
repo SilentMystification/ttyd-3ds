@@ -126,8 +126,15 @@ void plat_user_error(const char* fmt, ...) {
     exit(0);
 }
 
+extern char __end__[];
+
 int main(int argc, char** argv) {
     s_boot_tick = svcGetSystemTick();
+    if ((u32)__end__ > 0x01000000u) {
+        /* port_addr_impl.h: sound ids with flag bits (up to 0x07FFFFFF) must
+         * not fall inside the executable image */
+        svcBreak(USERBREAK_PANIC);
+    }
 
     bool n3ds = false;
     APT_CheckNew3DS(&n3ds);

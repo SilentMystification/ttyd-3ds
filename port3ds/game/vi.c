@@ -13,9 +13,13 @@
 #include <dolphin/gx.h>
 #include <dolphin/os.h>
 #include <dolphin/vi.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "driver/seqdrv.h"
+#include "driver/swdrv.h"
+#include "event.h"
+#include "mario/mario_party.h"
 #include "mario/mariost.h"
 #include "memory.h"
 #include "plat/gpu.h"
@@ -88,6 +92,58 @@ VIRetraceCallback VISetPostRetraceCallback(VIRetraceCallback callback) {
     return old;
 }
 
+/* A new file's state, as seq_load's "new game" sets it up, for a warp that
+ * starts outside the game (the title, the opening): the prologue's story
+ * set-up, no partner out, the save flags cleared, the story so far
+ * (GSW 0, which map scripts branch on) and one partner joined and out. */
+static void warp_new_game(int story, int party) {
+    stg0_00_init();
+    marioPartyKill();
+    swInit();
+    swByteSet(0, story);
+    if (party > 0 && party < 8) {
+        partyJoin((PartyId)party);
+        marioPartyEntry((PartyId)party);
+    }
+}
+
+static void warp_to(const char* map, const char* bero) {
+    if (seqGetSeq() != SEQ_GAME) {
+        warp_new_game(plat_switch_int("story", 0), plat_switch_int("party", 1));
+    }
+    PLOG_I("warp: %s %s", map, bero);
+    seqSetSeq(SEQ_MAP_CHANGE, map, bero[0] ? bero : NULL);
+}
+
+/* Switch map=<map>[,<bero>] (tests): once the title or the opening's map
+ * is up, start a new game there (story=N, party=N as for the menu's warp). */
+static void warp_switch(void) {
+    static int state = -1; /* -1 unread, 0 off, 1 waiting, 2 done */
+    static char map[16], bero[16];
+    if (state < 0) {
+        char v[40];
+        state = 0;
+        if (plat_switch_value("map", v, sizeof(v)) && v[0] != '\0') {
+            char* comma = strchr(v, ',');
+            if (comma != NULL) {
+                *comma = '\0';
+                snprintf(bero, sizeof(bero), "%.15s", comma + 1);
+            }
+            snprintf(map, sizeof(map), "%.15s", v);
+            state = 1;
+        }
+    }
+    if (state != 1 || gp == NULL) {
+        return;
+    }
+    if (seqGetSeq() == SEQ_TITLE || (seqGetSeq() == SEQ_GAME && strcmp(gp->currentMapName, map) != 0)) {
+        warp_new_game(plat_switch_int("story", 0), plat_switch_int("party", 1));
+        PLOG_I("warp: %s %s (switch)", map, bero);
+        seqSetSeq(SEQ_MAP_CHANGE, map, bero[0] ? bero : NULL);
+        state = 2;
+    }
+}
+
 static void frame_hooks(void) {
     s_frames++;
     plat_set_phase("frame hooks");
@@ -96,9 +152,9 @@ static void frame_hooks(void) {
     }
     char map[16], bero[16];
     if (plat_take_warp_request(map, sizeof(map), bero, sizeof(bero))) {
-        PLOG_I("warp: %s %s", map, bero);
-        seqSetSeq(SEQ_MAP_CHANGE, map, bero[0] ? bero : NULL);
+        warp_to(map, bero);
     }
+    warp_switch();
     PlatHudStats st;
     memset(&st, 0, sizeof(st));
     PlatGpuStats g;

@@ -10,7 +10,7 @@
 #include "plat/plat.h"
 #include "plat_internal.h"
 
-#define SWITCH_TEXT 512
+#define SWITCH_TEXT 4096
 
 static char s_text[SWITCH_TEXT];
 

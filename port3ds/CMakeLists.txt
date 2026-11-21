@@ -46,6 +46,10 @@ set(TTYD_C_FLAGS
     "SHELL:-iquote ${TTYD_REPO_DIR}/include/sdk"
     -Werror=implicit-function-declaration
     -Wno-error=int-conversion -Wno-error=incompatible-pointer-types
+    # The sources are UTF-8; the game's strings are Shift-JIS, as the
+    # matching build makes them (sjiswrap): names it compares with the
+    # disc's files (NPC tribes in setup files, messages) must match.
+    -fexec-charset=CP932
 )
 if(NOT TTYD_WARNINGS)
     list(APPEND TTYD_C_FLAGS -w)

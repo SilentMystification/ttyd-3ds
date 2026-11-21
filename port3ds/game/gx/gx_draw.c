@@ -584,6 +584,9 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
         return;
     }
     s_tri_out = plat_gpu_alloc_vertices(max_tris * 3);
+    if (s_tri_out == NULL) {
+        return; /* larger than the vertex arena (logged) */
+    }
     s_tri_n = 0;
     f32 lw = gx.line_width / 6.0f;
     switch (prim) {

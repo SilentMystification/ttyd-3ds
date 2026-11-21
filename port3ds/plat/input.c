@@ -20,7 +20,7 @@ typedef struct {
     uint32_t frames;
 } ScriptStep;
 
-#define MAX_STEPS 256
+#define MAX_STEPS 2048
 
 static ScriptStep s_script[MAX_STEPS];
 static int s_steps, s_step;
@@ -52,7 +52,7 @@ static uint32_t key_of(const char* name, int16_t* cx, int16_t* cy) {
 
 static void script_load(void) {
     s_script_loaded = 1;
-    char text[512];
+    static char text[4096];
     if (!plat_switch_value("padscript", text, sizeof(text))) {
         return;
     }
@@ -91,17 +91,27 @@ void plat_input_scan(PlatInput* out) {
         return; /* the Select menu has the input */
     }
     if (s_step < s_steps) {
-        const ScriptStep* st = &s_script[s_step];
-        out->held = st->keys;
-        out->circle_x = st->cx;
-        out->circle_y = st->cy;
-        if (++s_step_frames >= st->frames) {
-            s_step_frames = 0;
-            if (++s_step == s_steps) {
-                PLOG_I("padscript: done");
+        /* Steps count video frames (retraces), not reads: the game may read
+         * the pad more than once a frame. */
+        static uint32_t s_last_vblank;
+        uint32_t now = plat_vblank_count();
+        uint32_t elapsed = s_last_vblank == 0 ? 0 : now - s_last_vblank;
+        s_last_vblank = now;
+        while (elapsed-- > 0 && s_step < s_steps) {
+            if (++s_step_frames >= s_script[s_step].frames) {
+                s_step_frames = 0;
+                if (++s_step == s_steps) {
+                    PLOG_I("padscript: done");
+                }
             }
         }
-        return;
+        if (s_step < s_steps) {
+            const ScriptStep* st = &s_script[s_step];
+            out->held = st->keys;
+            out->circle_x = st->cx;
+            out->circle_y = st->cy;
+            return;
+        }
     }
     out->held = held;
     out->circle_x = cp.dx;

@@ -139,6 +139,7 @@ uint32_t plat_gpu_peek_argb(uint16_t x, uint16_t y);
 typedef struct {
     uint32_t draws, vertices, state_changes;
     uint32_t record_bytes;
+    uint32_t segments; /* extra submits in a frame (record or vertex arena full) */
     uint32_t render_us, gpu_us;
 } PlatGpuStats;
 void plat_gpu_stats(PlatGpuStats* out);

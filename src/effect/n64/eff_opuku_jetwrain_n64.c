@@ -59,6 +59,9 @@ inline int inline_fn2(s32 a) {
     return a < 12;
 }
 /** Returns whether n < 13 (the loop bound over the wave grid width). */
+#ifdef TARGET_PORT // file-local: MWCC inlines it here; other files define their own
+static
+#endif
 inline int inline_fn(s32 n) {
     return n < 13;
 }

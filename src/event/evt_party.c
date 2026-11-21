@@ -264,6 +264,9 @@ USER_FUNC(evt_party_get_pos) {
 }
 
 /** Linear step for a turn: the fraction step/frames of the angle difference a - b. */
+#ifdef TARGET_PORT // file-local: MWCC inlines it here; other files define their own
+static
+#endif
 inline float inline_fn(f32 a, f32 b, f32 c, s32 n) {
     return (a - b) * (c / (f32)n);
 }

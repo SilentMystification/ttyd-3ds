@@ -48,6 +48,9 @@ void effKemuri8N64SetCamId(EffectEntry* effect, s32 camId) {
 }
 
 /** Returns a * -b (used for the x position of each puff in the ring). */
+#ifdef TARGET_PORT // file-local: MWCC inlines it here; other files define their own
+static
+#endif
 inline float inline_fn(f32 a, f32 b) {
     return a * (-b);
 }

@@ -45,6 +45,9 @@ static void camEvalNearFar(CameraEntry* camera);
 static void cam3dMain(CameraEntry* camera);
 static void cam3dImgMain(CameraEntry* camera);
 static void camEffMain(CameraEntry* camera);
+#ifdef TARGET_PORT // file-local: MWCC inlines it here; other files define their own
+static
+#endif
 inline Vec makeVecByValue(f32 x, f32 y, f32 z);
 
 /**
@@ -858,11 +861,17 @@ static void camLetterBox(void) {
 }
 
 /** A zero vector; unused leftover helper. */
+#ifdef TARGET_PORT // file-local: MWCC inlines it here; other files define their own
+static
+#endif
 inline Vec unknownVec0(void) {
     return (Vec){0.0f, 0.0f, 0.0f};
 }
 
 /** Builds a Vec from three components; camInit uses it to place the fixed cameras. */
+#ifdef TARGET_PORT // file-local: MWCC inlines it here; other files define their own
+static
+#endif
 inline Vec makeVecByValue(f32 x, f32 y, f32 z) {
     Vec v = (Vec){0.0f, 0.0f, 0.0f};
     v.x = x;

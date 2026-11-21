@@ -43,6 +43,9 @@ static void effMugiKemuriMain(EffectEntry* effect);
 static void effMugiKemuriDisp(CameraId camId, void* param);
 
 /** Returns the rotation angle in radians (2 pi times the revised yaw fraction) used by the Kemuri effects. */
+#ifdef TARGET_PORT // file-local: MWCC inlines it here; other files define their own
+static
+#endif
 inline f32 inline_fn(effMugiKemuriData* data) {
     return 6.2831855f * reviseAngle(data->rot.y);
 }

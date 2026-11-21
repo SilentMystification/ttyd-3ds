@@ -43,11 +43,17 @@
 #include "evt/evt_msg.h"
 
 /** Returns the zero vector. */
+#ifdef TARGET_PORT // file-local: MWCC inlines it here; other files define their own
+static
+#endif
 inline Vec unknownVec0(void) {
     return (Vec){0.0f, 0.0f, 0.0f};
 }
 
 /** Builds a Vec from x, y, z (a twin of makeVecByValue that compiles the same). */
+#ifdef TARGET_PORT // file-local: MWCC inlines it here; other files define their own
+static
+#endif
 inline Vec makeVecByValue2(f32 x, f32 y, f32 z) {
     Vec v = (Vec){0.0f, 0.0f, 0.0f};
     v.x = x;
@@ -57,6 +63,9 @@ inline Vec makeVecByValue2(f32 x, f32 y, f32 z) {
 }
 
 /** Builds a Vec from x, y, z. */
+#ifdef TARGET_PORT // file-local: MWCC inlines it here; other files define their own
+static
+#endif
 inline Vec makeVecByValue(f32 x, f32 y, f32 z) {
     Vec v = (Vec){0.0f, 0.0f, 0.0f};
     v.x = x;

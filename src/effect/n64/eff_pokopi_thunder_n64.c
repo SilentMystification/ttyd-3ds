@@ -120,6 +120,9 @@ EffectEntry* effPokopiThunderN64Entry(s32 type, s32 duration, f32 x, f32 y, f32 
 }
 
 /** Returns i * step. */
+#ifdef TARGET_PORT // file-local: MWCC inlines it here; other files define their own
+static
+#endif
 inline float inline_fn(s32 i, float step) {
     return ((f32)i) * step;
 }

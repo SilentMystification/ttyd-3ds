@@ -147,7 +147,7 @@ add_custom_target(ttyd_rels DEPENDS ${TTYD_REL_OBJECTS})
 #                  Includes libctru headers, never game headers.
 # The two halves talk only through port3ds/include/plat/*.h, whose types are
 # fixed-size integers, pointers and structs of those (no enum-typed fields).
-set(TTYD_PORT_WARNINGS -Wall -Wextra -Wno-unused-parameter)
+set(TTYD_PORT_WARNINGS -Wall -Wextra -Wno-unused-parameter -Wno-unknown-pragmas)
 file(GLOB_RECURSE TTYD_PORT_GAME_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/game/*.c")
 file(GLOB_RECURSE TTYD_PORT_PLAT_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/plat/*.c")
 
@@ -176,7 +176,12 @@ target_compile_options(ttyd_port_game PRIVATE -std=gnu11 -O2 -g -fno-short-enums
 target_compile_definitions(ttyd_port_game PRIVATE ${TTYD_DEFINES} PORT3DS_GAME_SIDE=1)
 target_include_directories(ttyd_port_game PRIVATE ${TTYD_INCLUDES} "${TTYD_REPO_DIR}/libs/dolsdk2004/src/gx")
 
+# The GX vertex shader (port3ds/shaders/gx.v.pica), embedded as gx_shbin.
+ctr_add_shader_library(ttyd_gx_shader OUTPUT gx.shbin "${CMAKE_CURRENT_LIST_DIR}/shaders/gx.v.pica")
+dkp_add_embedded_binary_library(ttyd_gx_shader_bin ttyd_gx_shader)
+
 add_library(ttyd_port_plat OBJECT ${TTYD_PORT_PLAT_SOURCES})
+target_link_libraries(ttyd_port_plat PRIVATE ttyd_gx_shader_bin)
 target_compile_options(ttyd_port_plat PRIVATE -std=gnu11 -O2 -g ${TTYD_PORT_WARNINGS}
     -fno-strict-aliasing -ffunction-sections -fdata-sections)
 target_compile_definitions(ttyd_port_plat PRIVATE PORT3DS_PLAT_SIDE=1)
@@ -192,7 +197,7 @@ add_dependencies(ttyd ttyd_rels)
 # --no-enum-size-warning: the two enum ABIs are mixed on purpose (see above).
 target_link_options(ttyd PRIVATE -Wl,--gc-sections -Wl,--no-enum-size-warning
     -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/ttyd.map)
-target_link_libraries(ttyd PRIVATE citro3d ctru m)
+target_link_libraries(ttyd PRIVATE ttyd_gx_shader_bin citro3d ctru m)
 
 ttyd_add_cia(ttyd
     TITLE "TTYD 3DS"

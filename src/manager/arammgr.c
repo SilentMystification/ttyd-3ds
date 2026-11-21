@@ -4,6 +4,7 @@
 #include "memory.h"
 #include <dolphin/os.h>
 #include <string.h>
+#include "port_spin.h"
 
 #define ARAM_OWNER 0x19751128
 
@@ -66,10 +67,10 @@ static void aramMgrGarbage(void) {
     head = wp->head;
     for (entry = head; entry != NULL; entry = entry->next) {
         if (entry->flags & ARAM_ENTRY_TO_ARAM) {
-            while (!(entry->flags & ARAM_ENTRY_TO_ARAM_DONE)) {}
+            while (!(entry->flags & ARAM_ENTRY_TO_ARAM_DONE)) { PORT_SPIN(); }
         }
         if (entry->flags & ARAM_ENTRY_TO_MRAM) {
-            while (!(entry->flags & ARAM_ENTRY_TO_MRAM_DONE)) {}
+            while (!(entry->flags & ARAM_ENTRY_TO_MRAM_DONE)) { PORT_SPIN(); }
         }
     }
 
@@ -104,11 +105,11 @@ static void aramMgrGarbage(void) {
                 wp->busy = 1;
                 ARQPostRequest(&wp->request, ARAM_OWNER, ARQ_TYPE_ARAM_TO_MRAM, ARQ_PRIORITY_LOW,
                                curr->aramAddr + offset, (u32)wp->buffer, wp->bufferSize, aramCallbackGarbage);
-                while (wp->busy) {}
+                while (wp->busy) { PORT_SPIN(); }
                 wp->busy = 1;
                 ARQPostRequest(&wp->request, ARAM_OWNER, ARQ_TYPE_MRAM_TO_ARAM, ARQ_PRIORITY_LOW,
                                (u32)wp->buffer, addr + offset, wp->bufferSize, aramCallbackGarbage);
-                while (wp->busy) {}
+                while (wp->busy) { PORT_SPIN(); }
             }
             __memFree(HEAP_DEFAULT, wp->buffer);
             wp->buffer = NULL;
@@ -178,7 +179,7 @@ ARAMEntry* aramMgrToAramAsync(void* src, u32 size) {
 /** Copies a block to ARAM and spins until the transfer is done; mapdrv uses it to stash the previous map's data. */
 ARAMEntry* aramMgrToAram(void* src, u32 size) {
     ARAMEntry* entry = aramMgrToAramAsync(src, size);
-    while (!(entry->flags & ARAM_ENTRY_TO_ARAM_DONE)) {}
+    while (!(entry->flags & ARAM_ENTRY_TO_ARAM_DONE)) { PORT_SPIN(); }
     return entry;
 }
 
@@ -204,10 +205,10 @@ static void arqCallbackToMram(u32 request) {
  * Each entry is read back once; mapdrv restores a stashed map with it.
  */
 void aramMgrToMram(ARAMEntry* entry, void* dest) {
-    while (!(entry->flags & ARAM_ENTRY_TO_ARAM_DONE)) {}
+    while (!(entry->flags & ARAM_ENTRY_TO_ARAM_DONE)) { PORT_SPIN(); }
     ARQPostRequest(&entry->request, ARAM_OWNER, ARQ_TYPE_ARAM_TO_MRAM, ARQ_PRIORITY_LOW,
                    entry->aramAddr, (u32)dest, entry->size, arqCallbackToMram);
     entry->flags |= ARAM_ENTRY_TO_MRAM;
     entry->dest = dest;
-    while (!(entry->flags & ARAM_ENTRY_TO_MRAM_DONE)) {}
+    while (!(entry->flags & ARAM_ENTRY_TO_MRAM_DONE)) { PORT_SPIN(); }
 }

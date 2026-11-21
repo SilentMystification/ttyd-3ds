@@ -75,6 +75,12 @@ void plat_wd_hold(int on);
 int plat_frame_poll(void);
 void plat_shutdown(void) __attribute__((noreturn));
 
+/* ---- Vertical blank (plat/vblank.c) ----
+ * Calls `handler` on a dedicated thread at every top-screen vertical blank
+ * (59.83 Hz), standing in for the GameCube's retrace interrupt. */
+void plat_vblank_start(void (*handler)(void));
+uint32_t plat_vblank_count(void);
+
 /* ---- Select menu (plat/menu.c) ---- */
 /* The menu's "Return to title" holds the GameCube reset button until the
  * game has seen it (OSGetResetButtonState). */

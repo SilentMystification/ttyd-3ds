@@ -1,0 +1,42 @@
+; Pass-through vertex shader for the GX front end (port3ds/game/gx/gx_draw.c).
+;
+; The front end transforms, lights and texture-maps vertices on the CPU; this
+; shader only applies the 90-degree rotation of the 3DS screens to the clip
+; position (rot0/rot1 rows, chosen by the back end) and scales the 8-bit
+; color to 0..1. Every output register is written whole: a partial write
+; hangs the Old 3DS GPU (lesson from the Animal Crossing 3DS port).
+
+.fvec rot0, rot1
+
+.constf consts(0.0039215686, 1.0, 0.0, 0.0)
+.alias inv255 consts.xxxx
+
+.out outpos position
+.out outclr color
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outtc2 texcoord2
+
+.alias inpos v0
+.alias inclr v1
+.alias intc0 v2
+.alias intc1 v3
+.alias intc2 v4
+
+.proc main
+    mov r0, inpos
+    dp4 r0.x, rot0, inpos
+    dp4 r0.y, rot1, inpos
+    mov outpos, r0
+
+    mul outclr, inv255, inclr
+
+    mov r1, consts.zzzy
+    mov r1.xy, intc0
+    mov outtc0, r1
+    mov r1.xy, intc1
+    mov outtc1, r1
+    mov r1.xy, intc2
+    mov outtc2, r1
+    end
+.end

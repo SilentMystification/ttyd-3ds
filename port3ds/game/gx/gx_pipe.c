@@ -453,11 +453,14 @@ void gx_end_open_primitive(const void* caller) {
     GXEnd();
 }
 
+void* gx_begin_caller; /* the code that began the current primitive, for diagnostics */
+
 void GXBegin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts) {
     if (s_in_begin) {
         gx_end_open_primitive(__builtin_return_address(0));
     }
     run_pending_raw();
+    gx_begin_caller = __builtin_return_address(0);
     s_in_begin = 1;
     gx_prim_open = 1;
     s_prim = (u8)type;

@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "gx_internal.h"
+#include "port_addr.h"
 #include "plat/plat.h"
 
 GxState gx;
@@ -899,6 +900,20 @@ void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
         return;
     }
     if ((u32)id < GX_MAX_TEXMAP) {
+        const GxTexObj* t = (const GxTexObj*)obj;
+        if (!PORT_IS_ADDR(t->image) || t->format > GX_TF_CMPR) {
+            /* never initialised by GXInitTexObj; logged once per caller */
+            static void* seen[16];
+            void* ra = __builtin_return_address(0);
+            int i;
+            for (i = 0; i < 16 && seen[i] != NULL && seen[i] != ra; i++) {
+            }
+            if (i < 16 && seen[i] == NULL) {
+                seen[i] = ra;
+                PLOG_W("GX: GXLoadTexObj(%p) from %p: not a texture object (image %p, format %u)", obj, ra, t->image,
+                       t->format);
+            }
+        }
         gx.tex_map[id] = *(GxTexObj*)obj;
         gx.tex_map_valid[id] = 1;
         touch();

@@ -590,7 +590,7 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
     }
     if (s_dump) {
         /* switch gxdump=N: the draws of game frame N; a run of draws with the same matrix and texture is one line */
-        const GxTexObj* t0 = gx.tex_map_valid[0] ? &gx.tex_map[0] : NULL;
+        const GxTexObj* t0 = s_units > 0 && gx.tex_map_valid[s_unit_map[0]] ? &gx.tex_map[s_unit_map[0]] : NULL;
         static const void* last_img;
         static f32 last_m[3][4];
         static u32 run;
@@ -606,12 +606,13 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
         last_img = img;
         memcpy(last_m, gx.pos_mtx[v[0].pnmtx % GX_POS_MTX_COUNT], sizeof(last_m));
         PLOG_I("gxdump prim %02x n %lu units %d stages %d tev %d tex0 %p fmt %d %dx%d clip %.2f %.2f %.2f %.2f "
-               "col %02x%02x%02x%02x blend %d zc %d atest %d chans %d",
+               "col %02x%02x%02x%02x blend %d zc %d atest %d chans %d map %d from %p",
                prim, (unsigned long)n, s_units, s_state.num_stages, gx.num_tev, t0 ? t0->image : NULL,
                t0 ? t0->format : -1, t0 ? t0->width : 0, t0 ? t0->height : 0, (double)s_out[0].v.pos[0],
                (double)s_out[0].v.pos[1], (double)s_out[0].v.pos[2], (double)s_out[0].v.pos[3], s_out[0].v.color[0],
                s_out[0].v.color[1], s_out[0].v.color[2], s_out[0].v.color[3], s_state.blend_mode,
-               s_state.color_write, s_state.alpha_test_enable, gx.num_chans);
+               s_state.color_write, s_state.alpha_test_enable, gx.num_chans, s_units > 0 ? s_unit_map[0] : -1,
+               gx_begin_caller);
         const f32(*m)[4] = gx.pos_mtx[v[0].pnmtx % GX_POS_MTX_COUNT];
         PLOG_I("gxdump   v0 %.2f %.2f %.2f mtx[%d] %.3f %.3f %.3f %.2f / %.3f %.3f %.3f %.2f / %.3f %.3f %.3f %.2f",
                (double)v[0].pos[0], (double)v[0].pos[1], (double)v[0].pos[2], v[0].pnmtx, (double)m[0][0],

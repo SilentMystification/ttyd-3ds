@@ -337,7 +337,6 @@ void effTexSetup(void) {
  * until a file has loaded a 1x1 blank texture stands in.
  */
 void effGetTexObj(u32 id, GXTexObj* obj) {
-#ifdef __MWERKS__
     if ((s32)id < EFF_NTEX) { // number of images in effect.tpl
         if (!wp->texLoaded) {
             static char dummy ATTRIBUTE_ALIGN(32) = '\0';
@@ -353,7 +352,6 @@ void effGetTexObj(u32 id, GXTexObj* obj) {
             TEXGetGXTexObjFromPalette(*wp->handle->data, obj, id - EFF_NTEX);
         }
     }
-#endif
 }
 #pragma explicit_zero_data reset
 

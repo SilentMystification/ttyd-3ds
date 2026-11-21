@@ -266,17 +266,25 @@ The N3DS extra RAM ("QTM RAM") is 4 MiB at physical 0x1F000000. A process maps i
 
 How the port uses it:
 
-- **CIA:** the `.rsf` requests the mapping. A `qtm_alloc` arena owns the whole region. Every placement goes through one table in `port3ds/sys/memplace.c`, so moving a buffer between QTM, FCRAM linear memory and VRAM is a one-line change.
-- **3dsx:** a 3dsx gets the ExHeader of the title that launched it, so QTM is usually not mapped. At boot the port checks whether the mapping exists (`svcQueryMemory` at 0x1E800000). If it does not, the same table places those buffers in FCRAM. The game runs the same either way; only the speed differs.
-- **First candidates** (traffic that would otherwise go over the FCRAM bus):
-  - the GX record buffer that core 0 writes and core 2 reads every frame;
-  - the per-frame immediate-mode vertex and index arena;
-  - the TEV, combiner and texture-object caches;
-  - map collision data (`hitdrv`);
-  - the NDSP aux and reverb buffers;
-  - the MusyX voice state.
-- Azahar does not model memory timing, so it shows only that QTM placement works, not whether it helps. The final placement is chosen in phase 8 from hardware profiles: bus contention per buffer, A/B toggled by a debug switch.
-- Whether the real GPU can read QTM is checked by the phase 8 probe. Until then, GPU-read buffers placed in QTM keep a linear-memory alternative through the same placement table.
+**QTM is required.** The CIA is the deliverable, and its `.rsf` requests the mapping.
+
+- If the mapping is missing at boot (checked with `svcQueryMemory` at 0x1E800000), the port shows a clear error and exits. This covers the O3DS check as well.
+- A 3dsx gets the ExHeader of the title that launched it. It only runs when that title maps QTM; otherwise it shows the same error.
+- There is no FCRAM fallback path.
+
+**What goes where.** The GPU works from VRAM and linear FCRAM as usual: render targets, textures, vertex and index buffers, command lists. The DSP buffers (NDSP wave and aux buffers) stay in linear memory. QTM holds CPU-side state that several cores touch every frame, so that this traffic stays off the FCRAM bus the GPU and DSP use:
+
+- the GX record buffer that core 0 writes and core 2 reads;
+- the GX state tracker, the TEV-to-combiner cache and the texture-object table, which are read by both the recorder and the replayer;
+- the MusyX voice state and the aux and reverb working state, shared between the game thread and the audio thread on core 1;
+- the log queue and the profiler counters, which every thread writes;
+- map collision data (`hitdrv`) and other hot game-logic tables, if the phase 8 profile shows they pay off.
+
+**How placement is managed.**
+
+- A `qtm_alloc` arena owns the region.
+- Every placement is listed in one table, `port3ds/sys/memplace.c`, with a size budget. This gives one place to see what lives in QTM and to move it, and a boot-time check that the total fits.
+- Azahar does not model memory timing, so it shows that the placement works but not whether it helps. The final list is tuned in phase 8 from hardware profiles, using debug-switch A/B toggles that move one buffer to FCRAM for comparison. Those toggles are a measurement tool, not a shipping fallback.
 
 ## 6. Game data: extraction and conversion
 
@@ -325,7 +333,7 @@ Every test is one command that returns a non-zero exit code on failure. All of t
 
 **Runners**
 
-- `tools/port3ds/run_azahar.py --build <3dsx> --switches "map=gor_01 shots exitframe=600" --until "<regex>" --timeout 120`
+- `tools/port3ds/run_azahar.py --build <cia> --switches "map=gor_01 shots exitframe=600" --until "<regex>" --timeout 120`
   - Writes `debug3ds.txt` into Azahar's `sdmc`, sets turbo and vsync in the config (and restores the config afterwards), and starts Azahar with the GDB stub.
   - Tails `log.txt`. It stops on the regex, a `[CRASH]` line, log silence or the timeout, and always kills the emulator.
   - Collects the log, the screenshots and any `UnmappedAccess` lines from Azahar's own log. Those lines count as failures, because they fault on hardware.
@@ -368,7 +376,14 @@ Every test is one command that returns a non-zero exit code on failure. All of t
     - the services list (`ndsp`/`dsp::DSP`, `hid`, `fs:USER`, `ptm:u`, `soc:U`, `ac:u`, `qtm:u`)
     - `FileSystemAccess: DirectSdmc`
   - Original banner and icon art only.
-- **3dsx:** runs with whatever memory the launcher gives. On N3DS, full memory and the extra core need the Homebrew Launcher started through a title with the right exheader (an N3DS-only title, as you described). The README will explain this, and the boot log reports what was granted.
+- **The CIA is the deliverable and the main test target.** Its ExHeader requests:
+  - the 804 MHz clock;
+  - the L2 cache;
+  - core 2;
+  - the extended memory mode;
+  - the QTM mapping.
+- **3dsx:** a developer convenience for 3dslink pushes in phase 8. It runs only when the Homebrew Launcher was started through a title whose ExHeader grants the same things (such as an N3DS-only game). Otherwise the boot check shows what is missing and exits.
+- **Azahar tests also run the CIA**, because Azahar gives a 3dsx a default ExHeader without the QTM mapping. Phase 0 checks the exact flow: either `azahar -i ttyd.cia` followed by booting the installed title's content, or booting the CIA's NCCH directly.
 
 ## 10. Phases and exit criteria
 
@@ -396,7 +411,7 @@ Each phase ends with a commit, updated docs, and passing tests for everything ea
   - Azahar's `UnmappedAccess` log lines treated as failures.
 - Nothing depends on an unverified section 12 assumption:
   - `SystemModeExt` stays at 124MB;
-  - QTM is used through the placement table (section 5.7), which keeps an FCRAM alternative for every buffer;
+  - QTM holds shared CPU state through the placement table (section 5.7), and no GPU buffers are placed in QTM;
   - core 2 is used, with the core-0 fallback (`gxsync`) kept working.
 
 Performance work inside these phases is limited to what the architecture needs: offline vertex conversion, zero-copy arenas, the core-2 render thread and VFP matrix code. Profiling-driven tuning (L1-sized loop splitting, QTM placement, Thumb/ARM per file, NDSP voices) gets its own pass afterwards, using the profiler from phase 3.
@@ -420,10 +435,7 @@ These are asked in the conversation and recorded here with the answers once give
 - **QTM RAM on hardware:** Azahar maps 4 MiB minus 128 KiB through the ExHeader, and its GPU reads it. The probe confirms on the N3DS:
   - the CIA mapping;
   - what a 3dsx gets under the Homebrew Launcher;
-  - whether the real GPU can read and write QTM;
-  - QTM latency and bandwidth against FCRAM, under load from both CPU cores.
-
-  If the GPU cannot read QTM, the GPU-read buffers move back to linear memory through the placement table, and QTM keeps the CPU-side hot data.
+  - QTM latency and bandwidth against FCRAM, under load from several CPU cores and with the GPU busy.
 - **CIA memory:** whether `SystemModeExt: 178MB` is stable with the HOME Menu on retail N3DS; 124 MB is the fallback.
 - **Core 2:** whether it is fully usable at 100% from a CIA and from a 3dsx started through an N3DS title. Your note says about 2.8 cores in total; the probe measures it.
 - **ARM11 performance monitor:** whether its cache-miss counters are readable from userland under Luma. If not, cache work relies on timing.

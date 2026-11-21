@@ -29,7 +29,24 @@ static int s_ar_ready, s_arq_ready;
 typedef struct {
     ARQRequest* request;
     ARQCallback callback;
+    u64 due; /* plat_ticks() when the GameCube's DMA would finish */
 } Pending;
+
+/* The GameCube's ARAM DMA moves about 80 MB/s, so its completion interrupt
+ * comes well after ARQPostRequest returns. Game code relies on that: it
+ * links the request's owner into a list after posting (aramMgrToAramAsync),
+ * and the callback looks it up there. The copy is done at once here, but the
+ * callback waits for the DMA's time. */
+#define DMA_BYTES_PER_SEC (80u << 20)
+#define DMA_MIN_US 20u
+
+static u64 dma_ticks(u32 length) {
+    u64 us = (u64)length * 1000000u / DMA_BYTES_PER_SEC;
+    if (us < DMA_MIN_US) {
+        us = DMA_MIN_US;
+    }
+    return us * (PLAT_TICKS_PER_SEC / 1000000u);
+}
 
 static Pending s_pending[PENDING_MAX];
 static volatile u32 s_head, s_tail;
@@ -79,6 +96,10 @@ static void dma_thread(void* arg) {
             Pending p = s_pending[s_tail % PENDING_MAX];
             s_tail++;
             plat_mutex_unlock(s_lock);
+            u64 now = plat_ticks();
+            if (now < p.due) {
+                plat_thread_sleep_ns((int64_t)((p.due - now) * 1000000000ull / PLAT_TICKS_PER_SEC));
+            }
             port_irq_enter();
             p.callback((u32)p.request);
             port_irq_leave();
@@ -131,7 +152,12 @@ void ARQPostRequest(ARQRequest* request, u32 owner, u32 type, u32 priority, u32 
         plat_mutex_unlock(s_lock);
         plat_fatal("ARQ: %d transfers pending", PENDING_MAX);
     }
-    s_pending[s_head % PENDING_MAX] = (Pending){request, callback};
+    /* in order behind the transfers already queued, as the one DMA channel runs them */
+    u64 start = plat_ticks();
+    if (s_head != s_tail && s_pending[(s_head - 1) % PENDING_MAX].due > start) {
+        start = s_pending[(s_head - 1) % PENDING_MAX].due;
+    }
+    s_pending[s_head % PENDING_MAX] = (Pending){request, callback, start + dma_ticks(length)};
     s_head++;
     plat_mutex_unlock(s_lock);
     plat_event_signal(s_wake);

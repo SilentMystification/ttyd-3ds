@@ -230,5 +230,6 @@ void gx_end_open_primitive(const void* caller);
     } while (0)
 
 extern void* gx_begin_caller;
+int gx_draw_dumping(void); /* switch gxdump: this frame is logged */
 
 #endif

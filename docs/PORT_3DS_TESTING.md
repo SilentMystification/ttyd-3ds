@@ -82,7 +82,9 @@ Switches the game reads (space-separated words in `--switches`):
 |---|---|
 | `map=<map>[,<bero>]` | Starts a new game on that map once the title or the opening is up (the warning screen needs an A press first). `story=N` sets the story so far (GSW 0, default 0); `party=N` the partner (default 1, Goombella; 0 none) |
 | `padscript=<steps>` | Scripted input: comma-separated `KEYS*frames` steps (`a*3`, `wait*40`, `start*3`, `a+b*2`). Frames are game frames (one per VIWaitForRetrace). Keys: `a b x y l r zl zr start select up down left right`; `cl cr cu cd` push the circle pad (the game's control stick) fully left, right, up or down. TTYD's menus and dialogs move with the stick, not the D-pad, so use `cu`/`cd` there. Up to 2048 steps |
-| `shots=N` | Saves every Nth frame's EFB (608x480, as the game drew it) to `sdmc:/3ds/ttyd/shots/NNNNN.ppm` and logs that frame's draw counts. `shotmax=N` limits the number (default 200) |
+| `shots=N` | Saves every Nth frame's EFB (608x480, as the game drew it) to `sdmc:/3ds/ttyd/shots/NNNNN.ppm` and logs that frame's draw counts. `shotmax=N` limits the number (default 200). In Azahar about one shot in seven comes out all black although its frame drew normally (the log line shows the frame's draws); take shots a few frames apart rather than relying on one |
+| `gxdump=N` | Logs every draw of frame N: primitive, texture, first vertex in clip space, its matrix, TEV and blend state, and the code that began it (resolve with `addr2line -e build/3ds/game/ttyd.elf`). Runs of draws with the same matrix and texture are one line. EFB copies are logged too |
+| `evtdump=N` | Logs the running event scripts at frame N, with the messages their windows show |
 | `gputest` | Draws the orientation pattern at boot: red top left, green top right, blue bottom left of a grey screen |
 | `loglevel=3` | Debug lines in the log (each converted disc file, primitives closed without `GXEnd`) |
 

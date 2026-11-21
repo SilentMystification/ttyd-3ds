@@ -575,7 +575,7 @@ static void copy_to_texture(u16 x, u16 y, u16 w, u16 h, u32 handle, u32 dst_w, u
 
 static void take_shot(void);
 static u32 s_shot_due;
-static void capture_efb(void);
+static void capture_efb(const Record* r);
 
 /* The top screen's render target, linked to the framebuffer: citro3d
  * transfers it and swaps at C3D_FrameEnd. */
@@ -629,9 +629,6 @@ static void present(void) {
 static void render_record(Record* r) {
     u64 t0 = svcGetSystemTick();
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-    if (s_shot_due) {
-        capture_efb();
-    }
     C3D_FrameDrawOn(s_efb);
     C3D_BindProgram(&s_prog);
     C3D_SetAttrInfo(&s_attr);
@@ -704,6 +701,9 @@ static void render_record(Record* r) {
     s_stats.gpu_us = (u32)(C3D_GetDrawingTime() * 1000.0f);
     if (r->present && s_shots_every) {
         take_shot();
+        if (s_shot_due) {
+            capture_efb(r); /* its GPU copy waits for the frame's commands */
+        }
     }
 }
 
@@ -735,8 +735,7 @@ uint32_t plat_gpu_peek_argb(uint16_t x, uint16_t y) {
 /* ---- Screenshots (switch shots=N: every Nth frame to shots/NNNNN.ppm) ---- */
 
 /* Decides at each present whether this frame is captured; the capture
- * itself reads the EFB at the start of the next render, when the GPU has
- * finished the frame (C3D_FRAME_SYNCDRAW) and nothing new is drawn yet. */
+ * itself copies the EFB right after the frame is submitted, behind its commands. */
 static void take_shot(void) {
     static u32 frame;
     frame++;
@@ -748,7 +747,7 @@ static void take_shot(void) {
 }
 
 /* The EFB (608x480, as the game drew it) to shots/NNNNN.ppm. */
-static void capture_efb(void) {
+static void capture_efb(const Record* r) {
     char path[48];
     snprintf(path, sizeof(path), "shots/%05lu.ppm", (unsigned long)s_shot_due);
     s_shot_due = 0;
@@ -756,17 +755,34 @@ static void capture_efb(void) {
     if (f == NULL) {
         return;
     }
+    /* The GPU copies the EFB to linear memory first: a CPU read of VRAM can
+     * miss what the GPU drew (Azahar keeps rendered surfaces on the host GPU
+     * until a GPU transfer reads them). */
+    const u32 bytes = TARGET_W * TARGET_H * 4;
+    static u32* buf;
+    if (buf == NULL) {
+        buf = (u32*)linearAlloc(bytes);
+        if (buf == NULL) {
+            fclose(f);
+            PLOG_W("shot %s: no linear memory", path);
+            return;
+        }
+    }
+    GSPGPU_InvalidateDataCache(buf, bytes);
+    const u32 dim = GX_BUFFER_DIM(TARGET_W, TARGET_H);
+    C3D_SyncDisplayTransfer((u32*)s_efb->frameBuf.colorBuf, dim, buf, dim,
+                            GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                                GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    GSPGPU_InvalidateDataCache(buf, bytes);
     fprintf(f, "P6\n608 480\n255\n");
     static u8 row[608 * 3];
-    const u32* buf = (const u32*)s_efb->frameBuf.colorBuf;
     for (int y = 0; y < 480; y++) {
         for (int x = 0; x < 608; x++) {
             float tx, ty, tw, th;
             efb_to_target_rect((float)x, (float)y, 1, 1, &tx, &ty, &tw, &th);
             u32 px = (u32)tx, py = TARGET_H - 1 - (u32)ty;
-            u32 idx = ((py >> 3) * (TARGET_W >> 3) + (px >> 3)) * 64 + ((px & 1) | ((py & 1) << 1) | ((px & 2) << 1) |
-                                                                        ((py & 2) << 2) | ((px & 4) << 2) | ((py & 4) << 3));
-            u32 v = buf[idx]; /* RGBA8: R in the top byte */
+            u32 v = buf[py * TARGET_W + px]; /* untiled by the transfer; RGBA8: R in the top byte */
             row[x * 3 + 0] = (u8)(v >> 24);
             row[x * 3 + 1] = (u8)(v >> 16);
             row[x * 3 + 2] = (u8)(v >> 8);
@@ -774,7 +790,8 @@ static void capture_efb(void) {
         fwrite(row, 1, sizeof(row), f);
     }
     fclose(f);
-    PLOG_I("shot %s: %lu draws, %lu vertices, %lu states, %lu record bytes, %lu segments", path,
+    PLOG_I("shot %s: this record %lu bytes %lu vertices; %lu draws, %lu vertices, %lu states, %lu record bytes, %lu segments", path,
+           (unsigned long)r->used, (unsigned long)r->nverts,
            (unsigned long)s_stats.draws, (unsigned long)s_stats.vertices, (unsigned long)s_stats.state_changes,
            (unsigned long)s_stats.record_bytes, (unsigned long)s_stats.segments);
 }

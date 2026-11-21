@@ -420,6 +420,8 @@ typedef struct {
 static Out s_out[4096 + 8];
 static int s_dump; /* this frame's draws are logged (switch gxdump) */
 
+int gx_draw_dumping(void) { return s_dump; }
+
 static void transform(const GxVertex* v, Out* o) {
     const f32(*m)[4] = gx.pos_mtx[v->pnmtx % GX_POS_MTX_COUNT];
     f32 p[3];
@@ -431,6 +433,14 @@ static void transform(const GxVertex* v, Out* o) {
         const f32(*nm)[3] = gx.nrm_mtx[v->pnmtx % GX_POS_MTX_COUNT];
         for (int r = 0; r < 3; r++) {
             n[r] = nm[r][0] * v->nrm[0] + nm[r][1] * v->nrm[1] + nm[r][2] * v->nrm[2];
+        }
+        /* unit length, as Dolphin lights: a normal matrix with scale in it must not dim the model */
+        f32 len2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+        if (len2 > 0.0f && len2 != 1.0f) {
+            f32 inv = 1.0f / sqrtf(len2);
+            n[0] *= inv;
+            n[1] *= inv;
+            n[2] *= inv;
         }
     }
     f32 cx, cy, cz, cw;

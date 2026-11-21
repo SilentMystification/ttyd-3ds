@@ -274,6 +274,10 @@ void GXCopyTex(void* dest, GXBool clear) {
     if (w == 0 || h == 0 || gx.copy_src[2] == 0 || gx.copy_src[3] == 0) {
         return;
     }
+    if (gx_draw_dumping()) {
+        PLOG_I("gxdump copy %u,%u %ux%u to %p %ux%u fmt %u clear %d from %p", gx.copy_src[0], gx.copy_src[1],
+               gx.copy_src[2], gx.copy_src[3], dest, w, h, gx.copy_tex_fmt, clear, __builtin_return_address(0));
+    }
     u32 handle = gx_tex_copy_target(dest, w, h, gx.copy_tex_fmt);
     int half = gx.copy_tex_mip; /* mipmap flag: box-filter by 2 */
     plat_gpu_copy_tex(gx.copy_src[0], gx.copy_src[1], gx.copy_src[2], gx.copy_src[3], half, handle, w, h);

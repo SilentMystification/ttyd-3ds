@@ -1,6 +1,6 @@
 # Paper Mario: The Thousand-Year Door on Nintendo 3DS: port plan
 
-Status: draft, 2026-11-21. Nothing in `port3ds/` exists yet; this document is the plan for building it.
+Status: in progress. Phases 0 to 4 are done and phases 5 and 6 are under way; the table in section 10 gives each phase's state.
 
 This repository is a 100% matching C decompilation. The 3DS port compiles that same C for the ARM11 and replaces the Dolphin SDK underneath it. The GameCube build (`configure.py` + ninja, `30 files OK` for G8ME01) must keep matching. Every port change to shared code sits behind `TARGET_3DS` (or a shared `TARGET_PORT`), and the GameCube build is checked after each change.
 
@@ -412,12 +412,12 @@ Each phase ends with a commit, updated docs, and passing tests for everything ea
 | Phase | Work | Done when |
 |---|---|---|
 | 0. Tooling (**done 2026-11-21**; see PORT_3DS_TESTING.md) | Scripts from section 8 (runners for all three, each reading `GlobalWork`; `memcompare.py` moved to phase 1 because it needs the 3DS ELF's layouts), Docker image with makerom and bannertool, Windows script, first `.rsf` with a hello-world CIA that installs and runs in Azahar. The hardware probe app (memory modes, core 2 availability, measured L1/L2 and memory bandwidth, QTM mapping through Luma, `svcGetSystemTick` cost) is written here but first run on hardware in phase 8 | Every runner works from a single command; the CIA and the probe run in Azahar |
-| 1. Compile and link | `port3ds/CMakeLists.txt` compiles all game code and MusyX for ARM; static REL linking; the address-check audit; the MWCC-intrinsic and GQR fixes; the GameCube build still matches | Links with only the port SDK left as link errors; that list becomes the phase 3 to 5 work list |
-| 2. Disc access and decoders | ISO reader and FST, DVD layer, load-time swap of every format (TPL, anim, map, font, icon.bin, camera roads, MusyX banks) from generated swap tables, data compiled into the decomp read from the image, host decode tool with tests against paper-cut's decoders | Every file on the US disc decodes on the host and in the port, and the round-trip tests pass |
-| 3. Platform | OS, DVD, ARAM/ARQ, PAD, CARD, VI; log, crash handler, watchdog, switches, HUD, Select menu | The game reaches its first `GXBegin` on Azahar with logs; the crash handler's self-test path works in Azahar |
-| 4. GX | State tracker, vertex paths, shaders, TEV compiler, textures, EFB copies, fog and blend, bbox, z-texture, indirect, multipass, bounds checks | Logo, title and file select match paper-cut shots; `gor_01` renders |
-| 5. Audio | MusyX `hw_3ds` software backend, streams, DTK; then NDSP voices | Title music and `gor_01` sound effects play; matches paper-cut's audio golden hashes within tolerance |
-| 6. Bring-up | New game to Rogueport, first battle, save and load, partner, menus | Golden set passes on Azahar |
+| 1. Compile and link (**done**) | `port3ds/CMakeLists.txt` compiles all game code and MusyX for ARM; static REL linking; the address-check audit; the MWCC-intrinsic and GQR fixes; the GameCube build still matches | Links with only the port SDK left as link errors; that list becomes the phase 3 to 5 work list |
+| 2. Disc access and decoders (**done in the port**; the host decode tool is not written) | ISO reader and FST, DVD layer, load-time swap of every format (TPL, anim, map, font, icon.bin, camera roads, MusyX banks) from generated swap tables, data compiled into the decomp read from the image, host decode tool with tests against paper-cut's decoders | Every file on the US disc decodes on the host and in the port, and the round-trip tests pass |
+| 3. Platform (**done**) | OS, DVD, ARAM/ARQ, PAD, CARD, VI; log, crash handler, watchdog, switches, HUD, Select menu | The game reaches its first `GXBegin` on Azahar with logs; the crash handler's self-test path works in Azahar |
+| 4. GX (**done**: logo, title, file select, `gor_01`, field and battle scenes render) | State tracker, vertex paths, shaders, TEV compiler, textures, EFB copies, fog and blend, bbox, z-texture, indirect, multipass, bounds checks | Logo, title and file select match paper-cut shots; `gor_01` renders |
+| 5. Audio (**under way**: MusyX on paper-cut's mixer through one NDSP channel; not heard yet, as Azahar has no DSP firmware here) | MusyX `hw_3ds` software backend, streams, DTK; then NDSP voices | Title music and `gor_01` sound effects play; matches paper-cut's audio golden hashes within tolerance |
+| 6. Bring-up (**under way**: new game, Rogueport, field walking and a full first battle work in Azahar) | New game to Rogueport, first battle, save and load, partner, menus | Golden set passes on Azahar |
 | 7. Functional completion in Azahar | Map sweep, story sweep, every special effect scene, the remaining regions (JP, PAL with 50 Hz and languages), CIA install path | Sweeps clean in Azahar; game completable in Azahar |
 | 8. First hardware run | Run the probe app and record results in `docs/PORT_3DS_HARDWARE.md`; settle the section 12 assumptions; boot the functional build on the N3DS over 3dslink; crash-handler and watchdog tests on hardware; fix hardware-only faults (hangs, unmapped accesses, cache maintenance) | The phase 6 path runs on the N3DS without a crash or hang; ready for the separate bug-fix and optimization passes |
 

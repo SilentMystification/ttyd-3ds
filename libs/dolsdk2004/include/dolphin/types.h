@@ -1,6 +1,12 @@
 #ifndef _DOLPHIN_TYPES_H_
 #define _DOLPHIN_TYPES_H_
 
+// Marks the game enums declared under '#pragma enumsalwaysint off' (sized to their values). MWCC sizes them by
+// the pragma; ports define it as GCC's packed attribute for the same size (port3ds_prefix.h).
+#ifndef PORT_ENUM_PACKED
+#define PORT_ENUM_PACKED
+#endif
+
 typedef signed   char          s8;
 typedef unsigned char          u8;
 typedef signed   short int     s16;

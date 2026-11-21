@@ -8,8 +8,13 @@
 # The CIA uses port3ds/rsf/ttyd.rsf.
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
-find_program(MAKEROM makerom REQUIRED)
-find_program(BANNERTOOL bannertool REQUIRED)
+find_program(MAKEROM makerom)
+find_program(BANNERTOOL bannertool)
+find_program(SMDHTOOL smdhtool HINTS "$ENV{DEVKITPRO}/tools/bin" REQUIRED)
+find_program(TOOL_3DSXTOOL 3dsxtool HINTS "$ENV{DEVKITPRO}/tools/bin" REQUIRED)
+if(NOT MAKEROM OR NOT BANNERTOOL)
+    message(STATUS "makerom or bannertool not found: building the 3dsx only (the Docker build makes the CIA)")
+endif()
 
 set(TTYD_PORT3DS_DIR "${CMAKE_CURRENT_LIST_DIR}/..")
 get_filename_component(TTYD_PORT3DS_DIR "${TTYD_PORT3DS_DIR}" ABSOLUTE)
@@ -40,24 +45,28 @@ function(ttyd_add_cia target)
         COMMENT "Generating placeholder art for ${target}")
 
     add_custom_command(
-        OUTPUT "${art}/banner.bnr"
-        COMMAND "${BANNERTOOL}" makebanner -i "${art}/banner.png" -a "${art}/banner.wav" -o "${art}/banner.bnr"
-        DEPENDS "${art}/banner.png" "${art}/banner.wav"
-        COMMENT "Building banner for ${target}")
-
-    add_custom_command(
         OUTPUT "${art}/icon.smdh"
-        COMMAND "${BANNERTOOL}" makesmdh -s "${ARG_TITLE}" -l "${ARG_SHORT_DESC}" -p "${ARG_AUTHOR}"
-                -i "${art}/icon.png" -o "${art}/icon.smdh"
+        COMMAND "${SMDHTOOL}" --create "${ARG_TITLE}" "${ARG_SHORT_DESC}" "${ARG_AUTHOR}" "${art}/icon.png" "${art}/icon.smdh"
         DEPENDS "${art}/icon.png"
         COMMENT "Building SMDH for ${target}")
 
     set(out_dir "${CMAKE_CURRENT_BINARY_DIR}")
     add_custom_command(
         OUTPUT "${out_dir}/${target}.3dsx"
-        COMMAND 3dsxtool "$<TARGET_FILE:${target}>" "${out_dir}/${target}.3dsx" --smdh="${art}/icon.smdh"
+        COMMAND "${TOOL_3DSXTOOL}" "$<TARGET_FILE:${target}>" "${out_dir}/${target}.3dsx" --smdh="${art}/icon.smdh"
         DEPENDS ${target} "${art}/icon.smdh"
         COMMENT "Building ${target}.3dsx")
+
+    if(NOT MAKEROM OR NOT BANNERTOOL)
+        add_custom_target(${target}_package ALL DEPENDS "${out_dir}/${target}.3dsx")
+        return()
+    endif()
+
+    add_custom_command(
+        OUTPUT "${art}/banner.bnr"
+        COMMAND "${BANNERTOOL}" makebanner -i "${art}/banner.png" -a "${art}/banner.wav" -o "${art}/banner.bnr"
+        DEPENDS "${art}/banner.png" "${art}/banner.wav"
+        COMMENT "Building banner for ${target}")
 
     add_custom_command(
         OUTPUT "${out_dir}/${target}.cia"

@@ -25,7 +25,7 @@ typedef enum AudienceMemberType {
     AUDIENCE_PIRANHA_PLANT, // 0xB, 11
     AUDIENCE_LUIGI,         // 0xC, 12
     AUDIENCE_MAX            // 0xD, 13
-} AudienceMemberType;
+} PORT_ENUM_PACKED AudienceMemberType;
 #pragma enumsalwaysint on
 
 typedef struct StarPowerInfo {

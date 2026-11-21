@@ -28,7 +28,7 @@ typedef enum PartyMember {
     PARTY_MEMBER_FLURRIE_FOLLOWER,   // 17
     PARTY_MEMBER_VIVIAN_FOLLOWER,    // 18
     PARTY_MEMBER_MS_MOWZ_FOLLOWER    // 19
-} PartyMember;
+} PORT_ENUM_PACKED PartyMember;
 #pragma enumsalwaysint on
 
 #define MAIN_PARTY_MEMBER_MAX (PARTY_MEMBER_MS_MOWZ + 1) // the seven partners plus PARTY_MEMBER_NONE
@@ -65,7 +65,7 @@ typedef enum PartyFlags {
     PARTY_FLAG_CTRL_OFF = (1 << 29),
     PARTY_FLAG_CTRL_OFF_2 = (1 << 30),
     PARTY_FLAG_IS_EVT_USE = (1 << 31)
-} PartyFlags;
+} PORT_ENUM_PACKED PartyFlags;
 #pragma enumsalwaysint on
 
 // PartyEntry.flags2, the display flags (evt_party_dispflg_onoff); several mirror MarioDispFlags.
@@ -110,7 +110,7 @@ typedef enum PartySlotId {
     PARTY_SLOT_PARTY = 0,    // 0x0
     PARTY_SLOT_FOLLOWER = 1, // 0x1
     PARTY_SLOT_NONE = -1
-} PartySlotId;
+} PORT_ENUM_PACKED PartySlotId;
 #pragma enumsalwaysint on
 
 struct HitEntry;

@@ -15,7 +15,7 @@ typedef enum LightEntryFlags {
     LIGHT_SPOT = 1 << 13,
     LIGHT_DIRECTIONAL = 1 << 14,
     LIGHT_AMBIENT = 1 << 15
-} LightEntryFlags;
+} PORT_ENUM_PACKED LightEntryFlags;
 #pragma enumsalwaysint on
 
 typedef struct LightEntry {

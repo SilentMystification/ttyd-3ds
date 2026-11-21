@@ -306,7 +306,15 @@ The user supplies a G8MJ01, G8ME01 or G8MP01 disc image (ISO, GCM; RVZ and CISO 
    - the memory-card icon, palette and banner, which the matching build extracts from `main.dol` into `build/<version>/include/assets/` and `cardmgr.c` includes;
    - texture and other data arrays written as words in REL sources (for example `rels/win/src/window/win_04.c`), which are read from the disc's REL at runtime instead.
 
-   Phase 1 lists every such array with a script, and the port build fails if one is compiled in. `dspSlave` (GameCube DSP code) is not needed.
+   The phase 1 scan (2026-11-21) found 36 data arrays of 64 words or more in game sources (85 KB).
+   - **Game-logic tables stay compiled in.** They are code-like data written in the decomp's sources: item, sound, tattle and battle-stage tables.
+   - **Image data is filled at boot from the user's disc**, by symbol address from `config/<version>/symbols.txt` or the REL's symbol table, as for the card icon:
+     - `win_04.c` `texture_0` (4,992 bytes);
+     - `mapdrv.c` `texture_0` (256 bytes);
+     - `eff_torch.c` `torch_obj2_texture` and `torch_obj22t_texture` (2,032 bytes);
+     - `mobjdrv.c` `cubeDN` (4,920 bytes).
+
+   The port build checks the list so no new image array is compiled in. `dspSlave` (GameCube DSP code) is not needed.
 5. Writes the result to `sdmc:/3ds/ttyd/data/<GAMEID>/` with a manifest: file list, sizes, hashes and converter version. The port checks the manifest at boot and refuses mismatched data with a clear message.
 
 The converter is written in portable C as one library, built twice:

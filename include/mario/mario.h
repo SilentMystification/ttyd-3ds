@@ -51,7 +51,7 @@ typedef enum MarioMotion {
     MARIO_MOTION_KPA_POW_DOWN, // 0x27
     MARIO_MOTION_DUMMY,        // 0x28
     MARIO_MOTION_MOTION_MAX = 0xFFFF
-} MarioMotion;
+} PORT_ENUM_PACKED MarioMotion;
 #pragma enumsalwaysint on
 
 #pragma enumsalwaysint off
@@ -86,7 +86,7 @@ typedef enum MarioFlags {
     MARIO_FLAG_CHG_MOT_DISABLED = (1 << 28),
     MARIO_FLAG_IS_SHADOW_MARIO = (1 << 30),
     MARIO_FLAG_IS_8_BIT = (1 << 31)
-} MarioFlags;
+} PORT_ENUM_PACKED MarioFlags;
 #pragma enumsalwaysint on
 
 // MarioWork.dispFlags bits named so far (0x40, 0x80, 0x400, 0x800, 0x2000, 0x4000, 0x80000, 0x400000 and 0x800000
@@ -172,7 +172,7 @@ typedef enum MarioTrigFlags {
     // Set while evt_mario_normalize brings Mario back to his normal state; partners do not enter the slit.
     MARIO_TRIG_FLAG_NORMALIZING = (1 << 31)
 #endif
-} MarioTrigFlags;
+} PORT_ENUM_PACKED MarioTrigFlags;
 #pragma enumsalwaysint on
 
 /* ---- (1) per-motion scratch views: MarioWork.mot, 0x2A0 JP / 0x2B8 US, 0x1C bytes ----

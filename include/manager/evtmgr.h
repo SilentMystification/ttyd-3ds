@@ -135,7 +135,7 @@ typedef enum EventOpcode {
     OPCODE_DEBUG_NAME = 116,
     OPCODE_DEBUG_REM = 117,
     OPCODE_DEBUG_BP = 118
-} EventOpcode;
+} PORT_ENUM_PACKED EventOpcode;
 #pragma enumsalwaysint on
 
 typedef struct EventEntry EventEntry;

@@ -29,7 +29,7 @@ typedef enum HitAttr {
     HIT_ATTR_PARTY_PASS = 0x800000,      // partner rays skip it; Mario's rays test it even with HIT_ATTR_PASS_THROUGH
     HIT_ATTR_DAMAGE_RETURN = 0x40000000, // hitDamageReturnSet: hazard floor with a return point (damageHit)
     HIT_ATTR_MOBJ = 0x80000000,          // the collision object of a map object (mobjHitObjPtrToPtr)
-} HitAttr;
+} PORT_ENUM_PACKED HitAttr;
 #pragma enumsalwaysint on
 
 typedef struct HitCheckQuery HitCheckQuery;

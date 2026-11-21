@@ -15,6 +15,7 @@
 #include <dolphin/vi.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "driver/seqdrv.h"
 #include "driver/swdrv.h"
@@ -145,6 +146,106 @@ static void warp_switch(void) {
     }
 }
 
+/* Switch sweep=N (tests, tools/port3ds/map_sweep.py): visits each map listed
+ * in sweep.txt ("<map> [<story>]" per line) once the title or the opening is
+ * up, stays N game frames after the map is up, saves sweep/<map>.ppm and logs
+ * "sweep: <map> ok". A map not up within 1800 frames is logged as "timeout";
+ * a sequence that cannot be left (a battle the map starts) stops the sweep. */
+#define SWEEP_MAX 512
+static char (*s_sweep_maps)[16];
+static u8* s_sweep_story;
+static int s_sweep_n, s_sweep_i, s_sweep_frames, s_sweep_wait, s_sweep_state = -1;
+
+static void sweep_read(void) {
+    s_sweep_state = 0;
+    s_sweep_frames = plat_switch_int("sweep", 0);
+    if (s_sweep_frames <= 0) {
+        return;
+    }
+    FILE* f = fopen("sweep.txt", "r");
+    if (f == NULL) {
+        PLOG_E("sweep: no sweep.txt");
+        return;
+    }
+    static char maps[SWEEP_MAX][16];
+    static u8 story[SWEEP_MAX];
+    s_sweep_maps = maps;
+    s_sweep_story = story;
+    char line[64];
+    while (s_sweep_n < SWEEP_MAX && fgets(line, sizeof(line), f) != NULL) {
+        char name[16];
+        int st = 0;
+        int got = sscanf(line, "%15s %d", name, &st);
+        if (got < 1 || name[0] == '#') {
+            continue;
+        }
+        snprintf(maps[s_sweep_n], sizeof(maps[0]), "%s", name);
+        story[s_sweep_n] = (u8)(got == 2 && st >= 0 && st <= 255 ? st : 0);
+        s_sweep_n++;
+    }
+    fclose(f);
+    mkdir("sweep", 0777);
+    PLOG_I("sweep: %d maps, %d frames each", s_sweep_n, s_sweep_frames);
+    s_sweep_state = s_sweep_n > 0 ? 1 : 0;
+}
+
+static void sweep_frame(void) {
+    if (s_sweep_state < 0) {
+        sweep_read();
+    }
+    if (s_sweep_state <= 0 || gp == NULL) {
+        return;
+    }
+    int seq = seqGetSeq();
+    if (s_sweep_state == 1) { /* start the next map */
+        if (s_sweep_i >= s_sweep_n) {
+            PLOG_I("sweep: done");
+            s_sweep_state = 0;
+            return;
+        }
+        if (seq == SEQ_TITLE || (s_sweep_i == 0 && seq == SEQ_GAME)) {
+            warp_new_game(s_sweep_story[s_sweep_i], plat_switch_int("party", 1));
+        } else if (seq == SEQ_GAME) {
+            swByteSet(0, s_sweep_story[s_sweep_i]);
+        } else {
+            return; /* the logos, a map change in progress */
+        }
+        PLOG_I("sweep: %s (story %d)", s_sweep_maps[s_sweep_i], s_sweep_story[s_sweep_i]);
+        seqSetSeq(SEQ_MAP_CHANGE, s_sweep_maps[s_sweep_i], NULL);
+        s_sweep_state = 2;
+        s_sweep_wait = 0;
+        return;
+    }
+    s_sweep_wait++;
+    const char* map = s_sweep_maps[s_sweep_i];
+    if (s_sweep_state == 2) { /* waiting for the map */
+        if (seq == SEQ_GAME && strcmp(gp->currentMapName, map) == 0) {
+            s_sweep_state = 3;
+            s_sweep_wait = 0;
+        } else if (s_sweep_wait > 1800) {
+            PLOG_W("sweep: %s timeout (sequence %d, map %s)", map, seq, gp->currentMapName);
+            s_sweep_state = 4;
+        }
+        return;
+    }
+    if (s_sweep_state == 3 && s_sweep_wait == s_sweep_frames) {
+        char path[48];
+        snprintf(path, sizeof(path), "sweep/%s.ppm", map);
+        plat_gpu_shot(path);
+        PLOG_I("sweep: %s ok (sequence %d, map %s)", map, seq, gp->currentMapName);
+        s_sweep_state = 4;
+    }
+    if (s_sweep_state == 4) { /* leave for the next map from the field */
+        if (seq == SEQ_GAME) {
+            s_sweep_i++;
+            s_sweep_state = 1;
+        } else if (s_sweep_wait > s_sweep_frames + 1800) {
+            PLOG_W("sweep: stopped after %s (sequence %d)", map, seq);
+            s_sweep_state = 0;
+        }
+    }
+}
+
 void port_debug_frame(u32 frame);
 
 static void frame_hooks(void) {
@@ -160,6 +261,7 @@ static void frame_hooks(void) {
         warp_to(map, bero);
     }
     warp_switch();
+    sweep_frame();
     PlatHudStats st;
     memset(&st, 0, sizeof(st));
     PlatGpuStats g;

@@ -575,7 +575,9 @@ static void copy_to_texture(u16 x, u16 y, u16 w, u16 h, u32 handle, u32 dst_w, u
 
 static void take_shot(void);
 static u32 s_shot_due;
-static void capture_efb(const Record* r);
+static void capture_efb(const Record* r, const char* path);
+static char s_named_path[48];
+static int s_named_shot; /* plat_gpu_shot: the next presented frame goes to s_named_path */
 
 /* The top screen's render target, linked to the framebuffer: citro3d
  * transfers it and swaps at C3D_FrameEnd. */
@@ -702,8 +704,15 @@ static void render_record(Record* r) {
     if (r->present && s_shots_every) {
         take_shot();
         if (s_shot_due) {
-            capture_efb(r); /* its GPU copy waits for the frame's commands */
+            char path[48];
+            snprintf(path, sizeof(path), "shots/%05lu.ppm", (unsigned long)s_shot_due);
+            s_shot_due = 0;
+            capture_efb(r, path); /* its GPU copy waits for the frame's commands */
         }
+    }
+    if (r->present && __atomic_load_n(&s_named_shot, __ATOMIC_ACQUIRE)) {
+        capture_efb(r, s_named_path);
+        __atomic_store_n(&s_named_shot, 0, __ATOMIC_RELEASE);
     }
 }
 
@@ -746,11 +755,16 @@ static void take_shot(void) {
     s_shot_due = frame;
 }
 
-/* The EFB (608x480, as the game drew it) to shots/NNNNN.ppm. */
-static void capture_efb(const Record* r) {
-    char path[48];
-    snprintf(path, sizeof(path), "shots/%05lu.ppm", (unsigned long)s_shot_due);
-    s_shot_due = 0;
+void plat_gpu_shot(const char* path) {
+    if (__atomic_load_n(&s_named_shot, __ATOMIC_ACQUIRE)) {
+        return; /* the last one is not taken yet */
+    }
+    snprintf(s_named_path, sizeof(s_named_path), "%s", path);
+    __atomic_store_n(&s_named_shot, 1, __ATOMIC_RELEASE);
+}
+
+/* The EFB (608x480, as the game drew it) to a PPM file. */
+static void capture_efb(const Record* r, const char* path) {
     FILE* f = fopen(path, "wb");
     if (f == NULL) {
         return;

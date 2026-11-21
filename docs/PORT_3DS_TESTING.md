@@ -84,11 +84,22 @@ Switches the game reads (space-separated words in `--switches`):
 | `padscript=<steps>` | Scripted input: comma-separated `KEYS*frames` steps (`a*3`, `wait*40`, `start*3`, `a+b*2`). Frames are game frames (one per VIWaitForRetrace). Keys: `a b x y l r zl zr start select up down left right`; `cl cr cu cd` push the circle pad (the game's control stick) fully left, right, up or down. TTYD's menus and dialogs move with the stick, not the D-pad, so use `cu`/`cd` there. Up to 2048 steps |
 | `shots=N` | Saves every Nth frame's EFB (608x480, as the game drew it) to `sdmc:/3ds/ttyd/shots/NNNNN.ppm` and logs that frame's draw counts. `shotmax=N` limits the number (default 200). In Azahar about one shot in seven comes out all black although its frame drew normally (the log line shows the frame's draws); take shots a few frames apart rather than relying on one |
 | `gxdump=N` | Logs every draw of frame N: primitive, texture, first vertex in clip space, its matrix, TEV and blend state, and the code that began it (resolve with `addr2line -e build/3ds/game/ttyd.elf`). Runs of draws with the same matrix and texture are one line. EFB copies are logged too |
+| `sweep=N` | Visits each map listed in `sdmc:/3ds/ttyd/sweep.txt` (`<map> [<story>]` per line), N game frames each, saving `sweep/<map>.ppm` and logging `sweep: <map> ok`. Used by `tools/port3ds/map_sweep.py` |
 | `evtdump=N` | Logs the running event scripts at frame N, with the messages their windows show |
 | `gputest` | Draws the orientation pattern at boot: red top left, green top right, blue bottom left of a grey screen |
 | `loglevel=3` | Debug lines in the log (each converted disc file, primitives closed without `GXEnd`) |
 
 Sound needs `sdmc:/3ds/dspfirm.cdc` (dumped from a console with DSP1). Without it the game runs silently with the same sound timing.
+
+### Map sweep
+
+```sh
+tools/port3ds/map_sweep.py --story 30 --frames 180        # every map on the disc
+tools/port3ds/map_sweep.py --area tik --story 30          # one area
+tools/port3ds/map_sweep.py --maps gor_01,hei_00
+```
+
+It writes the map list to the SD card, runs the game with `sweep=N`, and reads the log. A run that ends early (a crash, a stall, a battle a map starts on entry) is followed by one that resumes after the map being visited. Results are in `build/map-sweep/`: `results.json` (each map `ok`, `timeout`, `stopped`, `crash` or `stall`), `shots/<map>.png`, and for a crash or stall the whole game log in `logs/<map>.txt`. Maps are entered without an entrance, so Mario starts where the map's default position puts him (often below the ground, from where the game's fall recovery lifts him).
 
 ## Running the GameCube game in Dolphin
 
@@ -145,5 +156,5 @@ Results in Azahar (2026-11-21, CIA):
 |---|---|
 | `tools/port3ds/memcompare.py`: the same structures read from Dolphin, paper-cut and Azahar and compared field by field. GameCube and 3DS layouts come from the 3DS ELF's debug info (the two layouts are identical apart from byte order); paper-cut values come from its own debug info | 1 |
 | `tools/port3ds/golden.py` | 4 |
-| Map and story sweeps | 6–7 |
+| Story sweeps | 6–7 |
 | Hardware push and log fetch (`N3DS_IP`) | 8 |

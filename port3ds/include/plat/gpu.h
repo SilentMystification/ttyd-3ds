@@ -144,6 +144,9 @@ typedef struct {
 } PlatGpuStats;
 void plat_gpu_stats(PlatGpuStats* out);
 
+/* The next presented frame's EFB to `path` (a PPM file, relative to sdmc:/3ds/ttyd/); ignored while one is pending. */
+void plat_gpu_shot(const char* path);
+
 #ifdef __cplusplus
 }
 #endif

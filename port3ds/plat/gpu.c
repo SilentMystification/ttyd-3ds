@@ -74,6 +74,9 @@ static shaderProgram_s s_prog;
 static int s_uloc_rot0, s_uloc_rot1;
 static C3D_AttrInfo s_attr;
 static TexSlot s_tex[MAX_TEX];
+/* Bound to texture units the draw does not use: citro3d's C3D_TexBind
+ * cannot take NULL (it reads the texture's type). 8x8 opaque white. */
+static C3D_Tex s_blank_tex;
 static LightLock s_tex_lock;
 static u32 s_frame_counter;
 static PlatGpuState s_last_state;
@@ -283,6 +286,8 @@ void plat_gpu_stats(PlatGpuStats* out) { *out = s_stats; }
 
 static u32 tex_alloc_slot(void) {
     LightLock_Lock(&s_tex_lock);
+    /* Release every texture whose last use has left the GPU first, so its
+     * memory (VRAM for copy targets) is back before the new one is made. */
     for (u32 i = 1; i < MAX_TEX; i++) {
         TexSlot* t = &s_tex[i];
         if (t->pending_free && s_frame_counter >= t->free_after_frame) {
@@ -292,6 +297,9 @@ static u32 tex_alloc_slot(void) {
             C3D_TexDelete(&t->tex);
             memset(t, 0, sizeof(*t));
         }
+    }
+    for (u32 i = 1; i < MAX_TEX; i++) {
+        TexSlot* t = &s_tex[i];
         if (!t->live && !t->pending_free) {
             t->live = 1;
             LightLock_Unlock(&s_tex_lock);
@@ -326,7 +334,10 @@ uint32_t plat_gpu_tex_create_target(uint32_t width, uint32_t height, uint32_t fm
         return 0;
     }
     TexSlot* t = &s_tex[h];
-    if (!C3D_TexInitVRAM(&t->tex, (u16)width, (u16)height, (GPU_TEXCOLOR)fmt)) {
+    /* VRAM when it has room (the EFB and its depth buffer take 4 of its
+     * 6 MB), otherwise linear FCRAM, which the GPU also renders to. */
+    if (!C3D_TexInitVRAM(&t->tex, (u16)width, (u16)height, (GPU_TEXCOLOR)fmt) &&
+        !C3D_TexInit(&t->tex, (u16)width, (u16)height, (GPU_TEXCOLOR)fmt)) {
         t->live = 0;
         return 0;
     }
@@ -398,7 +409,7 @@ static void apply_state(const PlatGpuState* st) {
     for (int u = 0; u < 3; u++) {
         const PlatGpuTexUnit* tu = &st->tex[u];
         if (tu->handle == 0 || tu->handle >= MAX_TEX || !s_tex[tu->handle].tex.data) {
-            C3D_TexBind(u, NULL);
+            C3D_TexBind(u, &s_blank_tex);
             continue;
         }
         C3D_Tex* t = &s_tex[tu->handle].tex;
@@ -422,7 +433,7 @@ static void apply_state(const PlatGpuState* st) {
     C3D_CullFace(GPU_CULL_NONE);
     /* window depth = far + (z/w) * (far - near), z/w in [-1, 0] as on GX */
     float zrange = st->depth_far - st->depth_near;
-    C3D_DepthMap(true, -zrange, st->depth_far);
+    C3D_DepthMap(true, zrange, st->depth_far); /* PICA: depth = scale * z/w + offset */
     C3D_FogGasMode(st->fog_enable ? GPU_FOG : GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
     if (st->fog_enable) {
         C3D_FogColor(st->fog_color);
@@ -519,42 +530,76 @@ static void copy_to_texture(u16 x, u16 y, u16 w, u16 h, u32 handle, u32 dst_w, u
         float ex = cx[i], ey = cy[i]; /* in the copied rect, 0..1 */
         float ttx, tty, dummy0, dummy1;
         efb_to_target_rect(x + ex * w, y + ey * h, 0, 0, &ttx, &tty, &dummy0, &dummy1);
-        float u = ttx / s_efb_tex.width, v = tty / s_efb_tex.height;
+        float u = ttx / s_efb_tex.width, v = tty / s_efb_tex.height; /* viewport pixel -> texel (see present) */
         (void)u0;
         (void)u1;
         (void)v0;
         (void)v1;
-        /* destination: texture rows run upward (t = 0 at the last row) */
+        /* destination: GX t = 0 is the texture's last memory row, which is
+         * viewport y = 0 (clip y = -1); the image fills the first dst_h
+         * viewport rows */
         float px = -1.0f + 2.0f * ex * fx;
-        float py = 1.0f - 2.0f * ey * fy;
+        float py = -1.0f + 2.0f * ey * fy;
         C3D_ImmSendAttrib(px, py, -0.5f, 1.0f);
         C3D_ImmSendAttrib(255, 255, 255, 255);
-        C3D_ImmSendAttrib(u, 1.0f - v, 0, 1);
+        C3D_ImmSendAttrib(u, v, 0, 1);
         C3D_ImmSendAttrib(0, 0, 0, 1);
         C3D_ImmSendAttrib(0, 0, 0, 1);
     }
     C3D_ImmDrawEnd();
     rot_uniforms();
     C3D_FrameDrawOn(s_efb);
-    memset(&s_last_state, 0xFF, sizeof(s_last_state)); /* force a full state for the next draw */
 }
 
 static void take_shot(void);
-static u8* s_present_buf;
 
+/* The top screen's render target, linked to the framebuffer: citro3d
+ * transfers it and swaps at C3D_FrameEnd. */
+static C3D_RenderTarget* s_screen;
+
+/* Present: the shown part of the EFB target (480x800, rotated as the
+ * screen) drawn into the 240x400 screen target as one textured quad. The
+ * bilinear sample at each screen pixel's centre falls on the corner shared
+ * by its four EFB pixels, so the halving averages them. (A display
+ * transfer of the EFB into a linear buffer followed by a TextureCopy into
+ * the framebuffer came out with only its first quarter in Azahar.) */
 static void present(void) {
-    /* 512x800 of the rotated EFB, halved, into a linear 256x400 RGB8 buffer */
-    C3D_SyncDisplayTransfer((u32*)s_efb->frameBuf.colorBuf, GX_BUFFER_DIM(TARGET_W, REGION_H), (u32*)s_present_buf,
-                            GX_BUFFER_DIM(TARGET_W / 2, REGION_H / 2),
-                            GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
-                                GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-                                GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
-                                GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_XY));
-    /* rows of 240 of the 256 pixels into the framebuffer (units of 16 bytes) */
-    u8* fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
-    C3D_SyncTextureCopy((u32*)s_present_buf, GX_BUFFER_DIM((240 * 3) >> 4, (16 * 3) >> 4), (u32*)fb,
-                        GX_BUFFER_DIM((240 * 3) >> 4, 0), 240 * 3 * 400, 8);
-    gfxScreenSwapBuffers(GFX_TOP, false);
+    C3D_FrameDrawOn(s_screen);
+    C3D_TexEnv* env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    for (int i = 1; i < 6; i++) {
+        C3D_TexEnvInit(C3D_GetTexEnv(i));
+    }
+    C3D_TexSetFilter(&s_efb_tex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexBind(0, &s_efb_tex);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+    C3D_SetViewport(0, 0, 240, 400);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_rot0, 1, 0, 0, 0);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_rot1, 0, 1, 0, 0);
+    /* Viewport y counts up from the last memory row (as GL's), and texel
+     * v = 1 - row / height with row the memory row: viewport pixel (x, y)
+     * of a target is texel (x / width, y / height). The screen target's
+     * viewport y runs right to left on the display, the EFB's left to
+     * right (efb_to_target_rect), so screen viewport pixel (sx, sy) shows
+     * EFB viewport pixel (2 sx, REGION_H - 2 sy). Checked with gputest. */
+    const float u1 = (float)REGION_W / TARGET_W, v1 = (float)REGION_H / TARGET_H;
+    const float c[4][4] = {{-1, -1, 0, v1}, {1, -1, u1, v1}, {-1, 1, 0, 0}, {1, 1, u1, 0}};
+    C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
+    for (int i = 0; i < 4; i++) {
+        C3D_ImmSendAttrib(c[i][0], c[i][1], -0.5f, 1.0f);
+        C3D_ImmSendAttrib(255, 255, 255, 255);
+        C3D_ImmSendAttrib(c[i][2], c[i][3], 0, 1);
+        C3D_ImmSendAttrib(0, 0, 0, 1);
+        C3D_ImmSendAttrib(0, 0, 0, 1);
+    }
+    C3D_ImmDrawEnd();
+    rot_uniforms();
 }
 
 static void render_record(Record* r) {
@@ -564,21 +609,27 @@ static void render_record(Record* r) {
     C3D_BindProgram(&s_prog);
     C3D_SetAttrInfo(&s_attr);
     rot_uniforms();
-    C3D_BufInfo* bi = C3D_GetBufInfo();
-    BufInfo_Init(bi);
-    BufInfo_Add(bi, r->verts, sizeof(PlatGpuVertex), 5, 0x43210);
+    static C3D_BufInfo bi;
+    BufInfo_Init(&bi);
+    BufInfo_Add(&bi, r->verts, sizeof(PlatGpuVertex), 5, 0x43210);
+    C3D_SetBufInfo(&bi);
     GSPGPU_FlushDataCache(r->verts, r->nverts * sizeof(PlatGpuVertex));
     u8* p = r->data;
     u8* end = r->data + r->used;
-    int state_ok = 0;
+    /* A clear or a copy draws with its own state (immediate mode, which
+     * also replaces the vertex buffer setup): the next draw puts the last
+     * GX state and the frame's vertex buffer back. */
+    const PlatGpuState* cur_state = NULL;
+    int restore = 0;
     while (p < end) {
         CmdHead* h = (CmdHead*)p;
         u8* body = p + sizeof(CmdHead);
         p = body + h->size;
         switch (h->type) {
         case CMD_STATE:
-            apply_state((const PlatGpuState*)body);
-            state_ok = 1;
+            cur_state = (const PlatGpuState*)body;
+            apply_state(cur_state);
+            restore = 0;
             break;
         case CMD_FOG: {
             static C3D_FogLut lut;
@@ -588,7 +639,11 @@ static void render_record(Record* r) {
         }
         case CMD_DRAW: {
             const u32* d = (const u32*)body;
-            if (state_ok && d[1] >= 3) {
+            if (cur_state != NULL && d[1] >= 3) {
+                if (restore) {
+                    apply_state(cur_state);
+                    restore = 0;
+                }
                 C3D_DrawArrays(GPU_TRIANGLES, (int)d[0], (int)(d[1] - d[1] % 3));
             }
             break;
@@ -597,23 +652,27 @@ static void render_record(Record* r) {
             const u32* d = (const u32*)body;
             draw_rect_quad(r, (u16)d[0], (u16)(d[0] >> 16), (u16)d[1], (u16)(d[1] >> 16), d[2], d[3] & 0xFFFFFF,
                            (d[3] >> 24) & 1, (d[3] >> 25) & 1);
-            state_ok = 0;
+            C3D_SetAttrInfo(&s_attr);
+            C3D_SetBufInfo(&bi);
+            restore = 1;
             break;
         }
         case CMD_COPY: {
             const u32* d = (const u32*)body;
             copy_to_texture((u16)d[0], (u16)(d[0] >> 16), (u16)d[1], (u16)(d[1] >> 16), d[3], d[4] & 0xFFFF,
                             d[4] >> 16);
-            state_ok = 0;
+            C3D_SetAttrInfo(&s_attr);
+            C3D_SetBufInfo(&bi);
+            restore = 1;
             break;
         }
         default: break;
         }
     }
-    C3D_FrameEnd(0);
     if (r->present) {
         present();
     }
+    C3D_FrameEnd(0);
     s_stats.render_us = (u32)((svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000000u));
     s_stats.gpu_us = (u32)(C3D_GetDrawingTime() * 1000.0f);
     if (r->present && s_shots_every) {
@@ -638,7 +697,7 @@ uint32_t plat_gpu_peek_argb(uint16_t x, uint16_t y) {
     plat_gpu_sync();
     float tx, ty, tw, th;
     efb_to_target_rect(x, y, 1, 1, &tx, &ty, &tw, &th);
-    u32 px = (u32)tx, py = (u32)ty;
+    u32 px = (u32)tx, py = TARGET_H - 1 - (u32)ty; /* viewport y counts up from the last memory row */
     const u32* buf = (const u32*)s_efb->frameBuf.colorBuf;
     u32 idx = ((py >> 3) * (TARGET_W >> 3) + (px >> 3)) * 64 + ((px & 1) | ((py & 1) << 1) | ((px & 2) << 1) |
                                                                   ((py & 2) << 2) | ((px & 4) << 2) | ((py & 4) << 3));
@@ -676,7 +735,8 @@ static void take_shot(void) {
         fwrite(row, 1, sizeof(row), f);
     }
     fclose(f);
-    PLOG_I("shot %s", path);
+    PLOG_I("shot %s: %lu draws, %lu vertices, %lu states, %lu record bytes", path, (unsigned long)s_stats.draws,
+           (unsigned long)s_stats.vertices, (unsigned long)s_stats.state_changes, (unsigned long)s_stats.record_bytes);
 }
 
 /* ---- Self-test (switch gputest): orientation pattern ---- */
@@ -749,10 +809,20 @@ void plat_gpu_init(void) {
         plat_fatal("gpu: no VRAM for the %dx%d EFB", TARGET_W, TARGET_H);
     }
     C3D_RenderTargetClear(s_efb, C3D_CLEAR_ALL, 0x000000FF, 0);
-    s_present_buf = linearAlloc((TARGET_W / 2) * (REGION_H / 2) * 3);
-    if (s_present_buf == NULL) {
-        plat_fatal("gpu: no memory for the present buffer");
+    if (!C3D_TexInit(&s_blank_tex, 8, 8, GPU_RGBA8)) {
+        plat_fatal("gpu: no memory for the blank texture");
     }
+    memset(s_blank_tex.data, 0xFF, s_blank_tex.size);
+    C3D_TexFlush(&s_blank_tex);
+    s_screen = C3D_RenderTargetCreate(240, 400, GPU_RB_RGB8, -1);
+    if (s_screen == NULL) {
+        plat_fatal("gpu: no VRAM for the screen target");
+    }
+    C3D_RenderTargetSetOutput(s_screen, GFX_TOP, GFX_LEFT,
+                              GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                                  GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB8) |
+                                  GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
+                                  GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
     /* the EFB's color buffer viewed as a texture, for EFB copies */
     memset(&s_efb_tex, 0, sizeof(s_efb_tex));
     s_efb_tex.data = s_efb->frameBuf.colorBuf;

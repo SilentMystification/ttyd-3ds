@@ -1,6 +1,9 @@
 // Map driver: loads map.dat (joints, materials, animations), builds the display lists, and animates,
 // culls and draws the map objects.
 #ifdef TARGET_PORT
+#ifdef TARGET_PORT
+#include "port_formats.h"
+#endif
 #include "port_disc_data.h"
 #include "port_addr.h"
 #endif
@@ -956,6 +959,9 @@ static void _mapLoad(MapWork* wp, BOOL group, const char* map) {
         DVDMgrRead(dvd, wp->entries[group].dat, OSRoundUp32B(wp->entries[group].datSize), 0);
         DVDMgrClose(dvd);
     }
+#ifdef TARGET_PORT
+    portMapSwap(wp->entries[group].dat, wp->entries[group].datSize, map); // big-endian on the disc
+#endif
 
     sprintf(str1, MAP_PATH_TPL, map);
     wp->entries[group].tpl = NULL;

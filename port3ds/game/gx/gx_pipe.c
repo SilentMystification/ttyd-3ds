@@ -426,12 +426,40 @@ static void encode_vertex(Reader* r, u8 fmt) {
 
 static void run_pending_raw(void);
 
-void GXBegin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts) {
-    run_pending_raw();
-    if (s_in_begin) {
-        plat_fatal("GXBegin inside GXBegin");
+/* A primitive the game never closed with GXEnd. On the GameCube GXEnd
+ * writes nothing (it is only a debug check), so retail code that leaves it
+ * out still draws: the GPU takes the vertex count from GXBegin. Here the
+ * vertices are decoded at GXEnd, so the next GX call closes the primitive
+ * first. The decomp has no GXEnd calls where MWCC inlined the empty
+ * function away, so this is the normal case. Logged once per caller
+ * (debug level). */
+int gx_prim_open;
+
+void gx_end_open_primitive(const void* caller) {
+    static const void* s_seen[16];
+    int known = 0;
+    for (int i = 0; i < 16 && s_seen[i] != NULL; i++) {
+        known |= s_seen[i] == caller;
     }
+    if (!known) {
+        for (int i = 0; i < 16; i++) {
+            if (s_seen[i] == NULL) {
+                s_seen[i] = caller;
+                break;
+            }
+        }
+        PLOG_D("GX: a primitive closed without GXEnd (next GX call from %p)", caller);
+    }
+    GXEnd();
+}
+
+void GXBegin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts) {
+    if (s_in_begin) {
+        gx_end_open_primitive(__builtin_return_address(0));
+    }
+    run_pending_raw();
     s_in_begin = 1;
+    gx_prim_open = 1;
     s_prim = (u8)type;
     s_fmt = (u8)vtxfmt;
     s_nverts = nverts;
@@ -466,6 +494,7 @@ void GXEnd(void) {
         plat_fatal("GXEnd without GXBegin");
     }
     s_in_begin = 0;
+    gx_prim_open = 0;
     Reader r = {s_pipe, NULL, NULL};
     if (gx_dl_recording()) {
         put_u8((u32)s_prim | s_fmt);
@@ -562,6 +591,9 @@ void gx_pipe_reset(void) {
 }
 
 void GXCallDisplayList(void* list, u32 nbytes) {
+    if (gx_prim_open) {
+        gx_end_open_primitive(__builtin_return_address(0));
+    }
     run_pending_raw();
     if (gx_dl_recording()) {
         plat_fatal("GXCallDisplayList inside a display list being recorded");

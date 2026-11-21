@@ -143,6 +143,32 @@ file(WRITE "${TTYD_GEN_DIR}/port3ds_build.h.tmp"
 configure_file("${TTYD_GEN_DIR}/port3ds_build.h.tmp" "${TTYD_GEN_DIR}/port3ds_build.h" COPYONLY)
 add_custom_target(ttyd_rels DEPENDS ${TTYD_REL_OBJECTS})
 
+# Byte-swap tables for the disc formats (port3ds/game/formats/), from the
+# port's own debug info: a probe object names each format's structs, and
+# tools/port3ds/gen_swap.py reads their layouts from its DWARF.
+execute_process(COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/gen_swap.py" probe
+    --out "${TTYD_GEN_DIR}/swap_probe.c.tmp" RESULT_VARIABLE _gen_rc)
+if(NOT _gen_rc EQUAL 0)
+    message(FATAL_ERROR "gen_swap.py probe failed")
+endif()
+configure_file("${TTYD_GEN_DIR}/swap_probe.c.tmp" "${TTYD_GEN_DIR}/swap_probe.c" COPYONLY)
+ttyd_game_objects(ttyd_swap_probe "${TTYD_GEN_DIR}/swap_probe.c")
+target_compile_options(ttyd_swap_probe PRIVATE -O0 -gdwarf-4 -fno-eliminate-unused-debug-types)
+if(CMAKE_READELF)
+    set(TTYD_READELF "${CMAKE_READELF}")
+else()
+    string(REGEX REPLACE "objcopy([^/]*)$" "readelf\\1" TTYD_READELF "${CMAKE_OBJCOPY}")
+endif()
+add_custom_command(
+    OUTPUT "${TTYD_GEN_DIR}/port_swap_gen.c" "${TTYD_GEN_DIR}/port_swap_gen.h"
+    COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/gen_swap.py" tables
+            --readelf "${TTYD_READELF}" --obj $<TARGET_OBJECTS:ttyd_swap_probe>
+            --out-c "${TTYD_GEN_DIR}/port_swap_gen.c" --out-h "${TTYD_GEN_DIR}/port_swap_gen.h"
+    DEPENDS ttyd_swap_probe $<TARGET_OBJECTS:ttyd_swap_probe> "${TTYD_REPO_DIR}/tools/port3ds/gen_swap.py"
+    COMMAND_EXPAND_LISTS
+    VERBATIM
+    COMMENT "Generating the disc formats' byte-swap tables")
+
 # The port, in two halves with different enum ABIs (see docs/PORT_3DS_PLAN.md):
 #   port3ds/game/  the SDK replacement the game calls (OS, DVD, CARD, PAD, VI,
 #                  GX front end, MTX, MusyX hardware front end). Built like
@@ -171,7 +197,8 @@ set(TTYD_SDK_SOURCES
     "${TTYD_REPO_DIR}/libs/dolsdk2004/src/pad/Padclamp.c"
     "${TTYD_REPO_DIR}/libs/dolsdk2004/src/gx/GXDraw.c")
 add_library(ttyd_port_game OBJECT ${TTYD_PORT_GAME_SOURCES} ${TTYD_SDK_SOURCES}
-    "${TTYD_GEN_DIR}/rel_table.c" "${TTYD_GEN_DIR}/mtx_sdk.c")
+    "${TTYD_GEN_DIR}/rel_table.c" "${TTYD_GEN_DIR}/mtx_sdk.c"
+    "${TTYD_GEN_DIR}/port_swap_gen.c" "${TTYD_GEN_DIR}/port_swap_gen.h")
 set_source_files_properties(${TTYD_SDK_SOURCES} "${TTYD_GEN_DIR}/mtx_sdk.c" TARGET_DIRECTORY ttyd_port_game
     PROPERTIES COMPILE_OPTIONS "-w")
 # GXDraw.c has a global named index, which newlib declares as a function

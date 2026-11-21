@@ -16,12 +16,24 @@ static inline int arcToLower(int c) {
     return (c == -1) ? -1 : (int)__lower_map[c & 0xFF];
 }
 
-#define entryIsDir(i) (((FstStart[i].entryInfo & 0xff000000) == 0) ? FALSE : TRUE)
-#define stringOff(i) (FstStart[i].entryInfo & ~0xff000000)
-#define parentDir(i) (FstStart[i].entryOffsetOrParent)
-#define nextDir(i) (FstStart[i].entrySizeOrNext)
-#define filePosition(i) (FstStart[i].entryOffsetOrParent)
-#define fileLength(i) (FstStart[i].entrySizeOrNext)
+#ifdef TARGET_PORT
+// Ports: the archive stays big-endian in memory (its member files are converted by their own loaders when opened),
+// so the header and FST words are read swapped. As paper-cut's PC port.
+static inline u32 arcBE32(const void* p) {
+    const u8* b = (const u8*)p;
+    return (u32)b[0] << 24 | (u32)b[1] << 16 | (u32)b[2] << 8 | b[3];
+}
+#define ARC_WORD(x) ((u32)arcBE32(&(x)))
+#else
+#define ARC_WORD(x) (x)
+#endif
+
+#define entryIsDir(i) (((ARC_WORD(FstStart[i].entryInfo) & 0xff000000) == 0) ? FALSE : TRUE)
+#define stringOff(i) (ARC_WORD(FstStart[i].entryInfo) & ~0xff000000)
+#define parentDir(i) (ARC_WORD(FstStart[i].entryOffsetOrParent))
+#define nextDir(i) (ARC_WORD(FstStart[i].entrySizeOrNext))
+#define filePosition(i) (ARC_WORD(FstStart[i].entryOffsetOrParent))
+#define fileLength(i) (ARC_WORD(FstStart[i].entrySizeOrNext))
 
 BOOL ARCGetCurrentDir(ARCHandle* handle, char* path, u32 maxlen);
 
@@ -37,16 +49,16 @@ BOOL ARCInitHandle(void* arcStart, ARCHandle* handle) {
     ARCHeader* header;
 
     header = (ARCHeader*)arcStart;
-    if (header->magic != 0x55AA382D) {
+    if (ARC_WORD(header->magic) != 0x55AA382D) {
         OSPanic(__FILE__, 70, "ARCInitHandle: bad archive format\0\0");
     }
     handle->archiveStartAddr = arcStart;
-    entry = (FSTEntry*)((u32)arcStart + header->fstStart);
+    entry = (FSTEntry*)((u32)arcStart + ARC_WORD(header->fstStart));
     handle->FSTStart = (void*)entry;                                // relative->absolute
-    handle->fileStart = (void*)((u32)arcStart + header->fileStart); // relative->absolute
-    handle->entryNum = entry->entrySizeOrNext;                      // entry 0 size is entry count
+    handle->fileStart = (void*)((u32)arcStart + ARC_WORD(header->fileStart)); // relative->absolute
+    handle->entryNum = ARC_WORD(entry->entrySizeOrNext);                      // entry 0 size is entry count
     handle->FSTStringStart = (char*)&entry[handle->entryNum];
-    handle->FSTLength = header->fstSize;
+    handle->FSTLength = ARC_WORD(header->fstSize);
     handle->currDir = 0;
     return TRUE;
 }

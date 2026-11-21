@@ -117,18 +117,22 @@ void GXInitTexPreLoadRegion(GXTexRegion* region, u32 tmem_even, u32 size_even, u
 /* Preloading into TMEM only changes where the GameCube keeps the texels;
  * the port converts from main memory either way. */
 void GXPreLoadEntireTexture(GXTexObj* tex_obj, GXTexRegion* region) {
+    GX_CLOSE_PRIMITIVE();
     (void)tex_obj;
     (void)region;
 }
 
 void GXLoadTexObjPreLoaded(GXTexObj* obj, GXTexRegion* region, GXTexMapID id) {
+    GX_CLOSE_PRIMITIVE();
     (void)region;
     GXLoadTexObj(obj, id);
 }
 
 /* TMEM cache invalidation: the converted textures are re-validated by hash
  * once per frame, which covers what an invalidation is for. */
-void GXInvalidateTexAll(void) {}
+void GXInvalidateTexAll(void) {
+    GX_CLOSE_PRIMITIVE();
+}
 void GXTexModeSync(void) {}
 
 /* Bytes a texture takes in main memory (the SDK's GXGetTexBufferSize). */

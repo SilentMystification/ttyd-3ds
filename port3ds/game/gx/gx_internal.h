@@ -219,4 +219,14 @@ void gx_tev_compile(PlatGpuState* st);
 /* ---- dl encoding helpers (gx_state.c) ---- */
 void gx_dl_replay_port_op(const u8** p, const u8* end);
 
+/* gx_pipe.c: a GXBegin not yet closed by GXEnd (see gx_end_open_primitive). */
+extern int gx_prim_open;
+void gx_end_open_primitive(const void* caller);
+#define GX_CLOSE_PRIMITIVE()                                     \
+    do {                                                         \
+        if (gx_prim_open) {                                      \
+            gx_end_open_primitive(__builtin_return_address(0)); \
+        }                                                        \
+    } while (0)
+
 #endif

@@ -360,6 +360,165 @@ static int plan(Half* out, Opnd a, Opnd b, Opnd cc, Opnd d, u8 op, u8 bias, u8 s
     return n;
 }
 
+/* ---- Constants: one per PICA stage ----
+ * A PICA stage has one constant color (shared by its rgb and alpha halves,
+ * rgb taking .rgb and alpha .a), a GX stage up to four. A half that needs
+ * two different constants is folded (constant-only arithmetic) or split in
+ * two halves, each with one constant. */
+
+static u8 kval(const Opnd* o, int is_alpha, int i) { return is_alpha ? o->val[3] : o->val[i]; }
+
+static int same_const(const Opnd* x, const Opnd* y, int is_alpha) {
+    for (int i = 0; i < (is_alpha ? 1 : 3); i++) {
+        if (kval(x, is_alpha, i) != kval(y, is_alpha, i)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int nsrc(u8 func) {
+    switch (func) {
+    case F_REPLACE: return 1;
+    case F_INTERPOLATE:
+    case F_MULT_ADD: return 3;
+    default: return 2;
+    }
+}
+
+/* A constant computed from two: f(x, y) per channel. */
+static Opnd kfold(const Opnd* x, const Opnd* y, int op) {
+    Opnd r = k_const(0, 0, 0, 0);
+    for (int i = 0; i < 4; i++) {
+        int a = x->val[i], b = y ? y->val[i] : 0, v;
+        switch (op) {
+        case 0: v = a * b / 255; break;   /* product */
+        case 1: v = a + b; break;         /* sum */
+        case 2: v = a - b; break;         /* difference */
+        case 3: v = a + b - 128; break;   /* signed sum */
+        default: v = 255 - a; break;      /* 1 - x */
+        }
+        r.val[i] = clamp8(v);
+    }
+    return r;
+}
+
+/* The operand 1 - o for a non-constant operand (PICA's inverted operands
+ * are the odd ones, for color and alpha alike). */
+static Opnd inv_opnd(Opnd o) {
+    if (o.is_const) {
+        return kfold(&o, NULL, 4);
+    }
+    o.op ^= 1;
+    return o;
+}
+
+static const Opnd k_own_prev_c = {SRC_PREV, OPC_COLOR, 0, 2, {0}};
+static const Opnd k_own_prev_a = {SRC_PREV, OPA_ALPHA, 0, 2, {0}};
+
+/* Rewrites the planned halves so that none uses two different constants.
+ * Returns the new count (at most 8). */
+static int legalize(Half* h, int n, int is_alpha) {
+    Half out[8];
+    int m = 0;
+    Opnd own_prev = is_alpha ? k_own_prev_a : k_own_prev_c;
+    for (int k = 0; k < n && m < 7; k++) {
+        Half x = h[k];
+        int ns = nsrc(x.func);
+        const Opnd* first = NULL;
+        int distinct = 0;
+        for (int i = 0; i < ns; i++) {
+            if (x.s[i].is_const) {
+                if (first == NULL) {
+                    first = &x.s[i];
+                } else if (!same_const(first, &x.s[i], is_alpha)) {
+                    distinct = 1;
+                }
+            }
+        }
+        if (!distinct) {
+            out[m++] = x;
+            continue;
+        }
+        Opnd* s0 = &x.s[0];
+        Opnd* s1 = &x.s[1];
+        Opnd* s2 = &x.s[2];
+        Half a = {F_REPLACE, {{0}}, x.scale}, b = {F_REPLACE, {{0}}, x.scale};
+        int two = 0;
+        switch (x.func) {
+        case F_MODULATE: a.s[0] = kfold(s0, s1, 0); break;
+        case F_ADD: a.s[0] = kfold(s0, s1, 1); break;
+        case F_SUBTRACT: a.s[0] = kfold(s0, s1, 2); break;
+        case F_ADD_SIGNED: a.s[0] = kfold(s0, s1, 3); break;
+        case F_MULT_ADD: /* s0 * s1 + s2 */
+            if (s0->is_const && s1->is_const) {
+                Opnd p = kfold(s0, s1, 0);
+                if (s2->is_const) {
+                    a.s[0] = kfold(&p, s2, 1);
+                } else {
+                    a.func = F_ADD;
+                    a.s[0] = *s2;
+                    a.s[1] = p;
+                }
+            } else { /* one of s0/s1 is the constant, s2 another */
+                a.func = F_MODULATE;
+                a.s[0] = *s0;
+                a.s[1] = *s1;
+                a.scale = 0;
+                b.func = F_ADD;
+                b.s[0] = own_prev;
+                b.s[1] = *s2;
+                two = 1;
+            }
+            break;
+        case F_INTERPOLATE: /* s0 * s2 + s1 * (1 - s2) */
+            if (s2->is_const) {
+                Opnd inv2 = kfold(s2, NULL, 4);
+                if (s0->is_const && s1->is_const) {
+                    Opnd p = kfold(s0, s2, 0), q = kfold(s1, &inv2, 0);
+                    a.s[0] = kfold(&p, &q, 1);
+                } else if (s0->is_const) { /* K s2 + X (1 - s2) */
+                    a.func = F_MODULATE;
+                    a.s[0] = *s1;
+                    a.s[1] = inv2;
+                    a.scale = 0;
+                    b.func = F_ADD;
+                    b.s[0] = own_prev;
+                    b.s[1] = kfold(s0, s2, 0);
+                    two = 1;
+                } else { /* X s2 + K (1 - s2) */
+                    a.func = F_MODULATE;
+                    a.s[0] = *s0;
+                    a.s[1] = *s2;
+                    a.scale = 0;
+                    b.func = F_ADD;
+                    b.s[0] = own_prev;
+                    b.s[1] = kfold(s1, &inv2, 0);
+                    two = 1;
+                }
+            } else { /* K0 X + K1 (1 - X) */
+                a.func = F_MODULATE;
+                a.s[0] = *s2;
+                a.s[1] = *s0;
+                a.scale = 0;
+                b.func = F_MULT_ADD;
+                b.s[0] = *s1;
+                b.s[1] = inv_opnd(*s2);
+                b.s[2] = own_prev;
+                two = 1;
+            }
+            break;
+        default: out[m++] = x; continue;
+        }
+        out[m++] = a;
+        if (two) {
+            out[m++] = b;
+        }
+    }
+    memcpy(h, out, (size_t)m * sizeof(Half));
+    return m;
+}
+
 /* Writes one PICA stage from a color half and an alpha half; resolves
  * constants into the stage's one constant color. Returns 0 if they do not
  * fit (two different constants on one side). */
@@ -453,7 +612,7 @@ void gx_tev_compile(PlatGpuState* st) {
     }
     st->buffer_input_rgb = st->buffer_input_alpha = 0;
     for (int s = 0; s < num; s++) {
-        Half hc[4], ha[4];
+        Half hc[8], ha[8];
         Opnd a = color_arg(&c, s, gx.tev[s].c_in[0]);
         Opnd b = color_arg(&c, s, gx.tev[s].c_in[1]);
         Opnd cc = color_arg(&c, s, gx.tev[s].c_in[2]);
@@ -468,6 +627,8 @@ void gx_tev_compile(PlatGpuState* st) {
         Opnd ac = alpha_arg(&c, s, gx.tev[s].a_in[2]);
         Opnd ad = alpha_arg(&c, s, gx.tev[s].a_in[3]);
         int na = plan(ha, aa, ab, ac, ad, aop > 1 ? GX_TEV_ADD : aop, gx.tev[s].a_bias, gx.tev[s].a_scale, 1);
+        nc = legalize(hc, nc, 0);
+        na = legalize(ha, na, 1);
         int steps = nc > na ? nc : na;
         /* An operand that reads the previous GX stage's result in a later
          * step of this plan would see this plan's own first step instead:

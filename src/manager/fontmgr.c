@@ -1,5 +1,8 @@
 // Font manager: loads the font file and draws text (strings, messages with tags, centred and rotated
 // text, edges, colour effects) glyph by glyph.
+#ifdef TARGET_PORT
+#include "port_formats.h"
+#endif
 #include "manager/fontmgr.h"
 #include "version.h"
 #include "manager/dvdmgr.h"
@@ -1018,6 +1021,9 @@ void JUTFontSetup(u16 font) {
         pfh = __memAlloc(HEAP_DEFAULT, size = OSRoundUp32B(size));
         DVDMgrRead(dvd, pfh, size, 0);
         DVDMgrClose(dvd);
+#endif
+#ifdef TARGET_PORT
+        portFontSwap(pfh, OSRoundUp32B(size), "font"); // big-endian on the disc
 #endif
         ptr = (BinaryFontBlock*)(pfh + 1);
         for (i = 0; i < pfh->blockcount; i++) {

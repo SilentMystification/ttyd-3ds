@@ -11,6 +11,14 @@
 #include "version.h"
 #include <string.h>
 
+// A u16 in a map file's packed display list: the vertex count after the primitive opcode, or a position index. The
+// lists stay in the GameCube's byte order on ports (the GX layer reads them so), so collision reads them big-endian.
+#ifdef TARGET_PORT
+#define HIT_DL_U16(p) ((u16)(((const u8*)(p))[0] << 8 | ((const u8*)(p))[1]))
+#else
+#define HIT_DL_U16(p) (*(u16*)(p))
+#endif
+
 // prototypes for asm stopgap forward references
 static void hitDamageReturnSet(HitEntry* hit, HitDamageReturn* damage, BOOL recursion);
 static void hitObjGetPosSub(HitEntry* hit, Vec* position, s32* counter, BOOL recursion);
@@ -199,7 +207,7 @@ static HitEntry* _hitEnt(MapFileJoint* joint, HitEntry* parent, Mtx parentMtx, s
                 // FAKE: i (dead after the joint search) as the packed counter and j holding the list offset: their later webs become the @ temps that give the target colouring
                 for (i = 0; i < mesh->displayListCount; i++) {
                     j = mesh->displayLists.packedLists[i].offset;
-                    numVectors += *(u16*)((AddrWord)j + 1) - 2;
+                    numVectors += HIT_DL_U16((AddrWord)j + 1) - 2;
                 }
             }
         }
@@ -660,7 +668,7 @@ static s32 hitCalcVtxPosition(HitEntry* hit) {
             stride = m * 2;
             for (k = 0; k < mesh->displayListCount; k++) {
                 u8* list = (u8*)(AddrWord)mesh->displayLists.packedLists[k].offset;
-                bit = *(u16*)(list + 1) - 2; // FAKE: loop bound in the dead popcount counter (its later web becomes an @ temp); (s32) keeps the signed compare
+                bit = HIT_DL_U16(list + 1) - 2; // FAKE: loop bound in the dead popcount counter (its later web becomes an @ temp); (s32) keeps the signed compare
                 for (j = 0; j < (s32)bit; j++) {
                     u16 i0;
                     s16* base;
@@ -676,14 +684,14 @@ static s32 hitCalcVtxPosition(HitEntry* hit) {
                     v2 = &hit->vectors[count];
                     m = (AddrWord)list; // FAKE: m (the popcount counter) reused as the i1/i2/i0 address temp gives the target add list,X; lhz 3 and leaves o1 a single web (o0/o1/base colour r4/r5/r3)
                     m += stride * (j + 1);
-                    i1 = *(u16*)(m + 3);
+                    i1 = HIT_DL_U16(m + 3);
                     m = (AddrWord)list;
                     m += stride * (j + 2);
-                    i2 = *(u16*)(m + 3);
+                    i2 = HIT_DL_U16(m + 3);
                     even = !(j & 1);
                     m = (AddrWord)list;
                     m += j * stride;
-                    i0 = *(u16*)(m + 3);
+                    i0 = HIT_DL_U16(m + 3);
                     o0 = i0 * 3;
                     o1 = (u16)(even ? i2 : i1) * 3;
                     o2 = (u16)(even ? i1 : i2) * 3;

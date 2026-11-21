@@ -1,4 +1,7 @@
 // Camera roads: moves the field camera along the camera curves stored in each map's camroad file.
+#ifdef TARGET_PORT
+#include "port_formats.h"
+#endif
 #include "system.h"
 #include "driver/arcdrv.h"
 #include "driver/mapdrv.h"
@@ -88,6 +91,9 @@ s32 camRoadSetup(const char* name) {
             return 0;
         }
     }
+#ifdef TARGET_PORT
+    portCamRoadSwap(wp->map, size, name); // big-endian on the disc
+#endif
     if ((u8*)wp->map->projection < (u8*)wp->map) {
         ADDR_WORD(wp->map->projection) += (AddrWord)wp->map;
         ADDR_WORD(wp->map->curves) += (AddrWord)wp->map;

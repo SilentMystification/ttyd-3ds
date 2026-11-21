@@ -128,6 +128,9 @@ void GXReadXfRasMetric(u32* xf_wait_in, u32* xf_wait_out, u32* ras_busy, u32* cl
 /* ---- Synchronisation ---- */
 
 void GXSetDrawSync(u16 token) {
+    if (gx_prim_open) {
+        gx_end_open_primitive(__builtin_return_address(0));
+    }
     gx_pipe_reset();
     gx.draw_sync_token = token;
 }
@@ -137,15 +140,24 @@ void GXSetDrawSync(u16 token) {
 u16 GXReadDrawSync(void) { return gx.draw_sync_token; }
 
 void GXDrawDone(void) {
+    if (gx_prim_open) {
+        gx_end_open_primitive(__builtin_return_address(0));
+    }
     gx_pipe_reset();
     plat_gpu_sync();
 }
 
-void GXPixModeSync(void) { gx_pipe_reset(); }
+void GXPixModeSync(void) {
+    if (gx_prim_open) {
+        gx_end_open_primitive(__builtin_return_address(0));
+    }
+    gx_pipe_reset();
+}
 
 /* ---- Bounding box ---- */
 
 void GXClearBoundingBox(void) {
+    GX_CLOSE_PRIMITIVE();
     gx.bbox[0] = 1023;
     gx.bbox[1] = 1023;
     gx.bbox[2] = 0;
@@ -154,6 +166,7 @@ void GXClearBoundingBox(void) {
 }
 
 void GXReadBoundingBox(u16* left, u16* top, u16* right, u16* bottom) {
+    GX_CLOSE_PRIMITIVE();
     *left = gx.bbox[0];
     *top = gx.bbox[1];
     *right = gx.bbox[2];
@@ -163,6 +176,7 @@ void GXReadBoundingBox(u16* left, u16* top, u16* right, u16* bottom) {
 /* ---- Pixel peek ---- */
 
 void GXPeekARGB(u16 x, u16 y, u32* color) {
+    GX_CLOSE_PRIMITIVE();
     gx_pipe_reset();
     *color = plat_gpu_peek_argb(x, y);
 }
@@ -248,6 +262,9 @@ static u32 clear_rgba(void) {
 }
 
 void GXCopyTex(void* dest, GXBool clear) {
+    if (gx_prim_open) {
+        gx_end_open_primitive(__builtin_return_address(0));
+    }
     gx_pipe_reset();
     u16 w = gx.copy_tex_dst[0], h = gx.copy_tex_dst[1];
     if (w == 0 || h == 0 || gx.copy_src[2] == 0 || gx.copy_src[3] == 0) {
@@ -264,6 +281,9 @@ void GXCopyTex(void* dest, GXBool clear) {
 
 /* Ends the frame: the EFB goes to the screen. */
 void GXCopyDisp(void* dest, GXBool clear) {
+    if (gx_prim_open) {
+        gx_end_open_primitive(__builtin_return_address(0));
+    }
     (void)dest;
     gx_pipe_reset();
     plat_gpu_frame_end(gx.copy_src[2] ? gx.copy_src[2] : 640, gx.copy_src[3] ? gx.copy_src[3] : 480);

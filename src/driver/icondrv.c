@@ -1,5 +1,8 @@
 // Icon driver: loads icon.tpl/icon.bin and draws icons (animated or still, 2D or 3D) and icon
 // digit numbers, one set of entries for the field and one for battle.
+#ifdef TARGET_PORT
+#include "port_formats.h"
+#endif
 #include "driver/icondrv.h"
 #include "driver/camdrv.h"
 #include <dolphin/gx.h>
@@ -168,6 +171,10 @@ static void _callback_tpl(s32 error, DVDFileInfo* info) {
 
 /** DVD read callback for icon.bin (per-icon size and animation frames): closes the file and marks it ready. */
 static void _callback_bin(s32 error, DVDFileInfo* info) {
+#ifdef TARGET_PORT
+    // icon.bin is all u16 (count, offsets, entries), big-endian on the disc: swapped as it arrives.
+    portSwapU16Run(icon_bin, DVDMgrGetLength(info->cb.userData) / 2);
+#endif
     DVDMgrClose(info->cb.userData);
     icon_bin_ok = TRUE;
 }

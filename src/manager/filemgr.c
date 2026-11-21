@@ -12,6 +12,9 @@
 #include "manager/dvdmgr.h"
 #include "libc_decls.h"
 #include "addr_word.h"
+#ifdef TARGET_PORT
+#include "port_formats.h"
+#endif
 
 //.bss
 #if VERSION <= VERSION_DEMO_JP
@@ -30,6 +33,9 @@ FileManagerWork* afp = &fileWork;
 
 // local prototypes
 static void fileGarbageDataAdrClear(FileEntry* entry);
+#ifdef TARGET_PORT
+static void portFileSwap(void* data, s32 type, u32 size, const char* name);
+#endif
 static void fileGarbageDataAdrSet(void* data, s32 type);
 static FileEntry* _fileAlloc(const char* filename, s32 type, void (*callback)(FileEntry*));
 static void dvdReadDoneCallBack(s32 error, DVDFileInfo* info);
@@ -476,6 +482,26 @@ static void fileGarbageDataAdrSet(void* data, s32 type) {
     }
 }
 
+#ifdef TARGET_PORT
+/** Ports: converts a file just read (from the disc or an archive) to host byte order, before it is relocated.
+ * Types 1-3 and 6-10 have no loader in the game (nothing asks for them). */
+static void portFileSwap(void* data, s32 type, u32 size, const char* name) {
+    switch (type) {
+        case 0:
+            break;
+        case 4:
+            portTplSwap(data, size, name);
+            break;
+        case 5:
+            portAnimSwap(data, size, name);
+            break;
+        default:
+            OSPanic("filemgr.c", __LINE__, "%s: file type %d has no port loader", name, type);
+            break;
+    }
+}
+#endif
+
 /**
  * Moves a file's data to data during smart-heap compaction (memory.c),
  * unrelocating it first and relocating it at the new address.
@@ -670,6 +696,11 @@ static FileEntry* _fileAlloc(const char* filename, s32 type, void (*callback)(Fi
             break;
     }
     if (handle) {
+#ifdef TARGET_PORT
+        u32 arcLength;
+        arcOpen(filename, NULL, &arcLength);
+        portFileSwap(handle, type, arcLength, filename);
+#endif
         fileGarbageDataAdrSet(handle, type);
     }
     if (handle) {
@@ -699,6 +730,9 @@ static FileEntry* _fileAlloc(const char* filename, s32 type, void (*callback)(Fi
         smart->file = newentry;
         DVDMgrRead(entry, smart->address, test, 0);
         DVDMgrClose(entry);
+#ifdef TARGET_PORT
+        portFileSwap(smart->address, type, size, filename);
+#endif
         newentry->data = &smart->address;
         newentry->state = 1;
         newentry->references = 1;
@@ -761,6 +795,9 @@ static void dvdReadDoneCallBack(s32 error, DVDFileInfo* info) {
         DVDMgrClose(entry);
     } else {
         f->entry = NULL;
+#ifdef TARGET_PORT
+        portFileSwap(*f->data, f->type, DVDMgrGetLength(entry), f->filename);
+#endif
         fileGarbageDataAdrSet(*f->data, f->type);
         DVDMgrClose(entry);
         if (f->callback) {
@@ -842,6 +879,11 @@ FileEntry* fileAsync(const char* filename, s32 type, FileCallback callback) {
     }
 
     if (handle) {
+#ifdef TARGET_PORT
+        u32 arcLength;
+        arcOpen(filename, NULL, &arcLength);
+        portFileSwap(handle, type, arcLength, filename);
+#endif
         fileGarbageDataAdrSet(handle, type);
     }
 

@@ -3,7 +3,7 @@
  * Every setter stores the GameCube register state in `gx` and bumps
  * gx.version so the emitter rebuilds the PICA state before the next draw.
  * Inside a display list being recorded, a setter instead appends a port
- * opcode with its arguments (0xC0, call id, word count, big-endian words),
+ * opcode with its arguments (0xC0, call id, word count, LEB128 words),
  * and GXCallDisplayList replays it through the same setter, as the GameCube
  * replays the register writes the SDK put in the list.
  */
@@ -65,12 +65,21 @@ enum {
     REC_COUNT
 };
 
+/* Words are stored as unsigned LEB128 (7 bits a byte, low first): most
+ * arguments are small enums and indices, so a recorded call is about as
+ * long as the GameCube's register writes for it, and display lists the
+ * game builds into fixed heaps (makeDisplayList's map lists) fit as there. */
 static void rec(u32 id, const u32* words, u32 n) {
     u8 head[3] = {GXDL_OP_PORT, (u8)id, (u8)n};
     gx_dl_put(head, 3);
     for (u32 i = 0; i < n; i++) {
-        u8 b[4] = {(u8)(words[i] >> 24), (u8)(words[i] >> 16), (u8)(words[i] >> 8), (u8)words[i]};
-        gx_dl_put(b, 4);
+        u8 b[5];
+        u32 k = 0, v = words[i];
+        do {
+            b[k++] = (u8)((v & 0x7F) | (v >= 0x80 ? 0x80 : 0));
+            v >>= 7;
+        } while (v != 0);
+        gx_dl_put(b, k);
     }
 }
 
@@ -92,7 +101,12 @@ static void rec(u32 id, const u32* words, u32 n) {
         }                                \
     } while (0)
 
-static inline void touch(void) { gx.version++; }
+static inline void touch(void) {
+    if (gx_prim_open) {
+        gx_end_open_primitive(__builtin_return_address(0));
+    }
+    gx.version++;
+}
 
 static GXColor u2c(u32 v) { return (GXColor){(u8)(v >> 24), (u8)(v >> 16), (u8)(v >> 8), (u8)v}; }
 static u32 c2u(GXColor c) { return (u32)c.r << 24 | (u32)c.g << 16 | (u32)c.b << 8 | c.a; }
@@ -100,6 +114,7 @@ static u32 c2u(GXColor c) { return (u32)c.r << 24 | (u32)c.g << 16 | (u32)c.b <<
 /* ---- Vertex description ---- */
 
 void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
+    GX_CLOSE_PRIMITIVE();
     REC(SetVtxDesc, attr, type);
     if (attr == GX_VA_NBT) {
         gx.vtx_desc[GX_VA_NBT] = (u8)type;
@@ -113,6 +128,7 @@ void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
 }
 
 void GXSetVtxDescv(const GXVtxDescList* list) {
+    GX_CLOSE_PRIMITIVE();
     for (; list->attr != GX_VA_NULL; list++) {
         GXSetVtxDesc(list->attr, list->type);
     }
@@ -146,12 +162,14 @@ void GXGetVtxAttrFmtv(GXVtxFmt fmt, GXVtxAttrFmtList* list) {
 }
 
 void GXClearVtxDesc(void) {
+    GX_CLOSE_PRIMITIVE();
     REC0(ClearVtxDesc);
     memset(gx.vtx_desc, GX_NONE, sizeof(gx.vtx_desc));
     gx.vtx_desc[GX_VA_POS] = GX_DIRECT;
 }
 
 void GXSetVtxAttrFmt(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
+    GX_CLOSE_PRIMITIVE();
     REC(SetVtxAttrFmt, vtxfmt, attr, cnt, type, frac);
     if ((u32)vtxfmt >= GX_MAX_VTXFMT) {
         return;
@@ -167,12 +185,14 @@ void GXSetVtxAttrFmt(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType typ
 }
 
 void GXSetVtxAttrFmtv(GXVtxFmt vtxfmt, const GXVtxAttrFmtList* list) {
+    GX_CLOSE_PRIMITIVE();
     for (; list->attr != GX_VA_NULL; list++) {
         GXSetVtxAttrFmt(vtxfmt, list->attr, list->cnt, list->type, list->frac);
     }
 }
 
 void GXSetArray(GXAttr attr, void* base_ptr, u8 stride) {
+    GX_CLOSE_PRIMITIVE();
     REC(SetArray, attr, (u32)base_ptr, stride);
     if (attr == GX_VA_NBT) {
         attr = GX_VA_NRM;
@@ -183,7 +203,9 @@ void GXSetArray(GXAttr attr, void* base_ptr, u8 stride) {
     }
 }
 
-void GXInvalidateVtxCache(void) {}
+void GXInvalidateVtxCache(void) {
+    GX_CLOSE_PRIMITIVE();
+}
 
 /* ---- Transform ---- */
 
@@ -243,6 +265,7 @@ void GXLoadTexMtxImm(const f32 mtx[][4], u32 id, GXTexMtxType type) {
 }
 
 void GXSetCurrentMtx(u32 id) {
+    GX_CLOSE_PRIMITIVE();
     REC(SetCurrentMtx, id);
     gx.cur_pnmtx = id / 3;
 }
@@ -887,15 +910,23 @@ void gx_dl_replay_port_op(const u8** pp, const u8* end) {
     u32 id = p[1];
     u32 n = p[2];
     p += 3;
-    if ((u32)(end - p) < n * 4) {
-        plat_fatal("GX: truncated port opcode %lu", (unsigned long)id);
-    }
     u32 w[32];
     if (n > 32) {
         plat_fatal("GX: port opcode %lu with %lu words", (unsigned long)id, (unsigned long)n);
     }
-    for (u32 i = 0; i < n; i++, p += 4) {
-        w[i] = (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3];
+    for (u32 i = 0; i < n; i++) {
+        u32 v = 0;
+        for (u32 shift = 0;; shift += 7) {
+            if (p >= end || shift > 28) {
+                plat_fatal("GX: truncated port opcode %lu", (unsigned long)id);
+            }
+            u8 b = *p++;
+            v |= (u32)(b & 0x7F) << shift;
+            if (!(b & 0x80)) {
+                break;
+            }
+        }
+        w[i] = v;
     }
     *pp = p;
     switch (id) {

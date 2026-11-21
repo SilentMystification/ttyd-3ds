@@ -66,6 +66,7 @@ static Record s_rec[2];
 static int s_cur;
 static LightEvent s_submit, s_done;
 static volatile int s_busy;
+static int s_render_idx; /* record the render thread replays; set before s_busy */
 static Thread s_thread;
 static int s_threaded;
 static C3D_RenderTarget* s_efb;
@@ -167,6 +168,9 @@ static void submit(int present) {
     r->present = present;
     wait_idle(); /* the render thread finished the previous record */
     if (s_threaded) {
+        /* hand over the record explicitly: s_cur flips below, and the render
+         * thread reading it too early replayed the record being refilled */
+        s_render_idx = s_cur;
         __atomic_store_n(&s_busy, 1, __ATOMIC_RELEASE);
         LightEvent_Signal(&s_submit);
     } else {
@@ -774,7 +778,7 @@ static void render_thread(void* arg) {
     plat_crash_install_thread();
     for (;;) {
         LightEvent_Wait(&s_submit);
-        render_record(&s_rec[s_cur ^ 1]);
+        render_record(&s_rec[__atomic_load_n(&s_render_idx, __ATOMIC_ACQUIRE)]);
         __atomic_store_n(&s_busy, 0, __ATOMIC_RELEASE);
         LightEvent_Signal(&s_done);
     }

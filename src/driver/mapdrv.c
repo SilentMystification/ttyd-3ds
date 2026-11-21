@@ -1,6 +1,7 @@
 // Map driver: loads map.dat (joints, materials, animations), builds the display lists, and animates,
 // culls and draws the map objects.
 #ifdef TARGET_PORT
+#include "port_disc_data.h"
 #include "port_addr.h"
 #endif
 #include "driver/mapdrv.h"
@@ -2575,6 +2576,10 @@ static s32 mapSetLight(MapObject* obj, LightEntry** lights) {
     return count;
 }
 
+#ifdef TARGET_PORT
+static u32 texture_0[64] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(texture_0, mapdrv_texture_0)
+#else
 static u32 texture_0[64] ATTRIBUTE_ALIGN(32) = {
     0xEB88E228,
     0x55FFAA00,
@@ -2641,6 +2646,7 @@ static u32 texture_0[64] ATTRIBUTE_ALIGN(32) = {
     0x00000000,
     0x00000000,
 };
+#endif
 
 #pragma push
 // FAKE: #pragma opt_lifetimes off: no lifetime splitting in mapSetMaterialTev, which gives the target register allocation; without it 328 of mapSetMaterialTev's 2,927 instructions use other registers (same length)

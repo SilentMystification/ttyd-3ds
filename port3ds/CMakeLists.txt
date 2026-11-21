@@ -61,6 +61,7 @@ set(TTYD_DEFINES
     MUSY_TARGET=0
 )
 set(TTYD_INCLUDES
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
     "${CMAKE_CURRENT_LIST_DIR}/include"
     "${TTYD_REPO_DIR}/include"
     "${TTYD_REPO_DIR}/libs/dolsdk2004/include"
@@ -130,6 +131,12 @@ file(WRITE "${TTYD_GEN_DIR}/rel_table.c.tmp"
     "const PortRelStatic port_rel_table[] = {\n${_rel_rows}};\n"
     "const int port_rel_count = sizeof(port_rel_table) / sizeof(port_rel_table[0]);\n")
 configure_file("${TTYD_GEN_DIR}/rel_table.c.tmp" "${TTYD_GEN_DIR}/rel_table.c" COPYONLY)
+# Where this version keeps the data ports read from the disc (port_disc_data.h).
+execute_process(COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/gen_disc_data.py"
+    --version ${TTYD_VERSION} "${TTYD_GEN_DIR}/port_disc_data_gen.h" RESULT_VARIABLE _gen_rc)
+if(NOT _gen_rc EQUAL 0)
+    message(FATAL_ERROR "gen_disc_data.py failed")
+endif()
 file(WRITE "${TTYD_GEN_DIR}/port3ds_build.h.tmp"
     "#define PORT3DS_BUILD_STRING \"#${TTYD_BUILD_COUNT} ${TTYD_BUILD_HASH}\"\n")
 configure_file("${TTYD_GEN_DIR}/port3ds_build.h.tmp" "${TTYD_GEN_DIR}/port3ds_build.h" COPYONLY)

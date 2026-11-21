@@ -1,6 +1,7 @@
 // win_04 (ウィンディん家周辺, Flurrie's house in Boggly Woods): the red-walled main room of Flurrie's house, with its
 // chandelier and mirror ball; exits west to win_03 and east through Flurrie's door to her bedroom win_05.
 
+#include "port_disc_data.h"
 #include "battle/battle_unit.h"
 #include "evt/evt_cmd.h"
 #include "driver/animdrv.h"
@@ -1103,6 +1104,10 @@ EVT_BEGIN(mirror_ball_event)
 EVT_END()
 
 /* GX_TF_CMPR texel data, 101x92 (GXInitTexObj in the draw function) */
+#ifdef TARGET_PORT
+static u32 texture_0[1248] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(texture_0, win_texture_0)
+#else
 static u32 texture_0[] = {
     0x00000001, 0xFFFFFFFF, 0x00000001, 0xFFFFFFFF, 0x00000001, 0xFFFFFFFF, 0x00000001, 0xFFFFFFFF,
     0x00000001, 0xFFFFFFFF, 0x00000001, 0xFFFFFFFF, 0x00000001, 0xFFFFFFFF, 0x00000001, 0xFFFFFFFF,
@@ -1261,6 +1266,7 @@ static u32 texture_0[] = {
     0x00000001, 0xFFFFFFFF, 0x00000001, 0xFFFFFFFF, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
     0x00000001, 0xFFFFFFFF, 0x00000001, 0xFFFFFFFF, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
 };
+#endif
 
 /**
  * Rose petals of Flurrie's entrance: the screen position (x, y) and final size (z) of each of the 55 flowers

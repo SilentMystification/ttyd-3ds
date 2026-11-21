@@ -23,6 +23,8 @@
 #include "port3ds/rel_static.h"
 #include "version.h"
 
+void port_disc_data_fill(void);
+
 #if VERSION == VERSION_US
 #define EXPECTED_ID "G8ME01"
 #elif VERSION == VERSION_JP
@@ -52,6 +54,17 @@ static int s_ready;
 static inline u32 be32(const u8* p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }
 
 u32 port_dvd_dol_offset(void) { return s_dol_offset; }
+
+/* Disc offset and size of a file, bypassing the static-REL redirection
+ * (for reading data out of the disc's own RELs). Returns 0 if absent. */
+u32 port_dvd_raw_file(const char* path, u32* size) {
+    s32 e = DVDConvertPathToEntrynum(path);
+    if (e <= 0 || s_fst[e].is_dir) {
+        return 0;
+    }
+    *size = s_fst[e].size;
+    return s_fst[e].offset;
+}
 
 /* Plain synchronous read for boot-time use (before threads matter). */
 s32 port_dvd_read_raw(u32 offset, void* buf, u32 size) { return plat_disc_read(offset, buf, size); }
@@ -105,6 +118,7 @@ void DVDInit(void) {
     s_ready = 1;
     PLOG_I("DVD: " EXPECTED_ID " image, %lu FST entries, main.dol at %08lx", (unsigned long)s_count,
            (unsigned long)s_dol_offset);
+    port_disc_data_fill();
 }
 
 static int name_eq(const char* fst_name, const char* path, size_t len) {

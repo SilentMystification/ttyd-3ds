@@ -15,7 +15,7 @@
 
 //.rodata
 #ifdef TARGET_PORT
-// Ports ship no game data: these come from the user's own main.dol at boot (port3ds/sdk/dol_assets.c).
+// Ports ship no game data: these come from the user's own main.dol at boot (port3ds/game/disc_data.c).
 extern u8 _mariost_icon_tex[0x400];
 extern u8 _mariost_icon_tlut[0x200];
 extern u8 _mariost_banner_tex[0x1800];

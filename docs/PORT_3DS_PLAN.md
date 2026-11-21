@@ -290,40 +290,40 @@ How the port uses it:
 - Every placement is listed in one table, `port3ds/sys/memplace.c`, with a size budget. This gives one place to see what lives in QTM and to move it, and a boot-time check that the total fits.
 - Azahar does not model memory timing, so it shows that the placement works but not whether it helps. The final list is tuned in phase 8 from hardware profiles, using debug-switch A/B toggles that move one buffer to FCRAM for comparison. Those toggles are a measurement tool, not a shipping fallback.
 
-## 6. Game data: extraction and conversion
+## 6. Game data: read from the disc image, decoded at load
 
-The user supplies a G8MJ01, G8ME01 or G8MP01 disc image (ISO, GCM; RVZ and CISO later). The converter:
+**Revised 2026-11-21 (phase 1 findings).** The earlier plan converted the disc offline into a tree of little-endian files. Two phase 1 results make that unnecessary:
 
-1. Reads the disc header and checks the game ID and revision against a table of known hashes.
-2. Reads the FST and extracts the files the game uses (about 1.3 GiB on disc).
-3. Converts each format to native little-endian with no relocation needed. Pointers become offsets that the loader turns into pointers by adding the base, done once at load. Every struct gets a schema, ported from paper-cut's `.spec` files:
-   - `m/<map>/d` maps, with display lists converted to PICA vertex and index buffers and a collision copy for `hitdrv`;
-   - `a/*` animations and models;
-   - TPL textures, converted to PICA textures (section 5.4);
-   - fonts, `icon.bin`, camera roads, `mono.dat` and ARC archives;
-   - MusyX banks, with sample data left as DSP-ADPCM.
-4. Extracts the data that the decomp compiles into code, so the port binary contains none of it:
-   - the memory-card icon, palette and banner, which the matching build extracts from `main.dol` into `build/<version>/include/assets/` and `cardmgr.c` includes;
-   - texture and other data arrays written as words in REL sources (for example `rels/win/src/window/win_04.c`), which are read from the disc's REL at runtime instead.
+- Pointers are 32 bits on both machines, and every struct has the GameCube layout (check_layout.py), so a loaded file needs only its fields byte-swapped. No struct needs rebuilding as paper-cut does for 64-bit pointers.
+- Textures and display lists are converted by the GX layer's caches anyway (section 5.4), including the ones the game builds at runtime.
 
-   The phase 1 scan (2026-11-21) found 36 data arrays of 64 words or more in game sources (85 KB).
-   - **Game-logic tables stay compiled in.** They are code-like data written in the decomp's sources: item, sound, tattle and battle-stage tables.
-   - **Image data is filled at boot from the user's disc**, by symbol address from `config/<version>/symbols.txt` or the REL's symbol table, as for the card icon:
-     - `win_04.c` `texture_0` (4,992 bytes);
-     - `mapdrv.c` `texture_0` (256 bytes);
-     - `eff_torch.c` `torch_obj2_texture` and `torch_obj22t_texture` (2,032 bytes);
-     - `mobjdrv.c` `cubeDN` (4,920 bytes).
+So the port works like this:
 
-   The port build checks the list so no new image array is compiled in. `dspSlave` (GameCube DSP code) is not needed.
-5. Writes the result to `sdmc:/3ds/ttyd/data/<GAMEID>/` with a manifest: file list, sizes, hashes and converter version. The port checks the manifest at boot and refuses mismatched data with a clear message.
+1. The user copies a G8MJ01, G8ME01 or G8MP01 disc image to `sdmc:/3ds/ttyd/game.iso`. The port checks the game ID and revision at boot and refuses anything else with a clear message on screen. There is no extraction step and nothing to install.
+2. `port3ds/game/dvd.c` reads files straight from the image through the disc's FST, on a file thread. The calling game thread sleeps meanwhile, so the DVD manager's background loads overlap gameplay as on the GameCube. `rel/<area>.rel` is answered with a module header that names the static REL (section 5.2).
+3. Each format is byte-swapped in place right after it loads, at the same points where paper-cut decodes on PC: TPL, anim models, maps, fonts, `icon.bin`, camera roads and MusyX banks.
+   - The swap tables (which words are 2, 4 or 8 bytes in each struct) are generated at build time from the port's own ARM debug info. Pointer graphs and counts follow paper-cut's `.spec` files.
+   - GPU payloads stay big-endian for the GX decoders: texels, palettes and vertex colour bytes.
+   - Display lists inside files are rewritten to the port's little-endian form, so `hitdrv`'s collision reads and the GX layer read one format.
+4. Data the decomp compiles into code (the card icon and banner, a few textures in REL sources; section 6.1) is read from `main.dol` and the RELs inside the image at boot.
+5. The same decoders also build for the host (`tools/port3ds/discdecode`). A test runs every file of the image through them and checks the result against paper-cut's decoders.
 
-The converter is written in portable C as one library, built twice:
+A pre-decoded cache on the SD card stays possible as an optimization if load-time decoding ever shows up in the profiles.
 
-- a host command-line tool for Linux and Windows, which writes to an SD card or an Azahar `sdmc` folder;
-- the same library inside the 3DS app, run on first boot when `sdmc:/3ds/ttyd/game.iso` exists but converted data does not.
+### 6.1 Data compiled into the decomp
 
-Section 11 asks whether you want both. The host tool is also what the tests use, and a round-trip test checks every converted file against paper-cut's decoders (`tests/port/disc_sweep`).
+The port binary contains no game data.
 
+- **Card icon, palette and banner.** The matching build extracts them from `main.dol` into `build/<version>/include/assets/`, and `cardmgr.c` includes them. On ports, `cardmgr.c` declares them extern, and the port fills them from the image's `main.dol` at boot.
+- **Results of the phase 1 scan (2026-11-21).** It found 36 data arrays of 64 words or more in game sources (85 KB).
+  - **Game-logic tables stay compiled in.** They are code-like data written in the decomp's sources: item, sound, tattle and battle-stage tables.
+  - **Image data is filled from the image at boot**, by symbol address from `config/<version>/symbols.txt` or the REL's symbol table:
+    - `win_04.c` `texture_0` (4,992 bytes);
+    - `mapdrv.c` `texture_0` (256 bytes);
+    - `eff_torch.c` `torch_obj2_texture` and `torch_obj22t_texture` (2,032 bytes);
+    - `mobjdrv.c` `cubeDN` (4,920 bytes).
+- **Enforcement.** The port build checks the list, so no new image array is compiled in.
+- **`dspSlave`** (GameCube DSP code) is not needed.
 ## 7. Developer tools inside the port
 
 These are taken from the PM64 3DS port and adapted:
@@ -413,7 +413,7 @@ Each phase ends with a commit, updated docs, and passing tests for everything ea
 |---|---|---|
 | 0. Tooling (**done 2026-11-21**; see PORT_3DS_TESTING.md) | Scripts from section 8 (runners for all three, each reading `GlobalWork`; `memcompare.py` moved to phase 1 because it needs the 3DS ELF's layouts), Docker image with makerom and bannertool, Windows script, first `.rsf` with a hello-world CIA that installs and runs in Azahar. The hardware probe app (memory modes, core 2 availability, measured L1/L2 and memory bandwidth, QTM mapping through Luma, `svcGetSystemTick` cost) is written here but first run on hardware in phase 8 | Every runner works from a single command; the CIA and the probe run in Azahar |
 | 1. Compile and link | `port3ds/CMakeLists.txt` compiles all game code and MusyX for ARM; static REL linking; the address-check audit; the MWCC-intrinsic and GQR fixes; the GameCube build still matches | Links with only the port SDK left as link errors; that list becomes the phase 3 to 5 work list |
-| 2. Converter | Disc reader, FST, all format schemas, PICA texture conversion, display-list conversion, MusyX banks, manifest; host tool plus tests against paper-cut's decoders | Every file on the US disc converts, and the round-trip tests pass |
+| 2. Disc access and decoders | ISO reader and FST, DVD layer, load-time swap of every format (TPL, anim, map, font, icon.bin, camera roads, MusyX banks) from generated swap tables, data compiled into the decomp read from the image, host decode tool with tests against paper-cut's decoders | Every file on the US disc decodes on the host and in the port, and the round-trip tests pass |
 | 3. Platform | OS, DVD, ARAM/ARQ, PAD, CARD, VI; log, crash handler, watchdog, switches, HUD, Select menu | The game reaches its first `GXBegin` on Azahar with logs; the crash handler's self-test path works in Azahar |
 | 4. GX | State tracker, vertex paths, shaders, TEV compiler, textures, EFB copies, fog and blend, bbox, z-texture, indirect, multipass, bounds checks | Logo, title and file select match paper-cut shots; `gor_01` renders |
 | 5. Audio | MusyX `hw_3ds` software backend, streams, DTK; then NDSP voices | Title music and `gor_01` sound effects play; matches paper-cut's audio golden hashes within tolerance |

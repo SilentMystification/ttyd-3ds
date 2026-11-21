@@ -63,6 +63,31 @@ tools/port3ds/run_azahar.py --build build/3ds/probe/ttyd_probe.cia \
 - **Results.** Azahar is always stopped afterwards. Logs are copied to `build/azahar-last/`. Azahar log lines that would fault on hardware (unmapped access, aborts, `svcBreak`) fail the run unless `--allow-hw-faults` is given.
 - **Debugger.** `--gdb` turns on Azahar's GDB stub (port 24689). The guest then waits for a debugger; use `tools/port3ds/gdbrsp.py` or `arm-none-eabi-gdb`.
 
+### The game in Azahar
+
+The game reads the disc image from the emulated SD card. Link it there once (a hard link: no second copy of 1.4 GB, and visible inside the Flatpak):
+
+```sh
+mkdir -p build/azahar-profile/data/azahar-emu/sdmc/3ds/ttyd
+ln -f iso/game.iso build/azahar-profile/data/azahar-emu/sdmc/3ds/ttyd/game.iso
+tools/port3ds/build.sh
+tools/port3ds/run_azahar.py --build build/3ds/game/ttyd.cia --log 3ds/ttyd/log.txt \
+    --switches "map=gor_01 shots=100 shotmax=40 padscript=wait*250,a*3" \
+    --until "shot shots/04000" --timeout 500 --stall 0
+```
+
+Switches the game reads (space-separated words in `--switches`):
+
+| Switch | Effect |
+|---|---|
+| `map=<map>[,<bero>]` | Starts a new game on that map once the title or the opening is up (the warning screen needs an A press first). `story=N` sets the story so far (GSW 0, default 0); `party=N` the partner (default 1, Goombella; 0 none) |
+| `padscript=<steps>` | Scripted input: comma-separated `KEYS*frames` steps (`a*3`, `wait*40`, `start*3`, `a+b*2`). Frames are video frames. Keys: `a b x y l r zl zr start select up down left right`; `cl cr cu cd` push the circle pad (the game's control stick) fully left, right, up or down. TTYD's menus and dialogs move with the stick, not the D-pad, so use `cu`/`cd` there. Up to 2048 steps |
+| `shots=N` | Saves every Nth frame's EFB (608x480, as the game drew it) to `sdmc:/3ds/ttyd/shots/NNNNN.ppm` and logs that frame's draw counts. `shotmax=N` limits the number (default 200) |
+| `gputest` | Draws the orientation pattern at boot: red top left, green top right, blue bottom left of a grey screen |
+| `loglevel=3` | Debug lines in the log (each converted disc file, primitives closed without `GXEnd`) |
+
+Sound needs `sdmc:/3ds/dspfirm.cdc` (dumped from a console with DSP1). Without it the game runs silently with the same sound timing.
+
 ## Running the GameCube game in Dolphin
 
 ```sh

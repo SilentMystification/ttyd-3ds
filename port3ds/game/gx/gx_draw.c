@@ -418,6 +418,7 @@ typedef struct {
 } Out;
 
 static Out s_out[4096 + 8];
+static int s_dump; /* this frame's draws are logged (switch gxdump) */
 
 static void transform(const GxVertex* v, Out* o) {
     const f32(*m)[4] = gx.pos_mtx[v->pnmtx % GX_POS_MTX_COUNT];
@@ -587,6 +588,37 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
     if (s_tri_out == NULL) {
         return; /* larger than the vertex arena (logged) */
     }
+    if (s_dump) {
+        /* switch gxdump=N: the draws of game frame N; a run of draws with the same matrix and texture is one line */
+        const GxTexObj* t0 = gx.tex_map_valid[0] ? &gx.tex_map[0] : NULL;
+        static const void* last_img;
+        static f32 last_m[3][4];
+        static u32 run;
+        const void* img = t0 ? t0->image : NULL;
+        if (img == last_img && memcmp(last_m, gx.pos_mtx[v[0].pnmtx % GX_POS_MTX_COUNT], sizeof(last_m)) == 0) {
+            run++;
+            goto dumped;
+        }
+        if (run > 0) {
+            PLOG_I("gxdump   (+%lu draws alike)", (unsigned long)run);
+        }
+        run = 0;
+        last_img = img;
+        memcpy(last_m, gx.pos_mtx[v[0].pnmtx % GX_POS_MTX_COUNT], sizeof(last_m));
+        PLOG_I("gxdump prim %02x n %lu units %d stages %d tev %d tex0 %p fmt %d %dx%d clip %.2f %.2f %.2f %.2f "
+               "col %02x%02x%02x%02x blend %d zc %d atest %d chans %d",
+               prim, (unsigned long)n, s_units, s_state.num_stages, gx.num_tev, t0 ? t0->image : NULL,
+               t0 ? t0->format : -1, t0 ? t0->width : 0, t0 ? t0->height : 0, (double)s_out[0].v.pos[0],
+               (double)s_out[0].v.pos[1], (double)s_out[0].v.pos[2], (double)s_out[0].v.pos[3], s_out[0].v.color[0],
+               s_out[0].v.color[1], s_out[0].v.color[2], s_out[0].v.color[3], s_state.blend_mode,
+               s_state.color_write, s_state.alpha_test_enable, gx.num_chans);
+        const f32(*m)[4] = gx.pos_mtx[v[0].pnmtx % GX_POS_MTX_COUNT];
+        PLOG_I("gxdump   v0 %.2f %.2f %.2f mtx[%d] %.3f %.3f %.3f %.2f / %.3f %.3f %.3f %.2f / %.3f %.3f %.3f %.2f",
+               (double)v[0].pos[0], (double)v[0].pos[1], (double)v[0].pos[2], v[0].pnmtx, (double)m[0][0],
+               (double)m[0][1], (double)m[0][2], (double)m[0][3], (double)m[1][0], (double)m[1][1], (double)m[1][2],
+               (double)m[1][3], (double)m[2][0], (double)m[2][1], (double)m[2][2], (double)m[2][3]);
+    }
+dumped:
     s_tri_n = 0;
     f32 lw = gx.line_width / 6.0f;
     switch (prim) {
@@ -641,6 +673,16 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
 }
 
 void gx_draw_frame_begin(void) {
+    static u32 frame;
+    static int dump_at = -1;
+    if (dump_at < 0) {
+        dump_at = plat_switch_int("gxdump", 0);
+    }
+    frame++;
+    s_dump = dump_at > 0 && frame == (u32)dump_at;
+    if (s_dump) {
+        PLOG_I("gxdump: frame %lu", (unsigned long)frame);
+    }
     gx_stat_draws = gx_stat_vertices = 0;
     s_built_version = 0xFFFFFFFFu; /* every frame starts with a full state */
 }

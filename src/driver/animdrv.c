@@ -2,6 +2,7 @@
 // keyframes and draws the animation poses of Mario, the partners, NPCs and items. Many helpers here
 // are inlined into their callers.
 #ifdef TARGET_PORT
+#include "port_addr.h"
 #include "port_formats.h"
 #endif
 #include "driver/animdrv.h"
@@ -27,6 +28,15 @@
 #include "sdk/texPalette.h"
 
 #define TESTHEAP_SIZE (u32)(1.5 * 1024 * 1024)
+
+/* The draw reads the low 16 bits of each 32-bit index entry through a u16 pointer one halfword in, the
+ * big-endian position. The port converts the index tables to native order at load, where the low half is
+ * the halfword before that. */
+#ifdef TARGET_PORT
+#define ANIM_IDX16(p) ((u16) * (const u32*)((const u16*)(p) - 1))
+#else
+#define ANIM_IDX16(p) (*(p))
+#endif
 #define PI 3.14159265358979323846264338327950288419716939937510f
 
 //.data
@@ -3697,7 +3707,12 @@ void animPoseSetStartTime(s32 poseId, OSTime startTime) {
 #define animPosePaperAnimId(pose) ((pose)->paperAnimIdx)
 /* An anim name parameter holds a name (an address in main memory, negative as
  * an s32) or an anim index (non-negative). */
+#ifdef TARGET_PORT
+// Ports: addresses are positive as an s32; a name is an address, an index is small (port_addr.h).
+#define ANIM_NAME_INDEX(name) (PORT_IS_ADDR(name) ? -1 : (s32)(AddrWord)(name))
+#else
 #define ANIM_NAME_INDEX(name) ((s32)(AddrWord)(name))
+#endif
 #define ANIM_INDEX_NAME(idx) ((const char*)(AddrWord)(idx))
 #define animPoseGetBaseDataId(id) (*(AnimationPoseData**)(wp->files[wp->poses[id].fileId].handle->data))
 
@@ -5854,13 +5869,13 @@ static void renderProc(s32 shapeId, s32 unused) {
                         texIndexPtr = (u16*)(data->texIndex[texIds[0]] + (firstDrawId + firstId[texIds[0]])) + 1;
                         GXBegin(GX_TRIANGLEFAN, GX_VTXFMT0, count);
                         for (k = count; k > 0; k--) {
-                            GXPosition1x16(*posIndexPtr);
+                            GXPosition1x16(ANIM_IDX16(posIndexPtr));
                             posIndexPtr += 2;
-                            GXNormal1x16(*nrmIndexPtr);
+                            GXNormal1x16(ANIM_IDX16(nrmIndexPtr));
                             nrmIndexPtr += 2;
-                            GXColor1x16(*clr0IndexPtr);
+                            GXColor1x16(ANIM_IDX16(clr0IndexPtr));
                             clr0IndexPtr += 2;
-                            GXTexCoord1x16(*texIndexPtr);
+                            GXTexCoord1x16(ANIM_IDX16(texIndexPtr));
                             texIndexPtr += 2;
                         }
                     }
@@ -5882,9 +5897,9 @@ static void renderProc(s32 shapeId, s32 unused) {
                         clr0IndexPtr = (u16*)(data->clr0Index + (fd2 + clr0FirstId)) + 1;
                         GXBegin(GX_TRIANGLEFAN, GX_VTXFMT0, cnt2);
                         for (k2 = 0; k2 < cnt2; k2++, posIndexPtr += 2, nrmIndexPtr += 2, clr0IndexPtr += 2) {
-                            GXPosition1x16(*posIndexPtr);
-                            GXNormal1x16(*nrmIndexPtr);
-                            GXColor1x16(*clr0IndexPtr);
+                            GXPosition1x16(ANIM_IDX16(posIndexPtr));
+                            GXNormal1x16(ANIM_IDX16(nrmIndexPtr));
+                            GXColor1x16(ANIM_IDX16(clr0IndexPtr));
                             for (l = tc2, index = 0; l > 0; l--, index++) {
                                 texIndex = texIds[(u32)(tc2 - index - 1)];
                                 GXTexCoord1x16((&wp->curPoseData->texIndex[texIndex][fd2 + firstId[texIndex]])[k2]);

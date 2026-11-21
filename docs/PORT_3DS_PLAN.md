@@ -266,11 +266,15 @@ The N3DS extra RAM ("QTM RAM") is 4 MiB at physical 0x1F000000. A process maps i
 
 How the port uses it:
 
-**QTM is required.** The CIA is the deliverable, and its `.rsf` requests the mapping.
+**QTM with an FCRAM fallback for development.** The CIA is the deliverable, and its `.rsf` requests the mapping.
 
-- If the mapping is missing at boot (checked with `svcQueryMemory` at 0x1E800000), the port shows a clear error and exits. This covers the O3DS check as well.
-- A 3dsx gets the ExHeader of the title that launched it. It only runs when that title maps QTM; otherwise it shows the same error.
-- There is no FCRAM fallback path.
+- At boot the port checks the mapping with `svcQueryMemory` at 0x1E800000.
+- If QTM is missing, the placement table puts the same buffers in FCRAM. This is the case for a 3dsx in Azahar, or under a Homebrew Launcher started without a QTM-mapping title. The game behaves the same; only memory speed differs.
+- The fallback is never silent:
+  - the boot log prints `[MEM] QTM unavailable, using FCRAM`;
+  - the HUD shows `QTM:off`;
+  - performance runs (`phase`, `bench`) refuse to start without QTM unless the `allowfcram` switch is set, so numbers are never mixed up.
+- The O3DS check is separate (`APT_CheckNew3DS`).
 
 **What goes where.** The GPU works from VRAM and linear FCRAM as usual: render targets, textures, vertex and index buffers, command lists. The DSP buffers (NDSP wave and aux buffers) stay in linear memory. QTM holds CPU-side state that several cores touch every frame, so that this traffic stays off the FCRAM bus the GPU and DSP use:
 
@@ -333,7 +337,7 @@ Every test is one command that returns a non-zero exit code on failure. All of t
 
 **Runners**
 
-- `tools/port3ds/run_azahar.py --build <cia> --switches "map=gor_01 shots exitframe=600" --until "<regex>" --timeout 120`
+- `tools/port3ds/run_azahar.py --build <3dsx|cia> --switches "map=gor_01 shots exitframe=600" --until "<regex>" --timeout 120`
   - Writes `debug3ds.txt` into Azahar's `sdmc`, sets turbo and vsync in the config (and restores the config afterwards), and starts Azahar with the GDB stub.
   - Tails `log.txt`. It stops on the regex, a `[CRASH]` line, log silence or the timeout, and always kills the emulator.
   - Collects the log, the screenshots and any `UnmappedAccess` lines from Azahar's own log. Those lines count as failures, because they fault on hardware.
@@ -382,8 +386,11 @@ Every test is one command that returns a non-zero exit code on failure. All of t
   - core 2;
   - the extended memory mode;
   - the QTM mapping.
-- **3dsx:** a developer convenience for 3dslink pushes in phase 8. It runs only when the Homebrew Launcher was started through a title whose ExHeader grants the same things (such as an N3DS-only game). Otherwise the boot check shows what is missing and exits.
-- **Azahar tests also run the CIA**, because Azahar gives a 3dsx a default ExHeader without the QTM mapping. Phase 0 checks the exact flow: either `azahar -i ttyd.cia` followed by booting the installed title's content, or booting the CIA's NCCH directly.
+- **3dsx:** a developer convenience for fast Azahar runs and 3dslink pushes. Without QTM it uses the FCRAM fallback (section 5.7). It still needs N3DS mode, the 804 MHz clock and core 2; if those are missing, the boot check shows what is missing and exits.
+- **Azahar tests:**
+  - Day-to-day runs use the 3dsx, which is quicker to deploy.
+  - The golden set and milestone checks also run the CIA, so the QTM path stays tested. Azahar gives a 3dsx a default ExHeader without the QTM mapping.
+  - Phase 0 works out the exact CIA flow: either `azahar -i ttyd.cia` followed by booting the installed title's content, or booting the CIA's NCCH directly.
 
 ## 10. Phases and exit criteria
 
@@ -411,7 +418,7 @@ Each phase ends with a commit, updated docs, and passing tests for everything ea
   - Azahar's `UnmappedAccess` log lines treated as failures.
 - Nothing depends on an unverified section 12 assumption:
   - `SystemModeExt` stays at 124MB;
-  - QTM holds shared CPU state through the placement table (section 5.7), and no GPU buffers are placed in QTM;
+  - QTM holds shared CPU state through the placement table (section 5.7), no GPU buffers are placed in QTM, and both the QTM path (CIA) and the FCRAM fallback (3dsx) get tested;
   - core 2 is used, with the core-0 fallback (`gxsync`) kept working.
 
 Performance work inside these phases is limited to what the architecture needs: offline vertex conversion, zero-copy arenas, the core-2 render thread and VFP matrix code. Profiling-driven tuning (L1-sized loop splitting, QTM placement, Thumb/ARM per file, NDSP voices) gets its own pass afterwards, using the profiler from phase 3.

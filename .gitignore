@@ -105,3 +105,7 @@ refs/ttyd-tools/
 
 # Matching pipeline helpers: kept on disk, not committed (L, 2026-10-22)
 /tools/decomp/
+
+# User-supplied disc image for the 3DS port (G8MJ01, G8ME01 or G8MP01). Never commit it.
+/iso/*
+!/iso/.gitkeep

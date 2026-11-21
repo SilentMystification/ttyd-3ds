@@ -24,6 +24,7 @@
 #include "memory.h"
 #include "plat/gpu.h"
 #include "plat/hud.h"
+#include "plat/input.h"
 #include "plat/plat.h"
 #include "port3ds/os_internal.h"
 #include "version.h"
@@ -144,8 +145,12 @@ static void warp_switch(void) {
     }
 }
 
+void port_debug_frame(u32 frame);
+
 static void frame_hooks(void) {
     s_frames++;
+    port_debug_frame(s_frames);
+    plat_input_frame();
     plat_set_phase("frame hooks");
     if (!plat_frame_poll()) {
         plat_shutdown();

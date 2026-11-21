@@ -13,6 +13,13 @@
 #include "system.h"
 #include "driver/windowdrv.h"
 #include "libc_decls.h"
+#ifdef TARGET_PORT
+// Ports: Shift-JIS text is a byte stream; a double-byte code is read big-endian (lead byte high), as the GameCube's
+// u16 load reads it.
+#define SJIS_CODE(p) ((u16)(((const u8*)(p))[0] << 8 | ((const u8*)(p))[1]))
+#else
+#define SJIS_CODE(p) (*(const u16*)(p))
+#endif
 
 typedef struct FontWidthEntry {
     u8 kerning; // 0x0
@@ -298,7 +305,7 @@ static inline void FontDrawStringVec(Vec pos, const s8* str) {
     PSMTXScale(scale, fontScale.x, fontScale.y, fontScale.z);
     while (*msg) {
         if (_ismbblead(*msg)) {
-            code = JUTFont_CodeToGlyph(*(const u16*)msg);
+            code = JUTFont_CodeToGlyph(SJIS_CODE(msg));
             msg += 2;
         } else {
             code = fontByteGlyph(*msg++);
@@ -344,7 +351,7 @@ static inline void fontDrawStringVecPitch(Vec pos, f32 pitch, const s8* str) {
     PSMTXScale(scale, fontScale.x, fontScale.y, fontScale.z);
     while (*msg) {
         if (_ismbblead(*msg)) {
-            code = JUTFont_CodeToGlyph(*(const u16*)msg);
+            code = JUTFont_CodeToGlyph(SJIS_CODE(msg));
             msg += 2;
         } else {
             code = fontByteGlyph(*msg++);
@@ -405,7 +412,7 @@ void FontDrawStringVecPitch(Vec pos, f32 pitch, const s8* msg) {
         code = 0xFFFF;
 #endif
         if (_ismbblead(*msg)) {
-            code = JUTFont_CodeToGlyph(*(const u16*)msg);
+            code = JUTFont_CodeToGlyph(SJIS_CODE(msg));
             msg += 2;
         } else {
 #if VERSION >= VERSION_US
@@ -507,7 +514,7 @@ void FontDrawStringMtx(Mtx mtx, const char* msg) {
     while (*(const s8*)msg) {
         code = 0xFFFF;
         if (_ismbblead(*(const s8*)msg)) {
-            code = JUTFont_CodeToGlyph(*(const u16*)msg);
+            code = JUTFont_CodeToGlyph(SJIS_CODE(msg));
             msg += 2;
         } else {
             switch (*(const s8*)msg) {
@@ -568,7 +575,7 @@ void FontDrawStringCenterMtx(Mtx mtx, const s8* msg) {
     GXLoadPosMtxImm(m, 0);
     while (*msg) {
         if (_ismbblead(*msg)) {
-            code = JUTFont_CodeToGlyph(*(const u16*)msg);
+            code = JUTFont_CodeToGlyph(SJIS_CODE(msg));
             msg += 2;
         } else {
             code = fontByteGlyph(*msg++);
@@ -608,7 +615,7 @@ void FontDrawStringShake(f32 x, f32 y, const char* msg) {
     PSMTXScale(scale, fontScale.x, fontScale.y, fontScale.z);
     while (*(const s8*)msg) {
         if (_ismbblead(*(const s8*)msg)) {
-            code = JUTFont_CodeToGlyph(*(const u16*)msg);
+            code = JUTFont_CodeToGlyph(SJIS_CODE(msg));
             msg += 2;
         } else {
             code = fontByteGlyph(*(const s8*)msg++);
@@ -662,7 +669,7 @@ void FontDrawMessage(s32 x, s32 y, const char* msg) {
     while (*(const s8*)msg) {
         code = 0xFFFF;
         if (_ismbblead(*(const s8*)msg)) {
-            code = JUTFont_CodeToGlyph(*(const u16*)msg);
+            code = JUTFont_CodeToGlyph(SJIS_CODE(msg));
             msg += 2;
         } else {
             switch (*(const s8*)msg) {
@@ -678,7 +685,16 @@ void FontDrawMessage(s32 x, s32 y, const char* msg) {
                     } else if (!strcmp((char*)tag, "/red")) {
                         FontDrawColor(fontColTbl[0]);
                     } else if (!strcmp((char*)tag, "col")) {
+#ifdef TARGET_PORT
+                        {
+                            // <col RRGGBBAA>: only a big-endian u32 lays the bytes out as GXColor's (R first)
+                            u32 rgba = 0;
+                            sscanf((char*)value, "%x", &rgba);
+                            color = (GXColor){(u8)(rgba >> 24), (u8)(rgba >> 16), (u8)(rgba >> 8), (u8)rgba};
+                        }
+#else
                         sscanf((char*)value, "%x", &color);
+#endif
                         FontDrawColor(color);
                     } else if (!strcmp((char*)tag, "/col")) {
                         FontDrawColor(fontColTbl[0]);
@@ -750,7 +766,7 @@ void FontDrawMessageMtx(Mtx mtx, const char* msg) {
     while (*(const s8*)msg) {
         code = 0xFFFF;
         if (_ismbblead(*(const s8*)msg)) {
-            code = JUTFont_CodeToGlyph(*(const u16*)msg);
+            code = JUTFont_CodeToGlyph(SJIS_CODE(msg));
             msg += 2;
         } else {
             switch (*(const s8*)msg) {
@@ -847,7 +863,7 @@ u16 FontGetMessageWidthLine(const char* msg, u16* lines) {
     while (*(const s8*)msg) {
         code = 0xFFFF;
         if (_ismbblead(*(const s8*)msg)) {
-            code = JUTFont_CodeToGlyph(*(const u16*)msg);
+            code = JUTFont_CodeToGlyph(SJIS_CODE(msg));
             msg += 2;
         } else {
             switch (*(const s8*)msg) {

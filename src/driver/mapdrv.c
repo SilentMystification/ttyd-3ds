@@ -36,6 +36,13 @@ static inline f32 sinf(f32 x) {
     return sin(x);
 }
 #include <string.h>
+#ifdef TARGET_PORT
+// The LZ77 header word of a compressed map archive (0x10, then a u24 little-endian size), as the GameCube's
+// big-endian load reads it.
+#define MAP_LZ77_HEADER(p) ((u32)((u8*)(p))[0] << 24 | (u32)((u8*)(p))[1] << 16 | (u32)((u8*)(p))[2] << 8 | ((u8*)(p))[3])
+#else
+#define MAP_LZ77_HEADER(p) (*(u32*)(p))
+#endif
 
 static void mapBuildTexture(MapObject* obj, TEXPalette* texture, void* table);
 static void _mapDispMapGrp(CameraId cam, MapObject* obj);
@@ -1206,7 +1213,7 @@ void mapLoad(const char* map) {
     sprintf(path, "%s/b/%s", getMarioStDvdRoot(), map);
     file = fileAlloc(path, 0);
     if (file != NULL) {
-        header = *(u32*)*file->data;
+        header = MAP_LZ77_HEADER(*file->data);
         size = ((header & 0xFF) << 16) | (header & 0xFF00) | ((header >> 16) & 0xFF);
         arc = _mapAllocTail(size);
         LZ77Decode(*file->data, arc);
@@ -1472,7 +1479,7 @@ void bmapLoad(const char* map, const char* map2) {
         sprintf(path, "%s/b/%s", getMarioStDvdRoot(), map);
         file = fileAlloc(path, 0);
         if (file != NULL) {
-            header = *(u32*)*file->data;
+            header = MAP_LZ77_HEADER(*file->data);
             size = ((header & 0xFF) << 16) | (header & 0xFF00) | ((header >> 16) & 0xFF);
             arc = _mapAllocTail(size);
             LZ77Decode(*file->data, arc);

@@ -257,6 +257,21 @@ u32 cubeDN[1230] = {
     0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
     0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000
 };
+#ifdef TARGET_PORT
+// cubeDN holds MapRawDL lists written as u32 words: a count, then 6 words per MapVtxRec (12 s16 indices, two per
+// word, the first in the high half). Read as s16 on a little-endian machine the halves swap, so they are put in
+// the GameCube's order once, at start-up.
+__attribute__((constructor)) static void portCubeDNToNative(void) {
+    s32 list, j;
+    for (list = 0; list < 6; list++) {
+        u32* p = &cubeDN[list * 205];
+        s32 words = (s32)p[0] * (s32)(sizeof(MapVtxRec) / sizeof(u32));
+        for (j = 1; j <= words && list * 205 + j < (s32)(sizeof(cubeDN) / sizeof(cubeDN[0])); j++) {
+            p[j] = (p[j] << 16) | (p[j] >> 16);
+        }
+    }
+}
+#endif
 
 /** Mesh of the full collision cube: all six faces. */
 CubeMesh cubeDP = {0, {0}, 0, 6, 0, cubeDDT, {cubeDN, &cubeDN[205], &cubeDN[410], &cubeDN[615], &cubeDN[820], &cubeDN[1025]}};

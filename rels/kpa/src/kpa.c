@@ -49,7 +49,14 @@ typedef struct KpaGameWork {
 KpaGameWork* kwp;
 static void kpa_stageclear_disp(CameraId camera, void* param);
 static void kpa_status_disp(CameraId camera, void* param);
+#ifdef TARGET_PORT
+// numeric_id packs two icon ids per word, digit 2n in the high half (the GameCube's u16 order); a u16 pointer on a
+// little-endian machine would read each pair swapped.
+#define NUMERIC_ID_AT(i) ((u16)((u32)numeric_id[(i) >> 1] >> (((i) & 1) ? 0 : 16)))
+#else
 #define NUMERIC_ID ((u16*)numeric_id)
+#define NUMERIC_ID_AT(i) NUMERIC_ID[i]
+#endif
 
 static USER_FUNC(kpa_add_coin);
 static USER_FUNC(kpa_get_msg);
@@ -732,7 +739,7 @@ static void kpa_status_disp(CameraId camera, void* param) {
     digit[4] = n / 10;
     digit[5] = n % 10;
     for (i = 0; i < 6; i++) {
-        ((IconDispGxArgOrderFn)iconDispGx)(1.0f, &pos, ICON_DISP_2D, NUMERIC_ID[digit[i]]);
+        ((IconDispGxArgOrderFn)iconDispGx)(1.0f, &pos, ICON_DISP_2D, NUMERIC_ID_AT(digit[i]));
         pos.x += 20.0f;
     }
     pos.x += 20.0f;
@@ -745,12 +752,12 @@ static void kpa_status_disp(CameraId camera, void* param) {
     digit[1] = n % 10;
     pos.x += 20.0f;
     for (i = 0; i < 2; i++) {
-        ((IconDispGxArgOrderFn)iconDispGx)(1.0f, &pos, ICON_DISP_2D, NUMERIC_ID[digit[i]]);
+        ((IconDispGxArgOrderFn)iconDispGx)(1.0f, &pos, ICON_DISP_2D, NUMERIC_ID_AT(digit[i]));
         pos.x += 20.0f;
     }
 
     pos.x = 50.0f;
-    ((IconDispGxArgOrderFn)iconDispGx)(1.0f, &pos, ICON_DISP_2D, NUMERIC_ID[kwp->stage]);
+    ((IconDispGxArgOrderFn)iconDispGx)(1.0f, &pos, ICON_DISP_2D, NUMERIC_ID_AT(kwp->stage));
     pos.x += 20.0f;
     ((IconDispGxArgOrderFn)iconDispGx)(1.0f, &pos, ICON_DISP_2D, 0x1EE + KPA_ICON_OFS);
 
@@ -759,7 +766,7 @@ static void kpa_status_disp(CameraId camera, void* param) {
     digit[1] = n % 10;
     pos.x += 20.0f;
     for (i = digit[0] == 0; i < 2; i++) {
-        ((IconDispGxArgOrderFn)iconDispGx)(1.0f, &pos, ICON_DISP_2D, NUMERIC_ID[digit[i]]);
+        ((IconDispGxArgOrderFn)iconDispGx)(1.0f, &pos, ICON_DISP_2D, NUMERIC_ID_AT(digit[i]));
         pos.x += 20.0f;
     }
 
@@ -770,7 +777,7 @@ static void kpa_status_disp(CameraId camera, void* param) {
     digit[1] = n / 10;
     digit[2] = n % 10;
     for (i = 0; i < 3; i++) {
-        ((IconDispGxArgOrderFn)iconDispGx)(1.0f, &pos, ICON_DISP_2D, NUMERIC_ID[digit[i]]);
+        ((IconDispGxArgOrderFn)iconDispGx)(1.0f, &pos, ICON_DISP_2D, NUMERIC_ID_AT(digit[i]));
         pos.x += 20.0f;
     }
 }

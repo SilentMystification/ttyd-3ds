@@ -15,8 +15,12 @@ USER_FUNC(evt_env_blur_on) {
     now = event->lifetime;
     if (isFirstCall) {
         envBlurOn(type, msec);
+#ifdef TARGET_PORT
+        *(u64*)event->userdata = now; // read back as one u64 below (the GameCube writes the high word first)
+#else
         event->userdata[0] = ((u64)now >> 32) & 0xFFFFFFFF;
         event->userdata[1] = now & 0xFFFFFFFF;
+#endif
     }
     if (msec && OSTicksToMilliseconds(now - *(u64*)event->userdata) >= msec) {
         envBlurOff();

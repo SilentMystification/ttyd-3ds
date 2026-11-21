@@ -91,27 +91,11 @@ void plat_input_scan(PlatInput* out) {
         return; /* the Select menu has the input */
     }
     if (s_step < s_steps) {
-        /* Steps count video frames (retraces), not reads: the game may read
-         * the pad more than once a frame. */
-        static uint32_t s_last_vblank;
-        uint32_t now = plat_vblank_count();
-        uint32_t elapsed = s_last_vblank == 0 ? 0 : now - s_last_vblank;
-        s_last_vblank = now;
-        while (elapsed-- > 0 && s_step < s_steps) {
-            if (++s_step_frames >= s_script[s_step].frames) {
-                s_step_frames = 0;
-                if (++s_step == s_steps) {
-                    PLOG_I("padscript: done");
-                }
-            }
-        }
-        if (s_step < s_steps) {
-            const ScriptStep* st = &s_script[s_step];
-            out->held = st->keys;
-            out->circle_x = st->cx;
-            out->circle_y = st->cy;
-            return;
-        }
+        const ScriptStep* st = &s_script[s_step];
+        out->held = st->keys;
+        out->circle_x = st->cx;
+        out->circle_y = st->cy;
+        return;
     }
     out->held = held;
     out->circle_x = cp.dx;
@@ -123,5 +107,19 @@ void plat_input_scan(PlatInput* out) {
         hidTouchRead(&tp);
         out->touch_x = tp.px;
         out->touch_y = tp.py;
+    }
+}
+
+/* One game frame passed (the game's VIWaitForRetrace): scripted input steps
+ * count game frames, so a script does the same at any frame rate. */
+void plat_input_frame(void) {
+    if (!s_script_loaded) {
+        script_load();
+    }
+    if (s_step < s_steps && ++s_step_frames >= s_script[s_step].frames) {
+        s_step_frames = 0;
+        if (++s_step == s_steps) {
+            PLOG_I("padscript: done");
+        }
     }
 }

@@ -1690,6 +1690,10 @@ typedef struct MonoDat {
     f32 scale;
 } MonoDat;
 
+#ifdef TARGET_PORT
+#define WINLOG_BE32(p) ((u32)((const u8*)(p))[0] << 24 | (u32)((const u8*)(p))[1] << 16 | \
+                        (u32)((const u8*)(p))[2] << 8 | ((const u8*)(p))[3])
+#endif
 /* header of the monosiri position file (file2): entry table pointer, then its size in bytes */
 typedef struct MonoDatFile {
     MonoDat* entries; // 0x0
@@ -1760,6 +1764,22 @@ static void capture(CameraId camera, void* param) {
     C_MTXLookAt(view, &(Vec){cx, cy, dist}, &(Vec){0.0f, 1.0f, 0.0f}, &(Vec){cx, cy, 0.0f});
     n = ((MonoDatFile*)m->file2->data)->size / sizeof(MonoDat);
     e = ((MonoDatFile*)m->file2->data)->entries;
+#ifdef TARGET_PORT
+    // w/<lang>/mono.dat is a raw file (cached and movable like any): it stays big-endian and is read so.
+    for (i = 0; i < n; i++, e++) {
+        if ((s32)WINLOG_BE32(&e->id) == m->id)
+            break;
+    }
+    if (i < n) {
+        u32 w;
+        w = WINLOG_BE32(&e->x);
+        memcpy(&tx, &w, 4);
+        w = WINLOG_BE32(&e->y);
+        memcpy(&ty, &w, 4);
+        w = WINLOG_BE32(&e->scale);
+        memcpy(&s, &w, 4);
+    } else {
+#else
     for (i = 0; i < n; i++, e++) {
         if (e->id == m->id)
             break;
@@ -1769,6 +1789,7 @@ static void capture(CameraId camera, void* param) {
         ty = e->y;
         s = e->scale;
     } else {
+#endif
         ty = tx = 0.0f;
         s = 1.0f;
     }

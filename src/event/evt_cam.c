@@ -73,11 +73,18 @@ USER_FUNC(evt_cam_shake) {
     now = event->lifetime;
     if (isFirstCall) {
         event->userdata[0] = 0;
+#ifdef TARGET_PORT
+        // The start time as one u64, read back as one (the GameCube writes the high word first, its u64 order).
+        *(u64*)&event->userdata[1] = now;
+        event->userWork[3] = 0;
+        event->wInterpRelatedTime = now;
+#else
         ((u32*)&event->userdata[1])[0] = (now >> 32) & 0xFFFFFFFF;
         ((u32*)&event->userdata[1])[1] = now & 0xFFFFFFFF;
         event->userWork[3] = 0;
         ((u32*)&event->wInterpRelatedTime)[0] = (now >> 32) & 0xFFFFFFFF;
         ((u32*)&event->wInterpRelatedTime)[1] = now & 0xFFFFFFFF;
+#endif
     }
     event->userdata[0]++;
     event->userdata[0] %= 4;
@@ -119,8 +126,12 @@ USER_FUNC(evt_cam_shake) {
             padRumbleOff(0);
             if (offTime < OSTicksToMilliseconds(now - last)) {
                 event->userWork[3] = 1 - event->userWork[3];
+#ifdef TARGET_PORT
+                event->wInterpRelatedTime = now;
+#else
                 ((u32*)&event->wInterpRelatedTime)[0] = (now >> 32) & 0xFFFFFFFF;
                 ((u32*)&event->wInterpRelatedTime)[1] = now & 0xFFFFFFFF;
+#endif
             }
         }
     }

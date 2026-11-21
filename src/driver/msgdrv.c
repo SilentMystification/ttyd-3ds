@@ -20,6 +20,13 @@
 #include "icon_ids.h"
 #include <dolphin/pad.h>
 #include <demo/DEMOPad.h>
+#ifdef TARGET_PORT
+// Ports: Shift-JIS text is a byte stream; a double-byte code is read big-endian (lead byte high), as the GameCube's
+// u16 load reads it.
+#define SJIS_CODE(p) ((u16)(((const u8*)(p))[0] << 8 | ((const u8*)(p))[1]))
+#else
+#define SJIS_CODE(p) (*(const u16*)(p))
+#endif
 /** Red "No messages" text shown in place of a message key that is not found, Japanese version (ErrMessage). */
 const char R_no_messages_JP[] = "<col ff0000ff>\203\201\203b\203Z\201[\203W\202\252\202\240\202\350\202\334\202\271\202\361</col>\n<key>";
 #if VERSION >= VERSION_US
@@ -991,7 +998,7 @@ void msgAnalize(smartEntry* smart, const char* msg) {
 #else
         if (_ismbblead((u8)check)) {
 #endif
-            glyph = kanjiSearch(*((const u16*)msg));
+            glyph = kanjiSearch(SJIS_CODE(msg));
 #if VERSION >= VERSION_US
             ww = scale.x * ((f32)(kanjiGetWidth((u16)(glyph + 0)) + 4));
             entry->glyph = glyph;
@@ -1006,9 +1013,9 @@ void msgAnalize(smartEntry* smart, const char* msg) {
             entry->scale = scale;
 #endif
             entry->value = flags;
-            if ((*((const u16*)msg)) == 0x8145) {
+            if ((SJIS_CODE(msg)) == 0x8145) {
                 entry->value |= MSG_CHAR_DOT;
-            } else if (((*((const u16*)msg)) != 0x8140) && ((*((const u16*)msg)) != 0x8151)) {
+            } else if (((SJIS_CODE(msg)) != 0x8140) && ((SJIS_CODE(msg)) != 0x8151)) {
                 entry->value |= MSG_CHAR_TALK;
             }
             if ((flags & MSG_CHAR_DYNAMIC) != 0) {
@@ -1187,7 +1194,17 @@ void msgAnalize(smartEntry* smart, const char* msg) {
                 } else if (strcmp(tag, "/wave") == 0) {
                     flags &= ~MSG_CHAR_WAVE;
                 } else if (strcmp(tag, "col") == 0) {
+#ifdef TARGET_PORT
+                    {
+                        // <col RRGGBBAA>: the GameCube's u32 lays the bytes out as GXColor reads them (R first);
+                        // a little-endian word is stored with its bytes reversed for that.
+                        u32 rgba = 0;
+                        sscanf(args, "%x", &rgba);
+                        entry->value = __builtin_bswap32(rgba);
+                    }
+#else
                     sscanf(args, "%x", &entry->value);
+#endif
                     entry->glyph = MSG_GLYPH_COLOR;
                     entry->time = time;
                     entry++;
@@ -1436,7 +1453,7 @@ void msgAnalize(smartEntry* smart, const char* msg) {
                     // FAKE: (u32) index casts here and in the second loop stop the IR optimizer from strength-reducing tag[j]/tag[i]; the backend
                     // does it instead and its pointer-IV init in the preheader keeps the dead j/i steps alive, as in the target (FAKES.md)
                     for (k = 0; k < half; k++) {
-                        glyph = kanjiSearch(*(u16*)&tag[(u32)j]);
+                        glyph = kanjiSearch(SJIS_CODE(&tag[(u32)j]));
 #if VERSION >= VERSION_US
                         total += (s32)(0.55f * (scale.y * ((f32)(kanjiGetWidth((u16)(glyph + 0)) + 4))));
 #else
@@ -1470,7 +1487,7 @@ void msgAnalize(smartEntry* smart, const char* msg) {
                                 ys[0] = yx[0] + ys[0];
                             }
                         }
-                        glyph = kanjiSearch(*(u16*)&tag[(u32)nn[0]]);
+                        glyph = kanjiSearch(SJIS_CODE(&tag[(u32)nn[0]]));
 #if VERSION >= VERSION_US
                         wwR = 0.55f * (scale.x * ((f32)(kanjiGetWidth((u16)(glyph + 0)) + 4)));
 #else

@@ -276,8 +276,14 @@ static void effSnowfallDisp(CameraId cameraId, EffectEntry* effect) {
     GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_TEXA, GX_CA_A0, GX_CA_ZERO);
     effGetTexObjN64(99, &texA);
     effGetTexObjN64(100, &texB);
+#ifdef TARGET_PORT
+    // ports: GXGetTexObjData gives back the pointer GXInitTexObj was given (the GameCube: a physical address)
+    dataA = (u8*)GXGetTexObjData(&texA);
+    dataB = (u8*)GXGetTexObjData(&texB);
+#else
     dataA = (u8*)GXGetTexObjData(&texA) + OS_BASE_CACHED; // physical -> cached
     dataB = (u8*)GXGetTexObjData(&texB) + OS_BASE_CACHED;
+#endif
     dataA += GXGetTexBufferSize(64, 64, 0, 1, 2);
     memcpy(dataA, dataB, GXGetTexBufferSize(16, 16, 0, 0, 0));
     DCFlushRange(dataA, GXGetTexBufferSize(64, 64, 0, 1, 3));

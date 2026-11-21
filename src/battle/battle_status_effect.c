@@ -694,7 +694,11 @@ void BattleStatusChangeMsgAdjust(BattleWork* wp) {
         if (!msg->flags) {
             msg->unitId = -1;
             msg->type = -1;
+#ifdef TARGET_PORT
+        } else if ((s64)((u64)(u32)base->maskHi << 32 | (u32)base->maskLo) & (s64)(1 << t)) { // the mask as a BE s64
+#else
         } else if (*(s64*)&base->maskHi & (s64)(1 << t)) {
+#endif
             msg->unitId = -1;
             msg->type = -1;
         }

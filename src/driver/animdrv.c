@@ -1,6 +1,9 @@
 // Animation driver: loads the paper animation files (.bin) and their textures, evaluates the
 // keyframes and draws the animation poses of Mario, the partners, NPCs and items. Many helpers here
 // are inlined into their callers.
+#ifdef TARGET_PORT
+#include "port_formats.h"
+#endif
 #include "driver/animdrv.h"
 #include <dolphin/os/OSFastCast.h>
 #include "driver/dispdrv.h"
@@ -3309,8 +3312,22 @@ void animInit(void) {
     if (file) {
         memcpy_as4(vivihimoData[1], *file->data, sizeof(_vivihimoData));
         memcpy_as4(vivihimoTailGroupNo, (u8*)*file->data + sizeof(_vivihimoData), sizeof(vivihimoTailGroupNo));
+#ifdef TARGET_PORT
+        portSwapU32Run(vivihimoTailGroupNo, sizeof(vivihimoTailGroupNo) / 4); // big-endian s32[4] in the file
+#endif
         fileFree(file);
     }
+#ifdef TARGET_PORT
+    {
+        // _vivihimoData holds big-endian f32 words, from a/vivian.bin or (without it) from its initializer, which
+        // is the GameCube's bytes. Once per boot (this runs again only on a reset, which reloads the file).
+        static BOOL native;
+        if (file || !native) {
+            portSwapU32Run(_vivihimoData, sizeof(_vivihimoData) / 4);
+            native = TRUE;
+        }
+    }
+#endif
     fileSetCurrentArchiveType(0);
     wp->mp_ag2tg = fileAllocf(0, "a/ag2tg.bin");
 }

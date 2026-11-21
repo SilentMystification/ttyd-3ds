@@ -13,4 +13,6 @@ void portMapSwap(void* data, u32 size, const char* name);
 void portCamRoadSwap(void* data, u32 size, const char* name);
 // A file made only of 16-bit words (icon.bin).
 void portSwapU16Run(void* data, u32 count);
+// Runs of 32-bit words (float and s32 tables).
+void portSwapU32Run(void* data, u32 count);
 #endif

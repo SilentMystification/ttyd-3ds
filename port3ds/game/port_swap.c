@@ -136,3 +136,15 @@ void portSwapU16Run(void* data, u32 count) {
         p[1] = t;
     }
 }
+
+void portSwapU32Run(void* data, u32 count) {
+    u8* p = data;
+    for (u32 i = 0; i < count; i++, p += 4) {
+        u8 t = p[0];
+        p[0] = p[3];
+        p[3] = t;
+        t = p[1];
+        p[1] = p[2];
+        p[2] = t;
+    }
+}

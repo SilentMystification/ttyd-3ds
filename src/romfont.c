@@ -486,7 +486,11 @@ void romFontPrintGX(f32 x, f32 y, f32 scale, GXColor* color, const char* msg, ..
     // --- walk the formatted string, one 24x24 quad per glyph ---
     for (;;) {
         u32 c = buf[i];
+#ifdef TARGET_PORT
+        u16 c16 = (u16)(buf[i] << 8 | buf[i + 1]); // lead<<8 | trail, as the GameCube's u16 load
+#else
         u16 c16 = *(u16*)&buf[i]; // big-endian lead<<8 | trail, for double-byte
+#endif
 
 #if VERSION >= VERSION_US
         if (wp->language != 0) {
@@ -564,7 +568,11 @@ s32 romFontGetWidth(const char* message) {
 
     for (;;) {
         c = message[i];
+#ifdef TARGET_PORT
+        c16 = (u16)((u8)message[i] << 8 | (u8)message[i + 1]); // lead<<8 | trail, as the GameCube's u16 load
+#else
         c16 = *(u16*)&message[i];
+#endif
 #if VERSION >= VERSION_US
         if (wp->language != 0) {
             if (c == 0x00) {

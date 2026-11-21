@@ -41,6 +41,9 @@ typedef struct {
  * replaces the hardware state. */
 void plat_input_scan(PlatInput* out);
 
+/* Called once per game frame: advances scripted input (switch padscript). */
+void plat_input_frame(void);
+
 #ifdef __cplusplus
 }
 #endif

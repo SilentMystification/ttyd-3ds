@@ -133,6 +133,38 @@ u32 batten_dl_0_0[] __attribute__((aligned(32))) = {0x98000E1E, 0x00021E1E, 0x1F
 u32 batten_dl_0_1[] __attribute__((aligned(32))) = {0x98000E1F, 0x00021F1F, 0x20000220, 0x201A0004, 0x1A1A1B00, 0x051B1B15, 0x00041515, 0x16000516, 0x16100004, 0x10101100, 0x0511110B, 0x00040B0B, 0x0C00050C, 0x0C060001, 0x01010700, 0x03040401, 0x00020202, 0x02000205, 0x05000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000};
 u32 batten_dl_0_2[] __attribute__((aligned(32))) = {0x98000E20, 0x00022020, 0x21000221, 0x211B0005, 0x1B1B1C00, 0x041C1C16, 0x00051616, 0x17000417, 0x17110005, 0x11111200, 0x0412120C, 0x00050C0C, 0x0D00040D, 0x0D070003, 0x04040800, 0x01060602, 0x00020505, 0x03000207, 0x07000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000};
 u32 batten_dl_0_3[] __attribute__((aligned(32))) = {0x98000E21, 0x00022121, 0x22000222, 0x221C0004, 0x1C1C1D00, 0x001D1D17, 0x00041717, 0x18000018, 0x18120004, 0x12121300, 0x0013130D, 0x00040D0D, 0x0E00000E, 0x0E080001, 0x06060900, 0x00080803, 0x00020707, 0x04000209, 0x09000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000};
+#ifdef TARGET_PORT
+// The display lists above are written as u32 words: on a little-endian machine each word's bytes are reversed in
+// memory, and GX reads a display list as bytes. They are put in the GameCube's byte order once, at start-up.
+__attribute__((constructor)) static void portDisplayListsToGXOrder(void) {
+    static u32* const lists[] = {
+        cloud_dl_0_0,
+        cloud_dl_0_1,
+        cloud_dl_0_2,
+        cloud_dl_0_3,
+        batten_dl_0_0,
+        batten_dl_0_1,
+        batten_dl_0_2,
+        batten_dl_0_3,
+    };
+    static const u32 sizes[] = {
+        sizeof(cloud_dl_0_0),
+        sizeof(cloud_dl_0_1),
+        sizeof(cloud_dl_0_2),
+        sizeof(cloud_dl_0_3),
+        sizeof(batten_dl_0_0),
+        sizeof(batten_dl_0_1),
+        sizeof(batten_dl_0_2),
+        sizeof(batten_dl_0_3),
+    };
+    u32 i, j;
+    for (i = 0; i < sizeof(lists) / sizeof(lists[0]); i++) {
+        for (j = 0; j < sizes[i] / 4; j++) {
+            lists[i][j] = __builtin_bswap32(lists[i][j]);
+        }
+    }
+}
+#endif
 void* batten_dl_0_tbl[] = {batten_dl_0_0, batten_dl_0_1, batten_dl_0_2, batten_dl_0_3};
 /** Size in 32-byte units of each of the X-shaped (batten) cloud model's four display lists. */
 u8 batten_dl_0_size_tbl[] = {0x03, 0x03, 0x03, 0x03};

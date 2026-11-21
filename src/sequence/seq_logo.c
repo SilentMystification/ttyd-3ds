@@ -389,7 +389,12 @@ void seq_logoMain(SequenceWork* work) {
             first = fileAllocf(0, "%s/b/first", getMarioStDvdRoot());
             if (first) {
                 decode = *first->data;
+#ifdef TARGET_PORT
+                size = (u32)((u8*)decode)[0] << 24 | (u32)((u8*)decode)[1] << 16 | (u32)((u8*)decode)[2] << 8 |
+                       ((u8*)decode)[3]; // LZ77 header: 0x10, then the size as a u24 little-endian (read big-endian)
+#else
                 size = *(u32*)decode;
+#endif
                 size = ((size << 16) & 0xFF0000) | (size & 0xFF00) | ((size >> 16) & 0xFF);
                 LZ77Decode(*first->data, decode = __memAlloc(HEAP_DEFAULT, size));
                 arcEntry(0, decode, size);

@@ -38,6 +38,7 @@ static aptHookCookie s_apt_cookie;
 uint64_t plat_ticks(void) { return svcGetSystemTick(); }
 uint32_t plat_uptime_ms(void) { return (uint32_t)((svcGetSystemTick() - s_boot_tick) / (PLAT_TICKS_PER_SEC / 1000u)); }
 int plat_is_new3ds(void) { return s_new3ds; }
+uint64_t plat_rtc_ms_since_1900(void) { return osGetTime(); }
 int plat_started_by_netload(void) { return s_netload; }
 const char* plat_build_string(void) { return PORT3DS_BUILD_STRING; }
 

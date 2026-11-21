@@ -42,6 +42,7 @@ int plat_switch_int(const char* key, int fallback);
 #define PLAT_TICKS_PER_SEC 268111856u /* ARM11 system tick */
 uint64_t plat_ticks(void);
 uint32_t plat_uptime_ms(void);
+uint64_t plat_rtc_ms_since_1900(void); /* the console's clock */
 
 /* ---- Crash handling and exit (plat/crash.c) ----
  * Every thread the port creates installs the exception handler with

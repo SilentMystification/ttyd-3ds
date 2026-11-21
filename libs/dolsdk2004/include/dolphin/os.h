@@ -67,6 +67,10 @@ u16 __OSWirelessPadFixMode AT_ADDRESS(OS_BASE_CACHED | 0x30E0);
 OSThread* __gUnkThread1 AT_ADDRESS(OS_BASE_CACHED | 0x00D8);
 int __gUnknown800030C0[2] AT_ADDRESS(OS_BASE_CACHED | 0x30C0);
 u8 __gUnknown800030E3 AT_ADDRESS(OS_BASE_CACHED | 0x30E3);
+#elif defined(TARGET_PORT)
+// Ports: the GameCube's clocks as constants (the console stores them in low memory).
+#define __OSBusClock  162000000u
+#define __OSCoreClock 486000000u
 #else
 #define __OSBusClock  (*(u32 *)(OS_BASE_CACHED | 0x00F8))
 #define __OSCoreClock (*(u32 *)(OS_BASE_CACHED | 0x00FC))
@@ -198,7 +202,15 @@ u32 OSUncachedToPhysical(void* ucaddr);
 void* OSCachedToUncached(void* caddr);
 void* OSUncachedToCached(void* ucaddr);
 
-#if !DEBUG
+#if defined(TARGET_PORT)
+// Ports have one address space: a "physical" address is the pointer itself.
+#define OSPhysicalToCached(paddr)    ((void*)(u32)(paddr))
+#define OSPhysicalToUncached(paddr)  ((void*)(u32)(paddr))
+#define OSCachedToPhysical(caddr)    ((u32)(caddr))
+#define OSUncachedToPhysical(ucaddr) ((u32)(ucaddr))
+#define OSCachedToUncached(caddr)    ((void*)(caddr))
+#define OSUncachedToCached(ucaddr)   ((void*)(ucaddr))
+#elif !DEBUG
 #define OSPhysicalToCached(paddr)    ((void*) ((u32)(OS_BASE_CACHED   + (u32)(paddr))))
 #define OSPhysicalToUncached(paddr)  ((void*) ((u32)(OS_BASE_UNCACHED + (u32)(paddr))))
 #define OSCachedToPhysical(caddr)    ((u32)   ((u32)(caddr)  - OS_BASE_CACHED))

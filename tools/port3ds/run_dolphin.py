@@ -16,6 +16,7 @@ byte-identical DOL, so its symbols are valid for the retail disc too.
   --deref NAME:SIZE      read the 4-byte pointer at NAME, then SIZE bytes at
                          the address it holds (for example gp -> GlobalWork)
   --addr 0xADDR:SIZE     read raw memory
+  --break FUNC           after --frames, run to the next call of FUNC
 
 Results are printed as hex and, with --json, written as
 {"frame": N, "reads": {label: {"addr": A, "hex": "..."}}}.
@@ -57,6 +58,7 @@ def main():
     ap.add_argument("--dol", type=Path, help="boot this DOL with --iso as the disc")
     ap.add_argument("--elf", type=Path, help="symbol source (default build/<version>/MarioSt.elf)")
     ap.add_argument("--frames", type=int, default=0, help="game frames (marioStMain calls) to run first")
+    ap.add_argument("--break", dest="brk", help="then run to the next call of this function")
     ap.add_argument("--read", action="append", default=[])
     ap.add_argument("--deref", action="append", default=[])
     ap.add_argument("--addr", action="append", default=[])
@@ -105,6 +107,13 @@ def main():
                 rsp.cont()
             rsp.clear_breakpoint(bp)
             result["frame"] = args.frames
+        if args.brk:
+            if args.brk not in syms:
+                die(f"unknown symbol {args.brk}", 2)
+            rsp.set_breakpoint(syms[args.brk].addr)
+            rsp.cont()
+            rsp.clear_breakpoint(syms[args.brk].addr)
+            result["break"] = args.brk
 
         def record(label, addr, size):
             data = rsp.read(addr, size)

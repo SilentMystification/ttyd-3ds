@@ -292,6 +292,18 @@ void GXCopyDisp(void* dest, GXBool clear) {
     if (gx_prim_open) {
         gx_end_open_primitive(__builtin_return_address(0));
     }
+    if (gx_stat_draws == 0) {
+        /* a frame shown with nothing drawn since the last one: logged once per caller */
+        static void* seen[8];
+        void* ra = __builtin_return_address(0);
+        int i;
+        for (i = 0; i < 8 && seen[i] != NULL && seen[i] != ra; i++) {
+        }
+        if (i < 8 && seen[i] == NULL) {
+            seen[i] = ra;
+            PLOG_W("GX: GXCopyDisp from %p with nothing drawn since the last one", ra);
+        }
+    }
     (void)dest;
     gx_pipe_reset();
     plat_gpu_frame_end(gx.copy_src[2] ? gx.copy_src[2] : 640, gx.copy_src[3] ? gx.copy_src[3] : 480);

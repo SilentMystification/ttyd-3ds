@@ -21,6 +21,7 @@
 #include "driver/seqdrv.h"
 #include "driver/swdrv.h"
 #include "event.h"
+#include "pmario_sound.h"
 #include "mario/mario_party.h"
 #include "mario/mariost.h"
 #include "memory.h"
@@ -100,6 +101,10 @@ VIRetraceCallback VISetPostRetraceCallback(VIRetraceCallback callback) {
  * set-up, no partner out, the save flags cleared, the story so far
  * (GSW 0, which map scripts branch on) and one partner joined and out. */
 static void warp_new_game(int story, int party) {
+    /* the file select's new game stops the title's (or the opening's) music
+     * and sounds; the warp skips it */
+    psndStopAllFadeOut();
+    psndSFXAllOff();
     stg0_00_init();
     marioPartyKill();
     swInit();

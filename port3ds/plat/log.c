@@ -387,9 +387,16 @@ void plat_log_start_writer(void) {
         plat_fatal("log: no memory for the log queue");
     }
     memset(s_slots, 0, sizeof(Slot) * SLOTS);
-    /* Core 1 first (needs APT_SetAppCpuTimeLimit), then core 0. */
-    s_writer = threadCreate(writer_main, NULL, 32 * 1024, 0x3F, 1, false);
-    int core = 1;
+    /* Core 2 (the New 3DS's extra core, beside the render thread, at the
+     * lowest priority) so SD and network writes never take time from the
+     * game thread on core 0 or the audio and DMA threads on core 1; then
+     * core 1, then core 0. */
+    int core = 2;
+    s_writer = threadCreate(writer_main, NULL, 32 * 1024, 0x3F, 2, false);
+    if (s_writer == NULL) {
+        s_writer = threadCreate(writer_main, NULL, 32 * 1024, 0x3F, 1, false);
+        core = 1;
+    }
     if (s_writer == NULL) {
         s_writer = threadCreate(writer_main, NULL, 32 * 1024, 0x3F, 0, false);
         core = 0;

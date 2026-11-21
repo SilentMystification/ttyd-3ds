@@ -80,6 +80,7 @@ static C3D_Tex s_blank_tex;
 static LightLock s_tex_lock;
 static u32 s_frame_counter;
 static PlatGpuState s_last_state;
+static int s_last_state_valid; /* s_last_state was recorded in the current record */
 static u32 s_last_fog_hash;
 static PlatGpuStats s_stats, s_stats_frame;
 static int s_rot;              /* orientation mode, see efb_to_target */
@@ -175,20 +176,27 @@ static void submit(int present) {
     s_rec[s_cur].used = 0;
     s_rec[s_cur].nverts = 0;
     memset(&s_last_state, 0xFF, sizeof(s_last_state));
+    s_last_state_valid = 0;
     s_last_fog_hash = 0;
 }
 
 /* The record is full mid-frame: hand it to the render thread as a segment
  * (drawn, not presented) and go on in the other one, with the current GX
  * state put back at its start. */
-static void flush_segment(void) {
+static void end_segment(void) {
+    /* The replay skips draws until a record's first state command, so the
+     * state in force goes at the start of the next record too. */
     PlatGpuState keep = s_last_state;
-    int have_state = s_rec[s_cur].used != 0;
+    int have_state = s_last_state_valid;
     rec_put(CMD_SEGMENT_END, 0);
     submit(0);
     if (have_state) {
         plat_gpu_set_state(&keep);
     }
+}
+
+static void flush_segment(void) {
+    end_segment();
     s_stats_frame.segments++;
 }
 
@@ -239,6 +247,7 @@ void plat_gpu_set_state(const PlatGpuState* state) {
     if (dst != NULL) {
         *dst = *state;
         s_last_state = *state;
+        s_last_state_valid = 1;
         s_stats_frame.state_changes++;
     }
 }
@@ -297,8 +306,7 @@ void plat_gpu_frame_end(uint16_t efb_w, uint16_t efb_h) {
 }
 
 void plat_gpu_sync(void) {
-    rec_put(CMD_SEGMENT_END, 0);
-    submit(0);
+    end_segment();
     wait_idle();
 }
 
@@ -679,6 +687,7 @@ static void render_record(Record* r) {
      * GX state and the frame's vertex buffer back. */
     const PlatGpuState* cur_state = NULL;
     int restore = 0;
+    u32 n_draw = 0, n_clear = 0, n_copy = 0, n_skip = 0, after_last_draw = 0; /* for the screenshot log */
     while (p < end) {
         CmdHead* h = (CmdHead*)p;
         u8* body = p + sizeof(CmdHead);
@@ -697,12 +706,17 @@ static void render_record(Record* r) {
         }
         case CMD_DRAW: {
             const u32* d = (const u32*)body;
+            if (cur_state == NULL) {
+                n_skip++;
+            }
             if (cur_state != NULL && d[1] >= 3) {
                 if (restore) {
                     apply_state(cur_state);
                     restore = 0;
                 }
                 C3D_DrawArrays(GPU_TRIANGLES, (int)d[0], (int)(d[1] - d[1] % 3));
+                n_draw++;
+                after_last_draw = 0;
             }
             break;
         }
@@ -710,6 +724,8 @@ static void render_record(Record* r) {
             const u32* d = (const u32*)body;
             draw_rect_quad(r, (u16)d[0], (u16)(d[0] >> 16), (u16)d[1], (u16)(d[1] >> 16), d[2], d[3] & 0xFFFFFF,
                            (d[3] >> 24) & 1, (d[3] >> 25) & 1);
+            n_clear++;
+            after_last_draw |= 1;
             C3D_SetAttrInfo(&s_attr);
             C3D_SetBufInfo(&bi);
             restore = 1;
@@ -719,6 +735,8 @@ static void render_record(Record* r) {
             const u32* d = (const u32*)body;
             copy_to_texture((u16)d[0], (u16)(d[0] >> 16), (u16)d[1], (u16)(d[1] >> 16), d[3], d[4] & 0xFFFF,
                             d[4] >> 16);
+            n_copy++;
+            after_last_draw |= 2;
             C3D_SetAttrInfo(&s_attr);
             C3D_SetBufInfo(&bi);
             restore = 1;
@@ -739,6 +757,9 @@ static void render_record(Record* r) {
             char path[48];
             snprintf(path, sizeof(path), "shots/%05lu.ppm", (unsigned long)s_shot_due);
             s_shot_due = 0;
+            PLOG_I("shot %s: record of %lu bytes has %lu draws (%lu without a state), %lu clears, %lu copies; after the last draw:%s%s", path,
+                   (unsigned long)r->used, (unsigned long)n_draw, (unsigned long)n_skip, (unsigned long)n_clear, (unsigned long)n_copy,
+                   after_last_draw & 1 ? " clear" : "", after_last_draw & 2 ? " copy" : "");
             capture_efb(r, path); /* its GPU copy waits for the frame's commands */
         }
     }

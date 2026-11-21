@@ -16,7 +16,7 @@ Everything below runs in Azahar from the CIA, on the `port3ds` branch.
 ## Open items, in order
 
 1. **First hardware boot.** The owner's N3DS runs ftpd at 192.168.1.223:5000.
-   - An ISO upload to `/3ds/ttyd/game.iso` was in progress at about 0.8 MB/s. It runs as a background process of the old session, so check the size (`ftplib` `SIZE`, expect 1459978240 bytes) and restart the upload if it stopped.
+   - The disc image is on the console: `/3ds/ttyd/game.iso`, 1459978240 bytes, size checked after the upload.
    - Then, in the Homebrew Launcher, press Y and run the probe first:
      `tools/port3ds/run_hw.py --ip 192.168.1.223 --build build/3ds/probe/ttyd_probe.3dsx`.
      The probe shows its results on screen and in `sdmc:/3ds/ttyd/probe.txt`.

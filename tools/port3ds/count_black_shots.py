@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""List all-black (single-colour) P6 .ppm shots in a directory and count them."""
+"""Usage: count_black_shots.py DIR [--from N]
+
+List all-black (single-colour) P6 .ppm shots in a directory and count them."""
 import os
 import sys
 
@@ -23,8 +25,14 @@ def pixels(path):
 
 
 def main():
-    d = sys.argv[1] if len(sys.argv) > 1 else "."
-    names = sorted(n for n in os.listdir(d) if n.endswith(".ppm"))
+    args = sys.argv[1:]
+    first = 0  # --from N: skip shots numbered below N (boot, logo and title fades)
+    if "--from" in args:
+        i = args.index("--from")
+        first = int(args[i + 1])
+        del args[i:i + 2]
+    d = args[0] if args else "."
+    names = sorted(n for n in os.listdir(d) if n.endswith(".ppm") and int(n[:-4]) >= first)
     bad = 0
     for n in names:
         p = pixels(os.path.join(d, n))

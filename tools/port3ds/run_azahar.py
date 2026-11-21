@@ -65,6 +65,8 @@ async_shader_compilation\\default=false
 [Audio]
 enable_audio_stretching=false
 enable_audio_stretching\\default=false
+audio_emulation={audio}
+audio_emulation\\default=false
 
 [Debugging]
 use_gdbstub={gdb}
@@ -99,11 +101,11 @@ def profile_dirs():
     return config, data, data / "azahar-emu" / "sdmc"
 
 
-def write_profile(gdb, gdb_port):
+def write_profile(gdb, gdb_port, lle_audio=False):
     config, data, sdmc = profile_dirs()
     (config / "azahar-emu").mkdir(parents=True, exist_ok=True)
     sdmc.mkdir(parents=True, exist_ok=True)
-    cfg = QT_CONFIG.format(gdb="true" if gdb else "false", gdb_port=gdb_port)
+    cfg = QT_CONFIG.format(gdb="true" if gdb else "false", gdb_port=gdb_port, audio=2 if lle_audio else 0)
     (config / "azahar-emu" / "qt-config.ini").write_text(cfg)
     return sdmc
 
@@ -178,6 +180,8 @@ def main():
     ap.add_argument("--stall", type=float, default=0.0, help="fail after this many seconds without log growth (0 = off)")
     ap.add_argument("--gdb", action="store_true", help="enable Azahar's GDB stub; the guest waits for a debugger")
     ap.add_argument("--gdb-port", type=int, default=24689)
+    ap.add_argument("--lle-audio", action="store_true",
+                    help="run the real DSP firmware (sdmc:/3ds/dspfirm.cdc in the profile) instead of Azahar's HLE DSP")
     ap.add_argument("--allow-hw-faults", action="store_true", help="do not fail on Azahar fault lines")
     args = ap.parse_args()
 
@@ -188,7 +192,7 @@ def main():
         fail("the build must be under the home directory (Azahar's Flatpak cannot see /tmp)", 2)
 
     subprocess.run(["flatpak", "kill", APP_ID], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    sdmc = write_profile(args.gdb, args.gdb_port)
+    sdmc = write_profile(args.gdb, args.gdb_port, args.lle_audio)
 
     ttyd_dir = sdmc / "3ds" / "ttyd"
     ttyd_dir.mkdir(parents=True, exist_ok=True)

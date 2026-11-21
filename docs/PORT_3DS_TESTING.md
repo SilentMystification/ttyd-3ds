@@ -89,7 +89,7 @@ Switches the game reads (space-separated words in `--switches`):
 | `gputest` | Draws the orientation pattern at boot: red top left, green top right, blue bottom left of a grey screen |
 | `loglevel=3` | Debug lines in the log (each converted disc file, primitives closed without `GXEnd`) |
 
-Sound needs `sdmc:/3ds/dspfirm.cdc` (dumped from a console with DSP1). Without it the game runs silently with the same sound timing.
+Sound needs `sdmc:/3ds/dspfirm.cdc` (dumped from a console with DSP1), in the profile's SD card as on the console. Without it the game runs silently with the same sound timing. `--lle-audio` makes Azahar run that firmware itself (its LLE DSP) instead of its own model of it, which is slower but closer to the console. `wavdump=N` saves the first N seconds of the game's mix as `sdmc:/3ds/ttyd/audio.wav`, and the log has the output's peak level every 10 s.
 
 ### Map sweep
 

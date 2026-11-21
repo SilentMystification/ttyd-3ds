@@ -67,6 +67,7 @@ void plat_console_lock(void) { LightLock_Lock(&s_console_lock); }
 int plat_console_trylock(void) { return LightLock_TryLock(&s_console_lock) == 0; }
 void plat_console_unlock(void) { LightLock_Unlock(&s_console_lock); }
 int plat_log_level(void) { return s_level; }
+void plat_log_set_level(int level) { s_level = level < 0 ? 0 : level > 3 ? 3 : level; }
 unsigned plat_log_dropped(void) { return s_drop_total + s_dropped; }
 
 static void ring_add(const char* s, int n) {

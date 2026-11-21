@@ -12,6 +12,7 @@
  *      to close, plat_shutdown() ends the process cleanly.
  */
 #include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,13 +87,20 @@ void plat_shutdown(void) {
     exit(0);
 }
 
-/* Without New 3DS hardware the port cannot run: say so on screen and wait
- * for START (or the HOME Menu). */
-static void old3ds_screen(void) {
+/* A message the user must read: shown on the top screen until START (or
+ * the HOME Menu). Works before and after the game set up the GPU. */
+static void (*s_gpu_shutdown)(void);
+void plat_set_gpu_shutdown(void (*fn)(void)) { s_gpu_shutdown = fn; }
+
+static void message_screen(const char* text) {
+    if (s_gpu_shutdown != NULL) {
+        s_gpu_shutdown(); /* citro3d and gfx down, so the console can take the screen */
+        s_gpu_shutdown = NULL;
+    }
     gfxInitDefault();
     consoleInit(GFX_TOP, NULL);
     printf("\n  Paper Mario: The Thousand-Year Door\n  (3DS port, build %s)\n\n", PORT3DS_BUILD_STRING);
-    printf("  This port needs a New 3DS, New 3DS XL\n  or New 2DS XL.\n\n  Press START to exit.\n");
+    printf("%s\n\n  Press START to exit.\n", text);
     while (aptMainLoop()) {
         hidScanInput();
         if (hidKeysDown() & KEY_START) {
@@ -105,6 +113,19 @@ static void old3ds_screen(void) {
     gfxExit();
 }
 
+void plat_user_error(const char* fmt, ...) {
+    char text[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+    PLOG_E("user error: %s", text);
+    plat_log_stop();
+    message_screen(text);
+    plat_log_crash_close();
+    exit(0);
+}
+
 int main(int argc, char** argv) {
     s_boot_tick = svcGetSystemTick();
 
@@ -112,7 +133,7 @@ int main(int argc, char** argv) {
     APT_CheckNew3DS(&n3ds);
     s_new3ds = n3ds ? 1 : 0;
     if (!s_new3ds) {
-        old3ds_screen();
+        message_screen("  This port needs a New 3DS, New 3DS XL\n  or New 2DS XL.");
         return 0;
     }
     osSetSpeedupEnable(true);
@@ -121,7 +142,7 @@ int main(int argc, char** argv) {
     mkdir(DATA_DIR, 0777);
     if (chdir(DATA_DIR) != 0) {
         /* No SD card or a write-protected one: nothing can be logged. */
-        old3ds_screen();
+        message_screen("  The SD card cannot be used\n  (missing or write-protected).");
         return 0;
     }
     s_netload = argc > 0 && argv[0] != NULL && strncmp(argv[0], "3dslink:", 8) == 0;

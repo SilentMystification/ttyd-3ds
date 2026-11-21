@@ -19,6 +19,7 @@ void plat_log_crash_close(void);     /* before svcExitProcess */
 void plat_log_console_ready(void);   /* the bottom console exists: show the lines kept until now */
 void plat_log_poll(void);            /* accept a live-log client while the writer does not run */
 unsigned plat_log_dropped(void);
+void plat_log_set_level(int level);
 void plat_console_lock(void);
 int plat_console_trylock(void);
 void plat_console_unlock(void);
@@ -28,6 +29,9 @@ void plat_crash_init(void);          /* handler stack, main thread handler, watc
 void plat_stack_register(int slot, const char* name, unsigned size);
 extern volatile uint32_t plat_wd_counter;
 
+/* menu.c: returns 1 while the Select menu is open (it consumed the input). */
+int plat_menu_input(uint32_t held, uint32_t down);
+
 /* memplace.c */
 void plat_memplace_init(void);
 void plat_memplace_report(void);
@@ -35,5 +39,6 @@ void plat_memplace_report(void);
 /* boot.c */
 int plat_started_by_netload(void);
 void plat_cpu_limit_init(void);      /* core 1 time limit and the APT hook that lowers it on HOME/sleep */
+void plat_set_gpu_shutdown(void (*fn)(void)); /* the GPU back end's teardown, for message screens */
 
 #endif

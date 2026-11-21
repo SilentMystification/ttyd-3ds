@@ -13,6 +13,7 @@
 #include "plat/plat.h"
 #include "plat/thread.h"
 #include "port3ds/os_internal.h"
+#include "port3ds/rel_static.h"
 
 /* The arena the game sees at main() on the GameCube (G8ME01, measured in
  * Dolphin: 0x80439920..0x817EE1A0). The game's own DEMOInit and memInit
@@ -23,6 +24,9 @@ static void* s_arena_lo;
 static void* s_arena_hi;
 static u8* s_arena_block;
 static int s_os_ready;
+
+/* Paired-single quantization registers (port_fastcast.h). */
+unsigned int port_gqr[8];
 
 /* ---- Arena ---- */
 
@@ -281,5 +285,6 @@ void OSInit(void) {
     s_arena_lo = s_arena_block;
     s_arena_hi = s_arena_block + GAME_ARENA_BYTES;
     port_thread_init();
+    port_rel_snapshot_all();
     PLOG_I("OSInit: arena %p..%p (%lu bytes)", s_arena_lo, s_arena_hi, (unsigned long)GAME_ARENA_BYTES);
 }

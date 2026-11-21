@@ -158,7 +158,9 @@ add_custom_command(
     DEPENDS "${TTYD_REPO_DIR}/tools/port3ds/gen_mtx.py"
     COMMENT "Generating the matrix library")
 # SDK sources compiled unchanged: the heap allocator.
-set(TTYD_SDK_SOURCES "${TTYD_REPO_DIR}/libs/dolsdk2004/src/os/OSAlloc.c")
+set(TTYD_SDK_SOURCES
+    "${TTYD_REPO_DIR}/libs/dolsdk2004/src/os/OSAlloc.c"
+    "${TTYD_REPO_DIR}/libs/dolsdk2004/src/pad/Padclamp.c")
 add_library(ttyd_port_game OBJECT ${TTYD_PORT_GAME_SOURCES} ${TTYD_SDK_SOURCES}
     "${TTYD_GEN_DIR}/rel_table.c" "${TTYD_GEN_DIR}/mtx_sdk.c")
 set_source_files_properties(${TTYD_SDK_SOURCES} "${TTYD_GEN_DIR}/mtx_sdk.c" TARGET_DIRECTORY ttyd_port_game

@@ -23,4 +23,10 @@ typedef struct PortRelStatic {
 extern const PortRelStatic port_rel_table[];
 extern const int port_rel_count;
 
+/* os_link.c */
+void port_rel_snapshot_all(void);
+int port_rel_index(const char* area);
+u32 port_rel_header_size(void);
+void port_rel_make_header(int index, void* out);
+
 #endif

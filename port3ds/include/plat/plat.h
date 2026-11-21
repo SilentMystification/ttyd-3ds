@@ -54,6 +54,10 @@ void plat_crash_install_thread(void);
 void plat_fatal(const char* fmt, ...) __attribute__((noreturn, format(printf, 1, 2)));
 void plat_exit_process(void) __attribute__((noreturn));
 void plat_crash_line(const char* s, int n);
+/* A problem the user can fix (no disc image, wrong game, no DSP firmware):
+ * shown on screen with the message until START, then the process ends.
+ * Also written to the log. */
+void plat_user_error(const char* fmt, ...) __attribute__((noreturn, format(printf, 1, 2)));
 /* Context shown in crash reports: a short name of what the game loop is
  * doing and the current map (set by the game side). */
 void plat_set_phase(const char* phase);
@@ -70,6 +74,11 @@ void plat_wd_hold(int on);
  * caller then calls plat_shutdown(). */
 int plat_frame_poll(void);
 void plat_shutdown(void) __attribute__((noreturn));
+
+/* ---- Select menu (plat/menu.c) ---- */
+/* The menu's "Return to title" holds the GameCube reset button until the
+ * game has seen it (OSGetResetButtonState). */
+int plat_reset_requested(void);
 
 /* ---- System information ---- */
 int plat_is_new3ds(void);

@@ -48,7 +48,7 @@ Updated 2026-11-22. Owner goals: original GameCube frame rates, stereo 3D, all t
 3. Vertex shader transform, gated by the no-z-fighting, no-seams tests (`PORT_3DS_GPU_OFFLOAD.md`). Then immediate mode, the matrix palette, and lighting.
 4. Game arena in linear memory (Star3D's idea), so the GPU reads game data without copies.
 5. GX translation moved to core 2 (`PORT_3DS_MULTICORE.md` A): `gxthread=0/1/2`, the late-read audit, the render fence, verify mode.
-6. Per-voice NDSP audio: MusyX voices on NDSP channels, loops re-aligned at build time.
+6. Per-voice NDSP audio: **done behind `ndspvoices=1`**, with loops re-aligned at load. It cuts audio CPU by 16–30%. Next: give streams (background music) their own NDSP channels, the biggest remaining audio cost. Hardware check before it becomes the default.
 7. **Stereo 3D:** two-eye rendering in the record/replay, the slider-driven quality profile, and the GPU budget for both eyes.
 8. QTM placement and the core-1 limit, decided by hardware numbers (Lane D).
 9. Frame pacing: no VBlank wait after a long frame; PAL at 50 Hz.

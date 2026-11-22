@@ -119,6 +119,9 @@ Switches the game reads (space-separated words in `--switches`):
 | `battle=<id\|name>` | Starts the given entry of the current area's battle setup table after the map is up (`battlewait=N`) |
 | `btlauto=perfect\|fail` | Runs battles unattended. `btlmoves=` gives the menu keys per turn and `btlstep=` the frames between presses. `perfect` forces every action command to succeed and `fail` presses nothing during them |
 | `stopframe=N` | GameCube debug DOL only: stops at game frame N, for `run_dolphin.py --break gcdbg_stop` |
+| `ndspvoices=1` | Plays MusyX's dry DSP-ADPCM voices on NDSP channels 1–23, timed to the software mix on channel 0. Streams, PCM, voices with an aux send, and starts beyond the free channels stay in software, and a voice that later gets an aux send moves back. Loops that start inside an ADPCM frame are re-aligned at load. Default off. See [PORT_3DS_AUDIO.md](PORT_3DS_AUDIO.md) |
+| `ndspstats=N` | Every N seconds, `[NDSPV]` lines: voice-frames in software, on NDSP and with aux, overflows, starts, cache hits, re-aligned loops, late events, and the share of time in the mixer |
+| `ndspcachekb=N` | Size of the NDSP voices' sample cache in linear memory, in KB (default 4096) |
 | `devmenu` | Enables the developer menu, opened with ZL+SELECT. SELECT alone opens the player Options menu, so a `padscript` that pressed `select` for the old developer menu now opens Options. While the Options menu is open, `padscript` steps advance once per ~16 ms menu poll, not per game frame. Example: `wait*900,select*3,wait*5,right*2,wait*5,select*3` |
 | `devupdate` | Development only: starts the ctr-devkit updater at boot (TCP 5050, `devupdateport=N`, `devupdatetoken=TEXT`), and a crash then goes to recovery mode instead of waiting for START. See "ctr-devkit: crash and devupdate" below |
 

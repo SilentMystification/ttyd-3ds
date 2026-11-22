@@ -227,6 +227,12 @@ static void sweep_frame(void) {
             return; /* the logos, a map change in progress */
         }
         PLOG_I("sweep: %s (story %d) at frame %u", s_sweep_maps[s_sweep_i], s_sweep_story[s_sweep_i], (unsigned)s_frames);
+        /* A normal map exit leaves the system level at 0. The previous map's event may still hold a level
+         * (hei_12 sets 2), which would start the next map's entry event stopped and hang SEQ_MAP_CHANGE. */
+        if (_mariostSystemLevel != 0 || (gp->systemLevelFlags & 0xF) != 0) {
+            PLOG_I("sweep: reset system level %d -> 0", (int)_mariostSystemLevel);
+            marioStSystemLevel(0);
+        }
         seqSetSeq(SEQ_MAP_CHANGE, s_sweep_maps[s_sweep_i], NULL);
         s_sweep_state = 2;
         s_sweep_wait = 0;

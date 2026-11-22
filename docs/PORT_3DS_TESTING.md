@@ -61,6 +61,7 @@ tools/port3ds/run_azahar.py --build build/3ds/probe/ttyd_probe.cia \
   - `--timeout`;
   - Azahar exiting.
 - **Results.** Azahar is always stopped afterwards. Logs are copied to `build/azahar-last/`. Azahar log lines that would fault on hardware (unmapped access, aborts, `svcBreak`) fail the run unless `--allow-hw-faults` is given.
+- **Headless.** Azahar runs on a private Xvfb display (started and stopped by the run, software GL), so no window appears; `--show` uses the real display. `--profile DIR` and `--last DIR` let a second instance run beside another; the runner stops only the Azahar it started, and at most `AZAHAR_MAX` (default 3) instances run on the machine at once (slot files in `$XDG_RUNTIME_DIR/ttyd-azahar/`).
 - **Debugger.** `--gdb` turns on Azahar's GDB stub (port 24689). The guest then waits for a debugger; use `tools/port3ds/gdbrsp.py` or `arm-none-eabi-gdb`.
 
 ### The game in Azahar

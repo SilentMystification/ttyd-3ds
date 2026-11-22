@@ -24,6 +24,7 @@ Exit status: 0 pass, 1 fail, 2 usage or setup error.
 """
 
 import argparse
+import atexit
 import fcntl
 import os
 import re
@@ -146,6 +147,46 @@ def write_profile(gdb, gdb_port, lle_audio=False, realtime=False, api=1):
     return sdmc
 
 
+_xvfb = None
+DISPLAY_NUM = None  # set when running headless
+
+
+def start_xvfb():
+    """A private virtual display for this run, so no Azahar window appears. Stopped at exit."""
+    global _xvfb, DISPLAY_NUM
+    r, w = os.pipe()
+    _xvfb = subprocess.Popen(["Xvfb", "-displayfd", str(w), "-screen", "0", "1280x720x24", "-nolisten", "tcp", "-ac"],
+                             pass_fds=(w,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+    os.close(w)
+    num = b""
+    while not num.endswith(b"\n"):
+        chunk = os.read(r, 16)
+        if not chunk:
+            fail("Xvfb did not start (use --show to use the real display)", 2)
+        num += chunk
+    os.close(r)
+    DISPLAY_NUM = int(num)
+    atexit.register(stop_xvfb)
+
+
+def stop_xvfb():
+    if _xvfb is not None and _xvfb.poll() is None:
+        _xvfb.terminate()
+        try:
+            _xvfb.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _xvfb.kill()
+
+
+def run_env():
+    env = dict(os.environ)
+    if DISPLAY_NUM is not None:
+        env["DISPLAY"] = f":{DISPLAY_NUM}"
+        env.pop("WAYLAND_DISPLAY", None)
+    return env
+
+
 def flatpak_cmd(args):
     # Flatpak overrides XDG_* (even with --env), so a shell inside the
     # sandbox re-exports them before starting Azahar.
@@ -153,6 +194,8 @@ def flatpak_cmd(args):
     return [
         "flatpak", "run",
         f"--filesystem={PROFILE}",
+    ] + ([f"--env=DISPLAY=:{DISPLAY_NUM}", "--env=WAYLAND_DISPLAY=", "--env=QT_QPA_PLATFORM=xcb", "--nosocket=wayland",
+          "--env=LIBGL_ALWAYS_SOFTWARE=1"] if DISPLAY_NUM is not None else []) + [
         "--command=sh",
         APP_ID,
         "-c", 'export XDG_CONFIG_HOME="$1" XDG_DATA_HOME="$2"; shift 2; exec azahar "$@"',
@@ -210,7 +253,7 @@ def cia_title_id(cia):
 
 def install_cia(cia, sdmc):
     print(f"run_azahar: installing {cia.name}")
-    r = subprocess.run(flatpak_cmd(["-i", str(cia)]), capture_output=True, text=True, timeout=120)
+    r = subprocess.run(flatpak_cmd(["-i", str(cia)]), env=run_env(), capture_output=True, text=True, timeout=120)
     if r.returncode != 0 or "Installed CIA successfully" not in r.stdout + r.stderr:
         print(r.stdout[-2000:], r.stderr[-2000:])
         fail("CIA install failed", 2)
@@ -249,6 +292,7 @@ def main():
     ap.add_argument("--profile", type=Path, help="Azahar profile folder (config, NAND, SD card); default build/azahar-profile. "
                     "A different folder lets a second instance run beside another; only that profile's Azahar is stopped")
     ap.add_argument("--last", type=Path, help="folder for this run's logs; default build/azahar-last")
+    ap.add_argument("--show", action="store_true", help="show the Azahar window on the real display (default: a private Xvfb)")
     ap.add_argument("--allow-hw-faults", action="store_true", help="do not fail on Azahar fault lines")
     args = ap.parse_args()
     global PROFILE, LAST
@@ -259,6 +303,8 @@ def main():
 
     build = args.build.resolve()
     acquire_slot()
+    if not args.show:
+        start_xvfb()
     if not build.is_file():
         fail(f"{build} not found", 2)
     if not str(build).startswith(str(Path.home())):
@@ -293,7 +339,7 @@ def main():
     stdout_path = LAST / "azahar_stdout.txt"
     print(f"run_azahar: booting {boot}")
     with open(stdout_path, "w") as so:
-        proc = subprocess.Popen(flatpak_cmd([str(boot)]), stdout=so, stderr=subprocess.STDOUT,
+        proc = subprocess.Popen(flatpak_cmd([str(boot)]), env=run_env(), stdout=so, stderr=subprocess.STDOUT,
                                 start_new_session=True)
 
     until = re.compile(args.until) if args.until else None

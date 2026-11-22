@@ -95,11 +95,59 @@ int plat_is_new3ds(void);
 const char* plat_build_string(void); /* "#<commits> <hash>" */
 
 /* ---- Memory placement (plat/memplace.c) ----
- * Buffers that several cores touch every frame live in the New 3DS extra RAM
- * (QTM) when the process has it mapped (CIA), else in FCRAM (3dsx), see
- * docs/PORT_3DS_PLAN.md section 5.7. Every placement has an id from the
- * table in memplace.c with a size budget. Returns NULL if the id is unknown
- * or its budget is exceeded (the caller treats that as fatal). */
+ * A placement is a named buffer region with a size, an ordered list of memory
+ * tiers it may live in, and flags saying who touches it. The platform packs
+ * all registrations by priority into the tiers at boot (plat_memplace_init),
+ * falls down each placement's tier list, logs the result ("[MEM]") and shows
+ * the QTM state on the HUD. See docs/PORT_3DS_PLAN.md section 5.7.
+ *
+ * How a game registers its own placements (the portable path): the game
+ * supplies a manifest function and hands it over before boot packs:
+ *
+ *     static void game_manifest(void) {
+ *         int h = plat_place_register("hitdrv", 256u << 10, 64,
+ *                                     PLAT_PREFS(PLAT_TIER_QTM, PLAT_TIER_HEAP), PLAT_PF_CPU_SHARED);
+ *         plat_place_priority(h, 10);  // lower packs first; default is registration order
+ *     }
+ *     plat_place_set_manifest(game_manifest);   // before plat_memplace_init
+ *
+ * and later takes memory with plat_place_alloc(h, bytes, align) (a bump
+ * allocation inside the registered region; NULL when it does not fit or the
+ * handle is unknown). Names may contain spaces; in the "place=" switch write
+ * them as '_'.
+ *
+ * Tiers: QTM (2 MiB application part of the New 3DS extra RAM), LINEAR
+ * (linear heap: CPU, GPU and DSP reach it), HEAP (ordinary cached FCRAM, CPU
+ * only). VRAM is not a tier: the CPU cannot map it, it needs transfers.
+ * Rules: a GPU_READ/GPU_WRITE placement is not put in QTM unless the switch
+ * "qtmgpu" says the GPU check passed (unverified on hardware); a DSP
+ * placement is never put in QTM. The switch
+ * "place=<name>:<tier>[,<name>:<tier>...]" (tier qtm, linear or heap) forces a
+ * placement's tier for A/B runs; the rules still apply. A bad name or tier is
+ * logged and ignored. */
+enum {
+    PLAT_TIER_QTM = 0,
+    PLAT_TIER_LINEAR,
+    PLAT_TIER_HEAP,
+    PLAT_TIER_COUNT,
+    PLAT_TIER_NONE = 0xFF /* ends a tier list */
+};
+enum {
+    PLAT_PF_CPU_SHARED = 1, /* several cores touch it every frame */
+    PLAT_PF_GPU_READ = 2,
+    PLAT_PF_GPU_WRITE = 4,
+    PLAT_PF_DSP = 8
+};
+/* PLAT_PREFS(PLAT_TIER_QTM, PLAT_TIER_HEAP): an ordered tier list, best first. */
+#define PLAT_PREFS(...) ((const uint8_t[]){__VA_ARGS__, PLAT_TIER_NONE})
+/* Returns a handle (>= 0), or -1 if the table is full or the arguments are bad.
+ * Before boot packs this only records the request; afterwards it places at once. */
+int plat_place_register(const char* name, size_t bytes, size_t align, const uint8_t* prefs, unsigned flags);
+void plat_place_priority(int handle, int priority); /* before packing; lower packs first */
+void plat_place_set_manifest(void (*fn)(void));     /* called by plat_memplace_init before packing */
+void* plat_place_alloc(int handle, size_t size, size_t align);
+/* Compatibility ids: the platform's own placements, registered at init in
+ * this order, so an id is also its handle. */
 enum {
     PLAT_PLACE_GX_RECORD = 0,  /* GX record buffers, core 0 writes, core 2 reads */
     PLAT_PLACE_GX_STATE,       /* GX state tracker and caches */
@@ -107,7 +155,6 @@ enum {
     PLAT_PLACE_LOG,            /* log queue and profiler counters */
     PLAT_PLACE_COUNT
 };
-void* plat_place_alloc(int id, size_t size, size_t align);
 int plat_qtm_available(void);
 
 #ifdef __cplusplus

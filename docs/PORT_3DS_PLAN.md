@@ -14,6 +14,11 @@ This repository is a 100% matching C decompilation. The 3DS port compiles that s
 - Azahar is used for functional tests. Performance numbers are measured on hardware; Azahar numbers only show the direction of a change.
 - Hot loops must fit the 16 KiB L1 caches (instruction and data, per core). The N3DS L2 (2 MiB) and QTM RAM are used deliberately, not by accident.
 - The Linux build and the Windows build (Docker) are the same CMake project, and both must work from the first commit.
+- **Release goals (decision 2026-11-22):**
+  - **Frame rate:** the GameCube's original rates (60 fps where the original runs 60, 30 where it runs 30), on a New 3DS.
+  - **Stereo 3D:** the 3D slider is in scope. Budget the GPU for two eyes, with a cheaper quality profile allowed when the slider is up if needed.
+  - **Regions:** the first release covers US, JP and PAL (50/60 Hz, all languages) together.
+  - **Extras:** an in-game options menu (separate from the debug Select menu), Dolphin `.gci` save import, and a user README/guide (dumping your own disc, installing, controls).
 - **Portability (decision 2026-11-22).** The platform and SDK layers should be reusable for other GameCube decomps. See [GC3DS_LIBRARY_NOTE.md](GC3DS_LIBRARY_NOTE.md) for the later split into `libgc3ds`. Rules from now on:
   - `port3ds/plat/` and the SDK implementations (`port3ds/game/os*.c`, `dvd.c`, `card.c`, `pad.c`, `vi.c`, `ar.c`, `ai.c`, `gx/`) contain no TTYD symbol, file name, map name or story knowledge. Anything game-specific is passed in through a hook, as the warp list is through `plat_set_map_list`.
   - Game-specific port code lives in clearly separate files (`port3ds/game/formats/`, `*_swap.c`, `disc_data.c`, `debug_dump.c`), or under `#ifdef TARGET_PORT` in `src/`.

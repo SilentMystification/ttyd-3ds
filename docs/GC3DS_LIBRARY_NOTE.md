@@ -67,8 +67,9 @@ The optimisation *mechanisms* belong to the library. Each game only supplies *da
 | L2 cache | 2 MB, shared | all cores | New 3DS only; shared with every core's traffic |
 | QTM RAM (application part) | 2 MB at `0x1E800000` | CPU (all cores); GPU (documented for the first 2 MB; **check on hardware**) | Offsets 0x200000+ belong to the system `qtm` service and the kernel. Retail ExHeader maps exactly these 2 MB |
 | VRAM | 6 MB | GPU (CPU only through transfers) | Render targets, EFB, and hot textures |
-| Linear FCRAM | 32 MB in our layout | CPU + GPU + DSP | Cache maintenance needed both ways |
-| Heap FCRAM | rest of the 124 MB | CPU | Ordinary cached memory |
+| APPLICATION region (FCRAM) | 124 MB on New 3DS (ExHeader `SystemModeExt: 124MB`); 64 MB, or 96 MB in extended mode, on Old 3DS | — | Holds code, data/bss, the stack, the regular heap and the linear heap. The library decides the split between the last two at startup (libctru `__ctru_linear_heap_size`); the game gives its needs in the manifest |
+| Linear heap | Part of the APPLICATION region; TTYD uses 32 MB today | CPU + GPU + DSP | The only FCRAM the GPU and DSP can address, because it is mapped physically contiguous. Cache maintenance needed both ways |
+| Regular heap | The rest (TTYD: about 81 MB) | CPU | Ordinary cached memory |
 | Cores | 0 and 2 full; 1 at most 80% (multi mode, ExHeader MaxCpu `0xD0`); 3 system | | Core 1 is shared with networking, file system and input services |
 
 ### Mechanisms (library) and inputs (game)

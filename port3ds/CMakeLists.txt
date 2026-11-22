@@ -253,7 +253,8 @@ target_link_libraries(ttyd PRIVATE ttyd_gx_shader_bin citro3d ctru m)
 
 ttyd_add_cia(ttyd
     TITLE "TTYD 3DS"
+    NAME "Paper Mario: The Thousand Year Door"
     SUBTITLE "PORT"
-    SHORT_DESC "Paper Mario TTYD (3DS port)"
+    SHORT_DESC "Paper Mario: The Thousand Year Door (3DS port)"
     UNIQUE_ID 0xFD886
     PRODUCT_CODE KTR-N-TTYD)

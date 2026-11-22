@@ -1,6 +1,10 @@
 # ttyd_add_cia(<target>
-#     TITLE <text> SUBTITLE <text> UNIQUE_ID <0x...> PRODUCT_CODE <KTR-N-XXXX>
+#     TITLE <text> [NAME <text>] SUBTITLE <text> UNIQUE_ID <0x...> PRODUCT_CODE <KTR-N-XXXX>
 #     [SHORT_DESC <text>] [AUTHOR <text>])
+#
+# TITLE is the short name the rsf takes (makerom limits it to 8 characters).
+# NAME is the HOME Menu title (SMDH short title), the banner/icon text and
+# the default long description; it defaults to TITLE.
 #
 # Builds <target>.3dsx and <target>.cia next to the ELF of executable
 # <target>. The banner, icon and banner sound are generated placeholder art
@@ -21,14 +25,17 @@ get_filename_component(TTYD_PORT3DS_DIR "${TTYD_PORT3DS_DIR}" ABSOLUTE)
 get_filename_component(TTYD_REPO_DIR "${TTYD_PORT3DS_DIR}/.." ABSOLUTE)
 
 function(ttyd_add_cia target)
-    cmake_parse_arguments(ARG "" "TITLE;SUBTITLE;UNIQUE_ID;PRODUCT_CODE;SHORT_DESC;AUTHOR" "" ${ARGN})
+    cmake_parse_arguments(ARG "" "TITLE;NAME;SUBTITLE;UNIQUE_ID;PRODUCT_CODE;SHORT_DESC;AUTHOR" "" ${ARGN})
     foreach(req TITLE UNIQUE_ID PRODUCT_CODE)
         if(NOT ARG_${req})
             message(FATAL_ERROR "ttyd_add_cia(${target}): ${req} is required")
         endif()
     endforeach()
+    if(NOT ARG_NAME)
+        set(ARG_NAME "${ARG_TITLE}")
+    endif()
     if(NOT ARG_SHORT_DESC)
-        set(ARG_SHORT_DESC "${ARG_TITLE}")
+        set(ARG_SHORT_DESC "${ARG_NAME}")
     endif()
     if(NOT ARG_AUTHOR)
         set(ARG_AUTHOR "ttyd-3ds")
@@ -40,14 +47,14 @@ function(ttyd_add_cia target)
 
     add_custom_command(
         OUTPUT "${art}/banner.png" "${art}/icon.png" "${art}/banner.wav"
-        COMMAND "${Python3_EXECUTABLE}" -I "${gen}" --title "${ARG_TITLE}" --subtitle "${ARG_SUBTITLE}" --out-dir "${art}"
+        COMMAND "${Python3_EXECUTABLE}" -I "${gen}" --title "${ARG_NAME}" --subtitle "${ARG_SUBTITLE}" --out-dir "${art}"
         DEPENDS "${gen}"
         VERBATIM
         COMMENT "Generating placeholder art for ${target}")
 
     add_custom_command(
         OUTPUT "${art}/icon.smdh"
-        COMMAND "${SMDHTOOL}" --create "${ARG_TITLE}" "${ARG_SHORT_DESC}" "${ARG_AUTHOR}" "${art}/icon.png" "${art}/icon.smdh"
+        COMMAND "${SMDHTOOL}" --create "${ARG_NAME}" "${ARG_SHORT_DESC}" "${ARG_AUTHOR}" "${art}/icon.png" "${art}/icon.smdh"
         DEPENDS "${art}/icon.png"
         VERBATIM
         COMMENT "Building SMDH for ${target}")

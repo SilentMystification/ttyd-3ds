@@ -93,7 +93,7 @@ The first install needs no FBI either:
 3. The bootstrap jumps into the installed title with `APT_PrepareToDoApplicationJump(0, titleId, MEDIATYPE_SD)` plus `APT_DoApplicationJump`, passing the switches as deliver arguments.
 4. From then on the installed title's own `devupdate` handles updates, relaunches and recovery.
 
-`devupdate.py bootstrap --cia app.cia [--switches ...]` does the whole sequence: 3dslink the bootstrap, push, install, jump. An app may instead embed its own CIA in its 3dsx and install itself. That's self-contained but makes every push about the CIA's size larger, so the generic bootstrap is preferred.
+`devupdate.py bootstrap --cia app.cia [--switches ...]` does the whole sequence: 3dslink the bootstrap, push, install, jump. **Decision (owner, 2026-11-22): the generic bootstrap is the way.** One small 3dsx serves every app; apps do not embed their CIA.
 
 ## Recovery mode and hardware test harness (owner's idea, 2026-11-22)
 

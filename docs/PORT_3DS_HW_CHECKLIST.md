@@ -40,7 +40,8 @@ Then the measurement items from `PORT_3DS_BACKLOG.md` lane D, all through `devup
 8. **The probe as a CIA:** QTM vs heap vs linear bandwidth from each core, and GPU reads from QTM.
 9. **Rosalina profiles** (`pc_sample.py`) of Mario's house, Rogueport and a battle, plus a `cpulimit` 0 / 30 / 80 comparison.
 10. **Sleep and HOME.** Expect the `gpu: suspend|sleep ... / gpu: resume` log lines and `cpu limit: 30% (HOME pressed, early ...)`.
-11. **The hardware-only warning** `gpu: copy target 2 cannot be rendered to`.
+11. **Copy targets:** open the START pause menu in `gor_01`. The background must show the captured field. Also run `vramfail=1` once, to check the strip fallback's `GX_TextureCopy` ordering on hardware.
+12. **Shader path (`gxvsh=1`, default):** compare frame times and the render thread's time with `gxvsh=0`.
 
 What Azahar can't show, so these are the real tests:
 - the APT jump or relaunch: Azahar aborts on it;

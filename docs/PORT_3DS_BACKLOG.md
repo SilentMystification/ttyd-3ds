@@ -80,7 +80,7 @@ Updated 2026-11-22. Owner goals: original GameCube frame rates, stereo 3D, all t
    - **Effect:** the RNG use differs from there.
    - **Status:** accepted as a known difference until real GameCube behaviour is known. `gw_diff` comparisons stop at the first `psndENVMain` restart.
    - **To resolve:** a real-hardware DSP reference for silent voices, then match it in `hw_pcmixer.c`'s null and full mix paths.
-6. **Copy targets that fail on VRAM:** the pause menu's 1024×512 RGBA8 capture doesn't fit the free VRAM, and citro3d can't render to linear textures, so the copy was skipped. Fix in progress: follow the game's copy format, plus a tiled VRAM-scratch fallback into linear memory.
+6. **Copy targets that fail on VRAM: fixed 2026-11-22** (follow the GX copy format, plus a strip fallback through a scratch target; hardware check pending). the pause menu's 1024×512 RGBA8 capture doesn't fit the free VRAM, and citro3d can't render to linear textures, so the copy was skipped. Fix in progress: follow the game's copy format, plus a tiled VRAM-scratch fallback into linear memory.
 7. **The DVD manager's idle loop** polls instead of blocking (`os_thread.c`'s `OSYieldThread`). Measure on hardware behind a switch.
 
 ## Lane E: leftovers and release

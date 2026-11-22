@@ -109,6 +109,7 @@ static PlatGpuVertex* s_last_alloc;   /* the last plat_gpu_alloc_vertices block,
 static VshDraw* s_last_vdraw;         /* body of the last command when it is a CMD_VSH_DRAW */
 static PlatGpuVshConst s_last_vconst;
 static int s_last_vconst_valid;       /* s_last_vconst was recorded in the current record */
+static u32 s_last_vconst_id;
 static struct {
     void* p;
     u32 frame;
@@ -194,9 +195,12 @@ static void wait_idle(void) {
 
 static void render_record(Record* r);
 
+static void stream_flush_dirty(void);
+
 static void submit(int present) {
     Record* r = &s_rec[s_cur];
     r->present = present;
+    stream_flush_dirty(); /* the streams this record draws */
     wait_idle(); /* the render thread finished the previous record */
     if (s_threaded) {
         /* hand over the record explicitly: s_cur flips below, and the render
@@ -230,6 +234,7 @@ static void end_segment(void) {
     PlatGpuState keep = s_last_state;
     int have_state = s_last_state_valid;
     PlatGpuVshConst keep_v = s_last_vconst;
+    u32 keep_vid = s_last_vconst_id;
     int have_v = s_last_vconst_valid;
     rec_put(CMD_SEGMENT_END, 0);
     submit(0);
@@ -237,7 +242,7 @@ static void end_segment(void) {
         plat_gpu_set_state(&keep);
     }
     if (have_v) {
-        plat_gpu_vsh_const(&keep_v);
+        plat_gpu_vsh_const(&keep_v, keep_vid);
     }
 }
 
@@ -358,7 +363,38 @@ void* plat_gpu_stream_alloc(uint32_t bytes) {
     return p;
 }
 
-void plat_gpu_stream_commit(const void* p, uint32_t bytes) { GSPGPU_FlushDataCache(p, bytes); }
+/* Written streams are flushed from the CPU cache once, before the record
+ * that may draw them goes to the render thread (a flush per draw cost more
+ * than the draw). Adjacent ranges merge. */
+#define DIRTY_MAX 32
+static struct {
+    uintptr_t lo, hi;
+} s_dirty[DIRTY_MAX];
+static u32 s_ndirty;
+
+static void stream_flush_dirty(void) {
+    for (u32 i = 0; i < s_ndirty; i++) {
+        GSPGPU_FlushDataCache((const void*)s_dirty[i].lo, (u32)(s_dirty[i].hi - s_dirty[i].lo));
+    }
+    s_ndirty = 0;
+}
+
+void plat_gpu_stream_commit(const void* p, uint32_t bytes) {
+    uintptr_t lo = (uintptr_t)p, hi = lo + bytes;
+    for (u32 i = 0; i < s_ndirty; i++) {
+        if (lo <= s_dirty[i].hi && hi >= s_dirty[i].lo) {
+            s_dirty[i].lo = lo < s_dirty[i].lo ? lo : s_dirty[i].lo;
+            s_dirty[i].hi = hi > s_dirty[i].hi ? hi : s_dirty[i].hi;
+            return;
+        }
+    }
+    if (s_ndirty == DIRTY_MAX) {
+        stream_flush_dirty();
+    }
+    s_dirty[s_ndirty].lo = lo;
+    s_dirty[s_ndirty].hi = hi;
+    s_ndirty++;
+}
 
 void plat_gpu_stream_free(void* p) {
     if (p == NULL) {
@@ -375,14 +411,15 @@ void plat_gpu_stream_free(void* p) {
     s_stream_npending++;
 }
 
-void plat_gpu_vsh_const(const PlatGpuVshConst* c) {
-    if (s_last_vconst_valid && memcmp(&s_last_vconst, c, sizeof(*c)) == 0) {
+void plat_gpu_vsh_const(const PlatGpuVshConst* c, uint32_t id) {
+    if (s_last_vconst_valid && (id != 0 ? id == s_last_vconst_id : memcmp(&s_last_vconst, c, sizeof(*c)) == 0)) {
         return;
     }
     PlatGpuVshConst* d = rec_put(CMD_VSH_CONST, sizeof(*c));
     if (d != NULL) {
         *d = *c;
         s_last_vconst = *c;
+        s_last_vconst_id = id;
         s_last_vconst_valid = 1;
         s_stats_frame.vsh_consts++;
     }

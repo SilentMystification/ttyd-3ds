@@ -331,6 +331,7 @@ typedef struct {
  * projection and viewport, whether the GPU or the CPU transforms them. */
 extern u32 gx_xf_version; /* bumped by matrix, projection and current-matrix changes (gx_state.c) */
 extern int gx_vsh_on;
+extern int gx_vsh_imm_on; /* switch gxvshimm */
 extern int gx_vsh_noted; /* the draws being made were routed already (a cached list replayed on the CPU) */
 
 /* Why a draw cannot take the shader path (a bit each; the census counts them). */
@@ -373,7 +374,18 @@ void gx_vsh_stream_free(GxVshStream* s); /* the vertices are reused only after t
 const void* gx_vsh_stream_base(const GxVshStream* s);
 /* Routes one draw under position matrix `pnmtx`: `reasons` 0 for a shader-eligible
  * cached list (`list`, `nbytes`), else why not. Returns 1 for the shader path. */
-int gx_vsh_route(u32 pnmtx, u32 reasons, const void* list, u32 nbytes, u32 nverts);
+int gx_vsh_route(u32 pnmtx, u32 reasons, const void* list, u32 nbytes, u32 nverts, int imm);
+/* Immediate mode: a draw's vertices in this frame's ring (gx_vsh.c). */
+typedef struct {
+    const void* base; /* stream base (a ring chunk) */
+    u32 layout;
+    u8 attr_slot[8];  /* stream slot of GX_VA_TEX0 + n, 0xFF when absent */
+    const u16* idx;   /* triangle list from the chunk base */
+    u32 nidx;
+} GxVshImm;
+u32 gx_vsh_imm_reasons(u8 prim, u32 n);
+int gx_vsh_imm_room(u32 n);
+const GxVshImm* gx_vsh_imm_build(u8 prim, const GxVertex* v, u32 n);
 void gx_vsh_count_shader(u32 nverts, u32 nidx);
 void gx_vsh_frame(void); /* frame boundary: hysteresis, decal links, counters */
 void gx_vsh_log(u32 frames);

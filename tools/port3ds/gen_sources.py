@@ -64,8 +64,7 @@ MUSYX_PORT = ["libs/musyx/src/musyx/runtime/hw_pcmixer.c"]
 
 
 def resolve(path):
-    """The path as it exists on disk, matching names without case (configure.py
-    names HARDWARE.C, the file is hardware.c), or None."""
+    """The path as it exists on disk, matching names without case, or None."""
     cur = ROOT
     for part in path.split("/"):
         if os.path.exists(os.path.join(cur, part)):

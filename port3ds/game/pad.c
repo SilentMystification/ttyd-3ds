@@ -4,7 +4,9 @@
  * directly; L and R are the GameCube's L and R, fully pressed (the 3DS
  * shoulders are digital, so the analog value is 255 with the click bit);
  * ZR is Z; the circle pad is the control stick and the New 3DS C-stick the
- * C-stick. Stick values use the GameCube's raw range (about +-100 at full
+ * C-stick. The player's options (game/options_ttyd.c) can remap A, B, X, Y,
+ * Z, L, R and Start to other 3DS buttons and make the D-pad the C-stick;
+ * what is described here is the default. Stick values use the GameCube's raw range (about +-100 at full
  * tilt, before PADClamp). Rumble has no 3DS equivalent, so PADControlMotor
  * only records the state.
  *
@@ -23,6 +25,27 @@
 static u32 s_motor[PAD_MAX_CONTROLLERS];
 static BOOL s_reset_button;
 
+/* The GameCube buttons the player can remap, and the 3DS keys (PLAT_KEY_* bits,
+ * 0 = none) that press each one: the defaults above, replaced from the player's
+ * options (game/options_ttyd.c, applied at PADInit and on every change). The
+ * order is the one of the key list there. */
+enum { GC_A, GC_B, GC_X, GC_Y, GC_Z, GC_L, GC_R, GC_START, GC_COUNT };
+static u32 s_src[GC_COUNT] = {PLAT_KEY_A, PLAT_KEY_B, PLAT_KEY_X,  PLAT_KEY_Y,
+                              PLAT_KEY_ZR, PLAT_KEY_L, PLAT_KEY_R, PLAT_KEY_START};
+static int s_cstick_dpad; /* the D-pad is the C-stick (and sends no D-pad buttons) */
+static int s_padlog = -1;
+static u16 s_last_log;
+
+void port_options_init(void);
+
+void port_pad_set_button_source(int gc_button, u32 keys) {
+    if (gc_button >= 0 && gc_button < GC_COUNT) {
+        s_src[gc_button] = keys;
+    }
+}
+
+void port_pad_set_cstick_dpad(int on) { s_cstick_dpad = on; }
+
 static s8 scale_stick(int v) {
     int s = v * STICK_FULL / CIRCLE_FULL;
     if (s > 127) {
@@ -35,6 +58,7 @@ static s8 scale_stick(int v) {
 
 BOOL PADInit(void) {
     memset(s_motor, 0, sizeof(s_motor));
+    port_options_init();
     return TRUE;
 }
 
@@ -51,29 +75,36 @@ u32 PADRead(PADStatus* status) {
     memset(status, 0, sizeof(PADStatus) * PAD_MAX_CONTROLLERS);
     PADStatus* p = &status[0];
     u16 b = 0;
-    if (in.held & PLAT_KEY_A) b |= PAD_BUTTON_A;
-    if (in.held & PLAT_KEY_B) b |= PAD_BUTTON_B;
-    if (in.held & PLAT_KEY_X) b |= PAD_BUTTON_X;
-    if (in.held & PLAT_KEY_Y) b |= PAD_BUTTON_Y;
-    if (in.held & PLAT_KEY_START) b |= PAD_BUTTON_START;
-    if (in.held & PLAT_KEY_DUP) b |= PAD_BUTTON_UP;
-    if (in.held & PLAT_KEY_DDOWN) b |= PAD_BUTTON_DOWN;
-    if (in.held & PLAT_KEY_DLEFT) b |= PAD_BUTTON_LEFT;
-    if (in.held & PLAT_KEY_DRIGHT) b |= PAD_BUTTON_RIGHT;
-    if (in.held & PLAT_KEY_ZR) b |= PAD_TRIGGER_Z;
-    if (in.held & PLAT_KEY_L) {
-        b |= PAD_TRIGGER_L;
-        p->triggerLeft = 0xFF;
+    static const u16 gc_bits[GC_COUNT] = {PAD_BUTTON_A,  PAD_BUTTON_B,  PAD_BUTTON_X,   PAD_BUTTON_Y,
+                                          PAD_TRIGGER_Z, PAD_TRIGGER_L, PAD_TRIGGER_R, PAD_BUTTON_START};
+    for (int i = 0; i < GC_COUNT; i++) {
+        if (in.held & s_src[i]) b |= gc_bits[i];
     }
-    if (in.held & PLAT_KEY_R) {
-        b |= PAD_TRIGGER_R;
-        p->triggerRight = 0xFF;
+    if (b & PAD_TRIGGER_L) p->triggerLeft = 0xFF;
+    if (b & PAD_TRIGGER_R) p->triggerRight = 0xFF;
+    int cx = in.cstick_x, cy = in.cstick_y;
+    if (s_cstick_dpad) {
+        cx = (in.held & PLAT_KEY_DRIGHT) ? CIRCLE_FULL : (in.held & PLAT_KEY_DLEFT) ? -CIRCLE_FULL : 0;
+        cy = (in.held & PLAT_KEY_DUP) ? CIRCLE_FULL : (in.held & PLAT_KEY_DDOWN) ? -CIRCLE_FULL : 0;
+    } else {
+        if (in.held & PLAT_KEY_DUP) b |= PAD_BUTTON_UP;
+        if (in.held & PLAT_KEY_DDOWN) b |= PAD_BUTTON_DOWN;
+        if (in.held & PLAT_KEY_DLEFT) b |= PAD_BUTTON_LEFT;
+        if (in.held & PLAT_KEY_DRIGHT) b |= PAD_BUTTON_RIGHT;
+    }
+    if (s_padlog < 0) {
+        s_padlog = plat_switch_has("padlog");
+    }
+    if (s_padlog && b != s_last_log) {
+        /* test hook (switch padlog): the 3DS keys that arrived and the GameCube buttons the game gets */
+        plat_log(PLAT_LOG_INFO, "padlog: 3ds=%05lx gc=%04x", (unsigned long)in.held, (unsigned)b);
+        s_last_log = b;
     }
     p->button = b;
     p->stickX = scale_stick(in.circle_x);
     p->stickY = scale_stick(in.circle_y);
-    p->substickX = scale_stick(in.cstick_x);
-    p->substickY = scale_stick(in.cstick_y);
+    p->substickX = scale_stick(cx);
+    p->substickY = scale_stick(cy);
     p->analogA = (b & PAD_BUTTON_A) ? 0xFF : 0;
     p->analogB = (b & PAD_BUTTON_B) ? 0xFF : 0;
     p->err = PAD_ERR_NONE;

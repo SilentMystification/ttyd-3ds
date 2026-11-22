@@ -60,17 +60,35 @@ The game sees one GameCube controller. The 3DS maps to it like this:
 | R | R (fully pressed) |
 | ZR | Z |
 
-- ZL does nothing.
-- The touch screen is not used.
+- ZL does nothing by default (you can give it a job in the Options menu).
+- In the game itself the touch screen is not used. It opens the Options menu (below).
 - Rumble does not exist on the 3DS, so the game's rumble option does nothing.
-- SELECT opens the **Select menu**. It is a **developer menu**, not an options menu.
-  - General tab: turn the status line on or off, return to the title screen, exit to the HOME Menu (press A twice).
-  - Debug tab: log level and warping to any map.
-  - L or R changes the tab. Up and Down move. Left, Right or A change a value. B or SELECT closes it.
-  - While it is open the game gets no input.
-  - Warping can break the story. Do not use it in a save you care about.
-- A proper options menu for players is planned. It does not exist yet.
 - The game's own soft reset (hold B, X and START) is unverified.
+
+### Options menu
+
+Press **SELECT**, or touch the **[Options]** button on the bottom screen (right side, under the status lines).
+The game pauses while the menu is open and receives no input.
+
+- **L / R** change the page. **Up / Down** move. **Left / Right** or **A** change a value. **B** or **SELECT** closes it.
+- With the touch screen, tap a line to change it, tap the title line to go to the next page, tap **[ Close ]** to close.
+- Changes apply at once and are saved when you close the menu.
+
+| Page | Option | Values |
+| --- | --- | --- |
+| Controls | GC A, B, X, Y, Z, L, R, Start | the 3DS button that presses it: A, B, X, Y, L, R, ZL, ZR, START or none. Several GameCube buttons may share one 3DS button |
+| Controls | C-stick is | C-stick nub (default), or D-pad. With the D-pad as the C-stick the D-pad no longer sends GameCube D-pad presses, and the C-stick nub does nothing |
+| Controls | Reset to defaults | puts the page back to A, B, X, Y, ZR = Z, L, R, START and the C-stick nub |
+| Display | 3D effect | off or on (default on). Stereoscopic 3D is not in the port yet; the setting is stored for when it is |
+| Display | Bottom screen HUD | off, FPS only, or full (default). The log below it stays |
+| Audio | Master volume | 0 to 100 percent in steps of 10 (default 100) |
+| Performance | Quality | auto (default), high or fast. Stored only; later speed features will read it |
+| Language | Game language | PAL version only: English, Deutsch, Francais, Espanol, Italiano. Stored only for now |
+
+- The options are kept in **`sdmc:/3ds/ttyd/options.txt`**, a small text file, not in your save. Delete it to go back to the defaults.
+  If it is damaged the port ignores it, writes a line to the log and uses the defaults.
+- The Select menu of earlier builds was a developer menu. It is now only for developers (switch `devmenu`, **ZL + SELECT**):
+  log level, warping to any map, return to title, exit. Warping can break the story. Do not use it in a save you care about.
 
 ## Saves
 

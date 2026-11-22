@@ -163,8 +163,14 @@ void plat_cpu_limit_init(void) {
     aptHook(&s_apt_cookie, apt_hook, NULL);
 }
 
+/* devupdate (plat/devupdate.c): during a transfer the network gets more of core 1. */
+void plat_cpu_limit_transfer(int on) {
+    cpu_limit_set(on ? 30 : s_cpu_limit, on ? "devupdate transfer" : "devupdate transfer done");
+}
+
 int plat_frame_poll(void) {
     plat_wd_progress();
+    plat_devupdate_frame();
     return aptMainLoop() ? 1 : 0;
 }
 
@@ -198,6 +204,7 @@ void plat_quit(int relaunch) {
         s_gpu_shutdown = NULL;
     }
     plat_cpu_limit_restore();
+    plat_devupdate_stop();
     plat_log_stop();
     plat_log_crash_close();
     if (relaunch) {
@@ -288,6 +295,7 @@ int main(int argc, char** argv) {
     plat_memplace_init();
     plat_log_start_writer();
     plat_crash_init();
+    plat_devupdate_init();
     plat_memplace_report();
 
     /* libctru gives the heap and the linear heap whatever the APPLICATION

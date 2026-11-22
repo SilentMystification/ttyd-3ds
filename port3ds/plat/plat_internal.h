@@ -33,6 +33,14 @@ void plat_set_audio_abort(void (*fn)(void)); /* DSP release for the crash exit (
 void plat_wd_quiesce(void);
 uint32_t plat_wd_frames(void);       /* plat_wd_progress calls so far */
 
+/* devupdate.c (glue to libs/ctr-devkit/devupdate; switch devupdate) */
+typedef bool (*PlatRecoveryHook)(const char* report, void* user);
+int plat_devupdate_enabled(void);
+void plat_devupdate_init(void);      /* starts the server when the switch is on */
+void plat_devupdate_stop(void);
+void plat_devupdate_frame(void);     /* game thread, each frame: pauses there during an update */
+PlatRecoveryHook plat_devupdate_recovery_hook(void); /* for the crash handler; NULL when off */
+
 /* menu.c: returns 1 while the Select menu is open (it consumed the input). */
 int plat_menu_input(uint32_t held, uint32_t down);
 
@@ -44,6 +52,7 @@ void plat_memplace_report(void);
 int plat_started_by_netload(void);
 void plat_cpu_limit_home_pressed(void); /* vblank thread: HOME seen, lower the limit now */
 uint64_t plat_boot_tick(void);       /* svcGetSystemTick at process start */
+void plat_cpu_limit_transfer(int on); /* devupdate: 30% while a transfer runs, then the game's limit */
 void plat_cpu_limit_init(void);      /* core 1 time limit and the APT hook that lowers it on HOME/sleep */
 void plat_set_gpu_shutdown(void (*fn)(void)); /* the GPU back end's teardown, for message screens */
 void plat_set_gpu_abort(void (*fn)(void));    /* teardown for the crash screen: must not wait for other threads */

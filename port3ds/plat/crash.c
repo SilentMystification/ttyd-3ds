@@ -122,6 +122,7 @@ void plat_crash_setup(void) {
     int wait = plat_switch_int("crashwait", 300);
     cfg.screen_wait_seconds = wait > 0 ? wait : -1;
     cfg.wrap_svcbreak = true;
+    cfg.on_recovery = plat_devupdate_recovery_hook(); /* NULL without the devupdate switch */
     if (plat_switch_value("crashtest", s_test, sizeof(s_test))) {
         cfg.test = s_test;
     }

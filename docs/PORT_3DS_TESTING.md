@@ -277,3 +277,16 @@ Results in Azahar (2026-11-21, CIA):
 | `tools/port3ds/memcompare.py`: the same structures read from Dolphin, paper-cut and Azahar and compared field by field. GameCube and 3DS layouts come from the 3DS ELF's debug info (the two layouts are identical apart from byte order); paper-cut values come from its own debug info | 1 |
 | `tools/port3ds/golden.py` | 4 |
 | Story sweeps | 6–7 |
+
+### Host decode (no console, no emulator)
+
+`tools/port3ds/test_decode.py [--disc iso/game.iso] [--papercut ../paper-cut] [--full]` builds `tools/port3ds/host_decode` (the port's own converters compiled for the PC) and checks it against paper-cut's decoders:
+- swap tables applied twice give back the original;
+- the disc's file table matches `gcdisc.py`;
+- every disc file converts, and converting again changes nothing;
+- the disc-data arrays match an independent `main.dol`/REL read;
+- TPL headers and pixels, anim keyframes, map vertex counts and bounds, and MusyX all match paper-cut;
+- paper-cut's `disc_sweep` accepts the same files.
+
+It takes about 1 to 3 minutes and exits 1 on any failure. Without the disc image or paper-cut, the checks that need them are skipped. Manual use: `host_decode --disc iso/game.iso list|decode PATH|all|discdata`. Details are in [PORT_3DS_HOST_DECODE.md](PORT_3DS_HOST_DECODE.md).
+

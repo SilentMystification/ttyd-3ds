@@ -23,6 +23,12 @@ u32 tst_rand_state(void);
 int tst_is_ptr(u32 v);
 /* Extra controller input for the next PADRead: GameCube PAD_BUTTON_* bits. */
 void tst_set_keys(u32 buttons);
+#ifndef TARGET_GCDEBUG
+/* Port only: the picture finished at game frame `frame` (the next one
+ * presented) goes to gallery/fNNNNN.ppm. Called one frame before. The
+ * GameCube build reads its XFB at tst_shot_point instead (run_dolphin.py). */
+void tst_plat_shot(u32 frame);
+#endif
 
 /* ---- the shared core (test_mode.c) ---- */
 /* 1 when the switch determ is on: game time comes from the game frame count. */
@@ -45,8 +51,13 @@ void tst_frame(u32 frame);
 /* Game frames since the first map change (the switch warp), 0 before. */
 u32 tst_warp_frames(void);
 
-/* ---- test_gallery.c: fx= and battle= ---- */
+/* ---- test_gallery.c: fx=, battle= and the gallery shots ---- */
 void tst_gallery_frame(u32 frame);
+/* The shot frame: called at the frame hook of game frame N when a shot of N
+ * is due (shotat=, fxshots=, btlshots=), after the frame's picture is done.
+ * The GameCube build's breakpoint for run_dolphin.py --shots. */
+void tst_shot_point(u32 frame);
+extern volatile u32 tst_shot_frame;
 /* ---- test_battle.c: btlauto= ---- */
 void tst_battle_frame(u32 frame);
 

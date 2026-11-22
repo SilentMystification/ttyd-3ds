@@ -14,7 +14,15 @@
  *   once the map has been up battlewait=N frames (default 60), the way
  *   evt_npc_battle_start does, with the first NPC on the map as the enemy in
  *   the field. Logs "battle: start ..." and "battle: end result R ...".
+ * fx= also takes ranges of indices: fx=0-80,n64:0-102.
+ * Shots for the galleries (tools/port3ds/gallery.py): shotat=F,F,... (game
+ *   frames), fxshots=O,O,... (frames after each fx= spawn) and btlshots=O,...
+ *   (frames after the battle start). A shot of frame F is the picture finished
+ *   at F's frame hook: the port saves it to gallery/fFFFFF.ppm (requested at
+ *   F-1, tst_plat_shot), the GameCube build calls tst_shot_point(F), where
+ *   run_dolphin.py --shots reads the XFB. Both log "shot: f=F".
  */
+#include <stdio.h>
 #include <string.h>
 
 #include "battle/battle.h"
@@ -54,9 +62,93 @@ static void track_map(void) {
     s_map_frames++;
 }
 
+/* ---- shots: shotat=, fxshots=, btlshots= ---- */
+
+#define SHOT_MAX 64
+#define SHOT_OFFS 8
+
+volatile u32 tst_shot_frame;
+static int s_shot_state = -1;
+static u32 s_shot_due[SHOT_MAX];
+static int s_shot_n;
+static int s_fxshot[SHOT_OFFS], s_fxshot_n;
+static int s_btlshot[SHOT_OFFS], s_btlshot_n;
+
+static int parse_int(const char* p);
+
+/* key=N,N,... into out (at most max values); returns the count. */
+static int shot_list(const char* key, int* out, int max) {
+    char text[120];
+    const char* p = text;
+    int n = 0;
+    if (!tst_sw_value(key, text, sizeof(text))) {
+        return 0;
+    }
+    while (*p >= '0' && *p <= '9' && n < max) {
+        out[n++] = parse_int(p);
+        while (*p >= '0' && *p <= '9') {
+            p++;
+        }
+        if (*p == ',') {
+            p++;
+        }
+    }
+    return n;
+}
+
+static void shot_add(u32 frame) {
+    if (s_shot_n < SHOT_MAX) {
+        s_shot_due[s_shot_n++] = frame;
+    }
+}
+
+/* Shots at offsets after a spawn or a battle start. */
+static void shot_add_after(const int* offs, int n, u32 frame) {
+    int i;
+    for (i = 0; i < n; i++) {
+        if (offs[i] > 0) {
+            shot_add(frame + (u32)offs[i]);
+        }
+    }
+}
+
+#ifdef __MWERKS__
+#pragma dont_inline on
+#endif
+void tst_shot_point(u32 frame) { tst_shot_frame = frame; }
+#ifdef __MWERKS__
+#pragma dont_inline reset
+#endif
+
+static void shot_frame(u32 frame) {
+    int i;
+    if (s_shot_state < 0) {
+        int at[SHOT_MAX];
+        int n = shot_list("shotat", at, SHOT_MAX);
+        for (i = 0; i < n; i++) {
+            shot_add((u32)at[i]);
+        }
+        s_fxshot_n = shot_list("fxshots", s_fxshot, SHOT_OFFS);
+        s_btlshot_n = shot_list("btlshots", s_btlshot, SHOT_OFFS);
+        s_shot_state = 1;
+    }
+    for (i = 0; i < s_shot_n; i++) {
+#ifndef TARGET_GCDEBUG
+        if (s_shot_due[i] == frame + 1) {
+            tst_plat_shot(s_shot_due[i]);
+        }
+#endif
+        if (s_shot_due[i] == frame) {
+            tst_log("shot: f=%lu map=%s", (unsigned long)frame, gp != NULL ? gp->currentMapName : "-");
+            tst_shot_point(frame);
+            s_shot_due[i--] = s_shot_due[--s_shot_n];
+        }
+    }
+}
+
 /* ---- fx= ---- */
 
-#define FX_MAX 16
+#define FX_MAX 128
 #define FX_ARGS 13
 
 static int s_fx_state = -1; /* -1 unread, 0 off/done, 1 running */
@@ -81,8 +173,26 @@ static int parse_int(const char* p) {
     return v;
 }
 
+static int is_number(const char* s);
+
+/* An fx= word "A-B" or "n64:A-B" (indices) adds A..B; anything else is one entry. */
+static void fx_add(const char* word) {
+    const char* num = strncmp(word, "n64:", 4) == 0 ? word + 4 : word;
+    const char* dash = strchr(num, '-');
+    if (dash != NULL && dash > num && *num >= '0' && *num <= '9' && is_number(dash + 1)) {
+        int a = parse_int(num), b = parse_int(dash + 1);
+        for (; a <= b && s_fx_n < FX_MAX; a++) {
+            sprintf(s_fx_list[s_fx_n++], "%s%d", num != word ? "n64:" : "", a);
+        }
+        return;
+    }
+    if (s_fx_n < FX_MAX) {
+        strcpy(s_fx_list[s_fx_n++], word);
+    }
+}
+
 static void fx_read(void) {
-    char text[200];
+    char text[600];
     char* p;
     s_fx_state = 0;
     if (!tst_sw_value("fx", text, sizeof(text)) || text[0] == '\0') {
@@ -90,14 +200,15 @@ static void fx_read(void) {
     }
     p = text;
     while (*p != '\0' && s_fx_n < FX_MAX) {
+        char word[24];
         char* comma = strchr(p, ',');
         int len = comma != NULL ? (int)(comma - p) : (int)strlen(p);
         if (len > 23) {
             len = 23;
         }
-        memcpy(s_fx_list[s_fx_n], p, len);
-        s_fx_list[s_fx_n][len] = '\0';
-        s_fx_n++;
+        memcpy(word, p, len);
+        word[len] = '\0';
+        fx_add(word);
         if (comma == NULL) {
             break;
         }
@@ -263,6 +374,7 @@ static void fx_frame(u32 frame) {
         return;
     }
     fx_spawn(s_fx_list[s_fx_i], frame);
+    shot_add_after(s_fxshot, s_fxshot_n, frame);
     s_fx_spawned = frame;
     s_fx_i++;
     s_fx_next = frame + (u32)s_fx_gap;
@@ -357,9 +469,57 @@ static void battle_start(u32 frame) {
             (unsigned long)frame, npc->description);
     s_btl_start = frame;
     s_btl_state = 2;
+    shot_add_after(s_btlshot, s_btlshot_n, frame);
+}
+
+/* btllist: 30 frames after each map comes up, logs its NPCs (used, enemies)
+ * and, the first time its area is seen, the area's battle setup table. With
+ * sweep= it lists every area's table in one run (gallery.py --list-battles). */
+static void battle_list(void) {
+    static int on = -1;
+    static char seen[64][4];
+    static int n_seen;
+    char area[4];
+    AreaData* ad;
+    NpcSetupBattleInfo* tbl;
+    NpcWork* w;
+    s32 i, n, used = 0, enemies = 0;
+    if (on < 0) {
+        on = tst_sw_has("btllist");
+    }
+    if (!on || s_map_frames != 30) {
+        return;
+    }
+    w = npcGetWorkPtr();
+    for (i = 0; i < w->total; i++) {
+        if (w->entries[i].flags & NPC_FLAG_USED) {
+            used++;
+            if (w->entries[i].flags & NPC_FLAG_ENEMY) {
+                enemies++;
+            }
+        }
+    }
+    tst_log("btllist: map %s npcs %ld enemies %ld", gp->currentMapName, (long)used, (long)enemies);
+    memcpy(area, gp->currentMapName, 3);
+    area[3] = '\0';
+    for (i = 0; i < n_seen; i++) {
+        if (strcmp(seen[i], area) == 0) {
+            return;
+        }
+    }
+    if (n_seen < 64) {
+        strcpy(seen[n_seen++], area);
+    }
+    ad = areaDataPtr(area);
+    tbl = ad != NULL ? (NpcSetupBattleInfo*)ad->btlSetupTbl : NULL;
+    for (n = 0; tbl != NULL && tbl[n].name != NULL; n++) {
+        tst_log("btllist: area %s %ld %s", area, (long)n, tbl[n].name);
+    }
+    tst_log("btllist: area %s has %ld setups", area, (long)n);
 }
 
 static void battle_frame(u32 frame) {
+    battle_list();
     if (s_btl_state < 0) {
         s_btl_state = 0;
         if (tst_sw_value("battle", s_btl_word, sizeof(s_btl_word)) && s_btl_word[0] != '\0') {
@@ -387,4 +547,5 @@ void tst_gallery_frame(u32 frame) {
     track_map();
     fx_frame(frame);
     battle_frame(frame);
+    shot_frame(frame);
 }

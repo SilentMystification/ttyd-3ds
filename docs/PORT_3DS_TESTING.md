@@ -113,6 +113,15 @@ Switches the game reads (space-separated words in `--switches`):
 | `gxfogcache=0/1` | 1 (default): the fog table is recomputed only when the fog parameters change, and sent with an id instead of a hash |
 | `gxunlit=0/1` | 1 (default): unlit colour channels skip `channel_color` and the eye-space normal |
 | `gxmerge=0/1` | 1 (default): consecutive draws with nothing recorded between them share one draw command. `gxstats` shows `gpu draws N (of M calls)` |
+| `gxvsh=0/1` | 1 (default): the vertex-shader path. Display-list cache entries get PICA streams, immediate-mode draws and decoded lists go through a per-frame ring, and a pass group fully eligible for `gxvshk` frames is transformed on the GPU. 0: every vertex is transformed on the CPU (A/B, and the hardware fallback). Acceptance: `tools/port3ds/vsh_accept.py` |
+| `gxvshk=N` | Hysteresis: eligible frames in a row before a group moves to the shader (default 30) |
+| `gxvshdecal=0/1` | 1 (default): a decal-like draw on the CPU path links the earlier shader-capable groups in its viewport, so they take one path. 0 only counts the links; it breaks the offload rules |
+| `gxvshimm=0/1` | 1 (default): immediate-mode draws and decoded lists may take the shader path; 0 keeps them on the CPU |
+| `gxvsh_check=N` | Logs every pass group of frame N (path, eligibility, streak, reasons, decal links) |
+| `gxvshs16=0/1`, `gxvshkb=N` | s16 stream attributes where exact (default 1); stream memory in KB (default 6144) |
+| `gxdepthshot` | Each shot also saves the depth buffer (`shots/NNNNN.dep`). Debug only |
+| `gxclearrgb=RRGGBB` | Test only: the frame clear colour (the seam test uses `FF00FF`) |
+| `shotfrom=N` | The first presented frame a shot may be taken on; with `shots=1 shotmax=K`, K consecutive frames |
 | `determ` | Deterministic test mode: game time advances exactly one retrace per frame (1/60 s, or 1/50 s on PAL) from a fixed date. The retrace callbacks run once per frame on the game thread, each frame waits for queued DVD reads, sound interrupts follow the frame, and the output is silent. Two runs with the same switches and padscript give identical `gwdump` streams. Details in [PORT_3DS_TEST_INFRA.md](PORT_3DS_TEST_INFRA.md) |
 | `gwdump=N` | A `gwdump` record every N frames: sequence, map, story flags (GSW), event values, Mario's position, the RNG state, battle state, clocks, pad, and a `GlobalWork` hash. Limit the range with `gwdumpfrom=`/`gwdumpto=`. Compare runs, or the port against Dolphin, with `tools/port3ds/gw_diff.py` |
 | `fx=<name\|index>[,...]` | Spawns effects through `evt_eff` (`n64:` through `evt_eff64`) after the map is up. Options: `fxwait`, `fxgap`, `fxargs` |

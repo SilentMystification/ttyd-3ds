@@ -14,26 +14,28 @@ A GCI file is one file of a GameCube memory card: a 0x40-byte directory entry (a
   - the TTYD save inside (a file named mariost_save_file): the header block's byte-sum checksums, and for each of
     the four slots both copies (main at 0x2000, backup at 0x12000): version string, size word, byte-sum checksum
     and its complement. These are the game's own tests (src/manager/cardmgr.c: headerCheck, dataCheck).
-  - the byte order of the save data. The checksum value does not depend on it (a byte sum), but the size word and
-    the checksum words do. The GameCube writes the data big-endian. The port keeps it as the 3DS holds it
-    (little-endian), see KNOWN GAP below.
+  - the byte order of the save data: "BE" is the GameCube's (and what the port writes), "LE" is what earlier port
+    builds wrote. The checksum value does not depend on the order (a byte sum), but the size word and the
+    checksum words do.
 
-`selftest` compiles the port's own card.c (port3ds/game/card.c) for the host, with stubs for the platform layer
-(threads and log), and drives its CARD API (mount, create, write, read, get/set status) on a temporary
-folder. It builds it for the US and JP releases. It checks:
-  - what the port writes is a valid GCI (the entry and the TTYD save checks above);
-  - the port reads back exactly what it wrote, and a GCI made as Dolphin makes them (another modification time,
-    copy counter, permissions, comment offset, another file name, a block count) reads byte for byte;
+`selftest` compiles the port's own card.c and save_swap.c (port3ds/game/) for the host, with stubs for the
+platform layer (threads and log), and drives the CARD API (mount, create, write, read, get/set status) on a
+temporary folder. It builds them for the US, JP and PAL releases. The swap tables are the ones the game build
+generates from the compiler's struct layout (build/3ds/game/generated/port_swap_gen.c) when that exists for the
+release (US and PAL); otherwise a stand-in with the same kinds of fields. It checks:
+  - what the port writes is a valid GCI, with big-endian data that passes the game's checks as the GameCube
+    would run them (the entry and the TTYD save checks above), and the port reads back the native data it wrote;
+  - a GCI made as Dolphin makes them (another modification time, copy counter, permissions, comment offset,
+    another file name, big-endian data) reads as the same native data;
+  - a save from an earlier port build (little-endian) is read as it is and migrated: the log says so, and the
+    next write stores it big-endian;
+  - paper-cut's test GCIs (genuine big-endian saves, if ../paper-cut exists) read to the native data the
+    tables give, and pass the game's check on the native bytes;
   - a save of another region, a truncated file and a copy of one save under two names are handled, with a log
     line, not a crash.
-
-KNOWN GAP (found by this test): the port stores the save data little-endian, the GameCube and Dolphin big-endian.
-The directory entry and the container are compatible both ways, but a Dolphin save's data is read by the game as
-broken (its size word reads wrong), and a port save is not a valid GameCube save. `check` reports the byte order
-as "LE" or "BE" so the gap is visible. The fix needs a field-level byte swap of GlobalWork and the other save
-structs (tools/port3ds/gen_swap.py has the machinery for disc formats), applied as card.c reads and writes.
 """
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -56,6 +58,60 @@ RELEASES = {
 META_DATA = 0x1E46  # sizeof(CardMetadata.data) that the header checksum covers
 SLOT_SIZE = 0x4000
 EPOCH_2000 = 946684800  # Unix time of the GameCube clock's zero
+
+
+# ---- The swap tables ----
+
+GEN_C = os.path.join(REPO, "build", "3ds", "game", "generated", "port_swap_gen.c")
+SLOT_BASE = 0x2000
+META_TYPE, SLOT_TYPE = "CardMetadata", "CardSaveSlot"
+_runs_cache = {}
+
+
+def load_runs(game):
+    """({type: [(offset, width, count)]}, source): the unit runs of CardMetadata and CardSaveSlot."""
+    if game in _runs_cache:
+        return _runs_cache[game]
+    rel = RELEASES[game]
+    out = None
+    if game != b"G8MJ" and os.path.exists(GEN_C):  # the generated tables are for the build's release (US)
+        text = open(GEN_C).read()
+        out = {}
+        for t in (META_TYPE, SLOT_TYPE):
+            m = re.search(r"static const PortSwapRun runs_%s\[\] = \{(.*?)\n\};" % t, text, re.S)
+            if m is None:
+                out = None
+                break
+            out[t] = [tuple(int(x) for x in e) for e in re.findall(r"\{(\d+), (\d+), (\d+)\}", m.group(1))]
+        src = "generated tables"
+    if out is None:
+        out = {META_TYPE: [(0x1E40, 2, 3), (0x1FF8, 4, 2)],
+               SLOT_TYPE: [(0, 2, 1), (8, 4, (rel["size"] - 8) // 4), (0x3FF4, 4, 3)]}
+        src = "stand-in tables"
+    _runs_cache[game] = (out, src)
+    return _runs_cache[game]
+
+
+def swap_region(buf, base, runs):
+    for off, w, n in runs:
+        for k in range(n):
+            a = base + off + k * w
+            buf[a:a + w] = buf[a:a + w][::-1]
+
+
+def swap_save(data, game, only=None):
+    """The save's data with every region's units byte-reversed (native <-> big-endian). `only` limits it to
+    the listed region numbers (0 = header block, 1..8 = slots)."""
+    runs, _ = load_runs(game)
+    d = bytearray(data)
+    for r in range(9):
+        if only is not None and r not in only:
+            continue
+        if r == 0:
+            swap_region(d, 0, runs[META_TYPE])
+        else:
+            swap_region(d, SLOT_BASE + (r - 1) * SLOT_SIZE, runs[SLOT_TYPE])
+    return bytes(d)
 
 
 # ---- Directory entry ----
@@ -189,6 +245,9 @@ def check_save(g):
         g.endian = "LE"
         g.warnings.append("no slot has a size word of 0x%X in either byte order" % rel["size"])
     le = g.endian == "LE"
+    if le:
+        g.warnings.append("little-endian data: a save from an earlier port build (the port converts it on load and "
+                          "writes it big-endian), not a GameCube save")
     # Header block: headerCheck()
     c1, c2 = u32(d, 0x1FF8, le), u32(d, 0x1FFC, le)
     g.header_ok = c2 == (~c1 & 0xFFFFFFFF) and c1 == (sum(d[0:META_DATA]) & 0xFFFFFFFF)
@@ -252,9 +311,11 @@ def entry(game=b"G8ME", maker=b"01", name=SAVE_NAME, t=0x32942FBE, blocks=SAVE_B
 
 
 def make_save_data(game=b"G8ME", le=True, empty_slots=(1, 2, 3), seed=1):
-    """A 0x22000-byte TTYD save as the game lays it out: valid header block, four slots in both copies."""
+    """A 0x22000-byte TTYD save as the game lays it out: valid header block, four slots in both copies.
+    Native (little-endian) data as the game holds it, or with le=False the same save as the GameCube
+    stores it (every unit of the tables swapped)."""
     rel = RELEASES[game]
-    pk = (lambda f, v: struct.pack("<" + f, v)) if le else (lambda f, v: struct.pack(">" + f, v))
+    pk = lambda f, v: struct.pack("<" + f, v)
     d = bytearray(SAVE_BLOCKS * SECTOR)
     meta = bytearray(SECTOR)
     meta[0:11] = b"Paper Mario"
@@ -278,7 +339,7 @@ def make_save_data(game=b"G8ME", le=True, empty_slots=(1, 2, 3), seed=1):
         sl[0x3FF8:0x4000] = pk("I", s) + pk("I", ~s & 0xFFFFFFFF)
         for base in (0x2000, 0x12000):
             d[base + slot * SLOT_SIZE:base + (slot + 1) * SLOT_SIZE] = sl
-    return bytes(d)
+    return bytes(d) if le else swap_save(d, game)
 
 
 # ---- The port's card.c on the host ----
@@ -340,7 +401,7 @@ void plat_mutex_unlock(PlatMutex* m) { pthread_mutex_unlock(&m->m); }
 """
 
 HARNESS_C = r"""
-/* usage: harness list | read NAME OUT | create NAME SIZE IN [setstatus]   (works in ./card) */
+/* usage: harness list | read NAME OUT | rewrite NAME OUT | create NAME SIZE IN   (works in ./card) */
 #include <dolphin/card.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -374,6 +435,15 @@ int main(int argc, char** argv) {
         wait_done();
         printf("read %d length %d\n", CARDGetResultCode(0), fi.length);
         FILE* f = fopen(argv[3], "wb"); fwrite(buf, 1, fi.length, f); fclose(f);
+    } else if (!strcmp(argv[1], "rewrite")) {
+        CARDFileInfo fi;
+        if (CARDOpen(0, argv[2], &fi) != 0) return 3;
+        char* buf = malloc(fi.length);
+        CARDReadAsync(&fi, buf, fi.length, 0, NULL);
+        wait_done();
+        CARDWriteAsync(&fi, buf, fi.length, 0, NULL);
+        wait_done();
+        printf("rewrite %d\n", CARDGetResultCode(0));
     } else if (!strcmp(argv[1], "create")) {
         CARDFileInfo fi;
         unsigned size = (unsigned)atoi(argv[3]);
@@ -408,13 +478,24 @@ class Host:
                            ("inc/dolphin/dvd.h", "#pragma once\n"), ("stubs.c", STUBS_C), ("harness.c", HARNESS_C)):
             with open(os.path.join(src, name), "w") as f:
                 f.write(text)
+        runs, self.tables = load_runs(game)
+        hdr = ['#pragma once', '#include "port3ds/port_swap.h"']
+        for t, size in ((META_TYPE, 0x2000), (SLOT_TYPE, 0x4000)):
+            hdr.append("static const PortSwapRun runs_%s[] = {%s};" % (
+                t, ", ".join("{%d, %d, %d}" % r for r in runs[t])))
+            hdr.append('const PortSwapType port_swap_type_%s = {"%s", %d, %d, runs_%s};' % (
+                t, t, size, len(runs[t]), t))
+        with open(os.path.join(src, "inc", "port_swap_gen.h"), "w") as f:
+            f.write("\n".join(hdr) + "\n")
         self.exe = os.path.join(tmp, "harness_" + game.decode())
         cmd = ["gcc", "-std=gnu11", "-w", "-include", os.path.join(REPO, "tools/port3ds/host_decode/host_prefix.h")]
         if macro:
             cmd.append("-D" + macro)
+        cmd += ["-DPORT_SAVE_HOST_TEST", "-DMETA_DATA_SIZE=0x1E46u", "-DSLOT_DATA_SIZE=0x%Xu" % RELEASES[game]["size"]]
         cmd += ["-I", os.path.join(src, "inc"), "-I", os.path.join(REPO, "libs/dolsdk2004/include"),
                 "-I", os.path.join(REPO, "port3ds/include"), "-I", os.path.join(REPO, "include"),
                 "-o", self.exe, os.path.join(src, "harness.c"), os.path.join(REPO, "port3ds/game/card.c"),
+                os.path.join(REPO, "port3ds/game/save_swap.c"),
                 os.path.join(src, "stubs.c"), "-lpthread"]
         subprocess.run(cmd, check=True, cwd=REPO)
 
@@ -443,22 +524,61 @@ def fresh(tmp, name):
     return d
 
 
+def find_papercut():
+    """paper-cut's test saves folder (a sibling of this checkout or of the main checkout of a worktree)"""
+    d = REPO
+    for _ in range(6):
+        c = os.path.join(os.path.dirname(d), "paper-cut", "tests", "port", "upgrade")
+        if os.path.isdir(c):
+            return c
+        d = os.path.dirname(d)
+    return None
+
+
+def native_valid(native, game):
+    """The game's dataCheck/headerCheck on native (little-endian) bytes: per slot (main, backup) validity."""
+    rel = RELEASES[game]
+    meta = native[0:META_DATA]
+    c1, c2 = u32(native, 0x1FF8, True), u32(native, 0x1FFC, True)
+    header = c2 == (~c1 & 0xFFFFFFFF) and c1 == (sum(meta) & 0xFFFFFFFF)
+    slots = []
+    for s in range(4):
+        ok = []
+        for base in (0x2000, 0x12000):
+            o = base + s * SLOT_SIZE
+            sl = native[o:o + SLOT_SIZE]
+            c1, c2 = u32(sl, 0x3FF8, True), u32(sl, 0x3FFC, True)
+            ok.append(u32(sl, 0x3FF4, True) == rel["size"] and sl[0x3FF0:0x3FF4] == rel["version"] and
+                      c2 == (~c1 & 0xFFFFFFFF) and c1 == (sum(sl[0:rel["size"]]) & 0xFFFFFFFF))
+        slots.append(tuple(ok))
+    return header, slots
+
+
 def selftest_release(tmp, macro, game, res):
     rel = RELEASES[game]
-    print("release %s (%s), card.c built with %s" % (rel["name"], game.decode(), macro or "no macro (JP default)"))
+    print("release %s (%s), card.c and save_swap.c built with %s" % (rel["name"], game.decode(),
+                                                                     macro or "no macro (JP default)"))
     host = Host(tmp, macro, game)
+    print("  swap tables: " + host.tables)
     other = b"G8MJ" if game != b"G8MJ" else b"G8ME"
     gamename = game.decode()
-    data = make_save_data(game, le=True)
+    native = make_save_data(game, le=True)
+    be = make_save_data(game, le=False)
+    res.check(native != be and be == swap_save(native, game) and swap_save(be, game) == native,
+              "the swap is its own inverse and changes the data")
     inp = os.path.join(tmp, "in.bin")
-    open(inp, "wb").write(data)
+    open(inp, "wb").write(native)
+    out_bin = os.path.join(tmp, "out.bin")
+    out = lambda: open(out_bin, "rb").read()
 
     # 1. The port writes: create + write + set status, as cardmgr.c's create does.
     d = fresh(tmp, "w_" + gamename)
-    rc, out = host.run(d, "create", SAVE_NAME, str(len(data)), inp)
+    rc, log = host.run(d, "create", SAVE_NAME, str(len(native)), inp)
     path = os.path.join(d, "card", "01-%s-%s.gci" % (gamename, SAVE_NAME))
-    res.check(rc == 0 and "setstatus 0" in out and os.path.exists(path), "the port creates %s" % os.path.basename(path))
-    g = parse(open(path, "rb").read())
+    res.check(rc == 0 and "setstatus 0" in log and os.path.exists(path),
+              "the port creates %s" % os.path.basename(path))
+    disk = open(path, "rb").read()
+    g = parse(disk)
     check_entry(g)
     check_save(g)
     res.check(not g.errors, "the port's file is a valid GCI (%s)" % ("; ".join(g.errors) or "entry fields ok"))
@@ -466,37 +586,68 @@ def selftest_release(tmp, macro, game, res):
               and g.pad6 == 0xFF and g.pad3a == b"\xff\xff", "game code, maker, file name, block count, padding")
     res.check(g.icon_addr == 0x40 and g.banner_fmt == 2 and g.icon_fmt == 1 and g.icon_speed == 2 and
               g.comment_addr == 0 and g.perm == 4, "banner, icon and comment fields as the game set them")
-    res.check(g.time > 0 and g.time < 0xFFFFFFFF and g.time == 1000000000, "modification time is on the 2000 epoch")
-    res.check(g.endian == "LE" and g.header_ok and all(a and b for a, b, _ in g.slots[:1]),
-              "the TTYD save inside passes the game's checksums (LE)")
-    # 2. The port reads back what it wrote.
-    out_bin = os.path.join(tmp, "out.bin")
-    rc, out = host.run(d, "read", SAVE_NAME, out_bin)
-    res.check(rc == 0 and open(out_bin, "rb").read() == data, "the port reads back the data it wrote")
+    res.check(g.time == 1000000000, "modification time is on the 2000 epoch")
+    res.check(g.endian == "BE" and g.header_ok and all(a and b for a, b, _ in g.slots[:1]),
+              "the data on disk is big-endian and passes the game's checksums as the GameCube runs them")
+    res.check(disk[HDR:] == be, "the file's data is exactly the GameCube byte order of the native save")
+    rc, log = host.run(d, "read", SAVE_NAME, out_bin)
+    res.check(rc == 0 and out() == native, "the port reads back the native data it wrote")
+    h, sl = native_valid(out(), game)
+    res.check(h and sl[0] == (True, True), "the data the game sees passes headerCheck and dataCheck")
 
-    # 3. A GCI as Dolphin makes it: other file name, time, copy counter, permissions, comment offset, BE data.
+    # 2. A GCI as Dolphin makes it: other file name, time, copy counter, permissions, comment offset, BE data.
     d = fresh(tmp, "dolphin_" + gamename)
-    bedata = make_save_data(game, le=False, seed=7)
     ent = entry(game=game, t=0x2A0D1C40, copies=2, perm=0x1C, first=0x2F, comment=0x20)
-    open(os.path.join(d, "card", "Paper Mario %s.GCI" % gamename), "wb").write(ent + bedata)
-    rc, out = host.run(d, "list")
-    res.check(('"%s"' % SAVE_NAME in out) and ("time %d" % 0x2A0D1C40) in out and "comment 00000020" in out and
-              "length %d" % (SAVE_BLOCKS * SECTOR) in out,
+    open(os.path.join(d, "card", "Paper Mario %s.GCI" % gamename), "wb").write(ent + be)
+    rc, log = host.run(d, "list")
+    res.check(('"%s"' % SAVE_NAME in log) and ("time %d" % 0x2A0D1C40) in log and "comment 00000020" in log and
+              "length %d" % (SAVE_BLOCKS * SECTOR) in log,
               "the port lists a Dolphin GCI under another file name (lookup is by the entry, not the file name)")
-    res.check("copy count 2" in out and ("%d blocks" % SAVE_BLOCKS) in out, "the log shows blocks and copy counter")
-    rc, out = host.run(d, "read", SAVE_NAME, out_bin)
-    res.check(rc == 0 and open(out_bin, "rb").read() == bedata, "the port reads the Dolphin GCI's data byte for byte")
-    gd = parse(ent + bedata)
-    check_entry(gd)
-    check_save(gd)
-    res.check(not gd.errors and gd.endian == "BE", "the checker sees the Dolphin save as valid, big-endian data")
-    # set status keeps the copy counter and permissions (the game does it after a save)
-    rc, out = host.run(d, "create", "other_file", "8192", inp)  # a second file must not disturb the first
+    res.check("copy count 2" in log and ("%d blocks" % SAVE_BLOCKS) in log, "the log shows blocks and copy counter")
+    rc, log = host.run(d, "read", SAVE_NAME, out_bin)
+    res.check(rc == 0 and out() == native and "old little-endian" not in log,
+              "the port reads the Dolphin GCI's big-endian data as the native save")
+    # a write to another file leaves the first file's entry (copy counter, permissions, time) alone
+    rc, log = host.run(d, "create", "other_file", "8192", inp)
     after = parse(open(os.path.join(d, "card", "Paper Mario %s.GCI" % gamename), "rb").read())
     res.check(after.copies == 2 and after.perm == 0x1C and after.time == 0x2A0D1C40,
               "a write to another file leaves the Dolphin file's entry untouched")
 
-    # 4. Another region's save, a truncated file, another game's file
+    # 3. A save from an earlier port build (little-endian): read as it is, migrated by the next write
+    d = fresh(tmp, "old_" + gamename)
+    open(os.path.join(d, "card", "01-%s-%s.gci" % (gamename, SAVE_NAME)), "wb").write(entry(game=game) + native)
+    rc, log = host.run(d, "read", SAVE_NAME, out_bin)
+    res.check(rc == 0 and out() == native and "card: converted a save from the old little-endian layout" in log,
+              "an old little-endian save reads as the same native data, and the log says it was converted")
+    # a mixed file (one slot already rewritten big-endian, the rest old) reads whole
+    mixed = swap_save(native, game, only={1, 5})
+    open(os.path.join(d, "card", "01-%s-%s.gci" % (gamename, SAVE_NAME)), "wb").write(entry(game=game) + mixed)
+    rc, log = host.run(d, "read", SAVE_NAME, out_bin)
+    res.check(rc == 0 and out() == native, "a file with some regions old and some big-endian reads whole")
+    # the next write stores it big-endian: write the native data back through the port
+    os.remove(os.path.join(d, "card", "01-%s-%s.gci" % (gamename, SAVE_NAME)))
+    open(os.path.join(d, "card", "01-%s-%s.gci" % (gamename, SAVE_NAME)), "wb").write(entry(game=game) + native)
+    rc, log = host.run(d, "rewrite", SAVE_NAME, out_bin)
+    disk = open(os.path.join(d, "card", "01-%s-%s.gci" % (gamename, SAVE_NAME)), "rb").read()
+    res.check(disk[HDR:] == be, "writing the migrated save stores it big-endian")
+
+    # 4. paper-cut's test saves: genuine big-endian game saves
+    pc = find_papercut()
+    if game == b"G8ME" and pc:
+        for ver in sorted(os.listdir(pc)):
+            f = os.path.join(pc, ver, "card1.gci")
+            if not os.path.exists(f):
+                continue
+            raw = open(f, "rb").read()
+            d = fresh(tmp, "pc_" + ver)
+            open(os.path.join(d, "card", "card1.gci"), "wb").write(raw)
+            rc, log = host.run(d, "read", SAVE_NAME, out_bin)
+            want = swap_save(raw[HDR:], game)
+            h, sl = native_valid(out(), game)
+            res.check(rc == 0 and out() == want and h and sl[0] == (True, True),
+                      "paper-cut %s card1.gci: reads to the native save and slot 1 passes the game's check" % ver)
+
+    # 5. Another region's save, a truncated file, another game's file
     d = fresh(tmp, "foreign_" + gamename)
     open(os.path.join(d, "card", "01-%s-%s.gci" % (other.decode(), SAVE_NAME)), "wb").write(
         entry(game=other) + make_save_data(other, le=False))
@@ -504,27 +655,27 @@ def selftest_release(tmp, macro, game, res):
     open(os.path.join(d, "card", "01-GALE-other.gci"), "wb").write(entry(game=b"GALE", name="other") + b"\0" * 0x2000)
     open(os.path.join(d, "card", "empty.gci"), "wb").write(b"\x01\x02")
     open(os.path.join(d, "card", "notes.txt"), "wb").write(b"not a gci")
-    rc, out = host.run(d, "list")
+    rc, log = host.run(d, "list")
     region = RELEASES[other]["name"]
-    res.check(rc == 0 and not any(l.startswith("file ") for l in out.splitlines()), "none of them is offered to the game, and no crash (exit %d)" % rc)
-    res.check("a %s save (%s)" % (region, other.decode()) in out and "skipped" in out,
+    res.check(rc == 0 and not any(l.startswith("file ") for l in log.splitlines()),
+              "none of them is offered to the game, and no crash (exit %d)" % rc)
+    res.check("a %s save (%s)" % (region, other.decode()) in log and "skipped" in log,
               "the other region's save is logged as '%s save', not silently dropped" % region)
-    res.check("trunc.gci skipped" in out and "bytes, but its header says %d blocks" % SAVE_BLOCKS in out,
+    res.check("trunc.gci skipped" in log and "bytes, but its header says %d blocks" % SAVE_BLOCKS in log,
               "the truncated file is logged with its size and block count")
-    res.check("another game's file (GALE/01)" in out and "shorter than a GCI header" in out,
+    res.check("another game's file (GALE/01)" in log and "shorter than a GCI header" in log,
               "another game's file and a 2-byte file are logged")
-    # a new save created next to them must work
-    rc, out = host.run(d, "create", SAVE_NAME, str(len(data)), inp)
-    res.check("create 0" in out and "write 0" in out, "creating a save next to foreign files works")
+    rc, log = host.run(d, "create", SAVE_NAME, str(len(native)), inp)
+    res.check("create 0" in log and "write 0" in log, "creating a save next to foreign files works")
 
-    # 5. Two files with one save inside: the newer is used
+    # 6. Two files with one save inside: the newer is used
     d = fresh(tmp, "dup_" + gamename)
-    old = make_save_data(game, le=True, seed=3)
     new = make_save_data(game, le=True, seed=9)
-    open(os.path.join(d, "card", "a_old.gci"), "wb").write(entry(game=game, t=1000) + old)
-    open(os.path.join(d, "card", "b_new.gci"), "wb").write(entry(game=game, t=2000) + new)
-    rc, out = host.run(d, "read", SAVE_NAME, out_bin)
-    res.check(rc == 0 and open(out_bin, "rb").read() == new and "hold the same save file" in out,
+    open(os.path.join(d, "card", "a_old.gci"), "wb").write(entry(game=game, t=1000) +
+                                                          make_save_data(game, le=False, seed=3))
+    open(os.path.join(d, "card", "b_new.gci"), "wb").write(entry(game=game, t=2000) + swap_save(new, game))
+    rc, log = host.run(d, "read", SAVE_NAME, out_bin)
+    res.check(rc == 0 and out() == new and "hold the same save file" in log,
               "two copies of one save under two names: the newer is used, and the log says so")
 
 

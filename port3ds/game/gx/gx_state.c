@@ -17,55 +17,6 @@ GxState gx;
 
 /* ---- Recording ---- */
 
-enum {
-    REC_SetVtxDesc = 1,
-    REC_ClearVtxDesc,
-    REC_SetVtxAttrFmt,
-    REC_SetArray,
-    REC_LoadPosMtx,
-    REC_LoadNrmMtx,
-    REC_LoadTexMtx,
-    REC_SetCurrentMtx,
-    REC_SetTexCoordGen2,
-    REC_SetNumTexGens,
-    REC_SetNumChans,
-    REC_SetChanCtrl,
-    REC_SetChanAmbColor,
-    REC_SetChanMatColor,
-    REC_LoadLightObj,
-    REC_SetNumTevStages,
-    REC_SetTevOrder,
-    REC_SetTevColorIn,
-    REC_SetTevAlphaIn,
-    REC_SetTevColorOp,
-    REC_SetTevAlphaOp,
-    REC_SetTevColor,
-    REC_SetTevColorS10,
-    REC_SetTevKColor,
-    REC_SetTevKColorSel,
-    REC_SetTevKAlphaSel,
-    REC_SetTevSwapMode,
-    REC_SetTevSwapModeTable,
-    REC_SetTevDirect,
-    REC_LoadTexObj,
-    REC_LoadTlut,
-    REC_SetAlphaCompare,
-    REC_SetBlendMode,
-    REC_SetZMode,
-    REC_SetZCompLoc,
-    REC_SetColorUpdate,
-    REC_SetAlphaUpdate,
-    REC_SetCullMode,
-    REC_SetFog,
-    REC_SetScissor,
-    REC_SetViewport,
-    REC_SetProjection,
-    REC_SetLineWidth,
-    REC_SetNumIndStages,
-    REC_SetTevIndirect,
-    REC_COUNT
-};
-
 /* Words are stored as unsigned LEB128 (7 bits a byte, low first): most
  * arguments are small enums and indices, so a recorded call is about as
  * long as the GameCube's register writes for it, and display lists the
@@ -87,13 +38,22 @@ static void rec(u32 id, const u32* words, u32 n) {
 #define F2U(x) (((union { f32 f; u32 u; }){.f = (x)}).u)
 #define U2F(x) (((union { u32 u; f32 f; }){.u = (x)}).f)
 /* Every setter starts with REC/REC0: a primitive still open (no GXEnd) is
- * drawn first, with the state it was given (see gx_end_open_primitive). */
+ * drawn first, with the state it was given (see gx_end_open_primitive).
+ * Inside a display list being recorded the call goes into the list; while
+ * the game thread records for a translator (gx_rec.c) it goes into that
+ * record. RECT: a call display lists do not hold (it applies at once while a
+ * list is being recorded, as before), recorded only for the translator. */
 #define REC(id, ...)                                         \
     do {                                                     \
         GX_CLOSE_PRIMITIVE();                                \
         if (gx_dl_recording()) {                             \
             const u32 w_[] = {__VA_ARGS__};                  \
             rec(REC_##id, w_, sizeof(w_) / sizeof(w_[0]));   \
+            return;                                          \
+        }                                                    \
+        if (gx_rec_on()) {                                   \
+            const u32 w_[] = {__VA_ARGS__};                  \
+            gx_rec_call(REC_##id, w_, sizeof(w_) / sizeof(w_[0])); \
             return;                                          \
         }                                                    \
     } while (0)
@@ -104,10 +64,23 @@ static void rec(u32 id, const u32* words, u32 n) {
             rec(REC_##id, NULL, 0);      \
             return;                      \
         }                                \
+        if (gx_rec_on()) {               \
+            gx_rec_call(REC_##id, NULL, 0); \
+            return;                      \
+        }                                \
+    } while (0)
+#define RECT(id, ...)                                        \
+    do {                                                     \
+        GX_CLOSE_PRIMITIVE();                                \
+        if (gx_rec_on()) {                                   \
+            const u32 w_[] = {__VA_ARGS__};                  \
+            gx_rec_call(REC_##id, w_, sizeof(w_) / sizeof(w_[0])); \
+            return;                                          \
+        }                                                    \
     } while (0)
 
 static inline void touch(void) {
-    if (gx_prim_open) {
+    if (gx_prim_is_open()) {
         gx_end_open_primitive(__builtin_return_address(0));
     }
     gx.version++;
@@ -119,7 +92,7 @@ static inline void touch(void) {
 u32 gx_xf_version;
 
 static inline void touch_xf(void) {
-    if (gx_prim_open) {
+    if (gx_prim_is_open()) {
         gx_end_open_primitive(__builtin_return_address(0));
     }
     gx_xf_version++;
@@ -133,18 +106,42 @@ static u32 c2u(GXColor c) { return (u32)c.r << 24 | (u32)c.g << 16 | (u32)c.b <<
 
 /* ---- Vertex description ---- */
 
+/* The field writes of the calls the game thread's shadow keeps (gx_shadow_call). */
+static void vtx_desc_set(GxState* st, u32 attr, u32 type) {
+    if (attr == GX_VA_NBT) {
+        st->vtx_desc[GX_VA_NBT] = (u8)type;
+        st->vtx_desc[GX_VA_NRM] = GX_NONE;
+    } else if (attr < GX_VA_MAX_ATTR) {
+        st->vtx_desc[attr] = (u8)type;
+        if (attr == GX_VA_NRM) {
+            st->vtx_desc[GX_VA_NBT] = GX_NONE;
+        }
+    }
+}
+
+static void vtx_desc_clear(GxState* st) {
+    memset(st->vtx_desc, GX_NONE, sizeof(st->vtx_desc));
+    st->vtx_desc[GX_VA_POS] = GX_DIRECT;
+}
+
+static void vat_set(GxState* st, u32 vtxfmt, u32 attr, u32 cnt, u32 type, u8 frac) {
+    if (vtxfmt >= GX_MAX_VTXFMT) {
+        return;
+    }
+    if (attr == GX_VA_NBT) {
+        attr = GX_VA_NRM;
+        cnt = GX_NRM_NBT;
+    }
+    if (attr >= GX_VA_MAX_ATTR) {
+        return;
+    }
+    st->vat[vtxfmt][attr] = (GxAttrFmt){(u8)cnt, (u8)type, frac};
+}
+
 void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
     GX_CLOSE_PRIMITIVE();
     REC(SetVtxDesc, attr, type);
-    if (attr == GX_VA_NBT) {
-        gx.vtx_desc[GX_VA_NBT] = (u8)type;
-        gx.vtx_desc[GX_VA_NRM] = GX_NONE;
-    } else if ((u32)attr < GX_VA_MAX_ATTR) {
-        gx.vtx_desc[attr] = (u8)type;
-        if (attr == GX_VA_NRM) {
-            gx.vtx_desc[GX_VA_NBT] = GX_NONE;
-        }
-    }
+    vtx_desc_set(&gx, (u32)attr, (u32)type);
 }
 
 void GXSetVtxDescv(const GXVtxDescList* list) {
@@ -155,14 +152,17 @@ void GXSetVtxDescv(const GXVtxDescList* list) {
 }
 
 void GXGetVtxDesc(GXAttr attr, GXAttrType* type) {
-    *type = (u32)attr < GX_VA_MAX_ATTR ? (GXAttrType)gx.vtx_desc[attr] : GX_NONE;
+    gx_rec_getter(GXG_VTXDESC);
+    *type = (u32)attr < GX_VA_MAX_ATTR ? (GXAttrType)gx_g()->vtx_desc[attr] : GX_NONE;
 }
 
 void GXGetVtxDescv(GXVtxDescList* list) {
+    gx_rec_getter(GXG_VTXDESC);
+    const GxState* g = gx_g();
     int n = 0;
     for (int a = GX_VA_PNMTXIDX; a <= GX_VA_TEX7; a++) {
         list[n].attr = (GXAttr)a;
-        list[n].type = (GXAttrType)gx.vtx_desc[a];
+        list[n].type = (GXAttrType)g->vtx_desc[a];
         n++;
     }
     list[n].attr = GX_VA_NULL;
@@ -170,12 +170,14 @@ void GXGetVtxDescv(GXVtxDescList* list) {
 }
 
 void GXGetVtxAttrFmtv(GXVtxFmt fmt, GXVtxAttrFmtList* list) {
+    gx_rec_getter(GXG_VAT);
+    const GxState* g = gx_g();
     int n = 0;
     for (int a = GX_VA_POS; a <= GX_VA_TEX7; a++) {
         list[n].attr = (GXAttr)a;
-        list[n].cnt = (GXCompCnt)gx.vat[fmt][a].cnt;
-        list[n].type = (GXCompType)gx.vat[fmt][a].type;
-        list[n].frac = gx.vat[fmt][a].frac;
+        list[n].cnt = (GXCompCnt)g->vat[fmt][a].cnt;
+        list[n].type = (GXCompType)g->vat[fmt][a].type;
+        list[n].frac = g->vat[fmt][a].frac;
         n++;
     }
     list[n].attr = GX_VA_NULL;
@@ -184,24 +186,13 @@ void GXGetVtxAttrFmtv(GXVtxFmt fmt, GXVtxAttrFmtList* list) {
 void GXClearVtxDesc(void) {
     GX_CLOSE_PRIMITIVE();
     REC0(ClearVtxDesc);
-    memset(gx.vtx_desc, GX_NONE, sizeof(gx.vtx_desc));
-    gx.vtx_desc[GX_VA_POS] = GX_DIRECT;
+    vtx_desc_clear(&gx);
 }
 
 void GXSetVtxAttrFmt(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
     GX_CLOSE_PRIMITIVE();
     REC(SetVtxAttrFmt, vtxfmt, attr, cnt, type, frac);
-    if ((u32)vtxfmt >= GX_MAX_VTXFMT) {
-        return;
-    }
-    if (attr == GX_VA_NBT) {
-        attr = GX_VA_NRM;
-        cnt = GX_NRM_NBT;
-    }
-    if ((u32)attr >= GX_VA_MAX_ATTR) {
-        return;
-    }
-    gx.vat[vtxfmt][attr] = (GxAttrFmt){(u8)cnt, (u8)type, frac};
+    vat_set(&gx, (u32)vtxfmt, (u32)attr, (u32)cnt, (u32)type, frac);
 }
 
 void GXSetVtxAttrFmtv(GXVtxFmt vtxfmt, const GXVtxAttrFmtList* list) {
@@ -225,6 +216,11 @@ void GXSetArray(GXAttr attr, void* base_ptr, u8 stride) {
 
 void GXInvalidateVtxCache(void) {
     GX_CLOSE_PRIMITIVE();
+    gx_rec_frame_start(); /* DEMOBeforeRender: the game frame's start (gxthread counters) */
+    if (gx_perf_drawdone_end != 0) {
+        gx_perf.t_idle += plat_ticks() - gx_perf_drawdone_end;
+        gx_perf_drawdone_end = 0;
+    }
 }
 
 /* ---- Transform ---- */
@@ -294,30 +290,35 @@ void GXSetCurrentMtx(u32 id) {
 
 void GXSetProjection(const f32 mtx[4][4], GXProjectionType type) {
     GX_CLOSE_PRIMITIVE();
-    gx.proj[0] = (f32)type;
-    gx.proj[1] = mtx[0][0];
-    gx.proj[3] = mtx[1][1];
-    gx.proj[5] = mtx[2][2];
-    gx.proj[6] = mtx[2][3];
+    f32 p[7];
+    p[0] = (f32)type;
+    p[1] = mtx[0][0];
+    p[3] = mtx[1][1];
+    p[5] = mtx[2][2];
+    p[6] = mtx[2][3];
     if (type == GX_PERSPECTIVE) {
-        gx.proj[2] = mtx[0][2];
-        gx.proj[4] = mtx[1][2];
+        p[2] = mtx[0][2];
+        p[4] = mtx[1][2];
     } else {
-        gx.proj[2] = mtx[0][3];
-        gx.proj[4] = mtx[1][3];
+        p[2] = mtx[0][3];
+        p[4] = mtx[1][3];
     }
-    REC(SetProjection, F2U(gx.proj[0]), F2U(gx.proj[1]), F2U(gx.proj[2]), F2U(gx.proj[3]), F2U(gx.proj[4]),
-        F2U(gx.proj[5]), F2U(gx.proj[6]));
+    REC(SetProjection, F2U(p[0]), F2U(p[1]), F2U(p[2]), F2U(p[3]), F2U(p[4]), F2U(p[5]), F2U(p[6]));
+    memcpy(gx.proj, p, sizeof(gx.proj));
     touch_xf();
 }
 
 void GXSetProjectionv(const f32* ptr) {
     GX_CLOSE_PRIMITIVE();
+    RECT(SetProjection, F2U(ptr[0]), F2U(ptr[1]), F2U(ptr[2]), F2U(ptr[3]), F2U(ptr[4]), F2U(ptr[5]), F2U(ptr[6]));
     memcpy(gx.proj, ptr, sizeof(gx.proj));
     touch_xf();
 }
 
-void GXGetProjectionv(f32* ptr) { memcpy(ptr, gx.proj, sizeof(gx.proj)); }
+void GXGetProjectionv(f32* ptr) {
+    gx_rec_getter(GXG_PROJ);
+    memcpy(ptr, gx_g()->proj, sizeof(gx.proj));
+}
 
 void GXSetViewport(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {
     REC(SetViewport, F2U(left), F2U(top), F2U(wd), F2U(ht), F2U(nearz), F2U(farz));
@@ -338,10 +339,14 @@ void GXSetViewportJitter(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz,
     GXSetViewport(left, top, wd, ht, nearz, farz);
 }
 
-void GXGetViewportv(f32* vp) { memcpy(vp, gx.vp, sizeof(gx.vp)); }
+void GXGetViewportv(f32* vp) {
+    gx_rec_getter(GXG_VIEWPORT);
+    memcpy(vp, gx_g()->vp, sizeof(gx.vp));
+}
 
 void GXSetZScaleOffset(f32 scale, f32 offset) {
     GX_CLOSE_PRIMITIVE();
+    RECT(SetZScaleOffset, F2U(scale), F2U(offset));
     gx.zscale = scale;
     gx.zoffset = offset;
     touch_xf();
@@ -357,14 +362,17 @@ void GXSetScissor(u32 left, u32 top, u32 wd, u32 ht) {
 }
 
 void GXGetScissor(u32* left, u32* top, u32* wd, u32* ht) {
-    *left = gx.scissor[0];
-    *top = gx.scissor[1];
-    *wd = gx.scissor[2];
-    *ht = gx.scissor[3];
+    gx_rec_getter(GXG_SCISSOR);
+    const GxState* g = gx_g();
+    *left = g->scissor[0];
+    *top = g->scissor[1];
+    *wd = g->scissor[2];
+    *ht = g->scissor[3];
 }
 
 void GXSetScissorBoxOffset(s32 x_off, s32 y_off) {
     GX_CLOSE_PRIMITIVE();
+    RECT(SetScissorBoxOffset, (u32)x_off, (u32)y_off);
     gx.scissor_off[0] = x_off;
     gx.scissor_off[1] = y_off;
     touch();
@@ -571,12 +579,16 @@ void GXLoadLightObjImm(const GXLightObj* lt_obj, GXLightID light) {
     GX_CLOSE_PRIMITIVE();
     const GxLightObj* l = (const GxLightObj*)lt_obj;
     int idx = 31 - __builtin_clz((u32)light & 0xFF);
-    if (gx_dl_recording()) {
+    if (gx_dl_recording() || gx_rec_on()) {
         const u32* w = (const u32*)l;
         u32 words[1 + sizeof(GxLightObj) / 4];
         words[0] = (u32)light;
         memcpy(words + 1, w, sizeof(GxLightObj));
-        rec(REC_LoadLightObj, words, sizeof(words) / 4);
+        if (gx_dl_recording()) {
+            rec(REC_LoadLightObj, words, sizeof(words) / 4);
+        } else {
+            gx_rec_call(REC_LoadLightObj, words, sizeof(words) / 4);
+        }
         return;
     }
     if (idx >= 0 && idx < GX_MAX_LIGHT) {
@@ -782,6 +794,7 @@ void GXSetNumIndStages(u8 nIndStages) {
 
 void GXSetIndTexOrder(GXIndTexStageID ind_stage, GXTexCoordID tex_coord, GXTexMapID tex_map) {
     GX_CLOSE_PRIMITIVE();
+    RECT(SetIndTexOrder, ind_stage, tex_coord, tex_map);
     if ((u32)ind_stage < 4) {
         gx.ind[ind_stage].coord = (u8)tex_coord;
         gx.ind[ind_stage].map = (u8)tex_map;
@@ -791,6 +804,7 @@ void GXSetIndTexOrder(GXIndTexStageID ind_stage, GXTexCoordID tex_coord, GXTexMa
 
 void GXSetIndTexCoordScale(GXIndTexStageID ind_state, GXIndTexScale scale_s, GXIndTexScale scale_t) {
     GX_CLOSE_PRIMITIVE();
+    RECT(SetIndTexCoordScale, ind_state, scale_s, scale_t);
     if ((u32)ind_state < 4) {
         gx.ind[ind_state].scale_s = (u8)scale_s;
         gx.ind[ind_state].scale_t = (u8)scale_t;
@@ -800,6 +814,8 @@ void GXSetIndTexCoordScale(GXIndTexStageID ind_state, GXIndTexScale scale_s, GXI
 
 void GXSetIndTexMtx(GXIndTexMtxID mtx_id, const f32 offset[2][3], s8 scale_exp) {
     GX_CLOSE_PRIMITIVE();
+    RECT(SetIndTexMtx, mtx_id, F2U(offset[0][0]), F2U(offset[0][1]), F2U(offset[0][2]), F2U(offset[1][0]),
+         F2U(offset[1][1]), F2U(offset[1][2]), (u32)(s32)scale_exp);
     int i = (int)mtx_id - GX_ITM_0;
     if (i >= 0 && i < 3) {
         memcpy(gx.ind_mtx[i], offset, sizeof(gx.ind_mtx[i]));
@@ -859,6 +875,7 @@ void GXSetAlphaUpdate(GXBool update_enable) {
 
 void GXSetDstAlpha(GXBool enable, u8 alpha) {
     GX_CLOSE_PRIMITIVE();
+    RECT(SetDstAlpha, enable, alpha);
     gx.dst_alpha_enable = enable;
     gx.dst_alpha = alpha;
     touch();
@@ -870,10 +887,14 @@ void GXSetCullMode(GXCullMode mode) {
     touch();
 }
 
-void GXGetCullMode(GXCullMode* mode) { *mode = (GXCullMode)gx.cull; }
+void GXGetCullMode(GXCullMode* mode) {
+    gx_rec_getter(GXG_CULL);
+    *mode = (GXCullMode)gx_g()->cull;
+}
 
 void GXSetPixelFmt(GXPixelFmt pix_fmt, GXZFmt16 z_fmt) {
     GX_CLOSE_PRIMITIVE();
+    RECT(SetPixelFmt, pix_fmt, z_fmt);
     gx.pixel_fmt = (u8)pix_fmt;
     gx.z_fmt = (u8)z_fmt;
     touch();
@@ -892,6 +913,7 @@ void GXSetFog(GXFogType type, f32 startz, f32 endz, f32 nearz, f32 farz, GXColor
 
 void GXSetZTexture(GXZTexOp op, GXTexFmt fmt, u32 bias) {
     GX_CLOSE_PRIMITIVE();
+    RECT(SetZTexture, op, fmt, bias);
     gx.ztex_op = (u8)op;
     gx.ztex_fmt = (u8)fmt;
     gx.ztex_bias = bias;
@@ -919,7 +941,8 @@ void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
         const GxTexObj* t = (const GxTexObj*)obj;
         const int fmt_ok = t->format <= GX_TF_CMPR || t->format == GX_TF_Z8 || t->format == GX_TF_Z16 ||
                            t->format == GX_TF_Z24X8;
-        if (!PORT_IS_ADDR(t->image) || !fmt_ok) {
+        /* checked where the game calls it (a translator replays an object already checked) */
+        if (!gx_tls_translator && (!PORT_IS_ADDR(t->image) || !fmt_ok)) {
             /* never initialised by GXInitTexObj; logged once per caller */
             static void* seen[16];
             void* ra = __builtin_return_address(0);
@@ -932,6 +955,13 @@ void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
                        t->format);
             }
         }
+        if (gx_rec_on()) {
+            u32 words[1 + sizeof(GxTexObj) / 4];
+            words[0] = (u32)id;
+            memcpy(words + 1, obj, sizeof(GxTexObj));
+            gx_rec_call(REC_LoadTexObj, words, sizeof(words) / 4);
+            return;
+        }
         gx.tex_map[id] = *(GxTexObj*)obj;
         gx.tex_map_valid[id] = 1;
         touch();
@@ -940,11 +970,15 @@ void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
 
 void GXLoadTlut(GXTlutObj* tlut_obj, u32 tlut_name) {
     GX_CLOSE_PRIMITIVE();
-    if (gx_dl_recording()) {
+    if (gx_dl_recording() || gx_rec_on()) {
         u32 words[1 + sizeof(GxTlutObj) / 4];
         words[0] = tlut_name;
         memcpy(words + 1, tlut_obj, sizeof(GxTlutObj));
-        rec(REC_LoadTlut, words, sizeof(words) / 4);
+        if (gx_dl_recording()) {
+            rec(REC_LoadTlut, words, sizeof(words) / 4);
+        } else {
+            gx_rec_call(REC_LoadTlut, words, sizeof(words) / 4);
+        }
         return;
     }
     if (tlut_name < 20) {
@@ -982,6 +1016,10 @@ void gx_dl_replay_port_op(const u8** pp, const u8* end) {
         w[i] = v;
     }
     *pp = p;
+    gx_apply_call(id, w);
+}
+
+void gx_apply_call(u32 id, const u32* w) {
     switch (id) {
     case REC_SetVtxDesc: GXSetVtxDesc((GXAttr)w[0], (GXAttrType)w[1]); break;
     case REC_ClearVtxDesc: GXClearVtxDesc(); break;
@@ -1106,7 +1144,67 @@ void gx_dl_replay_port_op(const u8** pp, const u8* end) {
     case REC_SetTevIndirect:
         GXSetTevIndWarp((GXTevStageID)w[0], (GXIndTexStageID)w[1], (u8)w[2], (u8)w[3], (GXIndTexMtxID)w[4]);
         break;
+    case REC_SetZScaleOffset: GXSetZScaleOffset(U2F(w[0]), U2F(w[1])); break;
+    case REC_SetScissorBoxOffset: GXSetScissorBoxOffset((s32)w[0], (s32)w[1]); break;
+    case REC_SetIndTexOrder: GXSetIndTexOrder((GXIndTexStageID)w[0], (GXTexCoordID)w[1], (GXTexMapID)w[2]); break;
+    case REC_SetIndTexCoordScale:
+        GXSetIndTexCoordScale((GXIndTexStageID)w[0], (GXIndTexScale)w[1], (GXIndTexScale)w[2]);
+        break;
+    case REC_SetIndTexMtx: {
+        f32 m[2][3];
+        for (int i = 0; i < 6; i++) {
+            m[i / 3][i % 3] = U2F(w[1 + i]);
+        }
+        GXSetIndTexMtx((GXIndTexMtxID)w[0], m, (s8)(s32)w[7]);
+        break;
+    }
+    case REC_SetDstAlpha: GXSetDstAlpha((GXBool)w[0], (u8)w[1]); break;
+    case REC_SetPixelFmt: GXSetPixelFmt((GXPixelFmt)w[0], (GXZFmt16)w[1]); break;
+    case REC_SetZTexture: GXSetZTexture((GXZTexOp)w[0], (GXTexFmt)w[1], w[2]); break;
+    case REC_SetCopyClear: GXSetCopyClear(u2c(w[0]), w[1]); break;
+    case REC_SetDispCopySrc: GXSetDispCopySrc((u16)w[0], (u16)w[1], (u16)w[2], (u16)w[3]); break;
+    case REC_SetDispCopyDst: GXSetDispCopyDst((u16)w[0], (u16)w[1]); break;
+    case REC_SetDispCopyYScale: GXSetDispCopyYScale(U2F(w[0])); break;
+    case REC_SetTexCopySrc: GXSetTexCopySrc((u16)w[0], (u16)w[1], (u16)w[2], (u16)w[3]); break;
+    case REC_SetTexCopyDst: GXSetTexCopyDst((u16)w[0], (u16)w[1], (GXTexFmt)w[2], (GXBool)w[3]); break;
+    case REC_CopyTex: GXCopyTex((void*)w[0], (GXBool)w[1]); break;
+    case REC_CopyDisp: gx_copy_disp((void*)w[0], (GXBool)w[1], (const void*)w[2]); break;
+    case REC_DrawDone: GXDrawDone(); break;
+    case REC_SetDrawSync: GXSetDrawSync((u16)w[0]); break;
+    case REC_ClearBoundingBox: GXClearBoundingBox(); break;
     default: plat_fatal("GX: unknown port opcode %lu in a display list", (unsigned long)id);
+    }
+}
+
+/* The game thread's shadow: what its getters and its display-list recording
+ * read back (vertex description and formats, projection, viewport, scissor,
+ * cull mode, the copy source and the draw-sync token). */
+void gx_shadow_call(u32 id, const u32* w) {
+    GxState* g = &gx_game;
+    switch (id) {
+    case REC_SetVtxDesc: vtx_desc_set(g, w[0], w[1]); break;
+    case REC_ClearVtxDesc: vtx_desc_clear(g); break;
+    case REC_SetVtxAttrFmt: vat_set(g, w[0], w[1], w[2], w[3], (u8)w[4]); break;
+    case REC_SetProjection:
+        for (int i = 0; i < 7; i++) {
+            g->proj[i] = U2F(w[i]);
+        }
+        break;
+    case REC_SetViewport:
+        for (int i = 0; i < 6; i++) {
+            g->vp[i] = U2F(w[i]);
+        }
+        break;
+    case REC_SetScissor: memcpy(g->scissor, w, sizeof(g->scissor)); break;
+    case REC_SetCullMode: g->cull = (u8)w[0]; break;
+    case REC_SetDispCopySrc:
+    case REC_SetTexCopySrc:
+        for (int i = 0; i < 4; i++) {
+            g->copy_src[i] = (u16)w[i];
+        }
+        break;
+    case REC_SetDrawSync: g->draw_sync_token = (u16)w[0]; break;
+    default: break;
     }
 }
 

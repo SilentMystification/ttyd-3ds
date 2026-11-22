@@ -72,10 +72,15 @@ GXFifoObj* GXInit(void* base, u32 size) {
         s_ready = 1;
         gx_tex_init();
         plat_gpu_init();
+        gx_rec_init();
     }
+    /* the state is set up directly, with any translator idle; the shadow starts from it */
+    gx_rec_excl_begin(GXF_READBACK);
     gx_state_init(PLAT_GPU_EFB_MAX_W, PLAT_GPU_EFB_MAX_H); /* the GameCube EFB's physical size */
     plat_gpu_frame_begin();
     gx_draw_frame_begin();
+    memcpy(&gx_game, &gx, sizeof(gx));
+    gx_rec_excl_end();
     PLOG_I("GXInit: FIFO %p (%lu bytes)", base, (unsigned long)size);
     return &s_fifo;
 }
@@ -129,27 +134,50 @@ void GXReadXfRasMetric(u32* xf_wait_in, u32* xf_wait_out, u32* ras_busy, u32* cl
 /* ---- Synchronisation ---- */
 
 void GXSetDrawSync(u16 token) {
-    if (gx_prim_open) {
+    if (gx_prim_is_open()) {
         gx_end_open_primitive(__builtin_return_address(0));
     }
     gx_pipe_reset();
+    if (gx_rec_on()) {
+        const u32 w = token;
+        gx_rec_call(REC_SetDrawSync, &w, 1);
+        return;
+    }
     gx.draw_sync_token = token;
 }
 
 /* The token is reached once the front end has taken the commands before it;
- * the GPU work behind it is finished by GXDrawDone. */
-u16 GXReadDrawSync(void) { return gx.draw_sync_token; }
+ * the GPU work behind it is finished by GXDrawDone. With a translator, that
+ * is once it has translated them: the read is a fence (the game waits on the
+ * token before it reuses memory the GPU may read, as smartGarbage does). */
+u16 GXReadDrawSync(void) {
+    if (gx_rec_on()) {
+        gx_rec_fence(GXF_SYNC);
+        return gx_game.draw_sync_token;
+    }
+    gx_rec_sync_mark();
+    return gx.draw_sync_token;
+}
 
 void GXDrawDone(void) {
-    if (gx_prim_open) {
+    if (gx_prim_is_open()) {
         gx_end_open_primitive(__builtin_return_address(0));
     }
     gx_pipe_reset();
+    if (gx_rec_on()) {
+        gx_rec_call(REC_DrawDone, NULL, 0); /* the translator waits for the GPU */
+        gx_rec_fence(GXF_DRAWDONE);
+        return;
+    }
+    u64 t0 = GX_PERF_T();
     plat_gpu_sync();
+    if (gx_perf_on > 0) {
+        gx_perf.t_sync += plat_ticks() - t0;
+    }
 }
 
 void GXPixModeSync(void) {
-    if (gx_prim_open) {
+    if (gx_prim_is_open()) {
         gx_end_open_primitive(__builtin_return_address(0));
     }
     gx_pipe_reset();
@@ -159,6 +187,10 @@ void GXPixModeSync(void) {
 
 void GXClearBoundingBox(void) {
     GX_CLOSE_PRIMITIVE();
+    if (gx_rec_on()) {
+        gx_rec_call(REC_ClearBoundingBox, NULL, 0);
+        return;
+    }
     gx.bbox[0] = 1023;
     gx.bbox[1] = 1023;
     gx.bbox[2] = 0;
@@ -168,6 +200,9 @@ void GXClearBoundingBox(void) {
 
 void GXReadBoundingBox(u16* left, u16* top, u16* right, u16* bottom) {
     GX_CLOSE_PRIMITIVE();
+    if (gx_rec_on()) {
+        gx_rec_fence(GXF_READBACK); /* the box is the translator's, complete once it caught up */
+    }
     *left = gx.bbox[0];
     *top = gx.bbox[1];
     *right = gx.bbox[2];
@@ -179,6 +214,12 @@ void GXReadBoundingBox(u16* left, u16* top, u16* right, u16* bottom) {
 void GXPeekARGB(u16 x, u16 y, u32* color) {
     GX_CLOSE_PRIMITIVE();
     gx_pipe_reset();
+    if (gx_rec_on()) {
+        gx_rec_excl_begin(GXF_READBACK); /* the back end's record is the translator's */
+        *color = plat_gpu_peek_argb(x, y);
+        gx_rec_excl_end();
+        return;
+    }
     *color = plat_gpu_peek_argb(x, y);
 }
 
@@ -207,8 +248,20 @@ void GXProject(f32 x, f32 y, f32 z, const f32 mtx[3][4], const f32* pm, const f3
 
 /* ---- Copies ---- */
 
+#define F2U(x) (((union { f32 f; u32 u; }){.f = (x)}).u)
+/* Recorded for a translator (gx_rec.c): the call by value, then return. */
+#define RECM(id, ...)                                              \
+    do {                                                           \
+        if (gx_rec_on()) {                                         \
+            const u32 w_[] = {__VA_ARGS__};                        \
+            gx_rec_call(REC_##id, w_, sizeof(w_) / sizeof(w_[0])); \
+            return;                                                \
+        }                                                          \
+    } while (0)
+
 void GXSetCopyClear(GXColor clear_clr, u32 clear_z) {
     GX_CLOSE_PRIMITIVE();
+    RECM(SetCopyClear, (u32)clear_clr.r << 24 | (u32)clear_clr.g << 16 | (u32)clear_clr.b << 8 | clear_clr.a, clear_z);
     gx.copy_clear_color = clear_clr;
     gx.copy_clear_z = clear_z & 0xFFFFFF;
 }
@@ -225,6 +278,7 @@ void GXSetCopyFilter(GXBool aa, const u8 sample_pattern[12][2], GXBool vf, const
 
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
     GX_CLOSE_PRIMITIVE();
+    RECM(SetDispCopySrc, left, top, wd, ht);
     gx.copy_src[0] = left;
     gx.copy_src[1] = top;
     gx.copy_src[2] = wd;
@@ -232,11 +286,18 @@ void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
 }
 
 void GXSetDispCopyDst(u16 wd, u16 ht) {
+    RECM(SetDispCopyDst, wd, ht);
     gx.copy_disp_dst[0] = wd;
     gx.copy_disp_dst[1] = ht;
 }
 
 u32 GXSetDispCopyYScale(f32 vscale) {
+    if (gx_rec_on()) {
+        const u32 w = F2U(vscale);
+        gx_rec_call(REC_SetDispCopyYScale, &w, 1);
+        gx_rec_getter(GXG_COPYSRC);
+        return (u32)(gx_game.copy_src[3] * vscale);
+    }
     gx.disp_yscale = vscale;
     return (u32)(gx.copy_src[3] * vscale);
 }
@@ -247,6 +308,7 @@ void GXSetDispCopyGamma(GXGamma gamma) { (void)gamma; }
 
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
     GX_CLOSE_PRIMITIVE();
+    RECM(SetTexCopySrc, left, top, wd, ht);
     gx.copy_src[0] = left;
     gx.copy_src[1] = top;
     gx.copy_src[2] = wd;
@@ -255,6 +317,7 @@ void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
 
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
     GX_CLOSE_PRIMITIVE();
+    RECM(SetTexCopyDst, wd, ht, fmt, mipmap);
     gx.copy_tex_dst[0] = wd;
     gx.copy_tex_dst[1] = ht;
     gx.copy_tex_fmt = (u8)fmt;
@@ -267,10 +330,11 @@ static u32 clear_rgba(void) {
 }
 
 void GXCopyTex(void* dest, GXBool clear) {
-    if (gx_prim_open) {
+    if (gx_prim_is_open()) {
         gx_end_open_primitive(__builtin_return_address(0));
     }
     gx_pipe_reset();
+    RECM(CopyTex, (u32)dest, clear);
     u16 w = gx.copy_tex_dst[0], h = gx.copy_tex_dst[1];
     if (w == 0 || h == 0 || gx.copy_src[2] == 0 || gx.copy_src[3] == 0) {
         return;
@@ -313,13 +377,25 @@ static s32 frame_clear_override(void) {
 
 /* Ends the frame: the EFB goes to the screen. */
 void GXCopyDisp(void* dest, GXBool clear) {
-    if (gx_prim_open) {
+    if (gx_prim_is_open()) {
         gx_end_open_primitive(__builtin_return_address(0));
     }
+    if (gx_rec_on()) {
+        gx_pipe_reset();
+        gx_rec_frame();
+        const u32 w[3] = {(u32)dest, clear, (u32)__builtin_return_address(0)};
+        gx_rec_call(REC_CopyDisp, w, 3);
+        return;
+    }
+    gx_rec_frame();
+    gx_copy_disp(dest, clear, __builtin_return_address(0));
+}
+
+void gx_copy_disp(void* dest, GXBool clear, const void* caller) {
     if (gx_stat_draws == 0) {
         /* a frame shown with nothing drawn since the last one: logged once per caller */
         static void* seen[8];
-        void* ra = __builtin_return_address(0);
+        void* ra = (void*)caller;
         int i;
         for (i = 0; i < 8 && seen[i] != NULL && seen[i] != ra; i++) {
         }
@@ -330,10 +406,13 @@ void GXCopyDisp(void* dest, GXBool clear) {
     }
     (void)dest;
     gx_pipe_reset();
+    u64 t0 = GX_PERF_T();
     plat_gpu_frame_end(gx.copy_src[2] ? gx.copy_src[2] : 640, gx.copy_src[3] ? gx.copy_src[3] : 480);
+    u64 t_present = gx_perf_on > 0 ? plat_ticks() - t0 : 0;
     gx_tex_frame_end();
     plat_gpu_frame_begin();
     gx_draw_frame_begin();
+    gx_perf.t_present += t_present; /* lands in the next frame's sums (the counters were just logged and reset) */
     if (clear) {
         u32 rgba = clear_rgba();
         s32 ov = frame_clear_override();
@@ -342,5 +421,8 @@ void GXCopyDisp(void* dest, GXBool clear) {
         }
         plat_gpu_clear(0, 0, gx.efb_w, gx.efb_h, gx.pixel_fmt == GX_PF_RGB8_Z24 ? (rgba | 0xFF000000u) : rgba,
                        gx.copy_clear_z, 1, 1);
+    }
+    if (gx_perf_on > 0 && !gx_rec_mode) {
+        gx_perf_drawdone_end = plat_ticks(); /* the frame's end: the gap to the next frame's start is the retrace wait */
     }
 }

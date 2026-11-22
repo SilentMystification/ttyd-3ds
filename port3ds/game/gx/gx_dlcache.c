@@ -347,6 +347,27 @@ static u32 trust(DlcEntry* e, u32 epoch) {
     return g;
 }
 
+/* gxthread=3: the array spans of the entry this frame used for `list` (the memory its decode reads). */
+u32 gx_dlcache_spans(const void* list, u32 nbytes, PlatMemSpan* sp, u32 max) {
+    if (s_enabled <= 0) {
+        return 0;
+    }
+    u32 frame = gx_perf_frame_no();
+    for (DlcEntry* e = E(s_bucket[bucket_of(list, nbytes)]); e; e = E(e->next)) {
+        if (e->list != list || e->nbytes != nbytes || e->state != E_BUILT || e->last_frame != frame) {
+            continue;
+        }
+        const DlcRange* r = e_ranges(e);
+        u32 n = 0;
+        for (u32 i = 0; i < e->nranges && n < max; i++) {
+            sp[n++] = (PlatMemSpan){r[i].base + (u32)r[i].imin * r[i].stride,
+                                    (u32)(r[i].imax - r[i].imin) * r[i].stride + r[i].elem};
+        }
+        return n;
+    }
+    return 0;
+}
+
 static void replay(DlcEntry* e) {
     const DlcDraw* d = e_draws(e);
     const GxVertex* v = e_verts(e);

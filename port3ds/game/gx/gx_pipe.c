@@ -42,7 +42,8 @@ static int s_dl_overflow;
 
 static GxVertex s_verts[4096];
 
-int gx_dl_recording(void) { return s_dl_buf != NULL; }
+/* Lists are recorded by the game thread; a translating thread is never inside one. */
+int gx_dl_recording(void) { return s_dl_buf != NULL && !gx_tls_translator; }
 
 void gx_dl_put(const void* bytes, u32 n) {
     if (s_dl_used + n > s_dl_size) {
@@ -392,16 +393,17 @@ static void copy_index(Reader* r, u8 d) {
 
 /* Re-encodes one vertex from pipe slots into GameCube bytes. */
 static void encode_vertex(Reader* r, u8 fmt) {
-    const GxAttrFmt* vat = gx.vat[fmt];
+    const GxState* g = gx_g(); /* the game thread records lists: its view of the vertex state */
+    const GxAttrFmt* vat = g->vat[fmt];
     for (int a = GX_VA_PNMTXIDX; a <= GX_VA_TEX7MTXIDX; a++) {
-        if (gx.vtx_desc[a] != GX_NONE) {
+        if (g->vtx_desc[a] != GX_NONE) {
             put_u8(rd_u8(r));
         }
     }
     for (int a = GX_VA_POS; a <= GX_VA_TEX7; a++) {
-        u8 d = gx.vtx_desc[a];
+        u8 d = g->vtx_desc[a];
         if (a == GX_VA_NRM && d == GX_NONE) {
-            d = gx.vtx_desc[GX_VA_NBT];
+            d = g->vtx_desc[GX_VA_NBT];
         }
         if (d == GX_NONE) {
             continue;
@@ -477,14 +479,15 @@ void gx_end_open_primitive(const void* caller) {
     GXEnd();
 }
 
-void* gx_begin_caller; /* the code that began the current primitive, for diagnostics */
+void* gx_begin_caller; /* the code that began the primitive being drawn (the translator's), for diagnostics */
+static void* s_begin_ra; /* the game thread's: the code that began the open primitive */
 
 void GXBegin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts) {
     if (s_in_begin) {
         gx_end_open_primitive(__builtin_return_address(0));
     }
     run_pending_raw();
-    gx_begin_caller = __builtin_return_address(0);
+    s_begin_ra = __builtin_return_address(0);
     s_in_begin = 1;
     gx_prim_open = 1;
     s_prim = (u8)type;
@@ -583,7 +586,11 @@ void GXEnd(void) {
                 put_u32(s_pipe[i].u32); /* each write's value; u8 and u16 writes use the low bytes */
             }
         }
+    } else if (s_nverts > 0 && gx_rec_on()) {
+        gx_rec_prim((u8)(s_prim | s_fmt), s_nverts, s_begin_ra, s_pipe,
+                    (u32)((const PPCWGPipe*)port_gx_wg_ptr - s_pipe));
     } else if (s_nverts > 0) {
+        gx_begin_caller = s_begin_ra;
         u64 t0 = GX_PERF_T();
         draw_from_reader(&r, s_prim, s_fmt, s_nverts);
         if (gx_perf_on > 0) {
@@ -592,6 +599,27 @@ void GXEnd(void) {
         }
     }
     port_gx_wg_ptr = s_pipe;
+}
+
+/* Translator side of a recorded GXBegin/GXEnd: the pipe writes as words (each
+ * write's low 32 bits, which is what the readers take from a slot). */
+static PPCWGPipe s_tr_slots[PIPE_SLOTS];
+
+void gx_draw_prim(u8 primfmt, u16 nverts, const void* caller, const u32* words, u32 nwords) {
+    if (nwords > PIPE_SLOTS) {
+        nwords = PIPE_SLOTS;
+    }
+    for (u32 i = 0; i < nwords; i++) {
+        s_tr_slots[i].u32 = words[i];
+    }
+    gx_begin_caller = (void*)caller;
+    Reader r = {s_tr_slots, NULL, NULL};
+    u64 t0 = GX_PERF_T();
+    draw_from_reader(&r, (u8)(primfmt & 0xF8), (u8)(primfmt & 7), nverts);
+    if (gx_perf_on > 0) {
+        gx_perf.imm_prims++;
+        gx_perf.t_imm += plat_ticks() - t0;
+    }
 }
 
 volatile PPCWGPipe* port_gx_wg_overflow(void) {
@@ -612,12 +640,14 @@ void gx_pipe_cur_list(const void** list, u32* nbytes) {
     *nbytes = s_list_bytes;
 }
 
+static const PPCWGPipe* s_slots_end; /* the end of the slots a pipe-mode run_commands reads */
+
 static void run_commands(Reader* r, int from_list) {
     for (;;) {
         if (r->slot == NULL && r->p >= r->end) {
             return;
         }
-        if (r->slot != NULL && r->slot >= (const PPCWGPipe*)port_gx_wg_ptr) {
+        if (r->slot != NULL && r->slot >= s_slots_end) {
             return;
         }
         u32 op = rd_u8(r);
@@ -646,7 +676,7 @@ static void run_commands(Reader* r, int from_list) {
                 PLOG_W("GX: raw primitive of %lu writes runs past its display list", (unsigned long)count);
                 return;
             }
-            static PPCWGPipe slots[PIPE_SLOTS];
+            PPCWGPipe* slots = s_tr_slots; /* never in use here: raw primitives are in lists, not pipe commands */
             for (u32 i = 0; i < count; i++) {
                 slots[i].u32 = rd_u32(r);
             }
@@ -698,12 +728,34 @@ static void run_commands(Reader* r, int from_list) {
 }
 
 static void run_pending_raw(void) {
+    if (gx_tls_translator && gx_rec_mode) {
+        return; /* the pipe is the game thread's; it recorded what was pending */
+    }
     if (s_in_begin || port_gx_wg_ptr == s_pipe) {
         return;
     }
+    if (gx_rec_on() && !gx_dl_recording()) {
+        gx_rec_raw(s_pipe, (u32)((const PPCWGPipe*)port_gx_wg_ptr - s_pipe));
+        port_gx_wg_ptr = s_pipe;
+        return;
+    }
     Reader r = {s_pipe, NULL, NULL};
+    s_slots_end = (const PPCWGPipe*)port_gx_wg_ptr;
     run_commands(&r, 0);
     port_gx_wg_ptr = s_pipe;
+}
+
+/* Translator side of recorded raw pipe commands. */
+void gx_run_raw(const u32* words, u32 nwords) {
+    if (nwords > PIPE_SLOTS) {
+        nwords = PIPE_SLOTS;
+    }
+    for (u32 i = 0; i < nwords; i++) {
+        s_tr_slots[i].u32 = words[i];
+    }
+    Reader r = {s_tr_slots, NULL, NULL};
+    s_slots_end = s_tr_slots + nwords;
+    run_commands(&r, 0);
 }
 
 void gx_pipe_reset(void) {
@@ -711,15 +763,26 @@ void gx_pipe_reset(void) {
 }
 
 void GXCallDisplayList(void* list, u32 nbytes) {
-    if (gx_prim_open) {
+    if (gx_prim_is_open()) {
         gx_end_open_primitive(__builtin_return_address(0));
     }
     run_pending_raw();
     if (gx_dl_recording()) {
         plat_fatal("GXCallDisplayList inside a display list being recorded");
     }
+    if (gx_rec_on()) {
+        gx_rec_list(list, nbytes, __builtin_return_address(0));
+        return;
+    }
+    gx_call_list(list, nbytes, __builtin_return_address(0));
+    if (gx_rec_direct) {
+        gx_rec_direct_list();
+    }
+}
+
+void gx_call_list(const void* list, u32 nbytes, const void* caller) {
     Reader r = {NULL, (const u8*)list, (const u8*)list + nbytes};
-    s_list_caller = __builtin_return_address(0);
+    s_list_caller = (void*)caller;
     s_list_start = (const u8*)list;
     s_list_bytes = nbytes;
     if (gx_perf_on > 0) {

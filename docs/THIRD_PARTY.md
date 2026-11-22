@@ -70,3 +70,5 @@ These are not in the repository. The first build downloads them into `build/`, a
 | wibo (Linux) | running the Windows compilers | [decompals/wibo](https://github.com/decompals/wibo) |
 
 `tools/ttydasm` (a Rust program) pulls its Rust crates from crates.io when you build it with Cargo.
+
+- `port3ds/third_party/aurora_thp`: the THP movie decoder (baseline JPEG and ADPCM audio), from aurora (https://github.com/encounter/aurora), (c) 2022 Luke Street, MIT licence (`LICENSE` in that folder), converted to C. The SDK's quarter-IDCT column-swap bug is reproduced behind `THP_SDK_QUARTER_IDCT_BUG` (default 1).

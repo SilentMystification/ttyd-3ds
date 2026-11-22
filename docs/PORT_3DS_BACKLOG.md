@@ -69,10 +69,12 @@ Updated 2026-11-22. Owner goals: original GameCube frame rates, stereo 3D, all t
 
 ## Lane F: found along the way
 
-1. **THP movie decoder in C.** The JP and PAL `dig` map's `demo.thp` plays black and silent today, because the SDK's THP decoder is PowerPC assembly and the port stubs it. The plan forbids stubs. Write a C Motion-JPEG plus THP audio decoder (portable, in the library layer).
+1. **THP movie decoder in C: done (2026-11-22, from aurora, MIT).** Untested in game: the US disc has no movie. Check the timing on hardware. The JP and PAL `dig` map's `demo.thp` plays black and silent today, because the SDK's THP decoder is PowerPC assembly and the port stubs it. The plan forbids stubs. Write a C Motion-JPEG plus THP audio decoder (portable, in the library layer).
 2. **JP ROM font (SJIS).** The port's ROM font is ASCII-only, and JP needs SJIS glyphs. This is the likeliest JP boot problem.
 3. **JP and PAL discs from the owner,** to run plan section 9.1's steps.
-4. **Battle "struck first" black band:** in progress.
+4. **Battle "struck first" black band (gon_02):**
+   - Traced to the map object `kuro1`, a black frame around the room. It is identical on disc and in the port, drawn every frame, and nothing hides it. Its bottom bar shows below the floor at the camera position of that moment.
+   - Likely the original game's behaviour, but confirm against a GameCube frame through the gallery tool (Dolphin screenshot of `gon_02` with `story=30`, frames 592-616), and compare the camera with `gw_diff`.
 5. **The DVD manager's idle loop** polls instead of blocking (`os_thread.c`'s `OSYieldThread`). Measure on hardware behind a switch.
 
 ## Lane E: leftovers and release

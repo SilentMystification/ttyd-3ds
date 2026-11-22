@@ -347,3 +347,12 @@ Player settings live in `sdmc:/3ds/ttyd/options.txt` as `key=value` lines ending
 - **Compare:** `tools/port3ds/gw_diff.py` runs the same switches and padscript in Azahar (with `determ`) and in Dolphin, and reports the first frame and the fields that differ.
 - Details are in [PORT_3DS_TEST_INFRA.md](PORT_3DS_TEST_INFRA.md).
 
+### THP movies
+
+The US disc has no THP files, so the tests make their own.
+
+1. Make a test movie: `tools/port3ds/thp_test/make_thp.py OUT.thp [--size WxH] [--frames N]`.
+2. Build `thp_dump` with gcc from `port3ds/third_party/aurora_thp/*.c`. Add `-DTHP_SDK_QUARTER_IDCT_BUG=0` for an exact decode.
+3. Compare against ffmpeg: `tools/port3ds/thp_test/compare.py OUT.thp --dump ./thp_dump`.
+4. On-device timing: the `tools/port3ds/thp_test/arm_bench` CIA (`--until "BENCH DONE"`).
+

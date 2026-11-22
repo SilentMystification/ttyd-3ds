@@ -20,7 +20,11 @@
  *     of every array element the list's vertices read, at the indices they
  *     read (kept in the entry), so CPU-animated arrays or other data loaded
  *     at the address are seen, at a cost proportional to what the list uses.
- * Everything is checked on every call; nothing is trusted across frames.
+ * Everything is checked on every call, except (switch gxtrust, default on)
+ * when the content-stable memory registry (include/plat/memstable.h) vouches
+ * that the list and every array span it reads lie in covered memory that no
+ * reported path changed since the entry's last full check: then the hashes
+ * are skipped. The state inputs above are still compared every call.
  * A list whose bytes or arrays changed is decoded again; after
  * DLC_DYNAMIC_AFTER such changes it is marked dynamic and always decoded.
  * A list called with another vertex state gets a second entry (up to

@@ -11,7 +11,6 @@ Updated 2026-11-22. Owner goals: original GameCube frame rates, stereo 3D, all t
 | Item | Agent |
 |---|---|
 | GX translation on core 2 (lane C 5) | Opus |
-| Stereo 3D by depth reprojection (lane C 7) | Opus |
 | Galleries, effect and battle sweeps, the `gon_02` GameCube comparison (lane A 5, B 3–4) | Opus |
 | Recorded inputs: `padrec=`, `padfile=`, `dtm2pad.py` (lane A 3) | Sonnet |
 
@@ -47,7 +46,7 @@ Updated 2026-11-22. Owner goals: original GameCube frame rates, stereo 3D, all t
 4. Game arena in linear memory (Star3D's idea), so the GPU reads game data without copies.
 5. GX translation moved to core 2 (`PORT_3DS_MULTICORE.md` A): `gxthread=0/1/2`, the late-read audit, the render fence, verify mode.
 6. Per-voice NDSP audio: **done behind `ndspvoices=1`**, with loops re-aligned at load. It cuts audio CPU by 16–30%. Streams on NDSP channels **done behind `ndspstreams=1`** (fill time down about 43% with voices). Open: extra clicks in `gor_01` with streams, the 1.6 dB level gap against paper-cut (in what plays, not the mixer), ADPCM history across wave buffers on firmware. Hardware check before either becomes the default.
-7. **Stereo 3D:** two-eye rendering in the record/replay, the slider-driven quality profile, and the GPU budget for both eyes.
+7. **Stereo 3D: done in Azahar** by depth reprojection (`stereo3d` option, `stereoforce=`). Slider 0 is pixel-identical to mono; +11% render-thread time, +0.4 ms GPU, about 350 KB more VRAM. Open: hardware judgement (checklist 14); 2D draws that write depth see the first eye's depth.
 8. QTM placement and the core-1 limit, decided by hardware numbers (Lane D).
 9. Frame pacing: no VBlank wait after a long frame; PAL at 50 Hz.
 

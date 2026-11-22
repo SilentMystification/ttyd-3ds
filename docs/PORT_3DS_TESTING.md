@@ -136,6 +136,13 @@ Switches the game reads (space-separated words in `--switches`):
 | `ndspcachekb=N` | Size of the NDSP voices' sample cache in linear memory, in KB (default 4096) |
 | `ndspstreams=1` | With `ndspvoices=1`, music streams play on NDSP channels: the ARAM ring (DSP-ADPCM or PCM16) is mirrored into linear memory and played as a chain of short wave buffers, refilled in step with channel 0. Default off. See PORT_3DS_AUDIO.md, "NDSP streams" |
 | `audiobatch=N` | Channel 0's 10 ms buffers are refilled once N are free and flushed in one call over the whole ring. N=1 (default) flushes each; N=2 halves the flushes and adds up to 10 ms latency |
+| `stereoforce=<0..1>` | Simulates the 3D slider (Azahar has none headless). With the `stereo3d` option on and a value above 0, presented frames are drawn in stereo by depth reprojection (render once, warp per eye; [PORT_3DS_GPU_OFFLOAD.md](PORT_3DS_GPU_OFFLOAD.md), "Stereo 3D"). With shots, each shot also saves the left and right screen targets as `shots/N.L.ppm` and `N.R.ppm` (400x240). 0 is identical to mono |
+| `stereosep=<px>` | Total parallax at infinity at the full slider, in top-screen pixels (default 6, max 20) |
+| `stereoconv=<1..99>` | Convergence: that percentile of the depth grid (default 50, the median) |
+| `stereogrid=<W>x<H>` | Depth grid and warp mesh size (default 40x24, up to 80x48) |
+| `stereostats=N` | Every N frames, a `stereostats` line: stereo and mono render-thread and GPU time, mesh time, 2D tail size and its depth writes, convergence |
+| `stereolog=N` | Logs the draw order of stereo frames N and N+300 (S/s scene draw on the CPU/shader path, L/l screen-layer draw, C copy, X clear) and where the 2D tail starts |
+| `scrshot` | Mono shots also save the top screen target as `shots/N.M.ppm` (400x240), for comparing against stereo eye shots |
 | `yieldsleep[=us]` | When `OSYieldThread` finds no other ready OS thread, sleeps `us` µs (default 100) instead of returning at once. This stops the DVD manager's `proc_main` spinning on core 0. Default off until measured on hardware |
 | `yieldstats=N` | Every N seconds, a `[THREADS]` line: each OS thread's share of baton-holding time, idle yields, and time slept by `yieldsleep` |
 | `devmenu` | Enables the developer menu, opened with ZL+SELECT. SELECT alone opens the player Options menu, so a `padscript` that pressed `select` for the old developer menu now opens Options. While the Options menu is open, `padscript` steps advance once per ~16 ms menu poll, not per game frame. Example: `wait*900,select*3,wait*5,right*2,wait*5,select*3` |

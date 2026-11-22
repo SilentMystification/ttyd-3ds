@@ -1,7 +1,8 @@
 /* Dolphin VI on the 3DS: retrace timing and the per-frame hooks.
  *
  * The top screen's vertical blank (59.83 Hz) stands in for the GameCube's
- * 60 Hz retrace: plat/vblank.c calls retrace() on its thread, which runs the
+ * 60 Hz retrace (PAL's 50 Hz is emulated on it, see vblank()): plat/vblank.c
+ * calls vblank() on its thread, whose retrace() runs the
  * game's pre- and post-retrace callbacks as an interrupt and wakes the
  * threads waiting in VIWaitForRetrace. The frame itself is presented by GX
  * (GXCopyDisp); the external framebuffer the game hands VI is not used.
@@ -54,6 +55,48 @@ static void retrace(void) {
     OSWakeupThread(&s_retrace_queue);
 }
 
+/* ---- Retrace rate: 60 Hz, or PAL's 50 Hz ----
+ *
+ * The TV format follows the render mode the game configures, as VIConfigure
+ * sets it on the GameCube: a PAL console starts in VI_PAL (50 Hz) and the PAL
+ * release's prompt either stays there or configures its EURGB60 mode (60 Hz).
+ * NTSC, EURGB60 and MPAL retrace once per LCD vertical blank (59.83 Hz, about
+ * 16.7 ms). PAL and DEBUG_PAL retrace every 20 ms: the LCD still refreshes at
+ * 59.83 Hz, so the vblank thread runs the retrace on the LCD blank nearest to
+ * each 20 ms tick (5 of every 6 blanks) and game frames are paced at 50 Hz by
+ * this emulation, not by the LCD. A frame then stays up for one or two LCD
+ * refreshes, the judder of 50 Hz content on a 60 Hz screen. */
+static u32 s_tv_format =
+#if VERSION == VERSION_EU
+    VI_PAL;
+#else
+    VI_NTSC;
+#endif
+static u64 s_next_retrace; /* 50 Hz: tick of the next emulated retrace */
+
+static int vi_50hz(void) {
+    u32 f = __atomic_load_n(&s_tv_format, __ATOMIC_RELAXED);
+    return f == VI_PAL || f == VI_DEBUG_PAL;
+}
+
+static void vblank(void) {
+    if (!vi_50hz()) {
+        s_next_retrace = 0;
+        retrace();
+        return;
+    }
+    const u64 period = PLAT_TICKS_PER_SEC / 50;
+    u64 now = plat_ticks();
+    if (s_next_retrace == 0 || now > s_next_retrace + period) {
+        s_next_retrace = now; /* first 50 Hz blank, or after a stall (sleep, HOME Menu) */
+    }
+    if (now + PLAT_TICKS_PER_SEC / 240 < s_next_retrace) {
+        return; /* the next LCD blank is nearer to the tick than this one */
+    }
+    s_next_retrace += period;
+    retrace();
+}
+
 void VIInit(void) {
     static int ready;
     if (ready) {
@@ -61,10 +104,19 @@ void VIInit(void) {
     }
     ready = 1;
     OSInitThreadQueue(&s_retrace_queue);
-    plat_vblank_start(retrace);
+    plat_vblank_start(vblank);
 }
 
-void VIConfigure(const GXRenderModeObj* rm) { (void)rm; }
+void VIConfigure(const GXRenderModeObj* rm) {
+    if (rm != NULL) {
+        u32 format = (u32)rm->viTVmode >> 2;
+        if (format != s_tv_format) {
+            PLOG_I("VI: TV format %lu -> %lu (%s Hz)", (unsigned long)s_tv_format, (unsigned long)format,
+                   format == VI_PAL || format == VI_DEBUG_PAL ? "50" : "60");
+        }
+        __atomic_store_n(&s_tv_format, format, __ATOMIC_RELAXED);
+    }
+}
 void VIFlush(void) {}
 void VISetNextFrameBuffer(void* fb) { s_next_fb = fb; }
 void VISetBlack(BOOL black) { s_black = black; }
@@ -73,13 +125,7 @@ u32 VIGetNextField(void) { return 1; }
 /* No component cable: the progressive-scan prompt never shows. */
 u32 VIGetDTVStatus(void) { return 0; }
 
-u32 VIGetTvFormat(void) {
-#if VERSION == VERSION_EU
-    return VI_PAL;
-#else
-    return VI_NTSC;
-#endif
-}
+u32 VIGetTvFormat(void) { return __atomic_load_n(&s_tv_format, __ATOMIC_RELAXED); }
 
 VIRetraceCallback VISetPreRetraceCallback(VIRetraceCallback callback) {
     BOOL level = OSDisableInterrupts();
@@ -323,8 +369,9 @@ u32 port_game_frame(void) {
 
 /* Game-time budget per game frame: the retrace callback (vblank thread) takes
  * game time from it, the game thread refills it once per frame. Below 30 fps
- * a frame then advances the game clocks by at most 2 retraces (33 ms). */
-#define GAME_TIME_BUDGET_MS 33
+ * (25 fps in PAL's 50 Hz mode) a frame then advances the game clocks by at
+ * most 2 retraces: 33 ms at 60 Hz, 2 x 20 ms at 50 Hz. */
+#define GAME_TIME_BUDGET_MS (vi_50hz() ? 40 : 33)
 static u32 s_time_budget = 0;
 
 OSTime port_game_time_take(OSTime want) {

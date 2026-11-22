@@ -15,6 +15,7 @@
  */
 #include <dolphin/os.h>
 #include <dolphin/vi.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "battle/battle.h"
@@ -159,7 +160,9 @@ static u32 fbits(f32 f) {
 static void gwdump(u32 frame) {
     MarioWork* m;
     EventWork* ew;
-    u32 h_gw, h_gswf, h_gsw, h_lswf, h_lsw, h_evtgw;
+    u32 h_gw, h_gswf, h_gsw, h_lswf, h_lsw, h_evtgw, h_evtgf;
+    char gwv[220];
+    int gwv_len = 0, i;
     char map[17];
     s32 evts = -1;
     s32 btl_turn = -1, btl_unit = -1;
@@ -180,23 +183,45 @@ static void gwdump(u32 frame) {
     /* the raw struct: pointers and byte order make this one build-specific */
     h_gw = hash_bytes(FNV0, gp, sizeof(GlobalWork));
     ew = evtGetWork();
-    h_evtgw = 0;
+    h_evtgw = h_evtgf = 0;
+    gwv[0] = '-';
+    gwv[1] = '\0';
     if (ew != NULL) {
         evts = ew->count;
-        h_evtgw = hash_words(FNV0, (const u32*)ew->gwData, sizeof(ew->gwData) / 4);
-        h_evtgw = hash_words(h_evtgw, (const u32*)ew->gfData, sizeof(ew->gfData) / 4);
+        h_evtgw = FNV0;
+        for (i = 0; i < (int)(sizeof(ew->gwData) / 4); i++) {
+            u32 v = (u32)ew->gwData[i];
+            v = tst_is_ptr(v) ? 0x50545221u : v; /* "PTR!" */
+            h_evtgw = hash_words(h_evtgw, &v, 1);
+        }
+        h_evtgf = hash_words(FNV0, (const u32*)ew->gfData, sizeof(ew->gfData) / 4);
+        /* the non-zero event GWs, pointers as P */
+        for (i = 0; i < (int)(sizeof(ew->gwData) / 4) && gwv_len < (int)sizeof(gwv) - 16; i++) {
+            if (ew->gwData[i] == 0) {
+                continue;
+            }
+            if (tst_is_ptr((u32)ew->gwData[i])) {
+                gwv_len += sprintf(gwv + gwv_len, "%s%d:P", gwv_len ? "," : "", i);
+            } else {
+                gwv_len += sprintf(gwv + gwv_len, "%s%d:%08lx", gwv_len ? "," : "", i, (unsigned long)ew->gwData[i]);
+            }
+        }
     }
     if (_battleWorkPointer != NULL && gp->inBattle) {
         btl_turn = _battleWorkPointer->turnCount;
         btl_unit = _battleWorkPointer->activeUnitId;
     }
     m = marioGetPtr();
-    tst_log("gwdump f=%lu wf=%lu seq=%d map=%s gsw0=%ld gswf=%08lx gsw=%08lx lswf=%08lx lsw=%08lx "
-            "evtgw=%08lx evts=%ld mario=%08lx,%08lx,%08lx rng=%08lx rc=%lu lv=%lx inbtl=%ld btl=%ld,%ld "
-            "rt=%08lx%08lx ft=%08lx%08lx pt=%08lx%08lx btn=%08lx stick=%d,%d gw=%08lx",
+    /* two lines (the port's log lines hold about 250 characters); gw_diff.py joins them by f */
+    tst_log("gwdump f=%lu wf=%lu seq=%d map=%s gsw0=%ld gswf=%08lx gsw=%08lx lswf=%08lx lsw=%08lx evtgw=%08lx "
+            "evtgf=%08lx evts=%ld",
             (unsigned long)frame, (unsigned long)s_warp_frame, (int)seqGetSeq(), map, (long)gp->gsw0,
             (unsigned long)h_gswf, (unsigned long)h_gsw, (unsigned long)h_lswf, (unsigned long)h_lsw,
-            (unsigned long)h_evtgw, (long)evts, (unsigned long)(m ? fbits(m->position.x) : 0),
+            (unsigned long)h_evtgw, (unsigned long)h_evtgf, (long)evts);
+    tst_log("gwdump f=%lu gwv=%s", (unsigned long)frame, gwv);
+    tst_log("gwdump f=%lu mario=%08lx,%08lx,%08lx rng=%08lx rc=%lu lv=%lx inbtl=%ld btl=%ld,%ld rt=%08lx%08lx "
+            "ft=%08lx%08lx pt=%08lx%08lx btn=%08lx stick=%d,%d gw=%08lx",
+            (unsigned long)frame, (unsigned long)(m ? fbits(m->position.x) : 0),
             (unsigned long)(m ? fbits(m->position.y) : 0), (unsigned long)(m ? fbits(m->position.z) : 0),
             (unsigned long)tst_rand_state(), (unsigned long)gp->retraceCount,
             (unsigned long)(u32)gp->systemLevelFlags, (long)gp->inBattle, (long)btl_turn, (long)btl_unit,

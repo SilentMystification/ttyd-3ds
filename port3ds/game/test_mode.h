@@ -18,6 +18,9 @@ int tst_sw_int(const char* key, int fallback);
 int tst_sw_value(const char* key, char* out, int n);
 void tst_log(const char* fmt, ...);
 u32 tst_rand_state(void);
+/* 1 if v is an address in this build's game memory (event GWs can hold
+ * pointers, which differ between builds: gwdump writes them as P). */
+int tst_is_ptr(u32 v);
 /* Extra controller input for the next PADRead: GameCube PAD_BUTTON_* bits. */
 void tst_set_keys(u32 buttons);
 

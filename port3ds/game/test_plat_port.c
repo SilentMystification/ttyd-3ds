@@ -6,6 +6,7 @@
 
 #include "plat/input.h"
 #include "plat/plat.h"
+#include "port_addr_impl.h"
 #include "test_mode.h"
 
 u32 ttyd_rand_state(void);
@@ -24,6 +25,8 @@ void tst_log(const char* fmt, ...) {
 }
 
 u32 tst_rand_state(void) { return ttyd_rand_state(); }
+
+int tst_is_ptr(u32 v) { return port_is_addr(v); }
 
 static volatile uint32_t s_keys;
 

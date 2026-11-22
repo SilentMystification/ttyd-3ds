@@ -145,6 +145,9 @@ void gcdbg_srand(unsigned int seed) { s_rand_next = seed; }
 
 u32 tst_rand_state(void) { return s_rand_next; }
 
+/* main memory, cached or uncached (24 MB) */
+int tst_is_ptr(u32 v) { return (v >= 0x80000000u && v < 0x81800000u) || (v >= 0xC0000000u && v < 0xC1800000u); }
+
 /* ---- clock ---- */
 
 OSTime gcdbg_OSGetTime(void) { return tst_determ() ? tst_game_time() : OSGetTime(); }

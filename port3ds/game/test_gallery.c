@@ -63,7 +63,7 @@ static int s_fx_state = -1; /* -1 unread, 0 off/done, 1 running */
 static char s_fx_list[FX_MAX][24];
 static int s_fx_n, s_fx_i;
 static int s_fx_wait, s_fx_gap;
-static u32 s_fx_next;
+static u32 s_fx_next, s_fx_spawned;
 static int s_fx_have_args;
 static f32 s_fx_args[FX_ARGS];
 static char s_fx_name[24];
@@ -238,7 +238,7 @@ static void fx_frame(u32 frame) {
         }
         s_fx_next = frame;
     }
-    if (frame == s_fx_next + 2 && s_fx_alive_check) {
+    if (frame == s_fx_spawned + 2 && s_fx_alive_check) {
         EffectEntry* e = effNameToPtr(s_fx_name);
         tst_log("fx: %s 2 frames after the spawn: %s", s_fx_list[s_fx_i - 1], e != NULL ? "alive" : "not found");
     }
@@ -263,6 +263,7 @@ static void fx_frame(u32 frame) {
         return;
     }
     fx_spawn(s_fx_list[s_fx_i], frame);
+    s_fx_spawned = frame;
     s_fx_i++;
     s_fx_next = frame + (u32)s_fx_gap;
 }

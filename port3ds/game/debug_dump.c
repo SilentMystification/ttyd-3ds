@@ -14,7 +14,10 @@
 #include <stdio.h>
 #include <string.h>
 
+void port_memmap_frame(u32 frame);
+
 void port_debug_frame(u32 frame) {
+    port_memmap_frame(frame); /* memmap_dump.c */
     static int every = -1;
     if (every < 0) {
         every = plat_switch_int("evtdump", 0);

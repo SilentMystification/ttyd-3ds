@@ -108,6 +108,7 @@ static void fill_block(int16_t* out) {
 static void ndsp_thread(void* arg) {
     (void)arg;
     plat_crash_install_thread();
+    plat_thread_register("audio", 32 * 1024);
     /* Prime the ring: every buffer queued before the first wait. */
     for (int i = 0; i < WAVEBUFS; i++) {
         fill_block(s_wbuf[i].data_pcm16);
@@ -148,6 +149,7 @@ static void ndsp_thread(void* arg) {
 static void null_thread(void* arg) {
     (void)arg;
     plat_crash_install_thread();
+    plat_thread_register("audio2", 32 * 1024);
     const uint64_t ticks_per_block = (uint64_t)SYSCLOCK_ARM11 * s_buf_frames / s_rate;
     uint64_t due = svcGetSystemTick();
     for (;;) {
@@ -206,6 +208,7 @@ static int start_ndsp(void) {
     LightEvent_Init(&s_frame_event, RESET_ONESHOT);
     ndspSetCallback(dsp_frame_callback, NULL);
     atexit(ndsp_shutdown);
+    plat_set_audio_abort(ndsp_shutdown);
     return 1;
 }
 

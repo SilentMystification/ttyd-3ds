@@ -82,6 +82,7 @@ Switches the game reads (space-separated words in `--switches`):
 |---|---|
 | `map=<map>[,<bero>]` | Starts a new game on that map once the title or the opening is up (`fastboot` presses A through the warning screen). `story=N` sets the story so far (GSW 0, default 0); `party=N` the partner (default 1, Goombella; 0 none) |
 | `fastboot` | Presses A every 6 game frames (held 2) through the boot sequences before the title (the warning screen, the logos), and stops for good once the title sequence starts or a `map=`/`sweep=` warp begins. `run_azahar.py`, `run_hw.py` and `map_sweep.py` add it by default; pass `nofastboot` (`--nofastboot` for `map_sweep.py`) to leave it out |
+| `crashtest=<kind>` | Tests the crash handler (`crashwait=N` seconds on the crash screen, default 300; `crashframe=N` game frame of the test, default 60; `wdog=N` hang limit in seconds). Kinds, run on the game thread at that frame: `segv` (write to address 0), `fatal` (`plat_fatal`), `break` (`svcBreak(USERBREAK_PANIC)`), `hang` (endless loop, the watchdog fires after `wdog`). At boot: `self` (the handler called with made-up registers), `null` (write to `crashaddr`, default 4), `undef`, `boot-fatal`. Azahar never raises a fault for an unmapped access, so `segv` only logs `UnmappedAccess` there; use `self` for the exception path |
 | `padscript=<steps>` | Scripted input: comma-separated `KEYS*frames` steps (`a*3`, `wait*40`, `start*3`, `a+b*2`). Frames are game frames (one per VIWaitForRetrace). Keys: `a b x y l r zl zr start select up down left right`; `cl cr cu cd` push the circle pad (the game's control stick) fully left, right, up or down. TTYD's menus and dialogs move with the stick, not the D-pad, so use `cu`/`cd` there. Up to 2048 steps |
 | `shots=N` | Saves every Nth frame's EFB (608x480, as the game drew it) to `sdmc:/3ds/ttyd/shots/NNNNN.ppm` and logs that frame's draw counts. `shotmax=N` limits the number (default 200). In Azahar about one shot in seven comes out all black although its frame drew normally (the log line shows the frame's draws); take shots a few frames apart rather than relying on one |
 | `gxdump=N` | Logs every draw of frame N: primitive, texture, first vertex in clip space, its matrix, TEV and blend state, and the code that began it (resolve with `addr2line -e build/3ds/game/ttyd.elf`). Runs of draws with the same matrix and texture are one line. EFB copies are logged too |
@@ -105,6 +106,20 @@ tools/port3ds/map_sweep.py --maps gor_01,hei_00
 
 A battle that a map starts counts as a pass (`ok (battle on entry)`): the game raises `BATTLE_SEQ_END`, the flag `battleMain` sets itself, so `seq_battleMain` exits through `battle_exit` to the field and the sweep goes on (victory screens skipped).
 It writes the map list to the SD card, runs the game with `sweep=N`, and reads the log. A run that ends early (a crash, a stall, a battle a map starts on entry) is followed by one that resumes after the map being visited. Results are in `build/map-sweep/`: `results.json` (each map `ok`, `timeout`, `stopped`, `crash`, `stall` or `not in map table`: the storybook's `stg` maps, which the map change cannot enter), `shots/<map>.png`, and for a crash or stall the whole game log in `logs/<map>.txt`. Maps are entered without an entrance, so Mario starts where the map's default position puts him (often below the ground, from where the game's fall recovery lifts him).
+
+### Crashes, svcBreak and hangs
+
+Exceptions, `plat_fatal`, the watchdog (`wdog=N`, default 10 s without a frame) and every `svcBreak` (the game links with `--wrap=svcBreak`, so libctru and citro3d panics count) go through one report path in `port3ds/plat/crash.c`.
+It writes `[CRASH]` lines to the log, `crash.txt` (appended, kept across boots) and the live log: registers, the stack scan, and for a hang the registers and top stack words of every port thread (SVC `0x3B`; Azahar returns an empty context, which the log says).
+Then it shuts citro3d and gfx down without waiting for other threads and shows a crash screen on both screens (top: what happened, thread, PC/LR, FAR/FSR, map, frame, build, whether `crash.txt` was written; bottom: the call chain, two addresses per line) until START or 5 minutes, releases GSP and the DSP and ends the process. The watchdog thread ends the process if the report takes over 5 s before the screen is up.
+
+`tools/port3ds/build.sh` archives each game ELF as `build/elfs/<build number>_<hash>.elf`. Resolve a report with it:
+
+```sh
+tools/port3ds/crash_report.py build/azahar-last/game_log.txt      # or a crash.txt, or --ftp <console ip>
+tools/port3ds/run_azahar.py --build build/3ds/game/ttyd.cia --switches "crashtest=break crashwait=3" \
+    --until "exiting the process" --expect-crash --timeout 90 --stall 60
+```
 
 ### Finding a hang
 

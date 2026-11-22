@@ -145,6 +145,20 @@ int plat_frame_poll(void) {
  * the HOME Menu). Works before and after the game set up the GPU. */
 static void (*s_gpu_shutdown)(void);
 void plat_set_gpu_shutdown(void (*fn)(void)) { s_gpu_shutdown = fn; }
+static void (*s_gpu_abort)(void);
+void plat_set_gpu_abort(void (*fn)(void)) { s_gpu_abort = fn; }
+
+/* The crash screen's version of message_screen's first step: citro3d and gfx
+ * down so the consoles can take both screens, without waiting for the render
+ * thread (it may be the one that crashed). */
+void plat_crash_gpu_down(void) {
+    void (*fn)(void) = s_gpu_abort != NULL ? s_gpu_abort : s_gpu_shutdown;
+    s_gpu_abort = NULL;
+    s_gpu_shutdown = NULL;
+    if (fn != NULL) {
+        fn();
+    }
+}
 
 void plat_wd_quiesce(void); /* crash.c */
 
@@ -240,7 +254,7 @@ int main(int argc, char** argv) {
     plat_switches_load(argc, argv);
     plat_log_init(s_netload || plat_switch_has("livelog"));
     plat_crash_install_thread();
-    plat_stack_register(0, "game", __stacksize__);
+    plat_stack_register(0, "main", __stacksize__);
     PLOG_I("TTYD 3DS build %s, switches \"%s\"", PORT3DS_BUILD_STRING, plat_switches_text());
     PLOG_I("boot: argc %d argv[0] \"%s\" 3dslink_host 0x%08lx netload %d", argc,
            (argc > 0 && argv[0] != NULL) ? argv[0] : "(null)", (unsigned long)__3dslink_host.s_addr, s_netload);

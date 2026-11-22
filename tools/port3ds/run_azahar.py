@@ -189,6 +189,8 @@ def main():
     ap.add_argument("--renderer", choices=["software", "opengl", "vulkan"], default="opengl")
     ap.add_argument("--lle-audio", action="store_true",
                     help="run the real DSP firmware (sdmc:/3ds/dspfirm.cdc in the profile) instead of Azahar's HLE DSP")
+    ap.add_argument("--expect-crash", action="store_true",
+                    help="a [CRASH] line does not end the run (crash tests: wait for --until)")
     ap.add_argument("--allow-hw-faults", action="store_true", help="do not fail on Azahar fault lines")
     args = ap.parse_args()
 
@@ -247,7 +249,7 @@ def main():
                 size = len(idle_lines.sub("", text))
                 if size != last_size:
                     last_size, last_growth = size, now
-            if "[CRASH]" in text:
+            if "[CRASH]" in text and not args.expect_crash:
                 verdict, reason = False, "[CRASH] line in game log"
             elif until is not None and until.search(text):
                 verdict, reason = True, f"matched {args.until!r}"

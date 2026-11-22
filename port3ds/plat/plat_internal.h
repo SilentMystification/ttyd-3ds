@@ -27,6 +27,9 @@ void plat_console_unlock(void);
 /* crash.c */
 void plat_crash_init(void);          /* handler stack, main thread handler, watchdog thread */
 void plat_stack_register(int slot, const char* name, unsigned size);
+void plat_thread_register(const char* name, unsigned stack_bytes); /* call at a thread's entry, after plat_crash_install_thread */
+void plat_set_audio_abort(void (*fn)(void)); /* DSP release for the crash exit (no waiting on the audio thread) */
+int plat_crash_file_ok(void);        /* log.c: crash.txt was opened and written */
 extern volatile uint32_t plat_wd_counter;
 
 /* menu.c: returns 1 while the Select menu is open (it consumed the input). */
@@ -40,5 +43,7 @@ void plat_memplace_report(void);
 int plat_started_by_netload(void);
 void plat_cpu_limit_init(void);      /* core 1 time limit and the APT hook that lowers it on HOME/sleep */
 void plat_set_gpu_shutdown(void (*fn)(void)); /* the GPU back end's teardown, for message screens */
+void plat_set_gpu_abort(void (*fn)(void));    /* teardown for the crash screen: must not wait for other threads */
+void plat_crash_gpu_down(void);
 
 #endif

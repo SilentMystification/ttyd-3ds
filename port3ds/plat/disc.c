@@ -46,6 +46,7 @@ int32_t plat_disc_read(uint64_t offset, void* buf, uint32_t size) {
 static void io_thread(void* arg) {
     (void)arg;
     plat_crash_install_thread();
+    plat_thread_register("dvd", 16 * 1024);
     for (;;) {
         LightLock_Lock(&s_queue_lock);
         while (s_head == s_tail) {

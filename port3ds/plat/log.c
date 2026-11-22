@@ -353,6 +353,7 @@ static void drain_locked(void) {
 static void writer_main(void* arg) {
     (void)arg;
     plat_crash_install_thread();
+    plat_thread_register("log", 32 * 1024);
     u64 last_sync = svcGetSystemTick();
     for (;;) {
         LightEvent_WaitTimeout(&s_wake, 250000000LL);
@@ -462,8 +463,10 @@ void plat_log_crash_close(void) {
     }
 }
 
+static int s_crash_fd = -1, s_crash_ok;
+int plat_crash_file_ok(void) { return s_crash_ok; }
+
 void plat_crash_line(const char* s, int n) {
-    static int crash_fd = -1;
     static int flushed;
     if (!flushed) {
         flushed = 1;
@@ -475,12 +478,12 @@ void plat_crash_line(const char* s, int n) {
         fsync(s_log_fd);
     }
     /* crash.txt keeps every crash (append), across boots. */
-    if (crash_fd < 0) {
-        crash_fd = open("crash.txt", O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (s_crash_fd < 0) {
+        s_crash_fd = open("crash.txt", O_WRONLY | O_CREAT | O_APPEND, 0666);
     }
-    if (crash_fd >= 0) {
-        write(crash_fd, s, (size_t)n);
-        fsync(crash_fd);
+    if (s_crash_fd >= 0) {
+        s_crash_ok = write(s_crash_fd, s, (size_t)n) == n;
+        fsync(s_crash_fd);
     }
     if (s_client >= 0) {
         send(s_client, s, (size_t)n, MSG_DONTWAIT);

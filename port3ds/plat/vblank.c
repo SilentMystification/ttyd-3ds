@@ -10,6 +10,7 @@ uint32_t plat_vblank_count(void) { return s_count; }
 static void vblank_thread(void* arg) {
     (void)arg;
     plat_crash_install_thread();
+    plat_thread_register("vblank", 16 * 1024);
     for (;;) {
         gspWaitForVBlank();
         s_count++;

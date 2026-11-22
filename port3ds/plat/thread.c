@@ -10,6 +10,7 @@ struct PlatThread {
     void (*entry)(void* arg);
     void* arg;
     char name[16];
+    uint32_t stack_bytes;
 };
 
 struct PlatEvent {
@@ -30,6 +31,7 @@ static void probe_entry(void* arg) {
 static void thread_trampoline(void* p) {
     PlatThread* t = p;
     plat_crash_install_thread();
+    plat_thread_register(t->name, t->stack_bytes);
     t->entry(t->arg);
 }
 
@@ -41,6 +43,7 @@ PlatThread* plat_thread_create(void (*entry)(void* arg), void* arg, uint32_t sta
     }
     t->entry = entry;
     t->arg = arg;
+    t->stack_bytes = (stack_bytes + 7u) & ~7u;
     strncpy(t->name, name ? name : "?", sizeof(t->name) - 1);
     if (priority < 0x18) {
         priority = 0x18;

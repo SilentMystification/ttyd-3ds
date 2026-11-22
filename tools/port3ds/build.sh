@@ -40,5 +40,16 @@ docker run --rm \
     sh -c 's=$1; o=$2; shift 2; cmake -S "$s" -B "$o" -G Ninja -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/3DS.cmake "$@" >/dev/null && cmake --build "$o"' \
     sh "$src" "$out" "$@"
 
+# Archive the game's ELF by build string, so tools/port3ds/crash_report.py can
+# resolve the addresses of a crash report from any earlier build.
+if [ "$name" = game ] && [ -f "$repo/$out/ttyd.elf" ] && [ -f "$repo/$out/generated/port3ds_build.h" ]; then
+    id=$(sed -n 's/.*PORT3DS_BUILD_STRING "#\([0-9]*\) \([0-9a-f]*\).*/\1_\2/p' "$repo/$out/generated/port3ds_build.h")
+    if [ -n "$id" ]; then
+        mkdir -p "$repo/build/elfs"
+        cp "$repo/$out/ttyd.elf" "$repo/build/elfs/$id.elf"
+        echo "build.sh: ELF archived as build/elfs/$id.elf"
+    fi
+fi
+
 echo "build.sh: outputs in $out"
 ls "$repo/$out"/*.3dsx "$repo/$out"/*.cia 2>/dev/null || true

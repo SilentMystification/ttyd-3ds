@@ -777,11 +777,16 @@ static void render_record(Record* r) {
     }
 }
 
+static volatile int s_dead;
 static void render_thread(void* arg) {
     (void)arg;
     plat_crash_install_thread();
+    plat_thread_register("render", 64 * 1024);
     for (;;) {
         LightEvent_Wait(&s_submit);
+        while (s_dead) {
+            svcSleepThread(1000000000LL);
+        }
         render_record(&s_rec[__atomic_load_n(&s_render_idx, __ATOMIC_ACQUIRE)]);
         __atomic_store_n(&s_busy, 0, __ATOMIC_RELEASE);
         LightEvent_Signal(&s_done);
@@ -918,6 +923,14 @@ static void gpu_selftest(void) {
 
 /* ---- Init ---- */
 
+/* Crash screen: no wait_idle (the render thread may be what crashed); the
+ * render thread parks instead of touching citro3d again. */
+static void gpu_abort(void) {
+    s_dead = 1;
+    C3D_Fini();
+    gfxExit();
+}
+
 static void gpu_shutdown(void) {
     wait_idle();
     C3D_Fini();
@@ -935,6 +948,7 @@ void plat_gpu_init(void) {
         plat_fatal("gpu: citro3d init failed");
     }
     plat_set_gpu_shutdown(gpu_shutdown);
+    plat_set_gpu_abort(gpu_abort);
     s_rot = plat_switch_int("rot", 0) & 3;
     s_efb = C3D_RenderTargetCreate(TARGET_W, TARGET_H, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     if (s_efb == NULL) {

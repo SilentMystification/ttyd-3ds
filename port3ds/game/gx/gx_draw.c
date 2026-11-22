@@ -39,6 +39,9 @@ static PlatGpuState s_state;
 #define SNAP_FROM (offsetof(GxState, num_texgens) & ~(size_t)3)
 #define SNAP_TO ((offsetof(GxState, copy_src) + 3) & ~(size_t)3)
 #define SNAP_WORDS ((SNAP_TO - SNAP_FROM) / 4)
+#define SNAP_LIGHT_START ((offsetof(GxState, light) - SNAP_FROM) / 4)
+#define SNAP_LIGHT_END ((offsetof(GxState, num_tev) - SNAP_FROM) / 4)
+_Static_assert(offsetof(GxState, light) % 4 == 0 && offsetof(GxState, num_tev) % 4 == 0, "snapshot word layout");
 static u32 s_snap[SNAP_WORDS]; /* word-aligned: the compare runs a word at a time (memcmp on an unaligned
                                   buffer goes byte by byte) */
 static f32 s_snap_vp[6];
@@ -52,8 +55,14 @@ static int state_unchanged(void) {
     }
     typedef u32 __attribute__((may_alias)) u32a;
     const u32a* cur = (const u32a*)((const u8*)&gx + SNAP_FROM);
-    /* backwards: the textures, blending and TEV (what changes between objects) sit at the end */
-    for (u32 i = SNAP_WORDS; i-- > 0;) {
+    /* backwards: the textures, blending and TEV (what changes between objects) sit at the end; the
+     * lights are skipped (the transform reads them per vertex, build_state does not) */
+    for (u32 i = SNAP_WORDS; i-- > SNAP_LIGHT_END;) {
+        if (cur[i] != s_snap[i]) {
+            return 0;
+        }
+    }
+    for (u32 i = SNAP_LIGHT_START; i-- > 0;) {
         if (cur[i] != s_snap[i]) {
             return 0;
         }

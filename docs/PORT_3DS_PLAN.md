@@ -258,10 +258,10 @@ Aurora encodes every GX call into FIFO bytes, parses them again, and lets the GP
 
 ### 5.7 Memory placement and QTM
 
-The N3DS extra RAM ("QTM RAM") is 4 MiB at physical 0x1F000000. A process maps it at virtual 0x1E800000 through an ExHeader memory mapping. Azahar emulates it:
+The N3DS extra RAM ("QTM RAM") is 4 MiB at physical 0x1F000000. A process maps it at virtual 0x1E800000 through an ExHeader memory mapping. The application part is the first 2 MiB (`0x1E800000-0x1E9FFFFF`). Offsets 0x200000-0x37FFFF belong to the system `qtm` service and the kernel (the last 128 KiB to the kernel), and retail titles map only the first 2 MiB. Writing past it crashed the qtm sysmodule, so the port maps and uses only the first 2 MiB. Azahar emulates it:
 
 - `src/core/memory.h` defines `N3DS_EXTRA_RAM_*`.
-- `src/core/hle/kernel/memory.cpp` maps 4 MiB minus 128 KiB from the ExHeader.
+- `src/core/hle/kernel/memory.cpp` maps 4 MiB minus 128 KiB from the ExHeader. The port asks for 2 MiB.
 - `src/video_core/gpu.cpp` translates QTM addresses for command lists, transfers and texture copies.
 
 How the port uses it:
@@ -389,7 +389,7 @@ Every test is one command that returns a non-zero exit code on failure. All of t
     - `EnableL2Cache: true`
     - `AffinityMask` and `IdealProcessor` so core 2 is available
     - `CoreVersion`
-    - a memory mapping for the N3DS extra RAM at 0x1E800000 (section 5.7)
+    - a memory mapping for the N3DS extra RAM at 0x1E800000, first 2 MiB only (section 5.7)
     - the services list (`ndsp`/`dsp::DSP`, `hid`, `fs:USER`, `ptm:u`, `soc:U`, `ac:u`, `qtm:u`)
     - `FileSystemAccess: DirectSdmc`
   - Original banner and icon art only.

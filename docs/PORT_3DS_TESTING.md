@@ -90,6 +90,7 @@ Switches the game reads (space-separated words in `--switches`):
 | `evtdump=N` | Logs the running event scripts at frame N, with the messages their windows show |
 | `gputest` | Draws the orientation pattern at boot: red top left, green top right, blue bottom left of a grey screen |
 | `loglevel=3` | Debug lines in the log (each converted disc file, primitives closed without `GXEnd`) |
+| `noqtm` | Keeps the per-frame buffers in FCRAM even when QTM is mapped. QTM's application part (the first 2 MB) is used by default |
 
 Sound needs `sdmc:/3ds/dspfirm.cdc` (dumped from a console with DSP1), in the profile's SD card as on the console. Without it the game runs silently with the same sound timing. `--lle-audio` makes Azahar run that firmware itself (its LLE DSP) instead of its own model of it, which is slower but closer to the console. `wavdump=N` saves the first N seconds of the game's mix as `sdmc:/3ds/ttyd/audio.wav`, and the log has the output's peak level every 10 s.
 
@@ -173,7 +174,7 @@ Results in Azahar (2026-11-21, CIA):
 | Item | Result |
 |---|---|
 | Model | New 3DS, with a 124 MB application region |
-| QTM | mapped read/write at `0x1E800000`, size `0x3E0000` |
+| QTM | mapped read/write at `0x1E800000`, size `0x3E0000` (before the change to 2 MB). The game now maps only the first 2 MB (`0x1E800000-0x1E9FFFFF`) |
 | QTM physical address | `osConvertVirtToPhys` gives `0x1F000000` |
 | CPU use of QTM | write and read back: ok |
 | GPU copy linear → linear | ok |

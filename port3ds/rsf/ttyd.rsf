@@ -6,9 +6,11 @@
 # (https://gist.github.com/jakcron/47392b861657746d8448), as adapted in iCam.
 # Port-specific parts:
 #   - New 3DS only: 804 MHz, L2 cache, core 2, the 124 MB extended mode.
-#   - MemoryMapping for the New 3DS extra RAM (QTM) at 0x1E800000. Azahar
-#     maps 4 MiB minus 128 KiB of it (src/core/hle/kernel/memory.cpp), which
-#     is the range below. Checked on hardware in plan phase 8.
+#   - MemoryMapping for the New 3DS extra RAM (QTM) at 0x1E800000: the first
+#     2 MiB only. QTM offsets 0x200000-0x37FFFF belong to the qtm service and
+#     the kernel (the last 128 KiB to the kernel), and retail titles map just
+#     the first 2 MiB. Mapping more is what crashed the qtm sysmodule.
+#     Checked on hardware in plan phase 8.
 # Untested on hardware until plan phase 8.
 
 BasicInfo:
@@ -68,7 +70,7 @@ AccessControlInfo:
    - 1ff00000-1ff7ffff   # DSP memory
   MemoryMapping:
    - 1f000000-1f5fffff:r # VRAM
-   - 1e800000-1ebdffff   # New 3DS extra RAM (QTM), read/write
+   - 1e800000-1e9fffff   # New 3DS extra RAM (QTM), application part, read/write
 
   SystemCallAccess:
     ArbitrateAddress: 34

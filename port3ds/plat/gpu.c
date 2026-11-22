@@ -36,7 +36,7 @@
 #define EFB_X_OFFSET 96 /* (800 - 608) / 2: TTYD's 608-wide EFB centred */
 #define MAX_TEX 4096
 #define ARENA_VERTICES (96 * 1024)
-#define RECORD_BYTES (1u << 20)
+#define RECORD_BYTES (512u << 10) /* two records fill the 1 MiB gx record budget in QTM */
 
 enum { CMD_STATE = 1, CMD_FOG, CMD_DRAW, CMD_CLEAR, CMD_COPY, CMD_FRAME_END, CMD_SEGMENT_END };
 

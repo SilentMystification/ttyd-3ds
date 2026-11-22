@@ -1,7 +1,9 @@
 /* Memory placement: shared per-frame CPU state in the New 3DS extra RAM.
  *
  * The CIA's ExHeader maps the extra RAM ("QTM RAM") at 0x1E800000
- * (port3ds/rsf/ttyd.rsf; Azahar maps 4 MiB minus 128 KiB). It holds state
+ * (port3ds/rsf/ttyd.rsf). The application part is the first 2 MiB; the
+ * rest (0x1EA00000 on) belongs to the system qtm service and the kernel,
+ * and writing there crashed the qtm sysmodule. It holds state
  * that several cores touch every frame, keeping that traffic off the FCRAM
  * bus the GPU and DSP use. The GPU does not use it (Azahar's GPU cannot reach
  * it; see docs/PORT_3DS_TESTING.md). When the mapping is absent (a 3dsx) the
@@ -17,7 +19,7 @@
 #include "plat_internal.h"
 
 #define QTM_VADDR 0x1E800000u
-#define QTM_BYTES 0x003E0000u
+#define QTM_BYTES 0x00200000u /* application part only */
 
 typedef struct {
     const char* name;
@@ -27,9 +29,9 @@ typedef struct {
 } Placement;
 
 static Placement s_table[PLAT_PLACE_COUNT] = {
-    [PLAT_PLACE_GX_RECORD] = {"gx record", 2u << 20, 0, NULL},
-    [PLAT_PLACE_GX_STATE] = {"gx state", 512u << 10, 0, NULL},
-    [PLAT_PLACE_AUDIO_STATE] = {"audio state", 512u << 10, 0, NULL},
+    [PLAT_PLACE_GX_RECORD] = {"gx record", 1u << 20, 0, NULL},
+    [PLAT_PLACE_GX_STATE] = {"gx state", 128u << 10, 0, NULL},
+    [PLAT_PLACE_AUDIO_STATE] = {"audio state", 128u << 10, 0, NULL},
     [PLAT_PLACE_LOG] = {"log", 320u << 10, 0, NULL},
 };
 static int s_qtm;
@@ -54,11 +56,10 @@ void plat_memplace_init(void) {
     if (total > QTM_BYTES) {
         plat_fatal("memplace: budgets total %lu bytes, QTM has %lu", (unsigned long)total, (unsigned long)QTM_BYTES);
     }
-    /* QTM RAM is also used by the system qtm sysmodule. Writing it without
-     * the qtm switch crashed the console at boot (Luma dump: qtm, NULL
-     * read), so the buffers stay in FCRAM unless the switch asks for QTM. */
+    /* The first 2 MiB of QTM RAM is the application part; noqtm puts the
+     * buffers back in FCRAM (for comparison or a bad QTM). */
     int mapped = qtm_mapped();
-    s_qtm = plat_switch_has("qtm") && mapped;
+    s_qtm = !plat_switch_has("noqtm") && mapped;
     u8* next = (u8*)QTM_VADDR;
     for (int i = 0; i < PLAT_PLACE_COUNT; i++) {
         Placement* p = &s_table[i];
@@ -76,8 +77,7 @@ void plat_memplace_init(void) {
         PLOG_I("[MEM] QTM mapped at %08lx, %lu of %lu bytes placed", (unsigned long)QTM_VADDR, (unsigned long)total,
                (unsigned long)QTM_BYTES);
     } else if (mapped) {
-        PLOG_W("[MEM] QTM mapped but not used (the system qtm module owns it; switch qtm to use it), using FCRAM (%lu bytes)",
-               (unsigned long)total);
+        PLOG_W("[MEM] QTM mapped but switched off (noqtm), using FCRAM (%lu bytes)", (unsigned long)total);
     } else {
         PLOG_W("[MEM] QTM unavailable, using FCRAM (%lu bytes)", (unsigned long)total);
     }

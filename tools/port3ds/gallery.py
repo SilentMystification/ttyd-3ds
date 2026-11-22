@@ -139,6 +139,12 @@ def run_gc(args, switches, stopframe, shots, last):
     words = switches.split()
     if "fastboot" not in words:
         words.append("fastboot")
+    key = " ".join(words + [f"stopframe={stopframe}"])
+    done = last / "switches.txt"
+    if (getattr(args, "reuse_gc", False) and done.exists() and done.read_text() == key
+            and (last / "gc_log.txt").exists()):
+        print("gallery: dolphin: reusing", last.relative_to(REPO))
+        return True, "reused", (last / "gc_log.txt").read_text()
     cmd = [sys.executable, "-u", str(REPO / "tools/port3ds/run_dolphin.py"), "--gcdebug", "--profile", str(DOL_PROFILE),
            "--port", str(DOL_PORT), "--switches", " ".join(words + [f"stopframe={stopframe}"]), "--break",
            "gcdbg_stop", "--read-log", "--timeout", str(args.gc_timeout), "--json", str(last / "dolphin.json")]
@@ -152,6 +158,8 @@ def run_gc(args, switches, stopframe, shots, last):
         text = json.loads((last / "dolphin.json").read_text()).get("log", "")
     (last / "gc_log.txt").write_text(text)
     reason = (r.stdout.strip().splitlines() or ["?"])[-1]
+    if r.returncode == 0:
+        done.write_text(key)
     return r.returncode == 0, reason, text
 
 
@@ -215,6 +223,15 @@ def cmd_fx(args):
         sw = (f"map={args.map} story={args.story} determ fx={','.join(batch)} fxgap={args.gap} "
               f"fxshots={','.join(map(str, offsets))} {args.extra}").strip()
         frames_needed = 700 + args.wait + len(batch) * args.gap + 60
+        # the first spawn comes about 727 + (wait - 60) frames in (gor_01); a fixed stop frame per batch lets a
+        # --gc-only run be reused
+        stop = 760 + args.wait + len(batch) * args.gap + max(offsets)
+        if args.gc_only:
+            bn_tag = f"b{bn:02d}"
+            gok, greason, _ = run_gc(args, sw, stop, out / "gc", out / "logs" / f"gc_{bn_tag}")
+            print(f"gallery: dolphin {bn_tag}: {greason}", flush=True)
+            todo = todo[args.batch:]
+            continue
         ok, reason, ptext = run_port(args, sw, r"fx: done", args.port_timeout_base + frames_needed / args.port_fps,
                                      out / "logs" / f"port_{tag}")
         collect_port_shots(out / "port")
@@ -233,8 +250,9 @@ def cmd_fx(args):
                 done = [batch[0]]
         gres = {}
         if args.dolphin and done:
-            spawned = [pres[it]["spawn"] for it in done if "spawn" in pres[it]]
-            stop = (max(spawned) if spawned else 800) + max(offsets) + 5
+            if len(done) < len(batch):
+                spawned = [pres[it]["spawn"] for it in done if "spawn" in pres[it]]
+                stop = (max(spawned) if spawned else 800) + max(offsets) + 5
             gok, greason, gtext = run_gc(args, sw, stop, out / "gc", out / "logs" / f"gc_{tag}")
             gres = parse_fx(gtext, batch)
             if not gok:
@@ -252,7 +270,8 @@ def cmd_fx(args):
         if not done:
             print("gallery: a batch made no progress, stopping")
             break
-    report(out, results, args)
+    if not args.gc_only:
+        report(out, results, args)
     return 0
 
 
@@ -307,7 +326,8 @@ def cmd_battle(args):
         sw = (f"map={args.map} story={args.story} determ battle={','.join(batch)} btlauto={args.mode} "
               + (f"btlshots={','.join(map(str, offsets))} " if offsets else "")
               + (f"gwdump={args.gwdump} " if args.gwdump else "") + args.extra).strip()
-        until = r"battle: (done|end result)" if len(batch) == 1 else r"battle: done"
+        until = (r"battle: (done|end result|\S+ is not in area|setup .* chose no group|no NPC)" if len(batch) == 1
+                 else r"battle: done")
         ok, reason, ptext = run_port(args, sw, until, args.port_timeout_base + len(batch) * args.battle_frames
                                      / args.port_fps, out / "logs" / f"port_{tag}")
         if offsets:
@@ -348,6 +368,93 @@ def cmd_battle(args):
         todo = [it for it in todo if it not in done]
     if offsets:
         report(out, results, args)
+    return 0
+
+
+# ---- battlelist: every area's battle setup table and each map's NPCs ----
+
+def parse_btllist(text):
+    areas = {}
+    for raw in text.splitlines():
+        line = strip(raw)
+        m = re.match(r"btllist: map (\S+) npcs (\d+) enemies (\d+)", line)
+        if m:
+            a = areas.setdefault(m.group(1)[:3], {"setups": [], "maps": {}})
+            a["maps"][m.group(1)] = [int(m.group(2)), int(m.group(3))]
+            continue
+        m = re.match(r"btllist: area (\S+) (\d+) (.*)$", line)
+        if m:
+            areas.setdefault(m.group(1), {"setups": [], "maps": {}})["setups"].append(m.group(3))
+    return areas
+
+
+def cmd_battlelist(args):
+    sys.path.insert(0, str(REPO / "tools/port3ds"))
+    from map_sweep import disc_maps
+    out = OUT_ROOT / args.name
+    maps = args.maps.split(",") if args.maps else [m for m in disc_maps(REPO / "iso/game.iso")
+                                                    if not m.startswith("stg")]
+    sd = ensure_azahar_profile()
+    (sd / "sweep.txt").write_text("".join(f"{m} {args.story}\n" for m in maps))
+    ok, reason, text = run_port(args, f"sweep=40 party=1 btllist {args.extra}".strip(), r"sweep: (done|stopped)",
+                                args.port_timeout_base + len(maps) * 15, out / "logs")
+    areas = parse_btllist(text)
+    save_results(out, {"kind": "battlelist", "run": reason, "areas": areas})
+    print(f"gallery: {len(areas)} areas, {sum(len(a['setups']) for a in areas.values())} battle setups "
+          f"({reason}); {out.relative_to(REPO)}/results.json")
+    return 0 if ok else 1
+
+
+def pick_map(area):
+    """The area's map for battles: the first with an enemy NPC, else the first with any NPC."""
+    maps = sorted(area["maps"].items())
+    for m, (npcs, enemies) in maps:
+        if enemies > 0:
+            return m
+    for m, (npcs, enemies) in maps:
+        if npcs > 0:
+            return m
+    return None
+
+
+def cmd_battlesweep(args):
+    """Every battle setup of every area (from a battlelist run), in batches per boot, port only by default."""
+    import copy
+    areas = load_results(OUT_ROOT / args.list)["areas"]
+    rows = []
+    for name in sorted(areas):
+        if args.areas and name not in args.areas.split(","):
+            continue
+        a = areas[name]
+        if not a["setups"]:
+            continue
+        m = pick_map(a)
+        sub_args = copy.copy(args)
+        sub_args.name = f"{args.name}/{name}"
+        if m is None:
+            rows.append((name, "-", "-", "no map of the area has an NPC to stand in for the enemy", "", ""))
+            continue
+        sub_args.map = m
+        n = len(a["setups"])
+        ids = list(range(n))
+        if args.per_area and n > args.per_area:  # evenly spread over the table, first and last included
+            k = args.per_area
+            ids = sorted({round(j * (n - 1) / (k - 1)) for j in range(k)}) if k > 1 else [0]
+        sub_args.items = ",".join(map(str, ids))
+        sub_args.offsets = ""
+        cmd_battle(sub_args)
+        res = load_results(OUT_ROOT / sub_args.name)["items"]
+        for i in ids:
+            r = res.get(str(i), {})
+            issues = sorted(set(r.get("warnings", [])))
+            st = r.get("status") or "-"
+            rows.append((name, str(i), a["setups"][i], st if st != "ended" else f"result {r.get('result')}",
+                         str(r.get("frames", "")), f"{r.get('turns', '')} turns; " + "; ".join(issues)[:300]))
+    md = ["| area | id | setup | result | frames | turns, issues |", "|---|---|---|---|---|---|"]
+    md += ["| " + " | ".join(x.replace("|", "/") for x in row) + " |" for row in rows]
+    (OUT_ROOT / args.name).mkdir(parents=True, exist_ok=True)
+    (OUT_ROOT / args.name / "table.md").write_text("\n".join(md) + "\n")
+    print(f"gallery: {len(rows)} battles; {(OUT_ROOT / args.name / 'table.md').relative_to(REPO)}")
     return 0
 
 
@@ -454,6 +561,10 @@ def main():
         p.add_argument("--pixel-threshold", type=int, default=32)
         p.add_argument("--review-threshold", type=float, default=8.0)
         p.add_argument("--redo", action="store_true", help="run items already in results.json again")
+        p.add_argument("--reuse-gc", action="store_true",
+                       help="skip a Dolphin run whose log (logs/gc_<batch>/) has exactly these switches")
+        p.add_argument("--gc-only", action="store_true",
+                       help="fx: run only Dolphin, for the batches the port run will make (to prepare with --reuse-gc)")
 
     p = sub.add_parser("fx")
     common(p)
@@ -475,6 +586,22 @@ def main():
     p.add_argument("--gwdump", type=int, default=0)
     p.add_argument("--battle-frames", type=float, default=4000, help="frames to allow per battle (timeouts)")
     p.set_defaults(func=cmd_battle)
+
+    p = sub.add_parser("battlelist", help="sweep maps with btllist: every area's battle setups, each map's NPCs")
+    common(p)
+    p.add_argument("--maps", default="", help="comma-separated maps (default: every map on the disc but stg_*)")
+    p.set_defaults(func=cmd_battlelist)
+
+    p = sub.add_parser("battlesweep", help="every battle of every area from a battlelist result")
+    common(p)
+    p.add_argument("--list", default="btllist", help="the battlelist gallery name")
+    p.add_argument("--areas", default="", help="only these areas (comma-separated)")
+    p.add_argument("--per-area", type=int, default=0, help="at most N setups per area, spread over its table (0 all)")
+    p.add_argument("--mode", default="perfect", choices=["perfect", "fail"])
+    p.add_argument("--batch", type=int, default=12)
+    p.add_argument("--gwdump", type=int, default=0)
+    p.add_argument("--battle-frames", type=float, default=4000)
+    p.set_defaults(func=cmd_battlesweep, dolphin=False)
 
     p = sub.add_parser("frames")
     common(p)

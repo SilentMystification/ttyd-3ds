@@ -67,19 +67,13 @@ def main():
         time.sleep(args.wait)
         for sample in range(args.samples):
             rsp.interrupt()
-            threads = []
-            reply = rsp.command("qfThreadInfo")
-            while reply.startswith("m"):
-                threads += [int(t, 16) for t in reply[1:].split(",") if t]
-                reply = rsp.command("qsThreadInfo")
+            threads = rsp.thread_ids()
             print(f"-- sample {sample + 1}")
             for spec in args.peek:
                 addr, size = spec.split(":")
                 print(f"    peek {addr}: {rsp.read(int(addr, 16), int(size)).hex()}")
             for t in threads:
-                rsp.command(f"Hg{t:x}")
-                regs = rsp.command("g")
-                words = [int.from_bytes(bytes.fromhex(regs[i:i + 8]), "little") for i in range(0, 16 * 8, 8)]
+                words = rsp.core_registers(t)
                 pc, lr, sp = words[15], words[14], words[13]
                 sym = symbolize(args.elf, [pc, lr])
                 if sample > 0 and t != threads[0] and any("svc.s" in line for line in sym[:2]):

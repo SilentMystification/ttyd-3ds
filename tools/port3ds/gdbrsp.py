@@ -101,3 +101,41 @@ class RSP:
     def interrupt(self):
         self.sock.sendall(b"\x03")
         return self.recv()
+
+    # Helpers shared by hang_probe.py and pc_sample.py.
+
+    def thread_ids(self):
+        """Thread ids from qfThreadInfo / qsThreadInfo."""
+        ids = []
+        reply = self.command("qfThreadInfo")
+        while reply.startswith("m"):
+            ids += [int(t, 16) for t in reply[1:].split(",") if t]
+            reply = self.command("qsThreadInfo")
+        return ids
+
+    def core_registers(self, tid):
+        """r0..r15 of one thread (Hg + g); r13 is sp, r14 lr, r15 pc."""
+        self.command(f"Hg{tid:x}")
+        regs = self.command("g")
+        return [int.from_bytes(bytes.fromhex(regs[i:i + 8]), "little") for i in range(0, 16 * 8, 8)]
+
+    def attach(self, pid):
+        """Luma3DS Rosalina: attach by process id (extended-remote). Returns the stop reply."""
+        return self.command(f"vAttach;{pid:x}")
+
+    def detach(self):
+        self.send("D")
+        return self.recv()
+
+    def core_registers_many(self, tids):
+        """{tid: r0..r15} for several threads with the Hg/g requests pipelined (one round trip
+        per batch instead of two per thread). Threads that cannot be read are left out."""
+        for t in tids:
+            self.send(f"Hg{t:x}")
+            self.send("g")
+        out = {}
+        for t in tids:
+            hg, regs = self.recv(), self.recv()
+            if hg == "OK" and len(regs) >= 128 and not (regs.startswith("E") and len(regs) == 3):
+                out[t] = [int.from_bytes(bytes.fromhex(regs[i:i + 8]), "little") for i in range(0, 16 * 8, 8)]
+        return out

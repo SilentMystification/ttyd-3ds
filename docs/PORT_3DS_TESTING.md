@@ -157,6 +157,35 @@ It ends when FBI closes the connection (a reset counts) and prints whether the f
 
 The probe (`build/3ds/probe/ttyd_probe.3dsx`) shows its results on the top screen and writes `sdmc:/3ds/ttyd/probe.txt`.
 
+### Profiling (PC sampling)
+
+```sh
+tools/port3ds/pc_sample.py --elf build/3ds/game/ttyd.elf --duration 60 --interval 200 --threads game=1,render=8
+```
+
+`pc_sample.py` attaches to a running process through a GDB stub, repeatedly interrupts it, reads the PC and LR of every thread, continues, and prints a flat profile per thread (self functions with their top 3 callers from LR, an inclusive list, busy shares) and an overall top 30. `--json FILE` writes the same data. The tool takes the ELF and the process as arguments and knows nothing about the game. With no `--pid` it talks to Azahar's stub (port 24689).
+
+- **Azahar.** Start the game with `run_azahar.py --gdb` (the guest waits for a debugger), connect once, continue, and detach after the game reaches the scene (`hang_probe.py` shows the connect-and-continue steps); then run `pc_sample.py`. Azahar's stub costs about 150 ms per stop, so the rate is about 6 Hz at `--interval 20` and the game barely advances between stops: with a 20 ms interval the game thread showed the same PC in every sample. Use `--interval 200` or more there. Results are a relative guide only, because Azahar's timing is not the console's.
+- **Safety.** The target is detached and continued on exit, Ctrl-C and errors (verified in Azahar: the game's log kept growing after detach and after Ctrl-C).
+- **Samples slower than 200 ms** print a warning and double the interval (up to 1 s).
+
+## Profiling on hardware
+
+1. Luma3DS: open the Rosalina menu (L+Down+Select), choose Debugger options, and enable the debugger. It listens on TCP ports 4000 and up (one per attached process). Enabling it freezes the console until a client connects, so do it, start the CIA from the HOME Menu, then open the Rosalina menu again, Process list, and note the game's process ID (PID). Luma's GDB server is only up while the debugger is enabled and a client has not attached yet.
+2. Make sure the CIA's ELF is the one that was built into the installed CIA (`build/elfs/<build>.elf`, or `build/3ds/game/ttyd.elf`).
+3. Run, from this PC (the console must be reachable):
+
+```sh
+N3DS_IP=192.168.1.223 tools/port3ds/pc_sample.py --pid <PID> --port 4000 \
+    --elf build/3ds/game/ttyd.elf --duration 30 --interval 20 \
+    --threads game=<tid>,render=<tid> --json build/pc_sample.json
+```
+
+   Thread ids are printed in the output's first table; run once without `--threads` to see them.
+4. `--title <hex title id>` instead of `--pid` asks Rosalina for its process list over the protocol (`qXfer:osdata`). That is written from the GDB specification, not checked against Rosalina; if it fails, use `--pid`.
+
+Not verified (written from Luma3DS's documentation and the GDB protocol, tested only against Azahar): attaching with `vAttach;<pid>`, the 20 ms rate Rosalina can sustain, and whether `D` resumes the process (the tool also sends `c`, and Rosalina detaches when the socket closes). Expect the achieved rate to be printed on the first line of the output; if samples are slower than 200 ms the tool backs off by itself.
+
 ## Running the GameCube game in Dolphin
 
 ```sh

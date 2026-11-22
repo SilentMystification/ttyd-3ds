@@ -15,6 +15,7 @@
 #include <dolphin/card.h>
 #include <dolphin/os.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -38,6 +39,11 @@ typedef struct {
 static Slot s_files[MAX_FILES];
 static int s_mounted;
 static volatile s32 s_result[2] = {CARD_RESULT_READY, CARD_RESULT_NOCARD};
+
+/* The game's save data is native in memory and big-endian in the file, as on the GameCube, so a GCI moves
+ * between the port and Dolphin. The game-specific converter is port_card_convert (save_swap.c): it converts
+ * bytes [offset, offset + length) of the file's data in place, to disk order (to_disk 1) or back. */
+void port_card_convert(u32 offset, void* buf, u32 length, int to_disk);
 
 /* ---- GCI directory entries (big-endian on disk) ---- */
 
@@ -341,9 +347,21 @@ static s32 do_rw(Job* j, int write) {
         return CARD_RESULT_IOERROR;
     }
     int ok = fseek(f, 64 + j->offset, SEEK_SET) == 0;
-    if (ok) {
-        ok = write ? fwrite(j->buf, 1, (size_t)j->length, f) == (size_t)j->length
-                   : fread(j->buf, 1, (size_t)j->length, f) == (size_t)j->length;
+    if (ok && write) {
+        /* convert a copy: the caller's buffer stays native for the game */
+        void* disk = malloc(j->length > 0 ? (size_t)j->length : 1);
+        ok = disk != NULL;
+        if (ok) {
+            memcpy(disk, j->buf, (size_t)j->length);
+            port_card_convert((u32)j->offset, disk, (u32)j->length, 1);
+            ok = fwrite(disk, 1, (size_t)j->length, f) == (size_t)j->length;
+            free(disk);
+        }
+    } else if (ok) {
+        ok = fread(j->buf, 1, (size_t)j->length, f) == (size_t)j->length;
+        if (ok) {
+            port_card_convert((u32)j->offset, j->buf, (u32)j->length, 0);
+        }
     }
     if (write) {
         fflush(f);

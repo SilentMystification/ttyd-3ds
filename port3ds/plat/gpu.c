@@ -70,6 +70,7 @@ typedef struct {
     u8 live;
     u8 is_target;
     u8 pending_free;
+    u8 via_scratch; /* a copy target in linear memory, filled through the VRAM scratch target */
     u32 free_after_frame;
     C3D_RenderTarget* target;
 } TexSlot;
@@ -546,7 +547,10 @@ static u32 tex_alloc_slot(void) {
 
 /* Render thread, between frames: frees the copy targets whose textures were
  * released (C3D_RenderTargetDelete panics inside a frame). */
+static int s_gx_entries; /* GX queue entries the strip copies of this record use (the queue holds 32) */
+
 static void reap_targets(void) {
+    s_gx_entries = 0;
     LightLock_Lock(&s_tex_lock);
     for (u32 i = 1; i < MAX_TEX; i++) {
         TexSlot* t = &s_tex[i];
@@ -577,6 +581,21 @@ uint32_t plat_gpu_tex_create(uint32_t width, uint32_t height, uint32_t fmt, cons
     return h;
 }
 
+/* VRAM budget helpers (copy targets): the largest block vramAlloc can still give. */
+static u32 vram_largest_kb(void) {
+    for (u32 kb = 3072; kb >= 64; kb -= 64) {
+        void* p = vramAlloc(kb * 1024);
+        if (p != NULL) {
+            vramFree(p);
+            return kb;
+        }
+    }
+    return 0;
+}
+
+static void* s_scratch_mem; /* VRAM for the strip copies (scratch_get); NULL: none */
+#define SCRATCH_BYTES (256 * 1024)
+
 uint32_t plat_gpu_tex_create_target(uint32_t width, uint32_t height, uint32_t fmt) {
     u32 h = tex_alloc_slot();
     if (h == 0) {
@@ -584,13 +603,31 @@ uint32_t plat_gpu_tex_create_target(uint32_t width, uint32_t height, uint32_t fm
     }
     TexSlot* t = &s_tex[h];
     /* VRAM when it has room (the EFB and its depth buffer take 4 of its
-     * 6 MB), otherwise linear FCRAM, which the GPU also renders to. */
-    if (!C3D_TexInitVRAM(&t->tex, (u16)width, (u16)height, (GPU_TEXCOLOR)fmt) &&
-        !C3D_TexInit(&t->tex, (u16)width, (u16)height, (GPU_TEXCOLOR)fmt)) {
+     * 6 MB). citro3d renders only to VRAM textures, so when it has no room
+     * the texture is in linear memory and copy_to_texture fills it through
+     * the VRAM scratch target in strips. vramfail=1 forces that path. */
+    static int s_vramfail = -1;
+    if (s_vramfail < 0) {
+        s_vramfail = plat_switch_int("vramfail", 0);
+    }
+    if (s_vramfail != 1 && C3D_TexInitVRAM(&t->tex, (u16)width, (u16)height, (GPU_TEXCOLOR)fmt)) {
+        t->is_target = 1;
+        return h;
+    }
+    PLOG_W("gpu: no VRAM for a %lux%lu copy target, format %lu (%lu KB): free %lu KB, largest block %lu KB%s",
+           (unsigned long)width, (unsigned long)height, (unsigned long)fmt,
+           (unsigned long)(width * height * (fmt == GPU_RGBA8 ? 4 : 2) / 1024),
+           (unsigned long)(vramSpaceFree() / 1024), (unsigned long)vram_largest_kb(),
+           s_scratch_mem ? "; filled through the scratch target" : "; no scratch target");
+    if (!C3D_TexInit(&t->tex, (u16)width, (u16)height, (GPU_TEXCOLOR)fmt)) {
         t->live = 0;
         return 0;
     }
+    /* the GPU writes this memory by transfer only: start it defined (clear) and out of the CPU cache */
+    memset(t->tex.data, 0, t->tex.size);
+    GSPGPU_FlushDataCache(t->tex.data, t->tex.size);
     t->is_target = 1;
+    t->via_scratch = s_scratch_mem != NULL;
     return h;
 }
 
@@ -752,19 +789,12 @@ static void draw_rect_quad(Record* r, u16 x, u16 y, u16 w, u16 h, u32 rgba, u32 
  * EFB render target (its color buffer is a texture in VRAM). */
 static C3D_Tex s_efb_tex;
 
-static void copy_to_texture(u16 x, u16 y, u16 w, u16 h, u32 handle, u32 dst_w, u32 dst_h) {
-    if (handle == 0 || handle >= MAX_TEX) {
-        return;
-    }
-    TexSlot* slot = &s_tex[handle];
-    if (slot->target == NULL) {
-        slot->target = C3D_RenderTargetCreateFromTex(&slot->tex, GPU_TEXFACE_2D, 0, -1);
-        if (slot->target == NULL) {
-            PLOG_E("gpu: copy target %lu cannot be rendered to", (unsigned long)handle);
-            return;
-        }
-    }
-    C3D_FrameDrawOn(slot->target);
+/* One pass of a copy: the quad into `target`, whose viewport is vp_w x vp_h
+ * texels and holds rows r0.. of the copy texture (0 and the whole texture for
+ * a copy target in VRAM; a strip for the scratch target). */
+static void copy_pass(C3D_RenderTarget* target, u32 vp_w, u32 vp_h, u32 r0, u16 x, u16 y, u16 w, u16 h, u32 dst_w,
+                      u32 dst_h) {
+    C3D_FrameDrawOn(target);
     C3D_TexEnv* env = C3D_GetTexEnv(0);
     C3D_TexEnvInit(env);
     C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
@@ -778,11 +808,11 @@ static void copy_to_texture(u16 x, u16 y, u16 w, u16 h, u32 handle, u32 dst_w, u
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
     C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
     C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
-    C3D_SetViewport(0, 0, slot->tex.width, slot->tex.height);
+    C3D_SetViewport(0, 0, vp_w, vp_h);
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     /* The copy texture holds the rectangle upright in GX texture space:
      * texel (s, t) of the dw x dh image is EFB pixel (x + s * w, y + t * h). */
-    float fx = (float)dst_w / slot->tex.width, fy = (float)dst_h / slot->tex.height;
+    float fx = (float)dst_w / vp_w;
     float tx, ty, tw, th;
     efb_to_target_rect(x, y, w, h, &tx, &ty, &tw, &th);
     float u0 = tx / s_efb_tex.width, u1 = (tx + tw) / s_efb_tex.width;
@@ -805,7 +835,7 @@ static void copy_to_texture(u16 x, u16 y, u16 w, u16 h, u32 handle, u32 dst_w, u
          * viewport y = 0 (clip y = -1); the image fills the first dst_h
          * viewport rows */
         float px = -1.0f + 2.0f * ex * fx;
-        float py = -1.0f + 2.0f * ey * fy;
+        float py = -1.0f + 2.0f * (ey * (float)dst_h - (float)r0) / (float)vp_h;
         C3D_ImmSendAttrib(px, py, -0.5f, 1.0f);
         C3D_ImmSendAttrib(255, 255, 255, 255);
         C3D_ImmSendAttrib(u, v, 0, 1);
@@ -815,6 +845,100 @@ static void copy_to_texture(u16 x, u16 y, u16 w, u16 h, u32 handle, u32 dst_w, u
     C3D_ImmDrawEnd();
     rot_uniforms();
     C3D_FrameDrawOn(s_efb);
+}
+
+/* The VRAM scratch target of the strip copies: one block of VRAM seen as a
+ * render target per (width, format), as many rows as it holds. */
+typedef struct {
+    u16 width, rows;
+    u8 fmt;
+    C3D_Tex tex;
+    C3D_RenderTarget* target;
+} Scratch;
+static Scratch s_scratch[32];
+static u32 s_scratch_n;
+
+static Scratch* scratch_get(u32 width, u32 fmt) {
+    for (u32 i = 0; i < s_scratch_n; i++) {
+        if (s_scratch[i].width == width && s_scratch[i].fmt == fmt) {
+            return &s_scratch[i];
+        }
+    }
+    u32 bpp = fmt == GPU_RGBA8 ? 4 : 2;
+    u32 rows = (SCRATCH_BYTES / (width * bpp)) & ~7u;
+    if (rows > 512) {
+        rows = 512;
+    }
+    if (s_scratch_mem == NULL || s_scratch_n >= sizeof(s_scratch) / sizeof(s_scratch[0]) || rows < 8 ||
+        (fmt != GPU_RGBA8 && fmt != GPU_RGB565 && fmt != GPU_RGBA5551 && fmt != GPU_RGBA4)) {
+        return NULL;
+    }
+    Scratch* sc = &s_scratch[s_scratch_n];
+    memset(sc, 0, sizeof(*sc));
+    sc->tex.data = s_scratch_mem;
+    sc->tex.fmt = (GPU_TEXCOLOR)fmt;
+    sc->tex.width = (u16)width;
+    sc->tex.height = (u16)rows;
+    sc->tex.size = width * rows * bpp;
+    sc->target = C3D_RenderTargetCreateFromTex(&sc->tex, GPU_TEXFACE_2D, 0, -1);
+    if (sc->target == NULL) {
+        return NULL;
+    }
+    sc->width = (u16)width;
+    sc->rows = (u16)rows;
+    sc->fmt = (u8)fmt;
+    s_scratch_n++;
+    return sc;
+}
+
+static void copy_to_texture(u16 x, u16 y, u16 w, u16 h, u32 handle, u32 dst_w, u32 dst_h) {
+    if (handle == 0 || handle >= MAX_TEX) {
+        return;
+    }
+    TexSlot* slot = &s_tex[handle];
+    if (slot->via_scratch) {
+        /* Strips: the copy is rendered R rows at a time into the scratch target, and each strip is copied
+         * (a raw memory copy, both are in the PICA's tiled layout) to its place in the linear texture. Memory
+         * tile row 0 is the top of the image (viewport y = H - 1), so the strip of viewport rows r0.. goes to
+         * tile rows counted from the end. */
+        static int s_warned;
+        Scratch* sc = scratch_get(slot->tex.width, slot->tex.fmt);
+        u32 th = slot->tex.height, lmax = (dst_h + 7) & ~7u;
+        if (lmax > th) {
+            lmax = th;
+        }
+        u32 nstrips = sc ? (lmax + sc->rows - 1) / sc->rows : 0;
+        if (sc == NULL || s_gx_entries + 2 * (int)nstrips > 24) {
+            if (!s_warned) {
+                s_warned = 1;
+                PLOG_E("gpu: copy target %lu (%lux%lu) cannot be filled: %s", (unsigned long)handle,
+                       (unsigned long)slot->tex.width, (unsigned long)th, sc ? "GX queue budget" : "no scratch target");
+            }
+            return;
+        }
+        u32 bpp = slot->tex.fmt == GPU_RGBA8 ? 4 : 2;
+        u32 rowbytes = slot->tex.width * 8 * bpp; /* one tile row */
+        for (u32 r0 = 0; r0 < lmax; r0 += sc->rows) {
+            u32 n = lmax - r0 < sc->rows ? lmax - r0 : sc->rows;
+            copy_pass(sc->target, slot->tex.width, sc->rows, r0, x, y, w, h, dst_w, dst_h);
+            C3D_FrameSplit(GX_CMDLIST_FLUSH);
+            u8* src = (u8*)sc->tex.data + ((sc->rows - n) / 8) * rowbytes;
+            u8* dst = (u8*)slot->tex.data + ((th - r0 - n) / 8) * rowbytes;
+            u32 bytes = (n / 8) * rowbytes;
+            GX_TextureCopy((u32*)src, GX_BUFFER_DIM(bytes, 0), (u32*)dst, GX_BUFFER_DIM(bytes, 0), bytes, 8);
+            s_gx_entries += 2;
+        }
+        C3D_FrameDrawOn(s_efb);
+        return;
+    }
+    if (slot->target == NULL) {
+        slot->target = C3D_RenderTargetCreateFromTex(&slot->tex, GPU_TEXFACE_2D, 0, -1);
+        if (slot->target == NULL) {
+            PLOG_E("gpu: copy target %lu cannot be rendered to", (unsigned long)handle);
+            return;
+        }
+    }
+    copy_pass(slot->target, slot->tex.width, slot->tex.height, 0, x, y, w, h, dst_w, dst_h);
 }
 
 static void take_shot(void);
@@ -1516,6 +1640,13 @@ void plat_gpu_init(void) {
                                   GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB8) |
                                   GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
                                   GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    /* the scratch target of the strip copies (bank A has room after the EFB and the screen) */
+    s_scratch_mem = vramAllocAt(SCRATCH_BYTES, VRAM_ALLOC_A);
+    if (s_scratch_mem == NULL) {
+        s_scratch_mem = vramAlloc(SCRATCH_BYTES);
+    }
+    PLOG_I("gpu: VRAM after the EFB, the screen and a %d KB copy scratch: %lu KB free, largest block %lu KB", SCRATCH_BYTES / 1024,
+           (unsigned long)(vramSpaceFree() / 1024), (unsigned long)vram_largest_kb());
     /* the EFB's color buffer viewed as a texture, for EFB copies */
     memset(&s_efb_tex, 0, sizeof(s_efb_tex));
     s_efb_tex.data = s_efb->frameBuf.colorBuf;

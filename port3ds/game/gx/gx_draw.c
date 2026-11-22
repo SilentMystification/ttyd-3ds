@@ -567,20 +567,122 @@ static void line(const Out* a, const Out* b, f32 width) {
     s_tri_out[s_tri_n++] = q[3].v;
 }
 
+/* switch gxstats: which GX features the draw's vertices use */
+static void perf_draw(u8 prim, const GxVertex* v, u32 n) {
+    GxPerf* p = &gx_perf;
+    p->xf_draws++;
+    p->xf_verts += n;
+    static const u8 prim_slot[8] = {0, 0, 1, 2, 3, 4, 5, 6}; /* (prim - 0x80) >> 3 */
+    p->v_prim[prim_slot[((prim - 0x80) >> 3) & 7]] += n;
+    if (gx.vtx_desc[GX_VA_PNMTXIDX] != GX_NONE) {
+        p->v_pnmtxidx += n;
+        u32 seen = 0;
+        for (u32 i = 0; i < n; i++) {
+            seen |= 1u << (v[i].pnmtx % GX_POS_MTX_COUNT);
+        }
+        u32 k = (u32)__builtin_popcount(seen);
+        if (k > p->max_pnmtx_in_draw) {
+            p->max_pnmtx_in_draw = k;
+        }
+    }
+    for (int t = 0; t < 8; t++) {
+        if (gx.vtx_desc[GX_VA_TEX0MTXIDX + t] != GX_NONE) {
+            p->v_texmtxidx += n;
+            break;
+        }
+    }
+    if (v[0].has_nrm) {
+        p->v_nrm += n;
+    }
+    int need_both = 0;
+    for (int u = 0; u < s_units; u++) {
+        const typeof(gx.texgen[0])* tg = &gx.texgen[s_unit_coord[u]];
+        if (tg->func == GX_TG_SRTG || tg->src == GX_TG_COLOR0 || tg->src == GX_TG_COLOR1) {
+            need_both = 1;
+        }
+        if (tg->func == GX_TG_MTX2x4) {
+            p->v_tg_2x4 += n;
+        } else if (tg->func == GX_TG_MTX3x4) {
+            p->v_tg_3x4 += n;
+        } else {
+            p->v_tg_other += n;
+        }
+        if (tg->src == GX_TG_POS) {
+            p->v_tg_pos += n;
+        } else if (tg->src == GX_TG_NRM) {
+            p->v_tg_nrm += n;
+        } else if (tg->src >= GX_TG_TEX0 && tg->src <= GX_TG_TEX7) {
+            p->v_tg_tex += n;
+        } else if (tg->src == GX_TG_COLOR0 || tg->src == GX_TG_COLOR1) {
+            p->v_tg_color += n;
+        }
+        if (tg->pt_mtx != GX_PTIDENTITY && tg->pt_mtx >= GX_PTTEXMTX0) {
+            p->v_tg_post += n;
+            if (tg->normalize) {
+                p->v_tg_normalize += n;
+            }
+        }
+    }
+    if (need_both) {
+        p->v_second_chan += n;
+    }
+    int lit = 0;
+    for (int k = 0; k < (need_both ? 2 : 1); k++) {
+        int ch = k == 0 ? s_color_chan : 1 - s_color_chan;
+        for (int part = 0; part < 2; part++) {
+            const typeof(gx.chan[0])* c = &gx.chan[ch + part * 2];
+            if (!c->enable) {
+                continue;
+            }
+            lit = 1;
+            u32 lights = (u32)__builtin_popcount(c->light_mask & 0xFF);
+            p->v_light_evals += n * lights * (part == 0 ? 3 : 1);
+            if (lights && c->attn_fn == GX_AF_SPOT) {
+                p->v_spot += n;
+            } else if (lights && c->attn_fn == GX_AF_SPEC) {
+                p->v_spec += n;
+            }
+            if (c->mat_src == GX_SRC_VTX || c->amb_src == GX_SRC_VTX) {
+                p->v_vtx_src += n;
+            }
+        }
+    }
+    if (lit) {
+        p->v_lit += n;
+    } else {
+        p->v_unlit += n;
+    }
+}
+
 void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
     if (n == 0) {
         return;
     }
+    u64 t0 = GX_PERF_T();
     if (gx.version != s_built_version) {
         build_state();
+        if (gx_perf_on > 0) {
+            gx_perf.builds++;
+            gx_perf.t_state += plat_ticks() - t0;
+        }
     }
     if (s_state.scissor_x1 <= s_state.scissor_x0 || s_state.scissor_y1 <= s_state.scissor_y0 ||
         gx.vp[2] == 0.0f || gx.vp[3] == 0.0f) {
         return; /* empty scissor or viewport: the PICA200 hangs on them */
     }
+    u64 t1 = GX_PERF_T();
     for (u32 i = 0; i < n; i++) {
         transform(&v[i], &s_out[i]);
         bbox_add(&s_out[i]);
+    }
+    if (gx_perf_on > 0) {
+        u64 t2 = plat_ticks();
+        gx_perf.t_xform += t2 - t1;
+        perf_draw(prim, v, n);
+        for (u32 i = 0; i < n; i++) {
+            gx_perf.v_behind += !s_out[i].front;
+        }
+        t1 = t2;
     }
     u32 max_tris;
     switch (prim) {
@@ -682,6 +784,15 @@ dumped:
         gx_stat_draws++;
         gx_stat_vertices += s_tri_n;
     }
+    if (gx_perf_on > 0) {
+        gx_perf.t_emit += plat_ticks() - t1;
+        if (prim == GX_LINES || prim == GX_LINESTRIP || prim == GX_POINTS) {
+            gx_perf.lines += s_tri_n / 6;
+        } else {
+            gx_perf.tris_out += s_tri_n / 3;
+            gx_perf.tris_culled += max_tris - s_tri_n / 3;
+        }
+    }
 }
 
 void gx_draw_frame_begin(void) {
@@ -714,6 +825,7 @@ void gx_draw_frame_begin(void) {
                (unsigned long)plat_gpu_present_count(), copy_left);
         plat_gpu_shot(path);
     }
+    gx_perf_frame();
     gx_stat_draws = gx_stat_vertices = gx_stat_copies = 0;
     s_built_version = 0xFFFFFFFFu; /* every frame starts with a full state */
 }

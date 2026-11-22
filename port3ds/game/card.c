@@ -366,12 +366,16 @@ static s32 post(const Job* j) {
     return CARD_RESULT_READY;
 }
 
+/* A card operation is queued or running (for a devupdate relaunch). */
+static int card_busy(void) { return s_job_head != s_job_tail; }
+
 /* ---- API ---- */
 
 void CARDInit(void) {
     if (s_thread != NULL) {
         return;
     }
+    plat_set_save_busy(card_busy);
     s_lock = plat_mutex_create();
     s_wake = plat_event_create();
     s_thread = plat_thread_create(card_thread, NULL, 32 * 1024, 0x2D, 1, "card");

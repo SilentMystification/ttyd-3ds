@@ -67,6 +67,9 @@ void plat_set_map_name(const char* map);
 void plat_wd_progress(void);
 /* Holds the watchdog while a long legitimate wait runs (saving, loading). */
 void plat_wd_hold(int on);
+/* The card layer registers whether a card operation is queued or running,
+ * so a devupdate relaunch waits for it (plat/devupdate.c). */
+void plat_set_save_busy(int (*busy)(void));
 
 /* ---- Frame and exit requests (plat/boot.c) ----
  * Called once per frame by the game side. Runs the APT loop (HOME menu,

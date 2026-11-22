@@ -1,5 +1,5 @@
-/* Debug switches: words from sdmc:/3ds/ttyd/debug3ds.txt and the 3dslink
- * arguments. Same rules as the Paper Mario 3DS port: a word matches whole
+/* Debug switches: words from the APT deliver arguments (devupdate restart),
+ * sdmc:/3ds/ttyd/debug3ds.txt and the 3dslink arguments. Same rules as the Paper Mario 3DS port: a word matches whole
  * words only; key=value pairs are read with plat_switch_value. Lookups are
  * cached (a test run has a switch string; real play has none and returns at
  * once). */
@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ctrdk/devupdate.h"
 #include "plat/plat.h"
 #include "plat_internal.h"
 
@@ -90,11 +91,19 @@ int plat_switch_int(const char* key, int fallback) {
 
 void plat_switches_load(int argc, char** argv) {
     s_text[0] = '\0';
+    /* First the switches this launch received as APT deliver arguments (a
+     * devupdate restart): a lookup takes the first match, so these one-shot
+     * switches win over the file and the 3dslink arguments. */
+    snprintf(s_text, sizeof(s_text), "%s", devupdate_launch_args());
     FILE* f = fopen("debug3ds.txt", "r");
     if (f != NULL) {
-        size_t got = fread(s_text, 1, sizeof(s_text) - 1, f);
+        size_t len = strlen(s_text);
+        if (len > 0 && len + 1 < sizeof(s_text)) {
+            s_text[len++] = ' ';
+        }
+        size_t got = fread(s_text + len, 1, sizeof(s_text) - 1 - len, f);
         fclose(f);
-        s_text[got] = '\0';
+        s_text[len + got] = '\0';
     }
     /* 3dslink arguments after the program name. */
     for (int i = 1; i < argc; i++) {

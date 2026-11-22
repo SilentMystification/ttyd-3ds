@@ -4,7 +4,9 @@
 #   tools/port3ds/build.sh [project] [cmake -D options...]
 #
 # project is a directory under port3ds/ ("probe" builds port3ds/probe; the
-# default "." builds the game in port3ds/). Output goes to build/3ds/<project>/.
+# default "." builds the game in port3ds/), or a path from the repository
+# root ("libs/ctr-devkit" builds the ctr-devkit examples). Output goes to
+# build/3ds/<last path component>/.
 # The image is built from tools/port3ds/docker/Dockerfile on first use and
 # tagged with a hash of the Dockerfile, so a changed Dockerfile rebuilds it.
 #
@@ -16,7 +18,11 @@ repo=$(cd "$(dirname "$0")/../.." && pwd)
 project=${1:-.}
 [ $# -gt 0 ] && shift
 
-src="port3ds/$project"
+if [ "$project" != "." ] && [ -f "$repo/$project/CMakeLists.txt" ]; then
+    src=$project
+else
+    src="port3ds/$project"
+fi
 name=$(basename "$(cd "$repo/$src" && pwd)")
 [ "$project" = "." ] && name=game
 out="build/3ds/$name"
@@ -30,8 +36,17 @@ if ! docker image inspect "$tag" >/dev/null 2>&1; then
     docker build -t "$tag" "$repo/tools/port3ds/docker"
 fi
 
+# In a git worktree, .git is a file pointing into the main repository's .git:
+# mount that too (read-only), so the build string gets the commit.
+gitmount=
+if [ -f "$repo/.git" ]; then
+    common=$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd)
+    gitmount="-v $common:$common:ro"
+fi
+
 mkdir -p "$repo/$out"
-docker run --rm \
+# shellcheck disable=SC2086
+docker run --rm $gitmount \
     --user "$(id -u):$(id -g)" \
     -e HOME=/tmp \
     -v "$repo:/work" \

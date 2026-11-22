@@ -47,6 +47,7 @@ static aptHookCookie s_apt_cookie;
 void plat_cpu_limit_restore(void); /* below */
 
 uint64_t plat_ticks(void) { return svcGetSystemTick(); }
+uint64_t plat_boot_tick(void) { return s_boot_tick; }
 uint32_t plat_uptime_ms(void) { return (uint32_t)((svcGetSystemTick() - s_boot_tick) / (PLAT_TICKS_PER_SEC / 1000u)); }
 int plat_is_new3ds(void) { return s_new3ds; }
 
@@ -162,8 +163,14 @@ void plat_cpu_limit_init(void) {
     aptHook(&s_apt_cookie, apt_hook, NULL);
 }
 
+/* devupdate (plat/devupdate.c): during a transfer the network gets more of core 1. */
+void plat_cpu_limit_transfer(int on) {
+    cpu_limit_set(on ? 30 : s_cpu_limit, on ? "devupdate transfer" : "devupdate transfer done");
+}
+
 int plat_frame_poll(void) {
     plat_wd_progress();
+    plat_devupdate_frame();
     return aptMainLoop() ? 1 : 0;
 }
 
@@ -186,8 +193,6 @@ void plat_crash_gpu_down(void) {
     }
 }
 
-void plat_wd_quiesce(void); /* crash.c */
-
 /* Normal exit. exit() runs the atexit handlers (ndsp, apt, gfx, soc), which
  * the raw svcExitProcess in plat_exit_process would skip. relaunch: ask APT
  * to start this app again when the process ends (the Homebrew Launcher may
@@ -199,6 +204,7 @@ void plat_quit(int relaunch) {
         s_gpu_shutdown = NULL;
     }
     plat_cpu_limit_restore();
+    plat_devupdate_stop();
     plat_log_stop();
     plat_log_crash_close();
     if (relaunch) {
@@ -279,7 +285,7 @@ int main(int argc, char** argv) {
     s_netload = (argc > 0 && argv[0] != NULL && strncmp(argv[0], "3dslink:", 8) == 0) || __3dslink_host.s_addr != 0;
     plat_switches_load(argc, argv);
     plat_log_init(s_netload || plat_switch_has("livelog"));
-    plat_crash_install_thread();
+    plat_crash_setup();
     plat_stack_register(0, "main", __stacksize__);
     PLOG_I("TTYD 3DS build %s, switches \"%s\"", PORT3DS_BUILD_STRING, plat_switches_text());
     PLOG_I("boot: argc %d argv[0] \"%s\" 3dslink_host 0x%08lx netload %d", argc,
@@ -289,6 +295,7 @@ int main(int argc, char** argv) {
     plat_memplace_init();
     plat_log_start_writer();
     plat_crash_init();
+    plat_devupdate_init();
     plat_memplace_report();
 
     /* libctru gives the heap and the linear heap whatever the APPLICATION

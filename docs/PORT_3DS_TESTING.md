@@ -97,6 +97,7 @@ Switches the game reads (space-separated words in `--switches`):
 | `place=<name>:<tier>[,<name>:<tier>...]` | Forces a memory placement's tier (`qtm`, `linear` or `heap`) for A/B runs. Write spaces in names as `_` (`gx_record:linear`). Unknown names or tiers are logged as `[MEM] place=... ignored` and skipped; the GPU/DSP rules still apply |
 | `qtmgpu` | Allows `GPU_READ`/`GPU_WRITE` placements in QTM. Off by default: GPU access to QTM is unverified on hardware. `DSP` placements never go in QTM |
 | `texstats=N` | Every N frames, logs texture hashes, bytes hashed, lookups, hash mismatches and uploads per frame. The first change of each texture is logged with its address, size, format, memory region and the caller of the last `GXInitTexObj*` for that address |
+| `devupdate` | Development only: starts the ctr-devkit updater at boot (TCP 5050, `devupdateport=N`, `devupdatetoken=TEXT`), and a crash then goes to recovery mode instead of waiting for START. See "ctr-devkit: crash and devupdate" below |
 
 Sound needs `sdmc:/3ds/dspfirm.cdc` (dumped from a console with DSP1), in the profile's SD card as on the console. Without it the game runs silently with the same sound timing. `--lle-audio` makes Azahar run that firmware itself (its LLE DSP) instead of its own model of it, which is slower but closer to the console. `wavdump=N` saves the first N seconds of the game's mix as `sdmc:/3ds/ttyd/audio.wav`, and the log has the output's peak level every 10 s.
 
@@ -189,6 +190,36 @@ N3DS_IP=192.168.1.223 tools/port3ds/pc_sample.py --pid <PID> --port 4000 \
 4. `--title <hex title id>` instead of `--pid` asks Rosalina for its process list over the protocol (`qXfer:osdata`). That is written from the GDB specification, not checked against Rosalina; if it fails, use `--pid`.
 
 Not verified (written from Luma3DS's documentation and the GDB protocol, tested only against Azahar): attaching with `vAttach;<pid>`, the 20 ms rate Rosalina can sustain, and whether `D` resumes the process (the tool also sends `c`, and Rosalina detaches when the socket closes). Expect the achieved rate to be printed on the first line of the output; if samples are slower than 200 ms the tool backs off by itself.
+
+## ctr-devkit: crash and devupdate
+
+The crash handler and the updater are the libctru-only libraries in `libs/ctr-devkit/` (MIT, see its README). `port3ds/plat/crash.c` and `port3ds/plat/devupdate.c` are TTYD's glue. Reports now start with the format version (`[CRASH] v1 ...`); `crash_report.py` reads both forms.
+
+```sh
+tools/port3ds/build.sh libs/ctr-devkit          # examples: build/3ds/ctr-devkit/examples/{crash,devupdate}/
+D=libs/ctr-devkit/devupdate/devupdate.py
+$D --ip $N3DS_IP push build/3ds/game/ttyd.cia --switches "map=gor_01 wdog=30" --wait 120   # needs devupdate on
+$D --ip $N3DS_IP restart map=hei_13 wdog=5
+$D --ip $N3DS_IP report --out build/devupdate-last/report.txt   # after a crash (recovery mode)
+$D --ip $N3DS_IP bootstrap --cia build/3ds/game/ttyd.cia --switches devupdate   # first install, no FBI
+```
+
+- **Switches.** `restart` and `push` switches reach the relaunched game as APT deliver arguments, which `plat_switches_load` puts first. They hold for that one launch; a start from the HOME Menu gets only `debug3ds.txt`. A devupdate relaunch keeps the server on.
+- **Saves.** Before a relaunch the game only waits for a card write in progress. It never touches the files in `sdmc:/3ds/ttyd/`.
+- **Azahar.** The same commands work with `--ip 127.0.0.1` against one long-lived headless instance:
+
+```sh
+$D azahar-session start --profile build/azahar-profile --boot build/3ds/game/ttyd.cia   # takes an Azahar slot
+tools/port3ds/devupdate_azahar.py [--app ttyd|ttyd-crash]   # the scripted check, one instance per run
+```
+
+Azahar runs:
+- the protocol and the CRC refusal;
+- the AM install, also over the running game, which keeps running;
+- the pause at a frame boundary and the resume;
+- recovery mode after `crashtest=fatal`.
+
+It cannot do an APT application jump: the Flatpak Azahar aborts, or never starts the new title, on any relaunch (`restart`, a push with relaunch, the bootstrap's jump). In Azahar a cancelled push over an installed title also removes that install, because its AM writes into the title's folder. Relaunches, their deliver arguments, and the old install surviving a refused push are therefore checked on the console only.
 
 ## Running the GameCube game in Dolphin
 

@@ -153,3 +153,5 @@ The CPU budget is about 2 full cores (0 and 2) plus about 0.7 of core 1 for back
 - `plat_job_init` / `plat_job_submit` / `plat_job_join` / `plat_job_join_all` / `plat_job_parallel_for` (`port3ds/plat/job.c`): a fork-join job queue on core 2 with work stealing. It is for pure computation only: no GPU or service calls inside a job.
 - `plat_input_set_extra_keys` (`port3ds/plat/input.c`): lets the game inject keys, as `fastboot` does.
 - `plat_place_register` / `plat_place_set_manifest` (`port3ds/plat/memplace.c`): memory placement tiers, plus a game manifest hook.
+- `plat_options_register(PlatOptMenu*)`, `plat_opt_get` / `plat_opt_set` / `plat_options_save`, and `opt_get_*` getters (`port3ds/plat/options.c`, `options_menu.c`): the game supplies the option pages, items and an `on_change` callback, and the platform provides storage and the bottom-screen menu.
+- The `plat_input_*` edge, modal-poll and key-hiding hooks (`port3ds/plat/input.c`).

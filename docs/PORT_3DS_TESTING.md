@@ -104,6 +104,8 @@ Switches the game reads (space-separated words in `--switches`):
 | `loadstats` | A `[LOADCONV]` line per load-time conversion, and a summary per load: per-kind time, DVD reads and wait |
 | `convhash` | Adds an FNV-1a hash of each converted file to the `loadstats` lines |
 | `arqspin` | ARQ waits poll with a yield (the old behaviour) instead of sleeping until the next ARQ callback |
+| `padlog` | Logs `padlog: 3ds=<held hex> gc=<GameCube button bits>` whenever the GameCube button state changes, to verify remaps |
+| `devmenu` | Enables the developer menu, opened with ZL+SELECT. SELECT alone opens the player Options menu, so a `padscript` that pressed `select` for the old developer menu now opens Options. While the Options menu is open, `padscript` steps advance once per ~16 ms menu poll, not per game frame. Example: `wait*900,select*3,wait*5,right*2,wait*5,select*3` |
 | `devupdate` | Development only: starts the ctr-devkit updater at boot (TCP 5050, `devupdateport=N`, `devupdatetoken=TEXT`), and a crash then goes to recovery mode instead of waiting for START. See "ctr-devkit: crash and devupdate" below |
 
 Sound needs `sdmc:/3ds/dspfirm.cdc` (dumped from a console with DSP1), in the profile's SD card as on the console. Without it the game runs silently with the same sound timing. `--lle-audio` makes Azahar run that firmware itself (its LLE DSP) instead of its own model of it, which is slower but closer to the console. `wavdump=N` saves the first N seconds of the game's mix as `sdmc:/3ds/ttyd/audio.wav`, and the log has the output's peak level every 10 s.
@@ -312,3 +314,6 @@ It takes about 1 to 3 minutes and exits 1 on any failure. Without the disc image
   2. Reach file select with `wait*850` followed by repeated `a*3,wait*150`, with `shots=100` to see it.
   3. Rogueport has a save block, so saving mid-game is a cheap test.
 
+### Options
+
+Player settings live in `sdmc:/3ds/ttyd/options.txt` as `key=value` lines ending in `#end`. Deleting the file resets everything to defaults.

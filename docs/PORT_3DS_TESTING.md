@@ -105,6 +105,8 @@ Switches the game reads (space-separated words in `--switches`):
 | `convhash` | Adds an FNV-1a hash of each converted file to the `loadstats` lines |
 | `arqspin` | ARQ waits poll with a yield (the old behaviour) instead of sleeping until the next ARQ callback |
 | `padlog` | Logs `padlog: 3ds=<held hex> gc=<GameCube button bits>` whenever the GameCube button state changes, to verify remaps |
+| `lang=<en\|de\|fr\|es\|it\|nl>` | PAL: the game language. The default comes from the 3DS system language; any other language falls back to English |
+| `hz=50` | PAL: preselects 50 Hz at the 50/60 Hz prompt (default 60 Hz) |
 | `devmenu` | Enables the developer menu, opened with ZL+SELECT. SELECT alone opens the player Options menu, so a `padscript` that pressed `select` for the old developer menu now opens Options. While the Options menu is open, `padscript` steps advance once per ~16 ms menu poll, not per game frame. Example: `wait*900,select*3,wait*5,right*2,wait*5,select*3` |
 | `devupdate` | Development only: starts the ctr-devkit updater at boot (TCP 5050, `devupdateport=N`, `devupdatetoken=TEXT`), and a crash then goes to recovery mode instead of waiting for START. See "ctr-devkit: crash and devupdate" below |
 
@@ -317,3 +319,12 @@ It takes about 1 to 3 minutes and exits 1 on any failure. Without the disc image
 ### Options
 
 Player settings live in `sdmc:/3ds/ttyd/options.txt` as `key=value` lines ending in `#end`. Deleting the file resets everything to defaults.
+
+### Regions
+
+- **Building:**
+  - `tools/port3ds/build.sh . -DREGION=JP` (or `PAL`) writes to `build/3ds/game_jp` (or `build/3ds/game_pal`).
+  - The discs go in `iso/G8MJ01.iso` and `iso/G8MP01.iso`, or are given with `-DTTYD_DISC=`.
+- **Wrong-disc check:** a build refuses a disc from another region. With the US disc, `run_azahar.py --build build/3ds/game_pal/ttyd.cia --switches "" --until "This build is for"` should pass.
+- **JP and PAL in-game testing needs the JP and PAL discs.** The steps are in PORT_3DS_PLAN.md section 9.1.
+

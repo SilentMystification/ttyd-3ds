@@ -67,6 +67,14 @@ Updated 2026-11-22. Owner goals: original GameCube frame rates, stereo 3D, all t
 5. The hardware-only warning `gpu: copy target 2 cannot be rendered to`.
 6. Multi-hour stability: memory, log volume, saves.
 
+## Lane F: found along the way
+
+1. **THP movie decoder in C.** The JP and PAL `dig` map's `demo.thp` plays black and silent today, because the SDK's THP decoder is PowerPC assembly and the port stubs it. The plan forbids stubs. Write a C Motion-JPEG plus THP audio decoder (portable, in the library layer).
+2. **JP ROM font (SJIS).** The port's ROM font is ASCII-only, and JP needs SJIS glyphs. This is the likeliest JP boot problem.
+3. **JP and PAL discs from the owner,** to run plan section 9.1's steps.
+4. **Battle "struck first" black band:** in progress.
+5. **The DVD manager's idle loop** polls instead of blocking (`os_thread.c`'s `OSYieldThread`). Measure on hardware behind a switch.
+
 ## Lane E: leftovers and release
 
 1. **Phase 5:** audio golden-hash comparison against paper-cut.

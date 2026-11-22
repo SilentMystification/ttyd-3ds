@@ -14,6 +14,7 @@
 #include <malloc.h>
 #include <string.h>
 
+#include "plat/memstable.h"
 #include "plat/plat.h"
 #include "port3ds/os_internal.h"
 #include "port3ds/rel_static.h"
@@ -75,6 +76,7 @@ BOOL OSLink(OSModuleInfo* newModule, void* bss) {
         plat_fatal("OSLink: module id %08lx is not a static REL", (unsigned long)newModule->id);
     }
     memcpy(r->data_start, s_snapshots[i], (size_t)(r->data_end - r->data_start));
+    plat_memstable_fill(r->data_start, (u32)(r->data_end - r->data_start)); /* the REL file's data again */
     memset(r->bss_start, 0, (size_t)(r->bss_end - r->bss_start));
     OSModuleHeader* h = (OSModuleHeader*)newModule;
     h->prolog = (u32)r->prolog;
@@ -102,6 +104,7 @@ BOOL OSUnlink(OSModuleInfo* oldModule) {
     if (*p == oldModule) {
         *p = oldModule->link.next;
     }
+    plat_memstable_release(r->data_start, (u32)(r->data_end - r->data_start));
     PLOG_I("OSUnlink %s", r->name);
     return TRUE;
 }

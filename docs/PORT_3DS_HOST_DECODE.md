@@ -81,8 +81,8 @@ is never built in place; without it the cross-checks are skipped. Run time is ab
 | MusyX | `.proj`, `.pool`, `.slib` and `.stm` headers byte-identical to paper-cut's `musyx_swap.c` (compiled as it is, `host_decode/xcheck_musyx.c`); `.sdir` entries (id, reference count, offset, address, sample header, ADPCM offset) and the ADPCM records against paper-cut's rebuilt native directory |
 | paper-cut C decoders | paper-cut's `tests/port/disc_sweep.c` (its `portTplDecode`, `portAnimDecode`, `portMapDecode`, `portCamRoadDecode`, `portFontSwap`, compiled with gcc) over the same files: both accept the same set |
 
-Not covered, and why: the FST reader is a copy of the logic in `port3ds/game/dvd.c` (`DVDInit`,
-`DVDConvertPathToEntrynum`), not that file (it is built on the 3DS thread and interrupt layer); texel and CLUT
+Not covered, and why: the disc header check in `DVDInit` stays in `dvd.c` (it is built on the 3DS thread and
+interrupt layer; the FST parsing and path lookup are the shared `port3ds/game/fst.c`); texel and CLUT
 data, packed display lists and vertex colours are left big-endian by the converters (the GX layer reads them
 so), so they are compared only as unchanged bytes; camera roads have no paper-cut Python decoder, so they are
 covered by the permutation check and paper-cut's C decoder accepting them.
@@ -106,6 +106,7 @@ the image in the page cache (the tables below are the converter time).
 
 518 files (21.7 MB) have no converter: messages, RELs, `.samp`, `.db`, `m/*/s` and the like.
 
-One file differs from paper-cut: `a/OFF_hei_01b` is a pre-release model (0x68-byte shapes) that paper-cut's
-decoder rejects. The port's converter accepts it and swaps it with the retail layout, which is wrong for it;
-the game never loads it (`hei_01` loads `OFF_hei_01c`). `test_decode.py` lists it as a known difference.
+One file is rejected, as in paper-cut: `a/OFF_hei_01b` is a pre-release model (0x68-byte shapes).
+`portAnimSwap` refuses it with a logged error ("pre-release model format") instead of swapping it with the
+retail layout; the game never loads it (`hei_01` loads `OFF_hei_01c`). `test_decode.py` expects exactly this
+rejection and fails if it goes away or anything else fails.

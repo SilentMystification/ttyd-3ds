@@ -27,11 +27,11 @@ extern const int host_format_count;
 /* ---- the disc (fst.c) ---- */
 
 typedef struct {
+    uint32_t name;   /* offset in the string table */
     uint32_t offset; /* file: disc offset. dir: parent index */
     uint32_t size;   /* file: size. dir: index after the last child */
-    uint32_t name;   /* offset in the string table */
     uint8_t is_dir;
-} FstEntry;
+} FstEntry; /* the layout of PortFstEntry (port3ds/fst.h) */
 
 /* Opens the image, checks it is a GameCube image, loads the FST. Returns 0, or -1 with a message in err. */
 int host_disc_open(const char* path, char* err, size_t err_n);

@@ -15,7 +15,12 @@
  * encoded on the game thread, from the shadow's vertex state.
  *
  * Who translates: gxthread=1 and 3, the game thread itself at each fence;
- * gxthread=2, a thread on core 2 that follows the ring as it fills.
+ * gxthread=2, a thread on core 2 that follows the ring as it fills. With
+ * gxthread=2 the game thread also translates the start of each frame itself
+ * (gx_rec_direct), while core 2 still replays the frame before; after
+ * s_switch_at display-list calls it starts recording. The split moves by
+ * hill climbing on the frame's work time (switch gxthreadsplit=0: record
+ * everything; gxthreadsplitat=N: a fixed split).
  *
  * Fences (gx_rec_fence): the caller waits until everything recorded so far is
  * translated. They are the points where the GameCube game waits for the GPU
@@ -96,6 +101,7 @@ static u32 s_win_frames, s_step = 256, s_better;
 static s32 s_dir = -1;
 static u64 s_ts_busy; /* translator thread busy ticks (atomic adds) */
 static u64 s_ts_present; /* translating GXCopyDisp (the frame's submit) */
+static u32 s_snap_mism; /* snapshots not used: the translator's vertex state or array differed */
 
 /* verify */
 #define REP_MAX 4096
@@ -119,6 +125,8 @@ static inline int load_sci(const int* p) { return __atomic_load_n(p, __ATOMIC_SE
 static inline void store_sci(int* p, int v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }
 
 /* ---- Translating ---- */
+
+static u32 vtx_state_hash(const GxState* g, u32 fmt);
 
 static void check_textures(void) {
     for (int s = 0; s < gx.num_tev && s < GX_MAX_TEV; s++) {
@@ -162,12 +170,39 @@ static void run_one(u32 type, const u32* w, u32 n) {
         }
         break;
     }
-    case GXR_PRIM:
-        gx_draw_prim((u8)w[0], (u16)w[1], (const void*)w[2], w + 3, n - 3);
+    case GXR_PRIM: {
+        u32 nslots = w[3], nsnap = w[4];
+        const u8* saved[GX_VA_MAX_ATTR];
+        u32 used = 0; /* attributes drawn from a snapshot (bit each) */
+        if (nsnap != 0) {
+            if (vtx_state_hash(&gx, w[0] & 7) != w[5]) {
+                s_snap_mism++; /* the translator's vertex state is not the shadow's: read live */
+            } else {
+                const u32* q = w + 6 + nslots;
+                for (u32 i = 0; i < nsnap; i++) {
+                    u32 a = q[0];
+                    if (a < GX_VA_MAX_ATTR && (u32)gx.array_base[a] == q[1] && gx.array_stride[a] == q[2]) {
+                        saved[a] = gx.array_base[a];
+                        gx.array_base[a] = (const u8*)(q + 5) - q[3] * q[2];
+                        used |= 1u << a;
+                    } else {
+                        s_snap_mism++;
+                    }
+                    q += 5 + (q[4] + 3) / 4;
+                }
+            }
+        }
+        gx_draw_prim((u8)w[0], (u16)w[1], (const void*)w[2], w + 6, nslots);
+        for (u32 a = 0; used != 0; a++, used >>= 1) {
+            if (used & 1) {
+                gx.array_base[a] = saved[a];
+            }
+        }
         if (gx_rec_mode == 3) {
             check_textures();
         }
         break;
+    }
     case GXR_RAW: gx_run_raw(w, n); break;
     case REC_CopyDisp: {
         /* the frame's end: its submit waits for the replay of the last frame (counted apart) */
@@ -291,7 +326,7 @@ void gx_rec_call(u32 id, const u32* w, u32 n) {
     }
     commit(n, 0);
     /* only the calls the shadow keeps (gx_shadow_call) */
-    if (id <= REC_SetViewport ? (id <= REC_SetVtxAttrFmt || id == REC_SetCullMode || id >= REC_SetScissor)
+    if (id <= REC_SetViewport ? (id <= REC_SetArray || id == REC_SetCullMode || id >= REC_SetScissor)
                               : (id == REC_SetProjection || id == REC_SetDispCopySrc || id == REC_SetTexCopySrc ||
                                  id == REC_SetDrawSync)) {
         gx_shadow_call(id, w);
@@ -312,16 +347,156 @@ void gx_rec_list(const void* list, u32 nbytes, const void* caller) {
     commit(n, 1);
 }
 
+/* ---- Snapshots of the arrays a GXBegin primitive indexes ----
+ * The game writes CPU-built arrays (skinned characters: animdrv's shared
+ * scratch) and draws from them at once with GXBegin, then reuses the memory
+ * for the next model. A translator reading them later sees the next model.
+ * So the game thread finds the index range of every indexed attribute (a
+ * walk over the pipe writes with the shadow's vertex description) and copies
+ * that part of the array into the record; the translator draws from the
+ * copy when its own vertex state and array match the shadow's. */
+static u32 comp_bytes(u8 type) { return type == GX_U8 || type == GX_S8 ? 1 : type == GX_U16 || type == GX_S16 ? 2 : 4; }
+
+static u32 vtx_state_hash(const GxState* g, u32 fmt) {
+    return gx_hash32(g->vat[fmt], sizeof(g->vat[fmt]), gx_hash32(g->vtx_desc, sizeof(g->vtx_desc), 0x51A9u));
+}
+
+typedef struct {
+    u32 lo, hi, elem; /* index range read, bytes of one element */
+} SnapRange;
+
+/* Index ranges of a primitive's indexed attributes (GX_VA_POS..GX_VA_TEX7); 0 when the writes do not parse. */
+static int snap_ranges(const GxState* g, u32 fmt, u32 nverts, const PPCWGPipe* sl, u32 nslots, SnapRange* r) {
+    const u8* d = g->vtx_desc;
+    const GxAttrFmt* f = g->vat[fmt];
+    for (int a = 0; a < GX_VA_MAX_ATTR; a++) {
+        r[a] = (SnapRange){0xFFFFFFFFu, 0, 0};
+    }
+    u32 k = 0;
+#define TAKE(n)                  \
+    do {                         \
+        k += (n);                \
+        if (k > nslots) {        \
+            return 0;            \
+        }                        \
+    } while (0)
+#define INDEX(a, dsc)                                                         \
+    do {                                                                      \
+        if (k >= nslots) {                                                    \
+            return 0;                                                         \
+        }                                                                     \
+        u32 i_ = (dsc) == GX_INDEX8 ? sl[k].u8 : sl[k].u16;                   \
+        k++;                                                                  \
+        r[a].lo = i_ < r[a].lo ? i_ : r[a].lo;                                \
+        r[a].hi = i_ > r[a].hi ? i_ : r[a].hi;                                \
+    } while (0)
+    for (u32 v = 0; v < nverts; v++) {
+        if (d[GX_VA_PNMTXIDX] != GX_NONE) {
+            TAKE(1);
+        }
+        for (int t = 0; t < 8; t++) {
+            if (d[GX_VA_TEX0MTXIDX + t] != GX_NONE) {
+                TAKE(1);
+            }
+        }
+        u32 n = f[GX_VA_POS].cnt == GX_POS_XY ? 2 : 3;
+        if (d[GX_VA_POS] == GX_DIRECT) {
+            TAKE(n);
+        } else if (d[GX_VA_POS] != GX_NONE) {
+            INDEX(GX_VA_POS, d[GX_VA_POS]);
+            r[GX_VA_POS].elem = n * comp_bytes(f[GX_VA_POS].type);
+        }
+        u8 dn = d[GX_VA_NRM] != GX_NONE ? d[GX_VA_NRM] : d[GX_VA_NBT];
+        if (dn != GX_NONE) {
+            u32 vecs = f[GX_VA_NRM].cnt == GX_NRM_XYZ ? 1 : 3;
+            if (dn == GX_DIRECT) {
+                TAKE(vecs * 3);
+            } else {
+                INDEX(GX_VA_NRM, dn); /* only the first vector is read from the array */
+                if (f[GX_VA_NRM].cnt == GX_NRM_NBT3) {
+                    TAKE(2);
+                }
+                r[GX_VA_NRM].elem = 3 * comp_bytes(f[GX_VA_NRM].type);
+            }
+        }
+        for (int c = 0; c < 2; c++) {
+            u8 dc = d[GX_VA_CLR0 + c];
+            u8 ty = f[GX_VA_CLR0 + c].type;
+            if (dc == GX_DIRECT) {
+                TAKE(ty == GX_RGB565 || ty == GX_RGBA4 ? 1 : ty == GX_RGB8 || ty == GX_RGBA6 ? 3 : 4);
+            } else if (dc != GX_NONE) {
+                INDEX(GX_VA_CLR0 + c, dc);
+                r[GX_VA_CLR0 + c].elem = ty == GX_RGB565 || ty == GX_RGBA4 ? 2 : ty == GX_RGBA6 ? 3 : 4;
+            }
+        }
+        for (int t = 0; t < 8; t++) {
+            u8 dt = d[GX_VA_TEX0 + t];
+            u32 nt = f[GX_VA_TEX0 + t].cnt == GX_TEX_S ? 1 : 2;
+            if (dt == GX_DIRECT) {
+                TAKE(nt);
+            } else if (dt != GX_NONE) {
+                INDEX(GX_VA_TEX0 + t, dt);
+                r[GX_VA_TEX0 + t].elem = nt * comp_bytes(f[GX_VA_TEX0 + t].type);
+            }
+        }
+    }
+#undef TAKE
+#undef INDEX
+    return 1;
+}
+
+#define SNAP_MAX_BYTES (64u << 10) /* per attribute; larger spans are read live (counted) */
+static u32 s_snap_bytes, s_snap_live;
+
 void gx_rec_prim(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* slots, u32 nslots) {
-    u32* c = put(GXR_PRIM, 3 + nslots);
+    SnapRange r[GX_VA_MAX_ATTR];
+    u32 fmt = primfmt & 7;
+    int ok = snap_ranges(&gx_game, fmt, nverts, slots, nslots, r);
+    u32 nsnap = 0, snap_words = 0;
+    if (ok) {
+        for (int a = GX_VA_POS; a <= GX_VA_TEX7; a++) {
+            if (r[a].elem == 0 || gx_game.array_base[a] == NULL) {
+                continue;
+            }
+            u32 bytes = (r[a].hi - r[a].lo) * gx_game.array_stride[a] + r[a].elem;
+            if (bytes > SNAP_MAX_BYTES) {
+                s_snap_live++;
+                r[a].elem = 0;
+                continue;
+            }
+            nsnap++;
+            snap_words += 5 + (bytes + 3) / 4;
+        }
+    }
+    u32 n = 6 + nslots + snap_words;
+    u32* c = put(GXR_PRIM, n);
     c[0] = primfmt;
     c[1] = nverts;
     c[2] = (u32)caller;
+    c[3] = nslots;
+    c[4] = nsnap;
+    c[5] = nsnap ? vtx_state_hash(&gx_game, fmt) : 0;
     for (u32 i = 0; i < nslots; i++) {
-        c[3 + i] = slots[i].u32; /* the readers take u8/u16/u32/f32 writes from the low bytes */
+        c[6 + i] = slots[i].u32; /* the readers take u8/u16/u32/f32 writes from the low bytes */
+    }
+    u32* q = c + 6 + nslots;
+    for (int a = GX_VA_POS; nsnap && a <= GX_VA_TEX7; a++) {
+        if (r[a].elem == 0 || gx_game.array_base[a] == NULL) {
+            continue;
+        }
+        u32 stride = gx_game.array_stride[a];
+        u32 bytes = (r[a].hi - r[a].lo) * stride + r[a].elem;
+        q[0] = (u32)a;
+        q[1] = (u32)gx_game.array_base[a];
+        q[2] = stride;
+        q[3] = r[a].lo;
+        q[4] = bytes;
+        memcpy(q + 5, gx_game.array_base[a] + r[a].lo * stride, bytes);
+        q += 5 + (bytes + 3) / 4;
+        s_snap_bytes += bytes;
     }
     s_gs.prims++;
-    commit(3 + nslots, 1);
+    commit(n, 1);
 }
 
 void gx_rec_raw(const PPCWGPipe* slots, u32 nslots) {
@@ -585,6 +760,9 @@ void gx_rec_frame(void) {
            (unsigned long)(s_gs.fences[4] / f), (unsigned long)(s_gs.fences[4] * 100 / f % 100),
            (unsigned long)us_of(s_gs.t_fence[4], f), (unsigned long)(s_gs.fences[5] / f),
            (unsigned long)(s_gs.fences[5] * 100 / f % 100), (unsigned long)us_of(s_gs.t_fence[5], f));
+    PLOG_I("gxthread   array snapshots: %lu bytes per frame, %lu spans too large (read live), %lu not used (total)",
+           (unsigned long)(s_snap_bytes / f), (unsigned long)s_snap_live, (unsigned long)s_snap_mism);
+    s_snap_bytes = 0;
     if (gx_rec_mode == 3) {
         u32 gm = 0;
         for (int i = 0; i < GXG_COUNT; i++) {

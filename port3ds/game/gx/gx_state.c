@@ -1178,13 +1178,22 @@ void gx_apply_call(u32 id, const u32* w) {
 
 /* The game thread's shadow: what its getters and its display-list recording
  * read back (vertex description and formats, projection, viewport, scissor,
- * cull mode, the copy source and the draw-sync token). */
+ * cull mode, the copy source and the draw-sync token), and the arrays, for
+ * the snapshots of GXBegin primitives (gx_rec.c). */
 void gx_shadow_call(u32 id, const u32* w) {
     GxState* g = &gx_game;
     switch (id) {
     case REC_SetVtxDesc: vtx_desc_set(g, w[0], w[1]); break;
     case REC_ClearVtxDesc: vtx_desc_clear(g); break;
     case REC_SetVtxAttrFmt: vat_set(g, w[0], w[1], w[2], w[3], (u8)w[4]); break;
+    case REC_SetArray: {
+        u32 a = w[0] == GX_VA_NBT ? GX_VA_NRM : w[0];
+        if (a < GX_VA_MAX_ATTR) {
+            g->array_base[a] = (const u8*)w[1];
+            g->array_stride[a] = (u8)w[2];
+        }
+        break;
+    }
     case REC_SetProjection:
         for (int i = 0; i < 7; i++) {
             g->proj[i] = U2F(w[i]);

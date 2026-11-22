@@ -4,6 +4,7 @@
 #include <dolphin/si.h>
 #include <string.h>
 
+#include "plat/memstable.h"
 #include "plat/plat.h"
 #include "plat/thread.h"
 #include "port3ds/os_internal.h"
@@ -117,12 +118,15 @@ void OSCancelAlarm(OSAlarm* alarm) {
  * vertex array and display list on the CPU and does its own flushes of the
  * buffers it hands to the PICA200, the audio layer flushes the buffers it
  * gives the DSP, and file reads are CPU copies. The calls therefore have
- * nothing to do; they are kept so the game's ordering stays as written. */
-void DCFlushRange(void* addr, u32 nBytes) { (void)addr; (void)nBytes; }
-void DCStoreRange(void* addr, u32 nBytes) { (void)addr; (void)nBytes; }
+ * nothing to do; they are kept so the game's ordering stays as written.
+ * A flush or store still says "the CPU wrote here", which the GameCube
+ * requires before the GPU reads CPU-written memory: it goes to the memory
+ * registry (include/plat/memstable.h), which caches of that memory rely on. */
+void DCFlushRange(void* addr, u32 nBytes) { plat_memstable_write(addr, nBytes); }
+void DCStoreRange(void* addr, u32 nBytes) { plat_memstable_write(addr, nBytes); }
 void DCInvalidateRange(void* addr, u32 nBytes) { (void)addr; (void)nBytes; }
-void DCFlushRangeNoSync(void* addr, u32 nBytes) { (void)addr; (void)nBytes; }
-void DCStoreRangeNoSync(void* addr, u32 nBytes) { (void)addr; (void)nBytes; }
+void DCFlushRangeNoSync(void* addr, u32 nBytes) { plat_memstable_write(addr, nBytes); }
+void DCStoreRangeNoSync(void* addr, u32 nBytes) { plat_memstable_write(addr, nBytes); }
 void ICInvalidateRange(void* addr, u32 nBytes) { (void)addr; (void)nBytes; }
 
 /* ---- SI ----

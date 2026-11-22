@@ -15,21 +15,26 @@ comparison aligns the two captures in time and measures:
     tools/port3ds/audio_compare.py capture-papercut --scene title
     tools/port3ds/audio_compare.py capture-port --scene gor_01 [--lle-audio] [--switches "ndspvoices=1"]
     tools/port3ds/audio_compare.py compare A.wav B.wav [--json out.json]
-    tools/port3ds/audio_compare.py selftest
+    tools/port3ds/audio_compare.py cpu --scene gor_01 [--switches "ndspvoices=1"]
+    tools/port3ds/audio_compare.py loops | loopcheck | selftest
 
 Captures go to build/audio/<source>_<scene>[_<tag>]/:
 
   capture-papercut  paper-cut's headless build (build/papercut-headless/ttyd-us, see
                     --help of that command) with $TTYD_AUDIO_WAV: pc.wav, 32 kHz, the
                     deterministic 60 Hz clock (TTYD_FAST). Runs in a second.
-  capture-port      the port in Azahar through run_azahar.py (slot-locked, headless) with
-                    --realtime. Two files:
+  capture-port      the port in Azahar through run_azahar.py (slot-locked, headless):
                       wavdump.wav  the game's software mix (switch wavdump=N), 32 kHz; with
                                    ndspvoices=1 it only holds what is still mixed in software;
-                      azahar.wav   what Azahar's DSP put out (its SDL2 sink on SDL's disk
-                                   driver: SDL3 resamples to its disk device, 44.1 kHz): every NDSP channel. Azahar pads with the
-                                   last sample when emulation falls behind real time; those
-                                   holds are counted (gaps) and cut before comparing.
+                      azahar.wav   Azahar's sound output: every NDSP channel after the DSP
+                                   (its SDL2 sink on SDL's disk driver, 44.1 kHz), recorded with
+                                   emulation held at --speed percent (default 34) and the disk
+                                   driver slowed to match. Where Azahar still falls behind it
+                                   pads with held or silent runs; compare cuts and counts them.
+                    --no-sink: wavdump only, at full speed.
+  cpu               pc_sample.py --interval 200 on a scene under Azahar's GDB stub.
+  loops             every sample's loop points on the disc (how many start inside a frame).
+  loopcheck         the port's loop re-alignment code, compiled for this PC, on every loop.
 
 Needs numpy. Exit status: 0 ok (compare: within tolerance), 1 outside tolerance or a failed run,
 2 setup errors.
@@ -568,7 +573,8 @@ def cpu_profile(scene, build, extra_switches, out, duration, start):
     import signal
     import time
     sc = SCENES[scene]
-    switches = " ".join(s for s in (sc["port_switches"], extra_switches) if s)
+    # wdog: the sampler's stops (about 150 ms each) slow the game's frames past the 10 s watchdog
+    switches = " ".join(s for s in (sc["port_switches"], "wdog=900", extra_switches) if s)
     out.mkdir(parents=True, exist_ok=True)
     ra = load_run_azahar()
     log = ra.PROFILE / "data" / "azahar-emu" / "sdmc" / "3ds" / "ttyd" / "log.txt"
@@ -672,6 +678,158 @@ def loop_survey(iso):
     return 0
 
 
+LOOPCHECK_C = r'''
+static uint16_t be16(const uint8_t* p) { return (uint16_t)(p[0] << 8 | p[1]); }
+static uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
+
+/* MusyX's software path (hw_pcmixer.c fetch1): decode to the end, jump to the
+ * loop with the loop history (loopType 0). */
+static void ref_play(const uint8_t* d, const uint16_t* c, uint32_t end, uint32_t ls, int16_t ly1, int16_t ly2,
+                     uint32_t n, int16_t* out) {
+    int32_t y1 = 0, y2 = 0;
+    uint32_t s = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        int16_t v;
+        adpcm_decode(d, c, s, 1, y1, y2, &v);
+        out[i] = v;
+        y2 = y1;
+        y1 = v;
+        if (s == end - 1) {
+            s = ls;
+            y1 = ly1;
+            y2 = ly2;
+        } else {
+            s++;
+        }
+    }
+}
+
+/* NDSP's model: buffer A [0, nls) then B [nls, nend) repeated, B's history
+ * reloaded at each pass (adpcm_dirty). */
+static void ndsp_play(const CacheEntry* e, const uint16_t* c, uint32_t n, int16_t* out) {
+    int32_t y1 = 0, y2 = 0;
+    uint32_t s = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (s == e->loop_start) {
+            y1 = e->loop_yn1;
+            y2 = e->loop_yn2;
+        }
+        int16_t v;
+        adpcm_decode(e->lin, c, s, 1, y1, y2, &v);
+        out[i] = v;
+        y2 = y1;
+        y1 = v;
+        s = (s == e->end - 1) ? e->loop_start : s + 1;
+    }
+}
+
+int main(int argc, char** argv) {
+    FILE* f = fopen(argv[1], "rb");
+    long sdir_off = atol(argv[2]), sdir_len = atol(argv[3]), samp_off = atol(argv[4]), samp_len = atol(argv[5]);
+    uint8_t* sdir = malloc(sdir_len);
+    uint8_t* samp = malloc(samp_len + 64);
+    fseek(f, sdir_off, SEEK_SET);
+    fread(sdir, 1, sdir_len, f);
+    fseek(f, samp_off, SEEK_SET);
+    fread(samp, 1, samp_len, f);
+    memset(samp + samp_len, 0, 64);
+    int tested = 0, realigned = 0, bad = 0, ps_mismatch = 0;
+    double worst_snr = 1e9, worst_jump = 0;
+    for (int i = 0; be16(sdir + i * 32) != 0xFFFF; i++) {
+        const uint8_t* e = sdir + i * 32;
+        uint32_t off = be32(e + 4), len = be32(e + 0x10), loop = be32(e + 0x14), loopLen = be32(e + 0x18), x = be32(e + 0x1C);
+        if ((len >> 24) != 0 || loopLen == 0 || x == 0) {
+            continue;
+        }
+        const uint8_t* info = sdir + x;
+        uint16_t coefs[16];
+        for (int k = 0; k < 16; k++) {
+            coefs[k] = be16(info + 8 + k * 2);
+        }
+        uint8_t loopPS = info[3];
+        int16_t loopY0 = (int16_t)be16(info + 4), loopY1 = (int16_t)be16(info + 6);
+        uint32_t end = loop + loopLen;
+        const uint8_t* data = samp + off;
+        if (loopPS != data[(loop / 14) * 8]) {
+            ps_mismatch++;
+        }
+        CacheEntry ce;
+        memset(&ce, 0, sizeof(ce));
+        uint32_t frames = (end + 13) / 14 + 2;
+        ce.lin = calloc(frames, 8);
+        memcpy(ce.lin, data, ((end + 13) / 14) * 8);
+        ce.end = end;
+        ce.loop_start = loop;
+        ce.looping = 1;
+        ce.loop_ps = loopPS;
+        ce.loop_yn1 = loopY1;
+        ce.loop_yn2 = loopY0;
+        int ok = realign_loop(&ce, coefs);
+        tested++;
+        if (!ok) {
+            bad++;
+            free(ce.lin);
+            continue;
+        }
+        realigned += ce.realigned;
+        uint32_t n = end + 3 * loopLen;
+        int16_t* a = malloc(n * 2);
+        int16_t* b = malloc(n * 2);
+        ref_play(data, coefs, end, loop, loopY1, loopY0, n, a);
+        ndsp_play(&ce, coefs, n, b);
+        double sig = 0, err = 0, maxd = 0;
+        uint32_t at = 0;
+        for (uint32_t k = 0; k < n; k++) {
+            double d = (double)a[k] - b[k];
+            sig += (double)a[k] * a[k];
+            err += d * d;
+            if (fabs(d) > maxd) { maxd = fabs(d); at = k; }
+        }
+        double snr = err > 0 ? 10 * log10(sig / err) : 200;
+        if (snr < worst_snr) worst_snr = snr;
+        if (maxd > worst_jump) worst_jump = maxd;
+        if (snr < 40 || maxd > 1500 || argc > 6)
+            printf("id %u loop %u+%u (%u into a frame): SNR %.1f dB, max diff %.0f at %u (%s %u, end-1 at %u; ref %d new %d)\n",
+                   be16(e), loop, loopLen, loop % 14, snr, maxd, at, at < end ? "first pass" : "loop pass offset",
+                   at < end ? at : (at - end) % loopLen, loopLen - 1, a[at], b[at]);
+        free(a);
+        free(b);
+        free(ce.lin);
+    }
+    printf("%d looping ADPCM samples: %d re-aligned, %d refused; loopPS differs from the frame header in %d; "
+           "worst SNR over 3 loop passes %.1f dB, worst sample difference %.0f\n",
+           tested, realigned, bad, ps_mismatch, worst_snr, worst_jump);
+    return 0;
+}
+'''
+
+
+def loop_check(iso):
+    """The loop re-alignment of port3ds/plat/audio.c (adpcm_decode, adpcm_encode_frame,
+    realign_loop, compiled for this PC with gcc) on every looping sample of the disc: the
+    re-aligned copy played as NDSP plays it (buffer A, then B with its history reloaded each
+    pass) against MusyX's software path, over the first pass and three loop passes."""
+    import tempfile
+    plat = (REPO / "port3ds" / "plat" / "audio.c").read_text()
+
+    def grab(start, end):
+        i = plat.index(start)
+        return plat[i:plat.index(end, i)]
+    code = ("#include <math.h>\n#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n" +
+            grab("typedef struct CacheEntry {", "} CacheEntry;") + "} CacheEntry;\n" +
+            grab("static inline int16_t clamp16", "static void cache_free") + LOOPCHECK_C)
+    files = disc_files(iso)
+    sdir = files["/sound/proj/pmario.sdir"]
+    samp = files["/sound/proj/pmario.samp"]
+    with tempfile.TemporaryDirectory() as tmp:
+        c, exe = Path(tmp) / "loopcheck.c", Path(tmp) / "loopcheck"
+        c.write_text(code)
+        r = subprocess.run(["gcc", "-O2", "-w", "-o", str(exe), str(c), "-lm"])
+        if r.returncode != 0:
+            return 2
+        return subprocess.run([str(exe), str(iso), str(sdir[0]), str(sdir[1]), str(samp[0]), str(samp[1])]).returncode
+
+
 # ----------------------------------------------------------------------------- self test
 
 def selftest():
@@ -751,9 +909,13 @@ def main():
                    help="regex in the game log that starts the sampling")
     p = sub.add_parser("loops", help="loop points of every MusyX sample on the disc")
     p.add_argument("--iso", type=Path, default=REPO / "iso" / "game.iso")
+    p = sub.add_parser("loopcheck", help="the port's loop re-alignment checked on every looping sample (needs gcc)")
+    p.add_argument("--iso", type=Path, default=REPO / "iso" / "game.iso")
     a = ap.parse_args()
     if a.cmd == "loops":
         return loop_survey(a.iso)
+    if a.cmd == "loopcheck":
+        return loop_check(a.iso)
     if a.cmd == "cpu":
         tag = ("_" + a.tag) if a.tag else ""
         return cpu_profile(a.scene, a.build.resolve(), a.switches, OUT / f"cpu_{a.scene}{tag}", a.duration, a.start)

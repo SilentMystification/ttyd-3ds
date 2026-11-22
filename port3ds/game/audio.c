@@ -161,6 +161,8 @@ static u32 s_nv_sw, s_nv_ndsp, s_nv_aux, s_nv_overflow, s_nv_aux_late; /* voice-
 /* starts kept in software, by reason (the [NDSPV] log line's "kept") */
 enum { NV_KEEP_AUX, NV_KEEP_STUDIO, NV_KEEP_FORMAT, NV_KEEP_RANGE, NV_KEEP_PLAT, NV_KEEP_N };
 static u32 s_nv_keep[NV_KEEP_N], s_nv_starts_seen;
+/* ndspstats: where MusyX's frame goes (system ticks): the command list, the mixer */
+static u64 s_t_build, s_t_mix;
 static int s_nv_hint;
 
 static int nv_voice_of(const _PB* pb) {
@@ -389,21 +391,34 @@ static void nv_frame_end(void) {
     plat_voice_note(s_nv_sw, s_nv_ndsp, s_nv_aux, s_nv_overflow, s_nv_aux_late);
     if (s_nv_stats) {
         static u32 frames;
-        if (++frames % 2000 == 0) { /* every 10 s */
+        if (++frames % 2000 == 0) { /* every 10 s of audio */
+            static u64 last;
+            u64 now = plat_ticks();
+            u32 wall = last ? (u32)((now - last) / 1000) : 0;
             PLOG_I("[NDSPV] voice starts %lu; kept in software: aux %lu, studio %lu, format %lu, range %lu, "
-                   "refused %lu, no channel %lu",
+                   "refused %lu, no channel %lu; MusyX frame: list %lu.%lu%%, mixer %lu.%lu%% of the time",
                    (unsigned long)s_nv_starts_seen, (unsigned long)s_nv_keep[NV_KEEP_AUX],
                    (unsigned long)s_nv_keep[NV_KEEP_STUDIO], (unsigned long)s_nv_keep[NV_KEEP_FORMAT],
                    (unsigned long)s_nv_keep[NV_KEEP_RANGE], (unsigned long)s_nv_keep[NV_KEEP_PLAT],
-                   (unsigned long)s_nv_overflow);
+                   (unsigned long)s_nv_overflow, (unsigned long)(wall ? s_t_build / wall / 10 : 0),
+                   (unsigned long)(wall ? s_t_build / wall % 10 : 0), (unsigned long)(wall ? s_t_mix / wall / 10 : 0),
+                   (unsigned long)(wall ? s_t_mix / wall % 10 : 0));
+            last = now;
+            s_t_build = s_t_mix = 0;
         }
     }
 }
 
 void salCtrlDsp(s16* dest) {
+    u64 t0, t1, t2;
     nv_frame_begin();
+    t0 = plat_ticks();
     salBuildCommandList(dest, salGetStartDelay());
+    t1 = plat_ticks();
     salStartDsp(dspCmdList);
+    t2 = plat_ticks();
+    s_t_build += t1 - t0;
+    s_t_mix += t2 - t1;
     nv_frame_end();
 }
 

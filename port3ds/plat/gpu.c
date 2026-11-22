@@ -28,6 +28,7 @@
 #include "plat/gpu.h"
 #include "plat/hud.h"
 #include "plat_internal.h"
+#include "stereo.h"
 
 #define TARGET_W 512  /* rotated render target, power of two so it can be sampled */
 #define TARGET_H 1024
@@ -950,6 +951,15 @@ static int s_named_shot; /* plat_gpu_shot: the next presented frame goes to s_na
 /* The top screen's render target, linked to the framebuffer: citro3d
  * transfers it and swaps at C3D_FrameEnd. */
 static C3D_RenderTarget* s_screen;
+#define SCREEN_TRANSFER_FLAGS                                                                                        \
+    (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |                                 \
+     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |                    \
+     GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
+
+static void efb_point(float x, float y, float* tx, float* ty) {
+    float tw, th;
+    efb_to_target_rect(x, y, 0, 0, tx, ty, &tw, &th);
+}
 
 /* Present: the shown part of the EFB target (480x800, rotated as the
  * screen) drawn into the 240x400 screen target as one textured quad. The
@@ -957,8 +967,8 @@ static C3D_RenderTarget* s_screen;
  * by its four EFB pixels, so the halving averages them. (A display
  * transfer of the EFB into a linear buffer followed by a TextureCopy into
  * the framebuffer came out with only its first quarter in Azahar.) */
-static void present(void) {
-    C3D_FrameDrawOn(s_screen);
+static void present(C3D_RenderTarget* screen) {
+    C3D_FrameDrawOn(screen);
     C3D_TexEnv* env = C3D_GetTexEnv(0);
     C3D_TexEnvInit(env);
     C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
@@ -1119,10 +1129,107 @@ static GPU_CULLMODE vsh_cull(u32 cull) {
     return cull_ccw ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW;
 }
 
+/* Stereo: where the record's 2D tail starts (stereo.h). Everything after the
+ * last scene draw or EFB copy is the tail, replayed once per eye on the warped
+ * image. TTYD draws its 2D layer (HUD, windows, text) and its fades with
+ * perspective cameras, so the projection type does not tell them apart; the
+ * viewport's depth range does: camdrv gives the 3D cameras 0-1, the 3D effect
+ * cameras 0.2-0.3, the 2D camera 0.1-0.2 and the fade cameras 0-0.1. A draw
+ * whose depth range ends at 0.2 or nearer is a screen layer; any other draw is
+ * scene, except draws that write neither colour nor depth (camDraw's
+ * sysDummyDraw runs for every camera, the debug ones after the 2D layer
+ * included). NULL: no scene draw in this record, the frame stays mono. */
+#define STEREO_LAYER_FAR 0.2001f
+static u8* stereo_split(const Record* r, u32* tail_cmds, u32* tail_zwrites) {
+    u8 *p = r->data, *end = r->data + r->used, *split = NULL;
+    int scene = 0;
+    const PlatGpuState* st = NULL;
+    *tail_cmds = *tail_zwrites = 0;
+    /* switch stereolog=N: the record's draw order at stereo frames N and N + 300 (S/s scene draw on the CPU/shader
+     * path, L/l screen layer draw, C copy, X clear; runs counted) */
+    static int s_log = -2;
+    static u32 s_nrec;
+    if (s_log == -2) {
+        s_log = plat_switch_int("stereolog", -1);
+    }
+    char seq[480];
+    u32 nseq = 0, run = 0;
+    char last = 0;
+    s_nrec++;
+    int logit = s_log >= 0 && (s_nrec == (u32)s_log || s_nrec == (u32)s_log + 300);
+#define SEQ(c)                                                                                                  \
+    do {                                                                                                        \
+        if (logit) {                                                                                            \
+            if ((c) == last) {                                                                                  \
+                run++;                                                                                          \
+            } else {                                                                                            \
+                if (last && nseq < sizeof(seq) - 12) {                                                          \
+                    nseq += (u32)snprintf(seq + nseq, sizeof(seq) - nseq, "%c%lu ", last, (unsigned long)run); \
+                }                                                                                               \
+                last = (c);                                                                                     \
+                run = 1;                                                                                        \
+            }                                                                                                   \
+        }                                                                                                       \
+    } while (0)
+    seq[0] = 0;
+    while (p < end) {
+        CmdHead* h = (CmdHead*)p;
+        u8* body = p + sizeof(CmdHead);
+        p = body + h->size;
+        (*tail_cmds)++;
+        if (h->type == CMD_CLEAR) {
+            SEQ('X');
+        }
+        switch (h->type) {
+        case CMD_STATE: st = (const PlatGpuState*)body; break;
+        case CMD_COPY: split = p; *tail_cmds = *tail_zwrites = 0; SEQ('C'); break;
+        case CMD_DRAW:
+        case CMD_VSH_DRAW:
+            if (st == NULL || (st->color_write == 0 && !st->depth_write)) {
+                break; /* skipped by the replay, or writes nothing (sysDummyDraw, once per camera) */
+            }
+            if (st->depth_far > STEREO_LAYER_FAR) {
+                SEQ(h->type == CMD_DRAW ? 'S' : 's');
+                split = p;
+                scene = 1;
+                *tail_cmds = *tail_zwrites = 0;
+            } else {
+                SEQ(h->type == CMD_DRAW ? 'L' : 'l');
+                *tail_zwrites += st->depth_write != 0;
+            }
+            break;
+        default: break;
+        }
+    }
+    if (logit) {
+        SEQ(1);
+        PLOG_I("stereolog frame %lu: %s(tail from byte %ld of %lu)", (unsigned long)s_nrec, seq,
+               split ? (long)(split - r->data) : -1L, (unsigned long)r->used);
+    }
+#undef SEQ
+    return scene ? split : NULL;
+}
+
+static void fog_bind(const void* body) {
+    static C3D_FogLut lut;
+    FogLut_FromArray(&lut, (const float*)body);
+    C3D_FogLutBind(&lut);
+}
+
 static void render_record(Record* r) {
     u64 t0 = svcGetSystemTick();
     reap_targets();
+    /* stereo (stereo.h): 0 mono, else the 2D tail's start; the 3D part is replayed once */
+    u32 tail_cmds = 0, tail_zwrites = 0;
+    u8* split = r->present && stereo_wanted() ? stereo_split(r, &tail_cmds, &tail_zwrites) : NULL;
+    int stereo = split != NULL && stereo_begin();
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    if (stereo) {
+        stereo_prepare();
+        s_gx_entries += STEREO_GX_ENTRIES;
+    } else {
+        split = NULL;
+    }
     C3D_FrameDrawOn(s_efb);
     C3D_BindProgram(&s_prog);
     C3D_SetAttrInfo(&s_attr);
@@ -1162,7 +1269,32 @@ static void render_record(Record* r) {
     const PlatGpuState* cur_state = NULL;
     int restore = 0;
     u32 n_draw = 0, n_clear = 0, n_copy = 0, n_skip = 0, after_last_draw = 0; /* for the screenshot log */
+    /* stereo: the state in force at the 2D tail's start, for the second eye's replay */
+    const void *fog_now = NULL, *split_fog = NULL;
+    const PlatGpuVshConst *vc_now = NULL, *split_vc = NULL;
+    const PlatGpuState* split_state = NULL;
+    u8* tail = NULL;
+    int eye = 0;
+#define STEREO_SPLIT()                       \
+    do {                                     \
+        LEAVE_VSH();                         \
+        stereo_snapshot();                   \
+        stereo_warp(0);                      \
+        C3D_SetAttrInfo(&s_attr);            \
+        C3D_SetBufInfo(&bi);                 \
+        rot_uniforms();                      \
+        restore = 1;                         \
+        tail = split;                        \
+        split_state = cur_state;             \
+        split_fog = fog_now;                 \
+        split_vc = vc_now;                   \
+        split = NULL;                        \
+    } while (0)
+eye_again:
     while (p < end) {
+        if (p == split) {
+            STEREO_SPLIT();
+        }
         CmdHead* h = (CmdHead*)p;
         u8* body = p + sizeof(CmdHead);
         p = body + h->size;
@@ -1173,12 +1305,10 @@ static void render_record(Record* r) {
             restore = 0;
             v_cull = 0;
             break;
-        case CMD_FOG: {
-            static C3D_FogLut lut;
-            FogLut_FromArray(&lut, (const float*)body);
-            C3D_FogLutBind(&lut);
+        case CMD_FOG:
+            fog_bind(body);
+            fog_now = body;
             break;
-        }
         case CMD_DRAW: {
             const u32* d = (const u32*)body;
             if (cur_state == NULL) {
@@ -1198,6 +1328,7 @@ static void render_record(Record* r) {
         }
         case CMD_VSH_CONST:
             vsh_apply_const((const PlatGpuVshConst*)body);
+            vc_now = (const PlatGpuVshConst*)body;
             break;
         case CMD_VSH_DRAW: {
             const VshDraw* d = (const VshDraw*)body;
@@ -1264,13 +1395,43 @@ static void render_record(Record* r) {
         }
     }
     LEAVE_VSH();
-#undef LEAVE_VSH
-    if (r->present) {
-        present();
+    if (stereo) {
+        if (split != NULL) {
+            STEREO_SPLIT(); /* the record ends with its 3D part */
+        }
+        present(stereo_eye_target(eye));
+        if (eye == 0) {
+            /* the right eye: its warp, then the same 2D tail from the same state */
+            eye = 1;
+            stereo_warp(1);
+            C3D_SetAttrInfo(&s_attr);
+            C3D_SetBufInfo(&bi);
+            rot_uniforms();
+            cur_state = split_state;
+            restore = 1;
+            v_stream = NULL;
+            v_scales = 0xFFFFFFFFu;
+            v_cull = 0;
+            if (split_fog != NULL) {
+                fog_bind(split_fog);
+            }
+            if (split_vc != NULL) {
+                vsh_apply_const(split_vc);
+            }
+            p = tail;
+            goto eye_again;
+        }
+    } else if (r->present) {
+        present(s_screen);
     }
+#undef STEREO_SPLIT
+#undef LEAVE_VSH
     C3D_FrameEnd(0);
     s_stats.render_us = (u32)((svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000000u));
     s_stats.gpu_us = (u32)(C3D_GetDrawingTime() * 1000.0f);
+    if (r->present) {
+        stereo_frame_done(stereo, s_stats.render_us, s_stats.gpu_us, tail_cmds, tail_zwrites);
+    }
     if (r->present && s_shots_every) {
         take_shot();
         if (s_shot_due) {
@@ -1281,6 +1442,7 @@ static void render_record(Record* r) {
                    (unsigned long)r->used, (unsigned long)n_draw, (unsigned long)n_skip, (unsigned long)n_clear, (unsigned long)n_copy,
                    after_last_draw & 1 ? " clear" : "", after_last_draw & 2 ? " copy" : "");
             capture_efb(r, path); /* its GPU copy waits for the frame's commands */
+            stereo_shot(path, stereo);
         }
     }
     if (r->present && __atomic_load_n(&s_named_shot, __ATOMIC_ACQUIRE)) {
@@ -1635,11 +1797,7 @@ void plat_gpu_init(void) {
     if (s_screen == NULL) {
         plat_fatal("gpu: no VRAM for the screen target");
     }
-    C3D_RenderTargetSetOutput(s_screen, GFX_TOP, GFX_LEFT,
-                              GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
-                                  GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB8) |
-                                  GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
-                                  GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    C3D_RenderTargetSetOutput(s_screen, GFX_TOP, GFX_LEFT, SCREEN_TRANSFER_FLAGS);
     /* the scratch target of the strip copies (bank A has room after the EFB and the screen) */
     s_scratch_mem = vramAllocAt(SCRATCH_BYTES, VRAM_ALLOC_A);
     if (s_scratch_mem == NULL) {
@@ -1656,6 +1814,7 @@ void plat_gpu_init(void) {
     s_efb_tex.size = TARGET_W * TARGET_H * 4;
     s_efb_tex.param = GPU_TEXTURE_MAG_FILTER(GPU_LINEAR) | GPU_TEXTURE_MIN_FILTER(GPU_LINEAR) |
                       GPU_TEXTURE_WRAP_S(GPU_CLAMP_TO_EDGE) | GPU_TEXTURE_WRAP_T(GPU_CLAMP_TO_EDGE);
+    StereoInit si = {s_efb, s_screen, &s_attr, 0, 0, SCREEN_TRANSFER_FLAGS, efb_point};
 
     s_dvlb = DVLB_ParseFile((u32*)gx_shbin, gx_shbin_size);
     shaderProgramInit(&s_prog);
@@ -1675,6 +1834,9 @@ void plat_gpu_init(void) {
         plat_fatal("gpu: shader uniforms missing (vsh %d clip %d texrow %d texsel %d)", s_uloc_vsh, s_uloc_clip,
                    s_uloc_texrow, s_uloc_texsel);
     }
+    si.uloc_rot0 = s_uloc_rot0;
+    si.uloc_rot1 = s_uloc_rot1;
+    stereo_init(&si);
     AttrInfo_Init(&s_attr);
     AttrInfo_AddLoader(&s_attr, 0, GPU_FLOAT, 4);
     AttrInfo_AddLoader(&s_attr, 1, GPU_UNSIGNED_BYTE, 4);

@@ -432,6 +432,13 @@ Each phase ends with a commit, updated docs, and passing tests for everything ea
 
 Each step ends with a commit, a short entry in PORT_3DS_STATUS.md, and the earlier steps' tests still passing. Steps 7.3 to 7.7 can overlap: a chapter in 7.3 brings its effects (7.5) and battles (7.4) with it.
 
+**Approach: find bugs through coverage, confirm through playthroughs** (owner's direction, 2026-11-22). Porting bugs come from a few shared mechanisms (GX features, engine subsystems, data formats), not from individual scenes. So bugs are found with automated, coverage-driven tools, and the chapter playthroughs in 7.3 are acceptance passes, not the discovery tool:
+
+- **Galleries:** switches `fx=<effect>` and `battle=<id>` spawn any effect or battle in a fixed test scene. Screenshots are taken in the port and in Dolphin and compared automatically.
+- **GX feature census:** the GX layer logs each distinct TEV, blend, texture-format, indirect and copy configuration it meets, as hashes. A static scan of `src/` lists the configurations the game can produce. The difference between the two is the untested list.
+- **Differential runs against Dolphin:** the same inputs play in Dolphin and the port. The runners read `GlobalWork` (story flags, sequence, positions), and the first divergence points at a logic bug. Luigi's walk at the start of the opening (fixed 2026-11-22) is the kind of bug this catches.
+- **Event-script coverage:** count which `evt` opcodes and `USER_FUNC`s have run. Those never run are the untested list for the story sweep.
+
 | Step | Work | Done when |
 |---|---|---|
 | 7.1 Test infrastructure | Map sweep fixes (a battle on entry counts as a pass; warp on without restarting Azahar; fewer frames per map). A "story jump" set-up for each chapter's start: story value (GSW 0), party, key items, flags, and padscripts that get past menus. Dolphin reference screenshots for chosen scenes, compared automatically with a tolerance. The `npctrace`/`gxdump`/`evtdump` tools documented per use case | One command runs the map sweep in under an hour. Any chapter start is reachable by switches |

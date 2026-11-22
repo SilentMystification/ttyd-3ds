@@ -274,6 +274,15 @@ target_include_directories(ttyd_port_game PRIVATE ${TTYD_INCLUDES} "${TTYD_REPO_
 # The GX vertex shader (port3ds/shaders/gx.v.pica), embedded as gx_shbin.
 ctr_add_shader_library(ttyd_gx_shader OUTPUT gx.shbin "${CMAKE_CURRENT_LIST_DIR}/shaders/gx.v.pica")
 dkp_add_embedded_binary_library(ttyd_gx_shader_bin ttyd_gx_shader)
+# Output-register discipline (each output written once, in full, outside
+# branches; no b15): the PICA200 hangs otherwise, Azahar does not.
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/gx_vsh_check.stamp"
+    COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/check_vsh.py"
+            "${CMAKE_CURRENT_LIST_DIR}/shaders/gx.v.pica" --stamp "${CMAKE_CURRENT_BINARY_DIR}/gx_vsh_check.stamp"
+    DEPENDS "${CMAKE_CURRENT_LIST_DIR}/shaders/gx.v.pica" "${TTYD_REPO_DIR}/tools/port3ds/check_vsh.py"
+    VERBATIM)
+add_custom_target(ttyd_gx_shader_check DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/gx_vsh_check.stamp")
+add_dependencies(ttyd_gx_shader ttyd_gx_shader_check)
 
 # ctr-devkit (libs/ctr-devkit): the crash handler (plat/crash.c) and the updater (plat/devupdate.c).
 add_subdirectory("${TTYD_REPO_DIR}/libs/ctr-devkit" ctr-devkit)

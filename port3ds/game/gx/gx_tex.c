@@ -13,6 +13,7 @@
  * GXCopyTex are GPU render targets and are used directly.
  */
 #include <malloc.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "gx_internal.h"
@@ -53,10 +54,140 @@ typedef struct {
 } CopyEntry;
 static CopyEntry s_copies[64];
 
+/* ---- texstats=N: measurement of the per-frame texture re-validation ----
+ * Every N frames logs the hashes made, bytes hashed, cache lookups and hash
+ * mismatches (a cached texture whose bytes changed). The first mismatch of
+ * each texture is logged with its address, size, format, memory and the
+ * caller of the GXInitTexObj* call that last set that image address. */
+extern void* OSGetArenaHi(void);
+#include "port3ds/rel_static.h"
+extern char __end__[];
+#define ARENA_BYTES 0x013B4880u /* GAME_ARENA_BYTES in os.c */
+
+static int s_stats_every;      /* 0 = off */
+static u32 s_arena_lo, s_arena_hi;
+static unsigned s_st_hashes, s_st_bytes, s_st_lookups, s_st_checks, s_st_mism, s_st_uploads, s_st_frames;
+static unsigned s_st_tot_hashes, s_st_tot_bytes, s_st_tot_lookups, s_st_tot_mism, s_st_tot_frames;
+static u32 s_dbg_tlut_hash[CACHE_SIZE];
+
+typedef struct {
+    const void* image;
+    void* init_ra;
+    unsigned mism;
+    unsigned interval_mism;
+    u8 fmt;
+    u16 w, h;
+} StatTex;
+#define STAT_TEX_MAX 512
+static StatTex s_stat_tex[STAT_TEX_MAX];
+
+static StatTex* stat_find(const void* image, int create) {
+    u32 slot = ((u32)image >> 5) % STAT_TEX_MAX;
+    for (u32 i = 0; i < 16; i++) {
+        StatTex* st = &s_stat_tex[(slot + i) % STAT_TEX_MAX];
+        if (st->image == image) {
+            return st;
+        }
+        if (st->image == NULL) {
+            if (create) {
+                st->image = image;
+            }
+            return create ? st : NULL;
+        }
+    }
+    return NULL;
+}
+
+static void stat_note_init(const void* image, void* ra) {
+    if (s_stats_every && image != NULL) {
+        StatTex* st = stat_find(image, 1);
+        if (st != NULL) {
+            st->init_ra = ra;
+        }
+    }
+}
+
+static const char* stat_region(u32 a, char* buf, size_t n) {
+    for (int i = 0; i < port_rel_count; i++) {
+        const PortRelStatic* r = &port_rel_table[i];
+        if (a >= (u32)r->data_start && a < (u32)r->data_end) {
+            snprintf(buf, n, "REL data (%s) +0x%x", r->name, (unsigned)(a - (u32)r->data_start));
+            return buf;
+        }
+        if (a >= (u32)r->bss_start && a < (u32)r->bss_end) {
+            snprintf(buf, n, "REL bss (%s) +0x%x", r->name, (unsigned)(a - (u32)r->bss_start));
+            return buf;
+        }
+    }
+    if (a >= 0x00100000u && a < (u32)__end__) {
+        return "exe image (static data/bss)";
+    }
+    if (a >= s_arena_lo && a < s_arena_hi) {
+        snprintf(buf, n, "game arena +0x%x", (unsigned)(a - s_arena_lo));
+        return buf;
+    }
+    if (a >= 0x08000000u && a < 0x14000000u) {
+        return "other heap";
+    }
+    if (a >= 0x14000000u && a < 0x40000000u) {
+        return "linear";
+    }
+    return "unknown";
+}
+
+static void stat_mismatch(const CacheEntry* e, const GxTexObj* t, u32 bytes, int tlut_changed) {
+    s_st_mism++;
+    StatTex* st = stat_find(t->image, 1);
+    if (st == NULL) {
+        return;
+    }
+    if (st->mism == 0) {
+        char rb[64];
+        st->fmt = t->format;
+        st->w = t->width;
+        st->h = t->height;
+        PLOG_I("texstats: FIRST CHANGE image %p %ux%u fmt %u ci %u bytes %u (%s) in %s; changed part: %s; init caller %p; "
+               "frame %u",
+               t->image, t->width, t->height, t->format, t->is_ci, (unsigned)bytes, "main memory",
+               stat_region((u32)t->image, rb, sizeof(rb)), tlut_changed ? "TLUT" : "image", st->init_ra,
+               (unsigned)s_frame);
+    }
+    st->mism++;
+    st->interval_mism++;
+    (void)e;
+}
+
+static void stat_frame_end(void) {
+    s_st_frames++;
+    s_st_tot_frames++;
+    if (s_stats_every && s_st_frames >= (u32)s_stats_every) {
+        unsigned f = s_st_frames;
+        PLOG_I("texstats: frames %u: per frame hashes %u.%02u bytes %u lookups %u.%02u first-use-checks %u.%02u "
+               "mismatches %u.%02u uploads %u.%02u",
+               (unsigned)f, s_st_hashes / f, s_st_hashes * 100 / f % 100, s_st_bytes / f, s_st_lookups / f,
+               s_st_lookups * 100 / f % 100, s_st_checks / f, s_st_checks * 100 / f % 100, s_st_mism / f,
+               s_st_mism * 100 / f % 100, s_st_uploads / f, s_st_uploads * 100 / f % 100);
+        s_st_tot_hashes += s_st_hashes;
+        s_st_tot_bytes += s_st_bytes;
+        s_st_tot_lookups += s_st_lookups;
+        s_st_tot_mism += s_st_mism;
+        for (int i = 0; i < STAT_TEX_MAX; i++) {
+            StatTex* st = &s_stat_tex[i];
+            if (st->interval_mism != 0) {
+                PLOG_I("texstats:   changed %p %ux%u fmt %u: %u times in last %u frames (%u total)", st->image, st->w,
+                       st->h, st->fmt, st->interval_mism, (unsigned)f, st->mism);
+                st->interval_mism = 0;
+            }
+        }
+        s_st_hashes = s_st_bytes = s_st_lookups = s_st_checks = s_st_mism = s_st_uploads = s_st_frames = 0;
+    }
+}
+
 /* ---- Objects ---- */
 
-void GXInitTexObj(GXTexObj* obj, void* image_ptr, u16 width, u16 height, GXTexFmt format, GXTexWrapMode wrap_s,
-                  GXTexWrapMode wrap_t, u8 mipmap) {
+static void tex_obj_init(GXTexObj* obj, void* image_ptr, u16 width, u16 height, GXTexFmt format,
+                         GXTexWrapMode wrap_s, GXTexWrapMode wrap_t, u8 mipmap, void* ra) {
+    stat_note_init(image_ptr, ra);
     GxTexObj* t = (GxTexObj*)obj;
     memset(obj, 0, sizeof(*obj));
     t->image = image_ptr;
@@ -71,9 +202,15 @@ void GXInitTexObj(GXTexObj* obj, void* image_ptr, u16 width, u16 height, GXTexFm
     t->max_lod_q = mipmap ? 10 * 16 : 0;
 }
 
+void GXInitTexObj(GXTexObj* obj, void* image_ptr, u16 width, u16 height, GXTexFmt format, GXTexWrapMode wrap_s,
+                  GXTexWrapMode wrap_t, u8 mipmap) {
+    tex_obj_init(obj, image_ptr, width, height, format, wrap_s, wrap_t, mipmap, __builtin_return_address(0));
+}
+
 void GXInitTexObjCI(GXTexObj* obj, void* image_ptr, u16 width, u16 height, GXCITexFmt format, GXTexWrapMode wrap_s,
                     GXTexWrapMode wrap_t, u8 mipmap, u32 tlut_name) {
-    GXInitTexObj(obj, image_ptr, width, height, (GXTexFmt)format, wrap_s, wrap_t, mipmap);
+    tex_obj_init(obj, image_ptr, width, height, (GXTexFmt)format, wrap_s, wrap_t, mipmap,
+                 __builtin_return_address(0));
     GxTexObj* t = (GxTexObj*)obj;
     t->is_ci = 1;
     t->tlut_name = tlut_name;
@@ -92,7 +229,10 @@ void GXInitTexObjLOD(GXTexObj* obj, GXTexFilter min_filt, GXTexFilter mag_filt, 
     t->max_aniso = (u8)max_aniso;
 }
 
-void GXInitTexObjData(GXTexObj* obj, void* image_ptr) { ((GxTexObj*)obj)->image = image_ptr; }
+void GXInitTexObjData(GXTexObj* obj, void* image_ptr) {
+    stat_note_init(image_ptr, __builtin_return_address(0));
+    ((GxTexObj*)obj)->image = image_ptr;
+}
 void* GXGetTexObjData(const GXTexObj* to) { return ((const GxTexObj*)to)->image; }
 GXTexFmt GXGetTexObjFmt(const GXTexObj* to) { return (GXTexFmt)((const GxTexObj*)to)->format; }
 u16 GXGetTexObjWidth(const GXTexObj* to) { return ((const GxTexObj*)to)->width; }
@@ -405,6 +545,10 @@ static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h) {
 
 static u32 hash_bytes(const u8* p, u32 n) {
     u32 h = 2166136261u;
+    if (s_stats_every) {
+        s_st_hashes++;
+        s_st_bytes += n <= 32 * 1024 ? n : 64 * 64;
+    }
     if (n <= 32 * 1024) {
         for (u32 i = 0; i < n; i++) {
             h = (h ^ p[i]) * 16777619u;
@@ -444,6 +588,7 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
             return s_copies[i].handle;
         }
     }
+    s_st_lookups += s_stats_every != 0;
     const GxTlutObj* tl = t->is_ci ? &gx.tlut[t->tlut_name < 20 ? t->tlut_name : 0] : NULL;
     u32 bytes = GXGetTexBufferSize(t->width, t->height, t->format, GX_FALSE, 0);
     u32 slot = ((u32)t->image >> 5) % CACHE_SIZE;
@@ -460,11 +605,17 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
             e->is_ci == t->is_ci && (!tl || (e->tlut == tl->data && e->tlut_fmt == tl->format))) {
             if (e->checked_frame != s_frame) {
                 u32 h = hash_bytes(t->image, bytes);
+                u32 th = 0;
                 if (tl) {
-                    h ^= hash_bytes(tl->data, (u32)tl->n_entries * 2);
+                    th = hash_bytes(tl->data, (u32)tl->n_entries * 2);
+                    h ^= th;
                 }
                 e->checked_frame = s_frame;
+                s_st_checks += s_stats_every != 0;
                 if (h != e->hash) {
+                    if (s_stats_every) {
+                        stat_mismatch(e, t, bytes, tl && th != s_dbg_tlut_hash[e - s_cache]);
+                    }
                     entry_free(e);
                     free_e = e;
                     break;
@@ -511,7 +662,10 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
     e->is_ci = t->is_ci;
     e->tlut = tl ? tl->data : NULL;
     e->tlut_fmt = tl ? tl->format : 0;
-    e->hash = hash_bytes(t->image, bytes) ^ (tl ? hash_bytes(tl->data, (u32)tl->n_entries * 2) : 0);
+    u32 th0 = tl ? hash_bytes(tl->data, (u32)tl->n_entries * 2) : 0;
+    s_dbg_tlut_hash[e - s_cache] = th0;
+    s_st_uploads += s_stats_every != 0;
+    e->hash = hash_bytes(t->image, bytes) ^ th0;
     e->last_frame = e->checked_frame = s_frame;
     *out_w = e->tex_w;
     *out_h = e->tex_h;
@@ -527,6 +681,7 @@ void gx_tex_invalidate_all(void) {
 }
 
 void gx_tex_frame_end(void) {
+    stat_frame_end();
     s_frame++;
     for (int i = 0; i < CACHE_SIZE; i++) {
         if (s_cache[i].handle && s_frame - s_cache[i].last_frame > EVICT_FRAMES) {
@@ -574,6 +729,13 @@ u32 gx_tex_copy_target(const void* addr, u16 w, u16 h, u8 fmt) {
 }
 
 void gx_tex_init(void) {
+    s_stats_every = plat_switch_int("texstats", 0);
+    s_arena_hi = (u32)OSGetArenaHi();
+    s_arena_lo = s_arena_hi - ARENA_BYTES;
+    if (s_stats_every) {
+        PLOG_I("texstats: every %d frames; arena %08x..%08x", s_stats_every, (unsigned)s_arena_lo,
+               (unsigned)s_arena_hi);
+    }
     s_rgba = memalign(64, 1024 * 1024 * 4);
     s_tiled = memalign(64, 1024 * 1024 * 4);
     if (s_rgba == NULL || s_tiled == NULL) {

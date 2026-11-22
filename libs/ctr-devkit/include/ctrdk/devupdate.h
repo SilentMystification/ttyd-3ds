@@ -92,6 +92,9 @@ void devupdate_prepare_relaunch(void);
 /* The switch text this launch received as APT deliver arguments; "" if
  * none. Read once (the first call), any time, also before devupdate_start. */
 const char* devupdate_launch_args(void);
+/* This launch was started by devupdate (a restart, a push's relaunch, the
+ * bootstrap's jump), even with no switches. */
+bool devupdate_launched(void);
 
 /* From the app's crash handler, after its report and crash screen: wakes
  * the recovery thread prepared by devupdate_start and returns true (false

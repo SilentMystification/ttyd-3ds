@@ -260,6 +260,13 @@ bool devupdate_relaunch_requested(void) { return s_relaunch_req; }
 bool devupdate_running(void) { return s_running; }
 bool devupdate_in_recovery(void) { return s_recovery != 0; }
 
+static bool s_launched;
+
+bool devupdate_launched(void) {
+    devupdate_launch_args();
+    return s_launched;
+}
+
 const char* devupdate_launch_args(void) {
     static char args[DELIVER_BYTES + 1];
     static bool read;
@@ -277,6 +284,7 @@ const char* devupdate_launch_args(void) {
         size_t n = strnlen((const char*)buf + ARG_PREFIX_LEN, sizeof(buf) - ARG_PREFIX_LEN);
         memcpy(args, buf + ARG_PREFIX_LEN, n);
         args[n] = '\0';
+        s_launched = true;
     }
     return args;
 }
@@ -343,6 +351,9 @@ static void hand_over(int fd, bool self, u64 tid, const char* args, bool recover
             s_next_args + ARG_PREFIX_LEN);
     s_relaunch_req = true;
     if (s_cfg.on_relaunch != NULL) {
+        if (!(envIsHomebrew() && !s_jump_self)) {
+            devupdate_prepare_relaunch(); /* the app's exit() then runs aptExit, which chainloads */
+        }
         s_cfg.on_relaunch(s_cfg.user);
     }
 }

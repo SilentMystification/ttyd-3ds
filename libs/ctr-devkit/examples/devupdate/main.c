@@ -12,9 +12,10 @@
  * with 3dslink, it receives any CIA (devupdate.py bootstrap), installs it
  * through AM and jumps into it with the switches as deliver arguments.
  *
- * It links the crash module too: X runs crash_test("fatal"), and the
- * launch argument crashtest=<kind> runs a test at frame 120. A crash hands
- * over to devupdate's recovery mode (report, push, restart from the PC).
+ * It links the crash module too: X runs crash_test("fatal"), the launch
+ * argument crashtest=<kind> runs a test at frame 120, and for emulators a
+ * file DIR/crashnow (holding the kind) runs one at once. A crash hands over
+ * to devupdate's recovery mode (report, push, restart from the PC).
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -236,6 +237,20 @@ int main(int argc, char** argv) {
         }
         if (down & KEY_X) {
             crash_test("fatal");
+        }
+        /* For emulator tests (no buttons): DIR/crashnow holding a test kind. */
+        if (crash_frame_count() % 30 == 0) {
+            FILE* cf = fopen(DIR "/crashnow", "r");
+            if (cf != NULL) {
+                char kind[16] = "fatal";
+                if (fgets(kind, sizeof(kind), cf) == NULL || kind[0] < 'a') {
+                    strcpy(kind, "fatal");
+                }
+                fclose(cf);
+                unlink(DIR "/crashnow");
+                kind[strcspn(kind, " \r\n")] = '\0';
+                crash_test(kind);
+            }
         }
         gfxFlushBuffers();
         gfxSwapBuffers();

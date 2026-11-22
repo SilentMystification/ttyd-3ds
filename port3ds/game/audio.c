@@ -28,6 +28,7 @@
 #include "musyx/sal.h"
 #include "musyx/synth.h"
 #include "plat/plat.h"
+#include "port3ds/os_internal.h"
 
 u8* port_aram_ptr(u32 addr);
 
@@ -37,7 +38,7 @@ static SND_SOME_CALLBACK s_user_callback;
 static u8 s_buffer_index;
 void* salAIBufferBase;
 static volatile u32 s_logic_active;
-static volatile OSTick s_last_tick;
+static volatile OSTime s_last_tick; /* the real clock, not the game's (a test mode can replace that) */
 /* hwDisableIrq nesting, per host thread: on the GameCube one count serves
  * because the game and the audio interrupt never run at once; here the
  * interrupt runs on another core (see SoundIntOff in sound.c). */
@@ -69,7 +70,7 @@ static void call_user_callback(void) {
 static void sal_callback(void) {
     s_buffer_index = (s_buffer_index + 1) % 4;
     AIInitDMA(OSCachedToPhysical(salAIBufferBase) + s_buffer_index * DMA_BUFFER_LEN, DMA_BUFFER_LEN);
-    s_last_tick = OSGetTick();
+    s_last_tick = port_os_real_time();
     call_user_callback();
 }
 
@@ -130,7 +131,7 @@ void salCtrlDsp(s16* dest) {
 }
 
 /* Microseconds since the last AI interrupt. */
-u32 salGetStartDelay(void) { return OSTicksToMicroseconds(OSGetTick() - s_last_tick); }
+u32 salGetStartDelay(void) { return (u32)OSTicksToMicroseconds(port_os_real_time() - s_last_tick); }
 
 void hwInitIrq(void) {
     s_old_state = OSDisableInterrupts();

@@ -201,6 +201,10 @@ class ProjectConfig:
         self.generate_compile_commands: bool = (
             True  # Generate compile_commands.json for clangd
         )
+        # A second build in its own build_dir (configure.py --gcdebug) writes its own ninja file and no objdiff.json,
+        # so the matching build's files stay as they are.
+        self.ninja_file: str = "build.ninja"
+        self.generate_objdiff: bool = True
         self.extra_clang_flags: List[str] = []  # Extra flags for clangd
         self.scratch_preset_id: Optional[int] = (
             None  # Default decomp.me preset ID for scratches
@@ -461,7 +465,8 @@ def generate_build(config: ProjectConfig) -> None:
     objects = config.objects()
     build_config = load_build_config(config, config.out_path() / "config.json")
     generate_build_ninja(config, objects, build_config)
-    generate_objdiff_config(config, objects, build_config)
+    if config.generate_objdiff:
+        generate_objdiff_config(config, objects, build_config)
     generate_compile_commands(config, objects, build_config)
 
 
@@ -1551,7 +1556,7 @@ def generate_build_ninja(
         description=f"RUN {configure_script}",
     )
     n.build(
-        outputs=["build.ninja", "objdiff.json"],
+        outputs=[config.ninja_file, *(["objdiff.json"] if config.generate_objdiff else [])],
         rule="configure",
         implicit=[
             build_config_path,
@@ -1578,7 +1583,7 @@ def generate_build_ninja(
         n.default(build_config_path)
 
     # Write build.ninja
-    with open("build.ninja", "w", encoding="utf-8") as f:
+    with open(config.ninja_file, "w", encoding="utf-8") as f:
         f.write(out.getvalue())
     out.close()
 

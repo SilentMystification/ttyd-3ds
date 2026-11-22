@@ -13,6 +13,18 @@ int port_irq_depth(void);
 int port_irq_release_all(void);
 void port_irq_reacquire(int depth);
 
+/* os.c: a replacement source for OSGetTime (and OSGetTick), for a test mode
+ * where game time comes from the frame count; NULL restores the clock.
+ * port_os_real_time is the clock itself, for code that needs real time. */
+void port_os_set_time_source(OSTime (*source)(void));
+OSTime port_os_real_time(void);
+
+/* ai.c: frame-paced audio. While on, the platform's audio thread only plays
+ * silence, and port_ai_pump runs the DMA interrupt for n 5 ms quanta of the
+ * game's own (the caller's) clock. */
+void port_ai_set_frame_paced(int on);
+void port_ai_pump(int quanta);
+
 /* os_thread.c */
 void port_thread_init(void);
 /* From a host thread that is not a game thread (an "interrupt"): give the

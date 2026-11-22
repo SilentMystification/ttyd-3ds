@@ -137,6 +137,12 @@ parser.add_argument(
     help="how to handle warnings",
 )
 parser.add_argument(
+    "--gcdebug",
+    action="store_true",
+    help="the GameCube debug DOL (non-matching): the 3DS port's test switches built in (TARGET_GCDEBUG), "
+    "output in build/gcdebug/<version>/, ninja file build_gcdebug.ninja (ninja -f build_gcdebug.ninja)",
+)
+parser.add_argument(
     "--no-progress",
     dest="progress",
     action="store_false",
@@ -331,6 +337,27 @@ cflags_rel = with_game_msl([
     "-DMUSY_VERSION_MINOR=0",
     "-DMUSY_VERSION_PATCH=3",
 ])
+
+# GameCube debug DOL (--gcdebug, docs/PORT_3DS_TEST_INFRA.md): the same game code with the 3DS port's test
+# switches (port3ds/game/test_*.c, port3ds/gcdebug/gcdebug.c). The game code's calls of the clock, the retrace
+# wait and callbacks, the pad and rand go to the test layer (gcdbg_*), which calls the real SDK; the SDK, MSL and
+# MusyX keep the real ones. None of this reaches the matching build.
+GCDEBUG_RENAMES = [
+    "-DTARGET_GCDEBUG",
+    "-DOSGetTime=gcdbg_OSGetTime",
+    "-DOSGetTick=gcdbg_OSGetTick",
+    "-DVIWaitForRetrace=gcdbg_VIWaitForRetrace",
+    "-DVISetPreRetraceCallback=gcdbg_VISetPreRetraceCallback",
+    "-DVISetPostRetraceCallback=gcdbg_VISetPostRetraceCallback",
+    "-DPADRead=gcdbg_PADRead",
+    "-Drand=gcdbg_rand",
+    "-Dsrand=gcdbg_srand",
+]
+if args.gcdebug:
+    # the game's own flags plus the renames (cflags_static also builds the main precompiled headers)
+    cflags_gcdebug_glue = [*cflags_static, "-DTARGET_GCDEBUG"]
+    cflags_static.extend(GCDEBUG_RENAMES)
+    cflags_rel.extend(GCDEBUG_RENAMES)
 
 config.linker_version = "GC/2.6"
 # RELs are linked without -strip_partial: the original RELs keep unreferenced code and data (the MSL math
@@ -2336,6 +2363,43 @@ config.progress_categories = [
     ProgressCategory("musyx", "MusyX Code"),
 ]
 config.progress_each_module = args.verbose
+
+if args.gcdebug:
+    # Its own build folder, ninja file and no objdiff.json or progress; the default target is the link (no SHA-1
+    # check); the tools of build/ are used.
+    config.build_dir = args.build_dir / "gcdebug"
+    config.ninja_file = "build_gcdebug.ninja"
+    config.generate_objdiff = False
+    config.generate_compile_commands = False
+    config.non_matching = True
+    config.progress = False
+    config.compilers_path = config.compilers_path or args.build_dir / "compilers"
+    config.binutils_path = config.binutils_path or args.build_dir / "binutils"
+    config.dtk_path = config.dtk_path or args.build_dir / "tools" / "dtk"
+    config.objdiff_path = config.objdiff_path or args.build_dir / "tools" / "objdiff-cli"
+    config.sjiswrap_path = config.sjiswrap_path or args.build_dir / "tools" / "sjiswrap.exe"
+    if not is_windows() and config.wrapper is None:
+        config.wrapper = args.build_dir / "tools" / "wibo"
+    GCDEBUG_UNITS = ["game/test_mode.c", "game/test_gallery.c", "game/test_battle.c"]
+    config.libs.append(
+        {
+            "lib": "gcdebug",
+            "mw_version": "GC/2.6",
+            "cflags": [*cflags_static, "-i port3ds/game"],
+            "progress_category": "game",
+            "src_dir": "port3ds",
+            "objects": [
+                *(Object(Matching, u) for u in GCDEBUG_UNITS),
+                Object(Matching, "gcdebug/gcdebug.c", cflags=[*cflags_gcdebug_glue, "-i port3ds/game"]),
+            ],
+        }
+    )
+
+    def gcdebug_link_order(module_id: int, units: List[str]) -> List[str]:
+        # the test layer goes at the end of the DOL
+        return [*units, *GCDEBUG_UNITS, "gcdebug/gcdebug.c"] if module_id == 0 else units
+
+    config.link_order_callback = gcdebug_link_order
 
 if args.mode == "configure":
     # Write build.ninja and objdiff.json

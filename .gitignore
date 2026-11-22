@@ -21,6 +21,7 @@ orig/*/*
 build/
 .ninja_*
 build.ninja
+build_gcdebug.ninja
 
 # decompctx output
 ctx.*

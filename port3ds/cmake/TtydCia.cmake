@@ -1,5 +1,5 @@
 # ttyd_add_cia(<target>
-#     TITLE <text> SUBTITLE <text> UNIQUE_ID <0x...> PRODUCT_CODE <CTR-H-XXXX>
+#     TITLE <text> SUBTITLE <text> UNIQUE_ID <0x...> PRODUCT_CODE <KTR-N-XXXX>
 #     [SHORT_DESC <text>] [AUTHOR <text>])
 #
 # Builds <target>.3dsx and <target>.cia next to the ELF of executable

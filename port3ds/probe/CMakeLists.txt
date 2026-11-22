@@ -11,5 +11,5 @@ ttyd_add_cia(ttyd_probe
     TITLE "TTYD 3DS"
     SUBTITLE "PROBE"
     SHORT_DESC "TTYD 3DS hardware probe"
-    UNIQUE_ID 0xF7D1F
-    PRODUCT_CODE CTR-H-TTYP)
+    UNIQUE_ID 0xFD887
+    PRODUCT_CODE KTR-N-TTYP)

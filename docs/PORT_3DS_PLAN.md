@@ -447,7 +447,7 @@ These are asked in the conversation and recorded here with the answers once give
 5. Hardware. **Answered:** an N3DS that the agent reaches over the network, with 3dslink for netload and ftpd for pulling logs. Scripts read the console address from the `N3DS_IP` environment variable; there is no auto-discovery.
 6. Regions. **Answered:** US first. The converter accepts all three regions from the start; JP and PAL are brought up in phase 7.
 7. Original game bugs. **Answered:** keep them, so behaviour matches the original.
-8. CIA. **Answered:** a unique ID in the homebrew range with product code `CTR-H-TTYD`, and plain original placeholder banner and icon art that can be replaced later.
+8. CIA. **Answered:** unique ID `0xFD886` (title `000400000FD88600`) with product code `KTR-N-TTYD`, and plain original placeholder banner and icon art that can be replaced later.
 9. Git. **Answered:** work on a `port3ds` branch pushed to `SilentMystification/ttyd-3ds`, with PRs into `main` at phase boundaries.
 
 ## 12. Unverified assumptions (checked on hardware in phase 8)

@@ -20,8 +20,8 @@ BasicInfo:
 
 TitleInfo:
   Category                     : Application
-  # Homebrew-range placeholder IDs, not registered: 0xF7D10 for the game,
-  # 0xF7D1F for the probe.
+  # Owner-chosen IDs, not registered: 0xFD886 (title 000400000FD88600) for
+  # the game, 0xFD887 for the probe.
   UniqueId                     : $(APP_UNIQUE_ID)
 
 Option:

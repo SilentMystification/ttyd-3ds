@@ -246,5 +246,5 @@ ttyd_add_cia(ttyd
     TITLE "TTYD 3DS"
     SUBTITLE "PORT"
     SHORT_DESC "Paper Mario TTYD (3DS port)"
-    UNIQUE_ID 0xF7D10
-    PRODUCT_CODE CTR-H-TTYD)
+    UNIQUE_ID 0xFD886
+    PRODUCT_CODE KTR-N-TTYD)

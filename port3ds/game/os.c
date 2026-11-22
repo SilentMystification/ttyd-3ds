@@ -15,10 +15,12 @@
 #include "port3ds/os_internal.h"
 #include "port3ds/rel_static.h"
 
-/* The arena the game sees at main() on the GameCube (G8ME01, measured in
- * Dolphin: 0x80439920..0x817EE1A0). The game's own DEMOInit and memInit
- * carve it, so every heap has its GameCube size. */
-#define GAME_ARENA_BYTES 0x013B4880u
+/* The arena the game sees at main() on the GameCube, for this version
+ * (tools/port3ds/gen_disc_data.py; G8ME01 0x80439920..0x817EE1A0, as
+ * measured in Dolphin). The game's own DEMOInit and memInit carve it, so
+ * every heap has its GameCube size. */
+#include "port_disc_data_gen.h"
+#define GAME_ARENA_BYTES (PORT_GAME_ARENA_HI - PORT_GAME_ARENA_LO)
 
 static void* s_arena_lo;
 static void* s_arena_hi;

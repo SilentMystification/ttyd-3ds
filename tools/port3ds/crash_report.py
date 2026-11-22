@@ -27,7 +27,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import elfsyms  # noqa: E402
 
-HEAD = re.compile(r"^\[CRASH\] (data abort|prefetch abort|undefined instruction|VFP|exception|fatal|svcBreak|watchdog)")
+# A report's first line; "v1" is the ctr-devkit report format version (older reports have none).
+HEAD = re.compile(r"^\[CRASH\] (?:v\d+ )?(data abort|prefetch abort|undefined instruction|VFP|exception|fatal|svcBreak|watchdog)")
 BUILD = re.compile(r"build #(\d+) ([0-9a-f]{6,})")
 KV = re.compile(r"\b(pc|lr)=([0-9a-f]{8})\b")
 HEX = re.compile(r"\b[0-9a-f]{8}\b")

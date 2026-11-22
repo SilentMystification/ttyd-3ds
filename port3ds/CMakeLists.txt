@@ -228,6 +228,9 @@ target_include_directories(ttyd_port_game PRIVATE ${TTYD_INCLUDES} "${TTYD_REPO_
 ctr_add_shader_library(ttyd_gx_shader OUTPUT gx.shbin "${CMAKE_CURRENT_LIST_DIR}/shaders/gx.v.pica")
 dkp_add_embedded_binary_library(ttyd_gx_shader_bin ttyd_gx_shader)
 
+# ctr-devkit (libs/ctr-devkit): the crash handler, which plat/crash.c configures.
+add_subdirectory("${TTYD_REPO_DIR}/libs/ctr-devkit" ctr-devkit)
+
 add_library(ttyd_port_plat OBJECT ${TTYD_PORT_PLAT_SOURCES})
 add_dependencies(ttyd_port_plat ttyd_build_stamp)
 add_dependencies(ttyd_port_game ttyd_build_stamp)
@@ -236,7 +239,8 @@ target_link_libraries(ttyd_port_plat PRIVATE ttyd_gx_shader_bin)
 target_compile_options(ttyd_port_plat PRIVATE -std=gnu11 -O2 -g ${TTYD_PORT_WARNINGS}
     -fno-strict-aliasing -ffunction-sections -fdata-sections)
 target_compile_definitions(ttyd_port_plat PRIVATE PORT3DS_PLAT_SIDE=1)
-target_include_directories(ttyd_port_plat PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include" "${TTYD_GEN_DIR}")
+target_include_directories(ttyd_port_plat PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include" "${TTYD_GEN_DIR}"
+    "${TTYD_REPO_DIR}/libs/ctr-devkit/include")
 
 add_executable(ttyd
     $<TARGET_OBJECTS:ttyd_dol>
@@ -246,10 +250,10 @@ add_executable(ttyd
     ${TTYD_REL_OBJECTS})
 add_dependencies(ttyd ttyd_rels)
 # --no-enum-size-warning: the two enum ABIs are mixed on purpose (see above).
-# --wrap=svcBreak: crash.c turns every svcBreak (libctru and citro3d panics too) into a crash report
+# --wrap=svcBreak: the crash library turns every svcBreak (libctru and citro3d panics too) into a crash report
 target_link_options(ttyd PRIVATE -Wl,--gc-sections -Wl,--wrap=svcBreak -Wl,--no-enum-size-warning
     -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/ttyd.map)
-target_link_libraries(ttyd PRIVATE ttyd_gx_shader_bin citro3d ctru m)
+target_link_libraries(ttyd PRIVATE ttyd_gx_shader_bin ctrdk_crash citro3d ctru m)
 
 ttyd_add_cia(ttyd
     TITLE "TTYD 3DS"

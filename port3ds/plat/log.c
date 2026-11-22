@@ -463,27 +463,17 @@ void plat_log_crash_close(void) {
     }
 }
 
-static int s_crash_fd = -1, s_crash_ok;
-int plat_crash_file_ok(void) { return s_crash_ok; }
-
+/* The crash library's line sink (plat/crash.c). The library itself writes
+ * crash.txt (appended, kept across boots) and the debugger channel. */
 void plat_crash_line(const char* s, int n) {
     static int flushed;
     if (!flushed) {
         flushed = 1;
         plat_log_crash_flush();
     }
-    svcOutputDebugString(s, n);
     if (s_log_fd >= 0) {
         write(s_log_fd, s, (size_t)n);
         fsync(s_log_fd);
-    }
-    /* crash.txt keeps every crash (append), across boots. */
-    if (s_crash_fd < 0) {
-        s_crash_fd = open("crash.txt", O_WRONLY | O_CREAT | O_APPEND, 0666);
-    }
-    if (s_crash_fd >= 0) {
-        s_crash_ok = write(s_crash_fd, s, (size_t)n) == n;
-        fsync(s_crash_fd);
     }
     if (s_client >= 0) {
         send(s_client, s, (size_t)n, MSG_DONTWAIT);

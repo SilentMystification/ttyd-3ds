@@ -12,7 +12,8 @@
    build/hw-last/log.txt. The game keeps its last lines in a ring and sends
    them on connect, so nothing before the connection is lost.
    The switches always include "livelog" (the game opens the log port for
-   any start), unless the switches include "nolivelog".
+   any start), unless the switches include "nolivelog". It also adds
+   "fastboot" (A pressed through the boot screens) unless "nofastboot" is given.
    For a game started from the HOME Menu (the CIA), add "livelog" to
    sdmc:/3ds/ttyd/debug3ds.txt, start it, and attach with --no-send:
        tools/port3ds/run_hw.py --no-send --until "warp:" --timeout 300
@@ -59,6 +60,10 @@ def main():
 
     OUT.mkdir(parents=True, exist_ok=True)
     sw = args.switches.split()
+    if "nofastboot" in sw:
+        sw.remove("nofastboot")
+    elif "fastboot" not in sw:
+        sw.append("fastboot")  # presses A through the boot screens
     if "nolivelog" in sw:
         sw.remove("nolivelog")
     elif "livelog" not in sw:

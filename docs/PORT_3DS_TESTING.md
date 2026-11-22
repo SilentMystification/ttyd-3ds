@@ -72,7 +72,7 @@ mkdir -p build/azahar-profile/data/azahar-emu/sdmc/3ds/ttyd
 ln -f iso/game.iso build/azahar-profile/data/azahar-emu/sdmc/3ds/ttyd/game.iso
 tools/port3ds/build.sh
 tools/port3ds/run_azahar.py --build build/3ds/game/ttyd.cia --log 3ds/ttyd/log.txt \
-    --switches "map=gor_01 shots=100 shotmax=40 padscript=wait*250,a*3" \
+    --switches "map=gor_01 shots=100 shotmax=40" \
     --until "shot shots/04000" --timeout 500 --stall 0
 ```
 
@@ -80,7 +80,8 @@ Switches the game reads (space-separated words in `--switches`):
 
 | Switch | Effect |
 |---|---|
-| `map=<map>[,<bero>]` | Starts a new game on that map once the title or the opening is up (the warning screen needs an A press first). `story=N` sets the story so far (GSW 0, default 0); `party=N` the partner (default 1, Goombella; 0 none) |
+| `map=<map>[,<bero>]` | Starts a new game on that map once the title or the opening is up (`fastboot` presses A through the warning screen). `story=N` sets the story so far (GSW 0, default 0); `party=N` the partner (default 1, Goombella; 0 none) |
+| `fastboot` | Presses A every 6 game frames (held 2) through the boot sequences before the title (the warning screen, the logos), and stops for good once the title sequence starts or a `map=`/`sweep=` warp begins. `run_azahar.py`, `run_hw.py` and `map_sweep.py` add it by default; pass `nofastboot` (`--nofastboot` for `map_sweep.py`) to leave it out |
 | `padscript=<steps>` | Scripted input: comma-separated `KEYS*frames` steps (`a*3`, `wait*40`, `start*3`, `a+b*2`). Frames are game frames (one per VIWaitForRetrace). Keys: `a b x y l r zl zr start select up down left right`; `cl cr cu cd` push the circle pad (the game's control stick) fully left, right, up or down. TTYD's menus and dialogs move with the stick, not the D-pad, so use `cu`/`cd` there. Up to 2048 steps |
 | `shots=N` | Saves every Nth frame's EFB (608x480, as the game drew it) to `sdmc:/3ds/ttyd/shots/NNNNN.ppm` and logs that frame's draw counts. `shotmax=N` limits the number (default 200). In Azahar about one shot in seven comes out all black although its frame drew normally (the log line shows the frame's draws); take shots a few frames apart rather than relying on one |
 | `gxdump=N` | Logs every draw of frame N: primitive, texture, first vertex in clip space, its matrix, TEV and blend state, and the code that began it (resolve with `addr2line -e build/3ds/game/ttyd.elf`). Runs of draws with the same matrix and texture are one line. EFB copies are logged too |
@@ -126,7 +127,7 @@ Setup on the console (once):
 export N3DS_IP=192.168.1.50      # the console's address (System Settings or the Homebrew Launcher's Y screen)
 # Homebrew Launcher: press Y to wait for 3dslink, then:
 tools/port3ds/run_hw.py --switches "wdog=30" --until "warp:|title" --timeout 300
-tools/port3ds/run_hw.py --switches "map=gor_01 wdog=30 padscript=wait*250,a*3" --until "warp: gor_01" --timeout 300
+tools/port3ds/run_hw.py --switches "map=gor_01 wdog=30" --until "warp: gor_01" --timeout 300
 ```
 
 `run_hw.py` sends the `.3dsx` with 3dslink, passing the switches as arguments, and then connects to the game's live log on TCP port 17492. A netloaded game opens that port by itself. It prints and saves every line to `build/hw-last/log.txt` and stops like the Azahar runner. The game also writes `sdmc:/3ds/ttyd/log.txt` and keeps the previous run as `log.old`, so the report of a crash that cut the connection can be fetched with ftpd.

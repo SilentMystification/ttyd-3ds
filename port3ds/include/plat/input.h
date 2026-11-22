@@ -41,6 +41,10 @@ typedef struct {
  * replaces the hardware state. */
 void plat_input_scan(PlatInput* out);
 
+/* Registers a hook (game-specific code) whose PLAT_KEY_* bits are ORed into
+ * every scan, on top of scripted or real input. NULL removes it. */
+void plat_input_set_extra_keys(uint32_t (*fn)(void));
+
 /* Called once per game frame: advances scripted input (switch padscript). */
 void plat_input_frame(void);
 

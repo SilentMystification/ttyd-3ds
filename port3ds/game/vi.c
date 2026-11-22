@@ -116,6 +116,35 @@ static void warp_new_game(int story, int party) {
     }
 }
 
+/* Switch fastboot (tests, on by default in the tools): through the boot
+ * sequences before the title (the warning screen, the logos) press A every 6
+ * game frames, held for 2. Stops for good once the title starts or a warp
+ * (map=, sweep=) has begun. */
+static int s_fastboot = -1; /* -1 unread, 0 off or finished, 1 pressing */
+
+static uint32_t fastboot_keys(void) {
+    return s_fastboot == 1 && (s_frames % 6) < 2 ? PLAT_KEY_A : 0;
+}
+
+static void fastboot_frame(int warped) {
+    if (s_fastboot < 0) {
+        s_fastboot = plat_switch_has("fastboot") ? 1 : 0;
+        if (s_fastboot) {
+            plat_input_set_extra_keys(fastboot_keys);
+            PLOG_I("fastboot: on");
+        }
+    }
+    if (s_fastboot != 1) {
+        return;
+    }
+    int seq = gp != NULL ? seqGetSeq() : SEQ_UNDEFINED;
+    if (warped || (seq != SEQ_UNDEFINED && seq != SEQ_LOGO)) {
+        s_fastboot = 0;
+        plat_input_set_extra_keys(NULL);
+        PLOG_I("fastboot: off at frame %u (sequence %d)", (unsigned)s_frames, seq);
+    }
+}
+
 static void warp_to(const char* map, const char* bero) {
     if (seqGetSeq() != SEQ_GAME) {
         warp_new_game(plat_switch_int("story", 0), plat_switch_int("party", 1));
@@ -126,6 +155,7 @@ static void warp_to(const char* map, const char* bero) {
 
 /* Switch map=<map>[,<bero>] (tests): once the title or the opening's map
  * is up, start a new game there (story=N, party=N as for the menu's warp). */
+static int s_warp_switch_done;
 static void warp_switch(void) {
     static int state = -1; /* -1 unread, 0 off, 1 waiting, 2 done */
     static char map[16], bero[16];
@@ -147,9 +177,10 @@ static void warp_switch(void) {
     }
     if (seqGetSeq() == SEQ_TITLE || (seqGetSeq() == SEQ_GAME && strcmp(gp->currentMapName, map) != 0)) {
         warp_new_game(plat_switch_int("story", 0), plat_switch_int("party", 1));
-        PLOG_I("warp: %s %s (switch)", map, bero);
+        PLOG_I("warp: %s %s (switch) at game frame %u", map, bero, (unsigned)s_frames);
         seqSetSeq(SEQ_MAP_CHANGE, map, bero[0] ? bero : NULL);
         state = 2;
+        s_warp_switch_done = 1;
     }
 }
 
@@ -323,6 +354,7 @@ static void frame_hooks(void) {
     }
     warp_switch();
     sweep_frame();
+    fastboot_frame(s_sweep_state > 1 || s_warp_switch_done);
     if (s_frames % 1800 == 0) {
         plat_memory_log("now");
     }

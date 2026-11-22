@@ -52,6 +52,7 @@ What is worth borrowing from Aurora (MIT licence):
 
 1. Every public entry point is the standard Dolphin SDK API (`GX*`, `OS*`, `DVD*`, `CARD*`, `PAD*`, `VI*`, `AR*`, `AI*`), plus a small documented `gc3ds_*` extension API for hooks: game time, warp and test switches, HUD lines, and effect overrides.
 2. Nothing in the library knows a TTYD symbol, file name or map name. Today's leaks are things to clean up during the split. The warp list is already a hook, because the game passes it in through `plat_set_map_list`, and that is the pattern to follow for any other leak.
+   - `plat_input_set_extra_keys(fn)`: the game registers a function whose `PLAT_KEY_*` bits are ORed into every input scan (TTYD's `fastboot` switch uses it to press A through the boot screens).
 3. Effect overrides are registered by the game: "when this TEV/indirect configuration is seen, call this function". The GX core falls back to a logged approximation, never a silent skip.
 4. Hardware rules stay as they are: bounds checks, explicit cache flushes, Azahar `UnmappedAccess` treated as failure, and both QTM and FCRAM paths tested.
 

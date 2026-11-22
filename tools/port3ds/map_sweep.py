@@ -55,12 +55,12 @@ def disc_maps(iso):
     return sorted(maps)
 
 
-def run(build, todo, story, frames, party, timeout):
+def run(build, todo, story, frames, party, timeout, fastboot=True):
     """One Azahar run over todo; returns {map: result} for the maps it reached."""
     GAME_DIR.mkdir(parents=True, exist_ok=True)
     (GAME_DIR / "sweep.txt").write_text("".join(f"{m} {story}\n" for m in todo))
     shutil.rmtree(GAME_DIR / "sweep", ignore_errors=True)
-    switches = f"sweep={frames} party={party}"
+    switches = f"sweep={frames} party={party} " + ("fastboot" if fastboot else "nofastboot")
     cmd = [sys.executable, str(ROOT / "tools/port3ds/run_azahar.py"), "--build", str(build),
            "--switches", switches, "--log", "3ds/ttyd/log.txt", "--until", r"sweep: (done|stopped)",
            "--timeout", str(timeout), "--stall", "60"]
@@ -114,6 +114,7 @@ def main():
     ap.add_argument("--story", type=int, default=0, help="GSW 0 for every map")
     ap.add_argument("--party", type=int, default=1)
     ap.add_argument("--frames", type=int, default=120, help="game frames on each map before its screenshot")
+    ap.add_argument("--nofastboot", action="store_true", help="do not press A through the boot screens")
     ap.add_argument("--timeout", type=float, default=3600.0, help="seconds per Azahar run")
     args = ap.parse_args()
 
@@ -124,7 +125,7 @@ def main():
     results = {}
     todo = list(maps)
     while todo:
-        got = run(args.build, todo, args.story, args.frames, args.party, args.timeout)
+        got = run(args.build, todo, args.story, args.frames, args.party, args.timeout, not args.nofastboot)
         results.update(got)
         reached = [m for m in todo if m in got]
         if not reached:

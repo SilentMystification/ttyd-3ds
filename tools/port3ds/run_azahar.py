@@ -176,7 +176,8 @@ def azahar_log_path():
 def main():
     ap = argparse.ArgumentParser(description="Run a 3DS build in Azahar with pass/fail detection.")
     ap.add_argument("--build", required=True, type=Path, help=".3dsx or .cia to run")
-    ap.add_argument("--switches", default="", help="words written to sdmc:/3ds/ttyd/debug3ds.txt")
+    ap.add_argument("--switches", default="",
+                    help="words written to sdmc:/3ds/ttyd/debug3ds.txt (fastboot is added unless nofastboot is given)")
     ap.add_argument("--log", default="3ds/ttyd/log.txt", help="game log path relative to the SD card root")
     ap.add_argument("--until", help="regex in the game log that means success")
     ap.add_argument("--timeout", type=float, default=120.0)
@@ -203,7 +204,12 @@ def main():
 
     ttyd_dir = sdmc / "3ds" / "ttyd"
     ttyd_dir.mkdir(parents=True, exist_ok=True)
-    (ttyd_dir / "debug3ds.txt").write_text(args.switches + "\n")
+    sw = args.switches.split()
+    if "nofastboot" in sw:
+        sw.remove("nofastboot")
+    elif "fastboot" not in sw:
+        sw.append("fastboot")  # presses A through the boot screens
+    (ttyd_dir / "debug3ds.txt").write_text(" ".join(sw) + "\n")
     game_log = sdmc / args.log
     if game_log.exists():
         game_log.unlink()

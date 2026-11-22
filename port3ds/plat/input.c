@@ -76,7 +76,22 @@ static void script_load(void) {
     PLOG_I("padscript: %d steps", s_steps);
 }
 
+static uint32_t (*s_extra_keys)(void);
+
+void plat_input_set_extra_keys(uint32_t (*fn)(void)) {
+    s_extra_keys = fn;
+}
+
+static void scan(PlatInput* out);
+
 void plat_input_scan(PlatInput* out) {
+    scan(out);
+    if (s_extra_keys != NULL) {
+        out->held |= s_extra_keys();
+    }
+}
+
+static void scan(PlatInput* out) {
     memset(out, 0, sizeof(*out));
     hidScanInput();
     if (!s_script_loaded) {

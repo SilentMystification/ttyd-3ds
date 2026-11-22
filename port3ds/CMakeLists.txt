@@ -252,7 +252,12 @@ set(TTYD_SDK_SOURCES
     "${TTYD_REPO_DIR}/libs/dolsdk2004/src/os/OSAlloc.c"
     "${TTYD_REPO_DIR}/libs/dolsdk2004/src/pad/Padclamp.c"
     "${TTYD_REPO_DIR}/libs/dolsdk2004/src/gx/GXDraw.c")
-add_library(ttyd_port_game OBJECT ${TTYD_PORT_GAME_SOURCES} ${TTYD_SDK_SOURCES}
+# Third-party code compiled as it is (port3ds/third_party/<name>/, each with its LICENSE):
+# the THP movie decoder from aurora (MIT), behind game/thp.c.
+set(TTYD_THIRD_PARTY_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/aurora_thp/thp_video.c"
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/aurora_thp/thp_audio.c")
+add_library(ttyd_port_game OBJECT ${TTYD_PORT_GAME_SOURCES} ${TTYD_SDK_SOURCES} ${TTYD_THIRD_PARTY_SOURCES}
     "${TTYD_GEN_DIR}/rel_table.c" "${TTYD_GEN_DIR}/mtx_sdk.c"
     "${TTYD_GEN_DIR}/port_swap_gen.c" "${TTYD_GEN_DIR}/port_swap_gen.h")
 set_source_files_properties(${TTYD_SDK_SOURCES} "${TTYD_GEN_DIR}/mtx_sdk.c" TARGET_DIRECTORY ttyd_port_game
@@ -269,7 +274,8 @@ target_compile_options(ttyd_port_game PRIVATE -std=gnu11 -O2 -g -fno-short-enums
     -fno-strict-aliasing -fwrapv -ffp-contract=off -ffunction-sections -fdata-sections
     -include "${CMAKE_CURRENT_LIST_DIR}/include/port3ds_prefix.h")
 target_compile_definitions(ttyd_port_game PRIVATE ${TTYD_DEFINES} PORT3DS_GAME_SIDE=1)
-target_include_directories(ttyd_port_game PRIVATE ${TTYD_INCLUDES} "${TTYD_REPO_DIR}/libs/dolsdk2004/src/gx")
+target_include_directories(ttyd_port_game PRIVATE ${TTYD_INCLUDES} "${TTYD_REPO_DIR}/libs/dolsdk2004/src/gx"
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/aurora_thp")
 
 # The GX vertex shader (port3ds/shaders/gx.v.pica), embedded as gx_shbin.
 ctr_add_shader_library(ttyd_gx_shader OUTPUT gx.shbin "${CMAKE_CURRENT_LIST_DIR}/shaders/gx.v.pica")

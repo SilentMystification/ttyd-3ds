@@ -924,7 +924,7 @@ int gx_vsh_imm_on = 1; /* switch gxvshimm (default 1): immediate-mode draws may 
 /* An immediate-mode draw (GXBegin/GXEnd) on the shader path, when its group
  * takes it: the vertices go to this frame's ring. 0: draw it on the CPU (it
  * was routed already). */
-static int draw_vsh_imm(u8 prim, const GxVertex* v, u32 n) {
+static int draw_vsh_imm(u8 prim, const GxVertex* v, u32 n, const void* ident, u32 ident_n, int imm) {
     vsh_state();
     u32 why = gx_vsh_imm_on ? s_vsh_reasons | gx_vsh_imm_reasons(prim, n) : GXV_R_IMM;
     if (gx_bbox_active) {
@@ -933,8 +933,7 @@ static int draw_vsh_imm(u8 prim, const GxVertex* v, u32 n) {
     if (why == 0 && !gx_vsh_imm_room(n)) {
         why = GXV_R_POOL;
     }
-    /* known across frames by the code that began it */
-    if (!gx_vsh_route(v[0].pnmtx, why, gx_begin_caller, 0xFFFFFFFFu, n, 1)) {
+    if (!gx_vsh_route(v[0].pnmtx, why, ident, ident_n, n, imm)) {
         return 0;
     }
     if (gx.cull == GX_CULL_ALL) {
@@ -990,12 +989,19 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
     ensure_state();
     if (gx_vsh_on && !gx_vsh_noted) {
         int in_list = gx_pipe_in_list();
-        if (!in_list && gx.vtx_desc[GX_VA_PNMTXIDX] == GX_NONE) {
-            /* immediate mode: the shader path when the draw and its group can take it */
+        if (gx.vtx_desc[GX_VA_PNMTXIDX] == GX_NONE) {
+            /* immediate mode, or a display list being decoded (first call, changed, uncached): the shader
+             * path from this frame's ring when the draw and its group can take it. Known across frames by
+             * the code that began it, or by the list (as its cached hits are). */
             if (empty_target()) {
                 return;
             }
-            if (draw_vsh_imm(prim, v, n)) {
+            const void* ident = gx_begin_caller;
+            u32 ident_n = 0xFFFFFFFFu;
+            if (in_list) {
+                gx_pipe_cur_list(&ident, &ident_n);
+            }
+            if (draw_vsh_imm(prim, v, n, ident, ident_n, !in_list)) {
                 return;
             }
             goto routed;

@@ -1,5 +1,5 @@
-/* The vertex-shader path (switch gxvsh, default 0): cached display lists
- * transformed by the PICA200 instead of the CPU. Rules and acceptance tests:
+/* The vertex-shader path (switch gxvsh): GX draws transformed by the PICA200
+ * instead of the CPU. Rules and acceptance tests:
  * docs/PORT_3DS_GPU_OFFLOAD.md; design: docs/PORT_3DS_GX_PERF.md, "Design:
  * the vertex-shader path against the offload rules".
  *
@@ -22,16 +22,23 @@
  * was fully eligible for K consecutive frames (switch gxvshk, default 30),
  * and drops back to the CPU at once: in the frame an ineligible draw
  * appears, the group's later draws go to the CPU (a split, counted), and the
- * next frame starts on the CPU. Across frames a group is known by its lists:
- * each list's record keeps the streak of the group it was drawn in, and a
- * group's path for the frame is read from the record of its first list.
+ * next frame starts on the CPU. Across frames a group is known by its lists
+ * (and immediate draws by the code that began them): each one's record keeps
+ * the streak of the group it was drawn in, and a group's path for the frame
+ * is read from the record of its first eligible draw.
+ *
+ * Immediate mode and decoded lists. GXBegin/GXEnd draws, and lists decoded
+ * rather than drawn from the cache, write their vertices to a per-frame ring
+ * of chunks (gx_vsh_imm_*) and take the same group decision, so characters,
+ * effects and the map share a path.
  *
  * Decals (coplanar draws under another matrix, which the group key cannot
- * see). A draw with depth compare EQUAL or LEQUAL and depth writes off links
- * its group with every group drawn earlier in the same viewport: linked
- * groups count as one at the frame's end (eligible only together, the same
- * streak), so a CPU-only decal (immediate mode) keeps them all on the CPU.
- *
+ * see). Two shader-path draws follow the same arithmetic, so only a
+ * decal-like draw (depth EQUAL, or LEQUAL with depth writes off) made on the
+ * CPU path links its group with the groups drawn earlier in its viewport
+ * that take or could take the shader path. Linked groups count as one at the
+ * frame's end: eligible only together, with the largest streak of the set.
+
  * Game-agnostic: display lists, vertex state and matrices only. */
 #include <stddef.h>
 #include <stdint.h>
@@ -189,7 +196,7 @@ static struct {
 static u32 s_switch_total, s_split_total, s_frames_total, s_decal_frames_total;
 
 void gx_vsh_init(void) {
-    gx_vsh_on = plat_switch_int("gxvsh", 0) != 0;
+    gx_vsh_on = plat_switch_int("gxvsh", 1) != 0; /* default on: PORT_3DS_GX_PERF.md, "Round 2" */
     int k = plat_switch_int("gxvshk", 30);
     s_k = k < 1 ? 1 : (u32)k;
     s_check_at = (u32)plat_switch_int("gxvsh_check", 0);
@@ -959,9 +966,12 @@ void gx_vsh_frame(void) {
     if (s_check_at != 0 && gx_perf_frame_no() == s_check_at) {
         census_log();
     }
-    /* sets of linked groups: eligible only together, the smallest streak */
+    /* sets of linked groups: eligible only together, one streak: the largest
+     * of the set, so a group that joins an established set (a new decal over a
+     * floor already on the shader) moves to the floor's path, instead of
+     * pulling the floor back to the CPU for K frames */
     static u8 set_elig[GROUPS];
-    static u16 set_min[GROUPS];
+    static u16 set_min[GROUPS]; /* the set's streak (0xFFFF: no record in the set) */
     for (u32 i = 0; i < s_ngroups; i++) {
         u32 gi = s_order[i];
         set_elig[gi] = 1;
@@ -975,7 +985,7 @@ void gx_vsh_frame(void) {
         }
         if (g->first_rec && g->first_rec != ~0u) {
             u16 st = s_rec[g->first_rec - 1].streak;
-            set_min[r] = st < set_min[r] ? st : set_min[r];
+            set_min[r] = set_min[r] == 0xFFFF || st > set_min[r] ? st : set_min[r];
         }
         s_st.groups_vsh += g->path;
         s_st.groups_elig += g->elig;
@@ -986,7 +996,7 @@ void gx_vsh_frame(void) {
             s_st.decal_forced++; /* eligible itself, kept on the CPU by a linked group */
         }
     }
-    /* every list a group drew: the group set's new streak (the smallest over its groups) */
+    /* every list a group drew: its group set's new streak (a list drawn in several sets takes the smallest) */
     for (u32 i = 0; i < s_ntouch; i++) {
         Rec* rc = &s_rec[s_touch[i].rec - 1];
         u32 r = find(s_touch[i].group);

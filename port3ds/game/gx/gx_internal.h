@@ -325,7 +325,7 @@ typedef struct {
     u32 count;
 } GxDlcDraw;
 
-/* ---- gx_vsh.c: the vertex-shader path (switch gxvsh, default 0) ----
+/* ---- gx_vsh.c: the vertex-shader path (switch gxvsh, default 1) ----
  * A cached list's vertices as a PICA stream (linear memory, built once), and
  * the pass-group table that decides, per group of draws sharing a matrix,
  * projection and viewport, whether the GPU or the CPU transforms them. */
@@ -392,5 +392,6 @@ void gx_vsh_log(u32 frames);
 /* gx_draw.c: draws a cached entry through the shader when its group takes that path; 0: draw it on the CPU. */
 int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nbytes, u32 nverts);
 int gx_pipe_in_list(void);
+void gx_pipe_cur_list(const void** list, u32* nbytes); /* the display list being run */
 
 #endif

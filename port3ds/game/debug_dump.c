@@ -10,6 +10,7 @@
 #include "driver/npcdrv.h"
 #include "mario/mario.h"
 #include "mario/mariost.h"
+#include "driver/seqdrv.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -25,7 +26,9 @@ void port_debug_frame(u32 frame) {
     if (wk == NULL || wk->entries == NULL) {
         return;
     }
-    PLOG_I("evtdump frame %lu: %ld entries", (unsigned long)frame, (long)wk->count);
+    PLOG_I("evtdump frame %lu: %ld entries, mapEventId %ld, seq %d, systemLevelFlags %lx, systemLevel %ld", (unsigned long)frame, (long)wk->count,
+           gp != NULL ? (long)gp->mapEventId : -1L, (int)seqGetSeq(),
+           gp != NULL ? (unsigned long)gp->systemLevelFlags : 0UL, (long)_mariostSystemLevel);
     for (s32 i = 0; i < wk->count; i++) {
         EventEntry* e = &wk->entries[i];
         if (!(e->flags & EVENT_ACTIVE)) {

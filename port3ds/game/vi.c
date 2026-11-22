@@ -226,7 +226,7 @@ static void sweep_frame(void) {
         } else {
             return; /* the logos, a map change in progress */
         }
-        PLOG_I("sweep: %s (story %d)", s_sweep_maps[s_sweep_i], s_sweep_story[s_sweep_i]);
+        PLOG_I("sweep: %s (story %d) at frame %u", s_sweep_maps[s_sweep_i], s_sweep_story[s_sweep_i], (unsigned)s_frames);
         seqSetSeq(SEQ_MAP_CHANGE, s_sweep_maps[s_sweep_i], NULL);
         s_sweep_state = 2;
         s_sweep_wait = 0;

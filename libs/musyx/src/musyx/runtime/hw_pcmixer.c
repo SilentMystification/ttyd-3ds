@@ -582,6 +582,7 @@ static s32 sBus[NUM_BUS][FRAME_LEN];
 static s32 sCompGain = 32768; /* compressor gain, 1.15 */
 #ifdef TARGET_PORT
 int (*salPcPbOffload)(_PB* pb, int phase);
+void (*salPcStreamUploadHook)(u32 aram, u32 len);
 #endif
 
 static void cmdSetup(const u16* spb) {

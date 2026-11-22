@@ -487,11 +487,15 @@ static int cache_get(const PlatVoiceSample* smp) {
     e->loop_yn2 = smp->loop_yn2;
     e->last_use = s_cache_clock;
     if (e->looping && e->loop_start % 14 != 0) {
+        uint32_t ls = e->loop_start, end = e->end;
         if (!realign_loop(e, smp->coefs)) {
             cache_free(e);
             return -1;
         }
-        s_vstat.realigned++;
+        if (s_vstat.realigned++ < 64 && s_vstats_every > 0) {
+            PLOG_I("[NDSPV] loop re-aligned: ARAM %08lx, loop %lu..%lu -> %lu..%lu", (unsigned long)e->key,
+                   (unsigned long)ls, (unsigned long)end, (unsigned long)e->loop_start, (unsigned long)e->end);
+        }
     } else if (e->looping) {
         e->loop_ps = e->lin[(e->loop_start / 14) * 8];
     }

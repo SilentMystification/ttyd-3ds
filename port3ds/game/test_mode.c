@@ -7,7 +7,7 @@
  *   in VIWaitForRetrace) with a virtual retrace count, and the game's
  *   OSGetTime is tst_game_time. DVD manager reads queued in a frame finish
  *   before the next frame starts (tst_dvd_busy). The platform keeps real time.
- * gwdump=N: every N game frames, one "gwdump" log line with the frame, the
+ * gwdump=N: every N game frames (gwdumpfrom=F to gwdumpto=T if given), log lines with the frame, the
  *   frames since the warp, the sequence, the map, the story flags (GSW, GSWF,
  *   LSW, LSWF as hashes), Mario's position, the RNG state, the clocks and a
  *   hash of all of GlobalWork. tools/port3ds/gw_diff.py compares the lines of
@@ -33,6 +33,7 @@ extern DVDEntry* dvdq;
 static int s_init;
 static int s_determ;
 static int s_gwdump;
+static u32 s_gwdump_from, s_gwdump_to;
 
 static void tst_init(void) {
     if (s_init) {
@@ -40,6 +41,8 @@ static void tst_init(void) {
     }
     s_determ = tst_sw_has("determ");
     s_gwdump = tst_sw_int("gwdump", 0);
+    s_gwdump_from = (u32)tst_sw_int("gwdumpfrom", 0);
+    s_gwdump_to = (u32)tst_sw_int("gwdumpto", 0);
     s_init = 1;
     if (s_determ) {
         tst_log("determ: on, %lu ticks per retrace", (unsigned long)tst_retrace_ticks());
@@ -239,7 +242,8 @@ void tst_frame(u32 frame) {
     } else if (s_warp_frame != 0) {
         s_warp_frame++;
     }
-    if (s_gwdump > 0 && frame % (u32)s_gwdump == 0) {
+    if (s_gwdump > 0 && frame % (u32)s_gwdump == 0 && frame >= s_gwdump_from &&
+        (s_gwdump_to == 0 || frame <= s_gwdump_to)) {
         gwdump(frame);
     }
     tst_gallery_frame(frame);

@@ -121,7 +121,11 @@ def run_dolphin(args, switches):
     if r.returncode != 0 or not out.exists():
         print("gw_diff: the Dolphin run failed")
         return None
-    return json.loads(out.read_text()).get("log", "")
+    data = json.loads(out.read_text())
+    if data.get("log_lost"):
+        print(f"gw_diff: WARNING: the debug DOL's log buffer was full, {data['log_lost']} lines lost "
+              "(use a larger --every or gwdumpfrom=/gwdumpto=)")
+    return data.get("log", "")
 
 
 def main():

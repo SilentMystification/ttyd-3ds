@@ -39,7 +39,7 @@ void stg0_00_init(void);
 /* ---- switches and log, shared with run_dolphin.py ---- */
 
 char gcdbg_switches[1024] = "gcdbg-no-switches";
-char gcdbg_log[0x18000];
+char gcdbg_log[0x30000];
 u32 gcdbg_log_len;
 u32 gcdbg_log_lost;
 volatile u32 gcdbg_stop_frame;

@@ -178,6 +178,11 @@ void plat_pad_state(PlatPadState* s) {
         rec_pad_init();
     }
     if (s_play_on) {
+        static int first = 1;
+        if (first) {
+            first = 0; /* F is the game frame counter (gwdump f=) at this read: the record index */
+            PLOG_I("[PAD] padfile first record at game frame %u", (unsigned)s_pad_frame);
+        }
         memset(s, 0, sizeof(*s));
         if (s_pad_frame < s_play_frames) {
             const uint8_t* r = s_play_buf + (size_t)s_pad_frame * TPAD_REC_BYTES;

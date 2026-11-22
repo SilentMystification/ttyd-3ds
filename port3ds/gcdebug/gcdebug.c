@@ -344,6 +344,11 @@ u32 gcdbg_PADRead(PADStatus* status) {
         /* replaces the script, fastboot and the test keys */
         const u8* r = s_pf_buf + 16 + 8 * (s_pf_frame < s_pf_frames ? s_pf_frame : 0);
         int live = s_pf_frame < s_pf_frames;
+        static int first = 1;
+        if (first) {
+            first = 0;
+            tst_log("[PAD] padfile first record at game frame %lu", (unsigned long)s_frames);
+        }
         b = live ? (u16)(r[0] | r[1] << 8) : 0;
         status[0].button = b;
         status[0].stickX = live ? (s8)r[2] : 0;
@@ -366,7 +371,10 @@ static void script_frame(void) {
     if (!s_script_loaded) {
         script_load();
     }
-    if (s_pf_on && ++s_pf_frame == s_pf_frames) {
+    /* counts every game frame from the first, as the port does, even those
+     * before the first PADRead loads the file */
+    s_pf_frame++;
+    if (s_pf_on && s_pf_frame == s_pf_frames) {
         tst_log("[PAD] padfile end at frame %lu", (unsigned long)s_pf_frame);
     }
     if (s_step < s_steps && ++s_step_frames >= s_script[s_step].frames) {

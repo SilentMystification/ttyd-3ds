@@ -221,7 +221,7 @@ def cmd_fx(args):
     items = parse_list(args.items)
     offsets = [int(o) for o in args.offsets.split(",")]
     results = load_results(out)
-    todo = [it for it in items if it not in results.get("items", {}) or args.redo]
+    todo = [it for it in items if it not in results.get("items", {}) or args.redo or args.gc_only]
     results.setdefault("items", {})
     results["kind"] = "fx"
     results["map"] = args.map

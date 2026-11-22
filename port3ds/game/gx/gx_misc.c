@@ -5,6 +5,7 @@
  * GXCopyTex copies an EFB rectangle into a render-target texture that later
  * draws use where the game points a GXTexObj at the copy's destination.
  */
+#include <stdio.h>
 #include <string.h>
 
 #include "gx_internal.h"
@@ -292,6 +293,24 @@ void GXCopyTex(void* dest, GXBool clear) {
     }
 }
 
+/* Switch gxclearrgb=RRGGBB (test only: the seam test clears to a loud colour): the
+ * colour of the frame clear, instead of the game's. -1 off. */
+static s32 frame_clear_override(void) {
+    static s32 v = -2;
+    if (v == -2) {
+        char buf[16];
+        v = -1;
+        if (plat_switch_value("gxclearrgb", buf, sizeof(buf))) {
+            unsigned x = 0;
+            if (sscanf(buf, "%x", &x) == 1) {
+                v = (s32)(((x >> 16) & 0xFF) | (x & 0xFF00) | ((x & 0xFF) << 16)); /* RGBA8, R in the low byte */
+                PLOG_I("gxclearrgb: frames clear to %06x", x & 0xFFFFFF);
+            }
+        }
+    }
+    return v;
+}
+
 /* Ends the frame: the EFB goes to the screen. */
 void GXCopyDisp(void* dest, GXBool clear) {
     if (gx_prim_open) {
@@ -316,8 +335,12 @@ void GXCopyDisp(void* dest, GXBool clear) {
     plat_gpu_frame_begin();
     gx_draw_frame_begin();
     if (clear) {
-        plat_gpu_clear(0, 0, gx.efb_w, gx.efb_h, gx.pixel_fmt == GX_PF_RGB8_Z24 ? (clear_rgba() | 0xFF000000u)
-                                                                                 : clear_rgba(),
+        u32 rgba = clear_rgba();
+        s32 ov = frame_clear_override();
+        if (ov >= 0) {
+            rgba = (u32)ov | (rgba & 0xFF000000u);
+        }
+        plat_gpu_clear(0, 0, gx.efb_w, gx.efb_h, gx.pixel_fmt == GX_PF_RGB8_Z24 ? (rgba | 0xFF000000u) : rgba,
                        gx.copy_clear_z, 1, 1);
     }
 }

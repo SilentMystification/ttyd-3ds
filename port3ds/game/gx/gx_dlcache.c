@@ -56,13 +56,7 @@
 
 enum { E_FREE = 0, E_BUILT, E_NOCACHE, E_DYNAMIC };
 
-typedef struct {
-    u8 prim;
-    u8 pad;
-    u16 count_hi; /* unused: counts fit 16 bits (chunks of at most 4096) */
-    u32 first;
-    u32 count;
-} DlcDraw;
+typedef GxDlcDraw DlcDraw;
 
 /* An indexed attribute the list reads: its array and the bytes of one element. */
 typedef struct {
@@ -96,6 +90,8 @@ typedef struct {
     void* blob;    /* DlcDraw[ndraws], DlcRange[nranges], GxAttrFmt[popcount(fmt_mask)][GX_VA_MAX_ATTR], GxVertex[nverts],
                     u16 index[nverts][nranges] */
     u32 blob_bytes;
+    GxVshStream* vsh; /* gxvsh: the vertices as a PICA stream (linear memory), or NULL */
+    u32 vsh_reason;   /* why there is none (GXV_R_*) */
 } DlcEntry;
 
 static DlcEntry s_e[DLC_ENTRIES];
@@ -134,6 +130,22 @@ static struct {
 
 static inline DlcEntry* E(u16 i) { return i ? &s_e[i - 1] : NULL; }
 static inline u16 IDX(const DlcEntry* e) { return (u16)(e - s_e + 1); }
+
+/* Frees an entry's decoded vertices and its stream (whose vertices the GPU
+ * may still read: gx_vsh_stream_free holds them for the frames in flight). */
+static void free_blob(DlcEntry* e) {
+    if (e->blob) {
+        free(e->blob);
+        s_used_bytes -= e->blob_bytes;
+        e->blob = NULL;
+        e->blob_bytes = 0;
+    }
+    if (e->vsh) {
+        s_used_bytes -= e->vsh->bytes;
+        gx_vsh_stream_free(e->vsh);
+        e->vsh = NULL;
+    }
+}
 
 static u32 bucket_of(const void* list, u32 n) {
     u32 h = (u32)(uintptr_t)list * 0x9E3779B1u ^ n * 0x85EBCA77u;
@@ -201,10 +213,7 @@ static void entry_drop(DlcEntry* e) {
         *link = e->next;
     }
     lru_unlink(e);
-    if (e->blob) {
-        free(e->blob);
-        s_used_bytes -= e->blob_bytes;
-    }
+    free_blob(e);
     memset(e, 0, sizeof(*e));
     e->next = s_free_head;
     s_free_head = IDX(e);
@@ -429,6 +438,19 @@ int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
             if (gx_perf_on > 0) {
                 gx_perf.t_cache += plat_ticks() - t0;
             }
+            if (gx_vsh_on) {
+                /* the pass group decides: the shader draws the stream, or the CPU replays as before */
+                if (gx_draw_vsh(e->vsh, e->vsh_reason, e->list, e->nbytes, e->nverts)) {
+                    if (gx_perf_on > 0) {
+                        gx_perf.dl_verts += e->nverts;
+                    }
+                    return 1;
+                }
+                gx_vsh_noted = 1;
+                replay(e);
+                gx_vsh_noted = 0;
+                return 1;
+            }
             replay(e);
             return 1;
         }
@@ -446,12 +468,7 @@ int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
         if (same_list_changed->changes + 1 >= DLC_DYNAMIC_AFTER) {
             /* keeps changing: decode it every time from now on */
             DlcEntry* e = same_list_changed;
-            if (e->blob) {
-                free(e->blob);
-                s_used_bytes -= e->blob_bytes;
-                e->blob = NULL;
-                e->blob_bytes = 0;
-            }
+            free_blob(e);
             e->state = E_DYNAMIC;
             e->changes++;
             e->last_frame = frame;
@@ -694,12 +711,7 @@ void gx_dlc_cap_finish(const GxState* st, u32 kind) {
     if (e != NULL) {
         /* the same list and state with other contents: replace that entry */
         u8 changes = e->changes;
-        if (e->blob) {
-            free(e->blob);
-            s_used_bytes -= e->blob_bytes;
-            e->blob = NULL;
-            e->blob_bytes = 0;
-        }
+        free_blob(e);
         e->changes = (u8)(changes + 1);
     }
     if (!cacheable) {
@@ -789,6 +801,15 @@ void gx_dlc_cap_finish(const GxState* st, u32 kind) {
     e->trust_epoch = 0;
     if (s_trust) {
         e->trust_gen = trust(e, s_cap_epoch);
+    }
+    e->vsh = NULL;
+    e->vsh_reason = 0;
+    if (gx_vsh_on) {
+        e->vsh = gx_vsh_stream_build(e_verts(e), e->nverts, e_draws(e), e->ndraws, st->vtx_desc,
+                                     (const GxAttrFmt(*)[GX_VA_MAX_ATTR])e_vat(e), e->fmt_mask, &e->vsh_reason);
+        if (e->vsh != NULL) {
+            s_used_bytes += e->vsh->bytes;
+        }
     }
     if (gx_perf_on > 0 && sizeof(GxVertex) % sizeof(f32) == 0) {
         exactness(e_verts(e), e->nverts, st->vtx_desc[GX_VA_TEX0] != GX_NONE);

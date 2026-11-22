@@ -89,6 +89,7 @@ void gx_opts_init(void) {
     gx_opt_fogcache = plat_switch_int("gxfogcache", 1) != 0;
     gx_opt_unlit = plat_switch_int("gxunlit", 1) != 0;
     PLOG_I("gx: statever %d fogcache %d unlit %d", gx_opt_statever, gx_opt_fogcache, gx_opt_unlit);
+    gx_vsh_init();
 }
 
 /* ---- State ---- */
@@ -790,12 +791,13 @@ static void perf_draw(u8 prim, const GxVertex* v, u32 n) {
     }
 }
 
-void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
-    if (n == 0) {
+/* The PICA state for the GX state in force (rebuilt when the version changed). */
+static void ensure_state(void) {
+    if (gx.version == s_built_version) {
         return;
     }
     u64 t0 = GX_PERF_T();
-    if (gx.version != s_built_version) {
+    {
         if (gx_opt_statever && state_unchanged()) {
             s_built_version = gx.version; /* the PICA state would come out the same */
             if (gx_perf_on > 0) {
@@ -813,9 +815,146 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
             }
         }
     }
-    if (s_state.scissor_x1 <= s_state.scissor_x0 || s_state.scissor_y1 <= s_state.scissor_y0 ||
-        gx.vp[2] == 0.0f || gx.vp[3] == 0.0f) {
-        return; /* empty scissor or viewport: the PICA200 hangs on them */
+}
+
+static int empty_target(void) {
+    /* empty scissor or viewport: the PICA200 hangs on them */
+    return s_state.scissor_x1 <= s_state.scissor_x0 || s_state.scissor_y1 <= s_state.scissor_y0 || gx.vp[2] == 0.0f ||
+           gx.vp[3] == 0.0f;
+}
+
+/* ---- Shader path (switch gxvsh): what the state lets the PICA do, and its uniforms ---- */
+
+static u32 s_vsh_ver = ~0u, s_vsh_xfv = ~0u, s_vsh_pn = ~0u;
+static u32 s_vsh_reasons;     /* why the state keeps draws on the CPU (GXV_R_*), 0 if it does not */
+static u8 s_vsh_unit_attr[3]; /* GX texture coordinate attribute each PICA unit's texgen reads, 0xFF none */
+static PlatGpuVshConst s_vsh_const;
+
+static void vsh_prepare(void) {
+    u32 why = 0;
+    PlatGpuVshConst* c = &s_vsh_const;
+    memset(c, 0, sizeof(*c));
+    if (s_need_both) {
+        why |= GXV_R_TWOCHAN;
+    }
+    /* colour: as transform() gives it with the channel unlit */
+    if (gx.num_chans != 0) {
+        int ch = s_color_chan;
+        if (!s_unlit[ch]) {
+            why |= GXV_R_LIT;
+        }
+        if (ch == 1 && (s_mat_vtx_rgb[1] || s_mat_vtx_a[1])) {
+            why |= GXV_R_CLR1; /* the stream carries colour 0 */
+        }
+        const GXColor m = gx.mat[ch];
+        for (int i = 0; i < 3; i++) {
+            c->clrmix[i] = s_mat_vtx_rgb[ch] ? 1.0f : 0.0f;
+            c->matclr[i] = s_mat_vtx_rgb[ch] ? 0.0f : (f32)(&m.r)[i];
+        }
+        c->clrmix[3] = s_mat_vtx_a[ch] ? 1.0f : 0.0f;
+        c->matclr[3] = s_mat_vtx_a[ch] ? 0.0f : (f32)m.a;
+    }
+    /* texture units: texgen() with an MTX2x4 matrix on (s, t, 1, 1) */
+    for (int u = 0; u < 3; u++) {
+        s_vsh_unit_attr[u] = 0xFF;
+        if (u >= s_units) {
+            continue; /* rows 0: the coordinate is (0, 0), as on the CPU */
+        }
+        const typeof(gx.texgen[0])* tg = &gx.texgen[s_unit_coord[u]];
+        if (tg->func != GX_TG_MTX2x4) {
+            why |= GXV_R_TGFUNC;
+        }
+        if (tg->src < GX_TG_TEX0 || tg->src > GX_TG_TEX7) {
+            why |= GXV_R_TGSRC;
+        } else {
+            s_vsh_unit_attr[u] = (u8)(tg->src - GX_TG_TEX0);
+        }
+        if (tg->pt_mtx != GX_PTIDENTITY && tg->pt_mtx >= GX_PTTEXMTX0) {
+            why |= GXV_R_TGPOST;
+        }
+        const f32* m = matrix_rows(tg->mtx);
+        memcpy(c->tex[2 * u], m, 16);
+        memcpy(c->tex[2 * u + 1], m + 4, 16);
+    }
+    /* clip rows: projection x position matrix, in 32-bit float on the CPU */
+    const f32(*m)[4] = gx.pos_mtx[gx.cur_pnmtx % GX_POS_MTX_COUNT];
+    const f32* p = gx.proj;
+    for (int j = 0; j < 4; j++) {
+        if (p[0] == (f32)GX_PERSPECTIVE) {
+            c->clip[0][j] = p[1] * m[0][j] + p[2] * m[2][j];
+            c->clip[1][j] = p[3] * m[1][j] + p[4] * m[2][j];
+            c->clip[2][j] = p[5] * m[2][j] + (j == 3 ? p[6] : 0.0f);
+            c->clip[3][j] = -m[2][j];
+        } else {
+            c->clip[0][j] = p[1] * m[0][j] + (j == 3 ? p[2] : 0.0f);
+            c->clip[1][j] = p[3] * m[1][j] + (j == 3 ? p[4] : 0.0f);
+            c->clip[2][j] = p[5] * m[2][j] + (j == 3 ? p[6] : 0.0f);
+            c->clip[3][j] = j == 3 ? 1.0f : 0.0f;
+        }
+    }
+    c->flags = p[0] == (f32)GX_PERSPECTIVE ? 0u : PLAT_VSH_ORTHO;
+    s_vsh_reasons = why;
+}
+
+int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nbytes, u32 nverts) {
+    ensure_state();
+    if (empty_target()) {
+        return 1; /* the CPU path would draw nothing either */
+    }
+    if (s_vsh_ver != gx.version || s_vsh_xfv != gx_xf_version || s_vsh_pn != gx.cur_pnmtx) {
+        vsh_prepare();
+        s_vsh_ver = gx.version;
+        s_vsh_xfv = gx_xf_version;
+        s_vsh_pn = gx.cur_pnmtx;
+    }
+    u32 why = s == NULL ? (entry_reason ? entry_reason : GXV_R_POOL) : s_vsh_reasons;
+    if (gx_bbox_active) {
+        why |= GXV_R_BBOX; /* GXReadBoundingBox needs the window positions on the CPU */
+    }
+    if (!gx_vsh_route(gx.cur_pnmtx, why, list, nbytes, nverts)) {
+        return 0;
+    }
+    if (gx.cull == GX_CULL_ALL) {
+        return 1; /* every triangle culled */
+    }
+    u32 scales = s->posk;
+    for (int u = 0; u < 3; u++) {
+        u8 a = s_vsh_unit_attr[u];
+        u32 slot = a < 8 ? s->attr_slot[a] : 0xFF;
+        scales |= (slot < 3 ? PLAT_VSH_UNIT(slot, s->slot_k[slot]) : PLAT_VSH_UNIT(3, 0)) << (8 + 8 * u);
+    }
+    u32 cull = gx.cull == GX_CULL_FRONT ? 1u : gx.cull == GX_CULL_BACK ? 2u : 0u;
+    plat_gpu_vsh_const(&s_vsh_const);
+    plat_gpu_vsh_draw(gx_vsh_stream_base(s), s->layout, scales, cull, s->idx, s->nidx);
+    gx_vsh_count_shader(nverts, s->nidx);
+    gx_stat_draws++;
+    return 1;
+}
+
+void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
+    if (n == 0) {
+        return;
+    }
+    ensure_state();
+    if (gx_vsh_on && !gx_vsh_noted) {
+        /* a draw only the CPU path makes (immediate mode, a decoded list): its group goes to the CPU */
+        u32 why = gx_pipe_in_list() ? GXV_R_MISS : GXV_R_IMM;
+        if (gx.vtx_desc[GX_VA_PNMTXIDX] != GX_NONE) {
+            u32 seen = 0;
+            for (u32 i = 0; i < n; i++) {
+                seen |= 1u << (v[i].pnmtx % GX_POS_MTX_COUNT);
+            }
+            for (u32 m = 0; m < GX_POS_MTX_COUNT; m++) {
+                if (seen >> m & 1) {
+                    gx_vsh_route(m, why | GXV_R_PNMTXIDX, NULL, 0, n);
+                }
+            }
+        } else {
+            gx_vsh_route(v[0].pnmtx, why, NULL, 0, n);
+        }
+    }
+    if (empty_target()) {
+        return;
     }
     u64 t1 = GX_PERF_T();
     for (u32 i = 0; i < n; i++) {
@@ -971,6 +1110,9 @@ void gx_draw_frame_begin(void) {
         PLOG_I("gxdump: frame %lu present %lu (copy-triggered, %d left)", (unsigned long)frame,
                (unsigned long)plat_gpu_present_count(), copy_left);
         plat_gpu_shot(path);
+    }
+    if (gx_vsh_on) {
+        gx_vsh_frame();
     }
     gx_perf_frame();
     gx_stat_draws = gx_stat_vertices = gx_stat_copies = 0;

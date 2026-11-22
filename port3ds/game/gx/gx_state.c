@@ -116,10 +116,13 @@ static inline void touch(void) {
 /* A matrix or the projection changed. build_state reads neither (the
  * transform reads them per vertex), so the PICA state is not rebuilt for them
  * (switch gxstatever=0: they bump the state version as every setter does). */
+u32 gx_xf_version;
+
 static inline void touch_xf(void) {
     if (gx_prim_open) {
         gx_end_open_primitive(__builtin_return_address(0));
     }
+    gx_xf_version++;
     if (!gx_opt_statever) {
         gx.version++;
     }
@@ -286,6 +289,7 @@ void GXSetCurrentMtx(u32 id) {
     GX_CLOSE_PRIMITIVE();
     REC(SetCurrentMtx, id);
     gx.cur_pnmtx = id / 3;
+    gx_xf_version++;
 }
 
 void GXSetProjection(const f32 mtx[4][4], GXProjectionType type) {

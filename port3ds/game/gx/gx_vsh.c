@@ -1,0 +1,967 @@
+/* The vertex-shader path (switch gxvsh, default 0): cached display lists
+ * transformed by the PICA200 instead of the CPU. Rules and acceptance tests:
+ * docs/PORT_3DS_GPU_OFFLOAD.md; design: docs/PORT_3DS_GX_PERF.md, "Design:
+ * the vertex-shader path against the offload rules".
+ *
+ * Streams. A cache entry (gx_dlcache.c) gets, once, its decoded vertices as a
+ * little-endian PICA stream in linear memory: the position and each texture
+ * coordinate attribute as s16 with a power-of-two scale where that represents
+ * every value exactly (a fixed-point source at its own `frac`, or a float
+ * source whose values all fit), otherwise as floats; the colour as u8 x 4;
+ * and u16 triangle indices in the CPU path's assembly order (quad split,
+ * strip parity, fan order). The scale only moves the exponent, so a vertex
+ * shared by two entries reaches the shader's dp4 with the same 24-bit value
+ * whatever its stream (seam rule 4). Streams live in pool segments of
+ * SEG_VERTS vertices (one stride each), so draws of a pass group that follow
+ * each other merge into one GPU draw; a freed range is reused only after the
+ * frames in flight.
+ *
+ * Pass groups (rule 1: the path is chosen per group, never per draw). A group
+ * is the draws of a frame that share the bits of the position matrix, the
+ * projection and the viewport. A group takes the shader path only when it
+ * was fully eligible for K consecutive frames (switch gxvshk, default 30),
+ * and drops back to the CPU at once: in the frame an ineligible draw
+ * appears, the group's later draws go to the CPU (a split, counted), and the
+ * next frame starts on the CPU. Across frames a group is known by its lists:
+ * each list's record keeps the streak of the group it was drawn in, and a
+ * group's path for the frame is read from the record of its first list.
+ *
+ * Decals (coplanar draws under another matrix, which the group key cannot
+ * see). A draw with depth compare EQUAL or LEQUAL and depth writes off links
+ * its group with every group drawn earlier in the same viewport: linked
+ * groups count as one at the frame's end (eligible only together, the same
+ * streak), so a CPU-only decal (immediate mode) keeps them all on the CPU.
+ *
+ * Game-agnostic: display lists, vertex state and matrices only. */
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "gx_internal.h"
+#include "plat/plat.h"
+
+#define SEG_VERTS 16384
+#define MAX_SEGS 64
+#define SEG_RUNS 128
+#define PENDING_MAX 2048
+#define GROUPS 2048        /* per frame, power of two */
+#define RECS 16384         /* list records, power of two */
+#define REC_PROBE 8
+#define TOUCH_MAX 16384
+#define MAX_VPS 16
+#define KEY_WORDS (12 + 7 + 6)
+
+int gx_vsh_on;
+int gx_vsh_noted;
+static u32 s_k = 30;
+static u32 s_check_at;  /* switch gxvsh_check=N: log every group of game frame N */
+static int s_s16 = 1;   /* switch gxvshs16 (default 1): s16 attributes where exact; 0 floats only */
+static u32 s_seg_budget; /* switch gxvshkb: linear memory for the segments */
+static int s_decal_rule = 1; /* switch gxvshdecal (default 1): decal links; 0 only for measuring the path itself */
+
+/* ---- Pool segments ---- */
+
+typedef struct {
+    u32 start, len;
+} Run;
+
+typedef struct {
+    u8* base;
+    u32 stride;
+    u32 bump;
+    u32 nruns;
+    Run runs[SEG_RUNS]; /* free runs below bump, sorted by start */
+} Seg;
+
+static Seg s_seg[MAX_SEGS];
+static u32 s_nseg, s_seg_bytes;
+static struct {
+    u16 seg;
+    u32 start, len, frame;
+} s_pending[PENDING_MAX];
+static u32 s_npending;
+
+static void seg_release(Seg* sg, u32 start, u32 len) {
+    if (start + len == sg->bump) {
+        sg->bump = start;
+        /* the last free run may now touch the end */
+        while (sg->nruns > 0 && sg->runs[sg->nruns - 1].start + sg->runs[sg->nruns - 1].len == sg->bump) {
+            sg->bump = sg->runs[--sg->nruns].start;
+        }
+        return;
+    }
+    u32 i = 0;
+    while (i < sg->nruns && sg->runs[i].start < start) {
+        i++;
+    }
+    if (i > 0 && sg->runs[i - 1].start + sg->runs[i - 1].len == start) {
+        sg->runs[i - 1].len += len;
+        if (i < sg->nruns && sg->runs[i - 1].start + sg->runs[i - 1].len == sg->runs[i].start) {
+            sg->runs[i - 1].len += sg->runs[i].len;
+            memmove(&sg->runs[i], &sg->runs[i + 1], (sg->nruns - i - 1) * sizeof(Run));
+            sg->nruns--;
+        }
+        return;
+    }
+    if (i < sg->nruns && start + len == sg->runs[i].start) {
+        sg->runs[i].start = start;
+        sg->runs[i].len += len;
+        return;
+    }
+    if (sg->nruns == SEG_RUNS) {
+        return; /* too fragmented: the range stays unused until the segment empties at the end */
+    }
+    memmove(&sg->runs[i + 1], &sg->runs[i], (sg->nruns - i) * sizeof(Run));
+    sg->runs[i] = (Run){start, len};
+    sg->nruns++;
+}
+
+static void pending_reap(void) {
+    u32 now = plat_gpu_present_count(), k = 0;
+    for (u32 i = 0; i < s_npending; i++) {
+        if ((s32)(now - s_pending[i].frame) >= 0) {
+            seg_release(&s_seg[s_pending[i].seg], s_pending[i].start, s_pending[i].len);
+        } else {
+            s_pending[k++] = s_pending[i];
+        }
+    }
+    s_npending = k;
+}
+
+/* n vertices of `stride` bytes: segment and first vertex, or -1. */
+static int seg_alloc(u32 stride, u32 n, u32* first) {
+    pending_reap();
+    for (u32 s = 0; s < s_nseg; s++) {
+        Seg* sg = &s_seg[s];
+        if (sg->stride != stride) {
+            continue;
+        }
+        for (u32 i = 0; i < sg->nruns; i++) {
+            if (sg->runs[i].len >= n) {
+                *first = sg->runs[i].start;
+                sg->runs[i].start += n;
+                sg->runs[i].len -= n;
+                if (sg->runs[i].len == 0) {
+                    memmove(&sg->runs[i], &sg->runs[i + 1], (sg->nruns - i - 1) * sizeof(Run));
+                    sg->nruns--;
+                }
+                return (int)s;
+            }
+        }
+        if (sg->bump + n <= SEG_VERTS) {
+            *first = sg->bump;
+            sg->bump += n;
+            return (int)s;
+        }
+    }
+    u32 bytes = SEG_VERTS * stride;
+    if (s_nseg == MAX_SEGS || s_seg_bytes + bytes > s_seg_budget) {
+        return -1;
+    }
+    u8* base = plat_gpu_stream_alloc(bytes);
+    if (base == NULL) {
+        return -1;
+    }
+    Seg* sg = &s_seg[s_nseg];
+    memset(sg, 0, sizeof(*sg));
+    sg->base = base;
+    sg->stride = stride;
+    sg->bump = n;
+    s_seg_bytes += bytes;
+    *first = 0;
+    return (int)s_nseg++;
+}
+
+/* ---- Counters (per frame, summed for gxstats) ---- */
+
+static struct {
+    u32 draws_vsh, verts_vsh, idx_vsh, draws_cpu_elig, draws_inelig, verts_inelig;
+    u32 reason_draws[GXV_R_COUNT];
+    u32 groups, groups_vsh, groups_elig, splits, switches_up, switches_down, rec_full, group_full;
+    u32 decal_draws, decal_triggers, decal_frames, decal_forced;
+    u32 decal_imm, decal_list_cpu, decal_list_vsh, trig_imm, trig_list, decal_frames_imm;
+    u32 built, build_fail, built_s16_pos, built_verts;
+    u32 build_reason[GXV_R_COUNT];
+} s_st, s_sum;
+static u32 s_switch_total, s_split_total, s_frames_total, s_decal_frames_total;
+
+void gx_vsh_init(void) {
+    gx_vsh_on = plat_switch_int("gxvsh", 0) != 0;
+    int k = plat_switch_int("gxvshk", 30);
+    s_k = k < 1 ? 1 : (u32)k;
+    s_check_at = (u32)plat_switch_int("gxvsh_check", 0);
+    s_s16 = plat_switch_int("gxvshs16", 1) != 0;
+    s_seg_budget = (u32)plat_switch_int("gxvshkb", 6144) * 1024u;
+    s_decal_rule = plat_switch_int("gxvshdecal", 1) != 0;
+    PLOG_I("gxvsh: %s, hysteresis %lu frames, s16 %d, decal links %d, segments up to %lu KB%s", gx_vsh_on ? "on" : "off",
+           (unsigned long)s_k, s_s16, s_decal_rule, (unsigned long)(s_seg_budget / 1024),
+           s_check_at ? ", census logged" : "");
+}
+
+/* ---- Stream build ---- */
+
+static int frac_bits(f32 f) {
+    union {
+        f32 f;
+        u32 u;
+    } c = {f};
+    u32 e = c.u >> 23 & 0xFF;
+    u32 m = c.u & 0x7FFFFF;
+    if (e == 0xFF) {
+        return -1;
+    }
+    if (e == 0 && m == 0) {
+        return 0;
+    }
+    if (e != 0) {
+        m |= 0x800000;
+    } else {
+        e = 1;
+    }
+    int k = 23 - ((int)e - 127) - __builtin_ctz(m);
+    return k > 0 ? k : 0;
+}
+
+static f32 pow2(int k) {
+    f32 f = 1.0f;
+    for (; k > 0; k--) {
+        f *= 2.0f;
+    }
+    return f;
+}
+
+/* Every value times 2^k is an integer that fits s16. */
+static int fits_s16(const GxVertex* v, u32 nv, u32 off_f32, u32 ncomp, int k) {
+    f32 sc = pow2(k);
+    for (u32 i = 0; i < nv; i++) {
+        const f32* p = (const f32*)((const u8*)&v[i] + off_f32);
+        for (u32 j = 0; j < ncomp; j++) {
+            f32 x = p[j] * sc;
+            if (!(x >= -32768.0f && x <= 32767.0f) || (f32)(s32)x != x) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+/* The exponent k for s16 values (value = s16 x 2^-k), or -1 for floats.
+ * `src_frac` >= 0 when every format the list uses has this attribute as a
+ * fixed-point type with that frac: the source's own scale, exact by
+ * definition (checked anyway). Otherwise the smallest k any value needs. */
+static int exact_k(const GxVertex* v, u32 nv, u32 off, u32 ncomp, int src_frac) {
+    if (!s_s16) {
+        return -1;
+    }
+    if (src_frac >= 0 && src_frac <= 30 && fits_s16(v, nv, off, ncomp, src_frac)) {
+        return src_frac;
+    }
+    int need = 0;
+    for (u32 i = 0; i < nv; i++) {
+        const f32* p = (const f32*)((const u8*)&v[i] + off);
+        for (u32 j = 0; j < ncomp; j++) {
+            int b = frac_bits(p[j]);
+            if (b < 0) {
+                return -1;
+            }
+            need = b > need ? b : need;
+        }
+    }
+    if (need > 30 || !fits_s16(v, nv, off, ncomp, need)) {
+        return -1;
+    }
+    return need;
+}
+
+static int fixed_type(u8 t) { return t == GX_U8 || t == GX_S8 || t == GX_U16 || t == GX_S16; }
+
+/* The frac every used format gives attribute a, when all are fixed-point; else -1. */
+static int source_frac(const GxAttrFmt (*vat)[GX_VA_MAX_ATTR], u8 fmt_mask, int a) {
+    int frac = -2;
+    u32 k = 0;
+    for (u32 f = 0; f < GX_MAX_VTXFMT; f++) {
+        if (!(fmt_mask & (1u << f))) {
+            continue;
+        }
+        const GxAttrFmt* af = &vat[k++][a];
+        if (!fixed_type(af->type)) {
+            return -1;
+        }
+        if (frac == -2) {
+            frac = af->frac;
+        } else if (frac != af->frac) {
+            return -1;
+        }
+    }
+    return frac < 0 ? -1 : frac;
+}
+
+static u32 tri_count(u8 prim, u32 n) {
+    switch (prim) {
+    case GX_QUADS: return n / 4 * 2;
+    case GX_TRIANGLES: return n / 3;
+    case GX_TRIANGLESTRIP:
+    case GX_TRIANGLEFAN: return n >= 3 ? n - 2 : 0;
+    default: return 0;
+    }
+}
+
+static inline void put_s16(u8* p, f32 v, f32 sc) {
+    s16 x = (s16)(s32)(v * sc);
+    memcpy(p, &x, 2);
+}
+
+GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, u32 nd, const u8* vtx_desc,
+                                 const GxAttrFmt (*vat)[GX_VA_MAX_ATTR], u8 fmt_mask, u32* reason) {
+    u32 why = 0;
+    if (vtx_desc[GX_VA_PNMTXIDX] != GX_NONE) {
+        why |= GXV_R_PNMTXIDX;
+    }
+    for (int t = 0; t < 8; t++) {
+        if (vtx_desc[GX_VA_TEX0MTXIDX + t] != GX_NONE) {
+            why |= GXV_R_TEXMTXIDX;
+        }
+    }
+    u32 ntri = 0;
+    for (u32 i = 0; i < nd; i++) {
+        if (d[i].prim != GX_QUADS && d[i].prim != GX_TRIANGLES && d[i].prim != GX_TRIANGLESTRIP &&
+            d[i].prim != GX_TRIANGLEFAN) {
+            why |= GXV_R_PRIM;
+        }
+        if (d[i].first + d[i].count > nv) {
+            why |= GXV_R_PRIM; /* never: the capture made them */
+        }
+        ntri += tri_count(d[i].prim, d[i].count);
+    }
+    u8 slot_attr[3];
+    u32 nslots = 0;
+    u8 attr_slot[8];
+    memset(attr_slot, 0xFF, sizeof(attr_slot));
+    for (int t = 0; t < 8; t++) {
+        if (vtx_desc[GX_VA_TEX0 + t] != GX_NONE) {
+            if (nslots == 3) {
+                why |= GXV_R_SLOTS;
+                break;
+            }
+            attr_slot[t] = (u8)nslots;
+            slot_attr[nslots++] = (u8)t;
+        }
+    }
+    if (ntri == 0 || nv > SEG_VERTS) {
+        why |= GXV_R_PRIM;
+    }
+    if (why != 0) {
+        *reason = why;
+        s_st.build_fail++;
+        for (u32 b = 0; b < GXV_R_COUNT; b++) {
+            s_st.build_reason[b] += (why >> b) & 1;
+        }
+        return NULL;
+    }
+    /* exactness */
+    int posk = exact_k(v, nv, offsetof(GxVertex, pos), 3, source_frac(vat, fmt_mask, GX_VA_POS));
+    int sk[3];
+    u32 s16mask = 0;
+    for (u32 i = 0; i < nslots; i++) {
+        sk[i] = exact_k(v, nv, offsetof(GxVertex, tex) + slot_attr[i] * 2 * sizeof(f32), 2,
+                        source_frac(vat, fmt_mask, GX_VA_TEX0 + slot_attr[i]));
+        if (sk[i] >= 0) {
+            s16mask |= 1u << i;
+        }
+    }
+    int32_t off[5];
+    u32 stride = plat_vsh_layout(posk >= 0, nslots, s16mask, off);
+    u32 layout = plat_vsh_layout_word(posk >= 0, nslots, s16mask);
+    u32 nidx = ntri * 3;
+    u32 sbytes = sizeof(GxVshStream) + nidx * sizeof(u16);
+    GxVshStream* s = malloc(sbytes);
+    if (s == NULL) {
+        *reason = GXV_R_POOL;
+        s_st.build_fail++;
+        s_st.build_reason[6]++;
+        return NULL;
+    }
+    u32 first;
+    int seg = seg_alloc(stride, nv, &first);
+    if (seg < 0) {
+        free(s);
+        *reason = GXV_R_POOL;
+        s_st.build_fail++;
+        s_st.build_reason[6]++;
+        return NULL;
+    }
+    s->seg = (u32)seg;
+    s->first = first;
+    s->nverts = nv;
+    s->layout = layout;
+    s->posk = (u8)(posk >= 0 ? posk : 0);
+    memcpy(s->attr_slot, attr_slot, sizeof(attr_slot));
+    for (u32 i = 0; i < 3; i++) {
+        s->slot_k[i] = (u8)(i < nslots && sk[i] >= 0 ? sk[i] : 0);
+    }
+    s->nidx = nidx;
+    s->bytes = sbytes + nv * stride;
+    /* vertices */
+    u8* out = s_seg[seg].base + first * stride;
+    f32 psc = pow2(posk >= 0 ? posk : 0);
+    for (u32 i = 0; i < nv; i++) {
+        u8* p = out + i * stride;
+        if (posk >= 0) {
+            for (int j = 0; j < 3; j++) {
+                put_s16(p + off[0] + 2 * j, v[i].pos[j], psc);
+            }
+        } else {
+            memcpy(p + off[0], v[i].pos, 12);
+        }
+        for (u32 k = 0; k < nslots; k++) {
+            const f32* tc = v[i].tex[slot_attr[k]];
+            if (sk[k] >= 0) {
+                f32 sc = pow2(sk[k]);
+                put_s16(p + off[2 + k], tc[0], sc);
+                put_s16(p + off[2 + k] + 2, tc[1], sc);
+            } else {
+                memcpy(p + off[2 + k], tc, 8);
+            }
+        }
+        const GXColor* c = &v[i].clr[0];
+        p[off[1] + 0] = c->r;
+        p[off[1] + 1] = c->g;
+        p[off[1] + 2] = c->b;
+        p[off[1] + 3] = c->a;
+        for (u32 b = (u32)off[1] + 4; b < stride; b++) {
+            p[b] = 0;
+        }
+    }
+    plat_gpu_stream_commit(out, nv * stride);
+    /* indices, in gx_draw_vertices' triangle order */
+    u16* ix = s->idx;
+    for (u32 i = 0; i < nd; i++) {
+        u32 b = first + d[i].first, n = d[i].count;
+        switch (d[i].prim) {
+        case GX_QUADS:
+            for (u32 q = 0; q + 3 < n; q += 4) {
+                *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 1), *ix++ = (u16)(b + q + 2);
+                *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 2), *ix++ = (u16)(b + q + 3);
+            }
+            break;
+        case GX_TRIANGLES:
+            for (u32 q = 0; q + 2 < n; q += 3) {
+                *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 1), *ix++ = (u16)(b + q + 2);
+            }
+            break;
+        case GX_TRIANGLESTRIP:
+            for (u32 q = 0; q + 2 < n; q++) {
+                if (q & 1) {
+                    *ix++ = (u16)(b + q + 1), *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 2);
+                } else {
+                    *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 1), *ix++ = (u16)(b + q + 2);
+                }
+            }
+            break;
+        default: /* fan */
+            for (u32 q = 1; q + 1 < n; q++) {
+                *ix++ = (u16)b, *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 1);
+            }
+            break;
+        }
+    }
+    s_st.built++;
+    s_st.built_verts += nv;
+    s_st.built_s16_pos += posk >= 0;
+    *reason = 0;
+    return s;
+}
+
+void gx_vsh_stream_free(GxVshStream* s) {
+    if (s == NULL) {
+        return;
+    }
+    if (s_npending == PENDING_MAX) {
+        plat_gpu_sync(); /* nothing in flight reads any of them now */
+        u32 now = plat_gpu_present_count();
+        for (u32 i = 0; i < s_npending; i++) {
+            s_pending[i].frame = now;
+        }
+        pending_reap();
+    }
+    s_pending[s_npending].seg = (u16)s->seg;
+    s_pending[s_npending].start = s->first;
+    s_pending[s_npending].len = s->nverts;
+    s_pending[s_npending].frame = plat_gpu_present_count() + 3; /* the record being written and the one rendering */
+    s_npending++;
+    free(s);
+}
+
+const void* gx_vsh_stream_base(const GxVshStream* s) { return s_seg[s->seg].base; }
+
+/* ---- Pass groups and list records ---- */
+
+typedef struct {
+    const void* list;
+    u32 nbytes;
+    u16 streak;    /* consecutive fully eligible frames of the group it was drawn in */
+    u8 decision;   /* 1: shader path this frame */
+    u8 touched;
+    u16 pending;   /* this frame's new streak (minimum over the groups it was in) */
+    u32 last_frame;
+} Rec;
+
+typedef struct {
+    u32 hash;
+    u32 key[KEY_WORDS];
+    u32 first_rec;   /* record index + 1 of the group's first list, 0 none yet */
+    u16 parent;      /* decal links (union-find over this frame's groups) */
+    u8 used, path, elig, decal, vp, lists; /* lists: a display list drew in it */
+    u32 reasons;
+    u32 n_vsh, n_cpu_elig, n_inelig;
+    const void* first_list;
+} Group;
+
+static Rec s_rec[RECS];
+static Group s_grp[GROUPS];
+static u16 s_order[GROUPS]; /* this frame's groups, in order of their first draw */
+static u32 s_ngroups;
+static struct {
+    u32 rec;
+    u16 group;
+} s_touch[TOUCH_MAX];
+static u32 s_ntouch;
+static struct {
+    f32 vp[6];
+    u16 groups[GROUPS]; /* not all used: a frame's groups per viewport */
+    u32 n, linked_all, linked_list; /* the groups an immediate / a list decal has linked so far */
+    int root_all, root_list;
+} s_vps[MAX_VPS];
+static u32 s_nvps;
+static int s_group_poison; /* a decal had no group slot: every group is ineligible this frame */
+static Group* s_last_g;
+static u32 s_last_ver = ~0u, s_last_xfv = ~0u, s_last_pn = ~0u;
+static int s_decal_this_frame;
+static struct {
+    const void* caller;
+    u32 count;
+    u8 zfunc;
+} s_trig_callers[8]; /* the code that began the immediate decals that triggered (GXBegin's caller) */
+
+static u32 hash_words(const u32* w, u32 n) {
+    u32 h = 0x811C9DC5u;
+    for (u32 i = 0; i < n; i++) {
+        h = (h ^ w[i]) * 0x01000193u;
+        h ^= h >> 13;
+    }
+    return h;
+}
+
+static u32 find(u32 i) {
+    while (s_grp[i].parent != i) {
+        s_grp[i].parent = s_grp[s_grp[i].parent].parent;
+        i = s_grp[i].parent;
+    }
+    return i;
+}
+
+static void unite(u32 a, u32 b) {
+    a = find(a);
+    b = find(b);
+    if (a != b) {
+        s_grp[b].parent = (u16)a;
+    }
+}
+
+static int vp_index(const f32* vp) {
+    for (u32 i = 0; i < s_nvps; i++) {
+        if (gx_mem_equal(s_vps[i].vp, vp, sizeof(s_vps[i].vp))) {
+            return (int)i;
+        }
+    }
+    if (s_nvps == MAX_VPS) {
+        return -1;
+    }
+    memcpy(s_vps[s_nvps].vp, vp, sizeof(s_vps[s_nvps].vp));
+    s_vps[s_nvps].n = s_vps[s_nvps].linked_all = s_vps[s_nvps].linked_list = 0;
+    s_vps[s_nvps].root_all = s_vps[s_nvps].root_list = -1;
+    return (int)s_nvps++;
+}
+
+static Group* group_for(u32 pnmtx) {
+    if (s_last_g != NULL && s_last_ver == gx.version && s_last_xfv == gx_xf_version && s_last_pn == pnmtx) {
+        return s_last_g;
+    }
+    u32 key[KEY_WORDS];
+    memcpy(key, gx.pos_mtx[pnmtx % GX_POS_MTX_COUNT], 48);
+    memcpy(key + 12, gx.proj, 28);
+    memcpy(key + 19, gx.vp, 24);
+    s_last_ver = gx.version;
+    s_last_xfv = gx_xf_version;
+    s_last_pn = pnmtx;
+    if (s_last_g != NULL && gx_mem_equal(s_last_g->key, key, sizeof(key))) {
+        return s_last_g;
+    }
+    u32 h = hash_words(key, KEY_WORDS);
+    for (u32 p = 0; p < GROUPS; p++) {
+        Group* g = &s_grp[(h + p) & (GROUPS - 1)];
+        if (!g->used) {
+            if (s_ngroups >= GROUPS / 2) {
+                break; /* keep the table sparse */
+            }
+            memset(g, 0, sizeof(*g));
+            g->used = 1;
+            g->hash = h;
+            memcpy(g->key, key, sizeof(key));
+            g->parent = (u16)(g - s_grp);
+            g->elig = 1;
+            int vi = vp_index(gx.vp);
+            g->vp = (u8)(vi < 0 ? 0xFF : vi);
+            if (vi >= 0) {
+                s_vps[vi].groups[s_vps[vi].n++] = g->parent;
+            }
+            s_order[s_ngroups++] = g->parent;
+            s_last_g = g;
+            return g;
+        }
+        if (g->hash == h && gx_mem_equal(g->key, key, sizeof(key))) {
+            s_last_g = g;
+            return g;
+        }
+    }
+    s_st.group_full++;
+    s_last_g = NULL;
+    return NULL;
+}
+
+static u32 rec_for(const void* list, u32 nbytes) {
+    u32 h = ((u32)(uintptr_t)list * 0x9E3779B1u ^ nbytes * 0x85EBCA77u) >> 7;
+    u32 now = gx_perf_frame_no();
+    u32 victim = ~0u, oldest = 0;
+    for (u32 p = 0; p < REC_PROBE; p++) {
+        u32 i = (h + p) & (RECS - 1);
+        Rec* r = &s_rec[i];
+        if (r->list == list && r->nbytes == nbytes) {
+            r->last_frame = now;
+            return i + 1;
+        }
+        u32 age = r->list == NULL ? ~0u : now - r->last_frame;
+        if (age > 2 && age >= oldest && !r->touched) {
+            oldest = age;
+            victim = i;
+        }
+    }
+    if (victim == ~0u) {
+        s_st.rec_full++;
+        return 0;
+    }
+    Rec* r = &s_rec[victim];
+    memset(r, 0, sizeof(*r));
+    r->list = list;
+    r->nbytes = nbytes;
+    r->last_frame = now;
+    return victim + 1;
+}
+
+static void touch(u32 rec, const Group* g) {
+    if (rec == 0 || s_ntouch == TOUCH_MAX) {
+        return;
+    }
+    s_touch[s_ntouch].rec = rec;
+    s_touch[s_ntouch].group = (u16)(g - s_grp);
+    s_ntouch++;
+}
+
+static int decal_like(void) {
+    return gx.z_enable && (gx.z_func == GX_EQUAL || gx.z_func == GX_LEQUAL) && !gx.z_update;
+}
+
+/* A decal-like draw in group g. An immediate-mode one (always on the CPU)
+ * links g with every group drawn so far in its viewport, so all of them are
+ * ineligible together: the rule for decals the group key cannot see. A list
+ * one links g with the list groups drawn so far in its viewport, so they
+ * take one path (eligible together, the same streak) whatever their
+ * matrices; groups of immediate draws only are left out of those links. */
+static void decal_link(Group* g, u32 reasons, int path) {
+    s_st.decal_draws++;
+    int imm = (reasons & (GXV_R_IMM | GXV_R_MISS)) != 0;
+    if (imm) {
+        s_st.decal_imm++;
+    } else if (path) {
+        s_st.decal_list_vsh++;
+    } else {
+        s_st.decal_list_cpu++;
+    }
+    if (g->vp == 0xFF) {
+        s_group_poison = s_decal_rule;
+        return;
+    }
+    typeof(s_vps[0])* vp = &s_vps[g->vp];
+    u32 gi = (u32)(g - s_grp);
+    int* root = imm ? &vp->root_all : &vp->root_list;
+    u32* linked = imm ? &vp->linked_all : &vp->linked_list;
+    if (*root < 0) {
+        *root = (int)gi;
+    }
+    int trig = 0;
+    for (u32 i = *linked; i < vp->n; i++) {
+        u32 o = vp->groups[i];
+        if (!imm && !s_grp[o].lists && o != gi) {
+            continue; /* no list drawn in it (yet): immediate draws only */
+        }
+        if (o != gi && (s_grp[o].path || s_grp[o].elig)) {
+            trig = 1; /* a group that takes, or could take, the shader path */
+        }
+        if (s_decal_rule) {
+            unite((u32)*root, o);
+        }
+    }
+    *linked = vp->n;
+    if (s_decal_rule) {
+        unite((u32)*root, gi);
+    }
+    if (trig) {
+        s_st.decal_triggers++;
+        if (imm) {
+            s_st.trig_imm++;
+            const void* c = (reasons & GXV_R_IMM) ? gx_begin_caller : NULL;
+            for (u32 k = 0; k < 8; k++) {
+                if (s_trig_callers[k].caller == c || s_trig_callers[k].count == 0) {
+                    s_trig_callers[k].caller = c;
+                    s_trig_callers[k].count++;
+                    s_trig_callers[k].zfunc = gx.z_func;
+                    break;
+                }
+            }
+        } else {
+            s_st.trig_list++;
+        }
+        s_decal_this_frame |= imm ? 1 : 2;
+    }
+}
+
+int gx_vsh_route(u32 pnmtx, u32 reasons, const void* list, u32 nbytes, u32 nverts) {
+    Group* g = group_for(pnmtx);
+    if (g == NULL) {
+        s_st.draws_inelig++;
+        s_st.reason_draws[14]++;
+        if (decal_like()) {
+            s_st.decal_draws++;
+            s_group_poison = s_decal_rule;
+        }
+        return 0;
+    }
+    int path = 0;
+    if (list != NULL || (reasons & GXV_R_MISS)) {
+        g->lists = 1;
+    }
+    if (reasons != 0) {
+        if (g->path) {
+            g->path = 0; /* the rest of this frame's draws of the group go to the CPU */
+            s_st.splits++;
+        }
+        g->elig = 0;
+        g->reasons |= reasons;
+        g->n_inelig++;
+        s_st.draws_inelig++;
+        s_st.verts_inelig += nverts;
+        for (u32 b = 0; b < GXV_R_COUNT; b++) {
+            s_st.reason_draws[b] += (reasons >> b) & 1;
+        }
+        if (list != NULL) {
+            touch(rec_for(list, nbytes), g);
+        }
+    } else {
+        u32 r = rec_for(list, nbytes);
+        touch(r, g);
+        if (g->first_rec == 0) {
+            g->first_rec = r ? r : ~0u;
+            g->first_list = list;
+            /* the path for the whole frame: the record's, if nothing ineligible came first */
+            g->path = (u8)(g->elig && r != 0 && s_rec[r - 1].decision);
+        }
+        path = g->path;
+        if (path) {
+            g->n_vsh++;
+        } else {
+            g->n_cpu_elig++;
+            s_st.draws_cpu_elig++;
+        }
+    }
+    if (decal_like()) {
+        decal_link(g, reasons, path);
+    }
+    return path;
+}
+
+void gx_vsh_count_shader(u32 nverts, u32 nidx) {
+    s_st.draws_vsh++;
+    s_st.verts_vsh += nverts;
+    s_st.idx_vsh += nidx;
+}
+
+static const char* reason_letters = "imPTlsoBLcCfrpg";
+
+static void census_log(void) {
+    PLOG_I("gxvsh census frame %lu: %lu groups (K %lu)", (unsigned long)gx_perf_frame_no(), (unsigned long)s_ngroups,
+           (unsigned long)s_k);
+    for (u32 i = 0; i < s_ngroups && i < 400; i++) {
+        const Group* g = &s_grp[s_order[i]];
+        char rs[GXV_R_COUNT + 1];
+        u32 n = 0;
+        for (u32 b = 0; b < GXV_R_COUNT; b++) {
+            if (g->reasons >> b & 1) {
+                rs[n++] = reason_letters[b];
+            }
+        }
+        rs[n] = 0;
+        const Rec* r = g->first_rec && g->first_rec != ~0u ? &s_rec[g->first_rec - 1] : NULL;
+        const f32* k = (const f32*)g->key;
+        PLOG_I("gxvsh   g%lu %s elig %d set %lu streak %u vsh %lu cpu-elig %lu inelig %lu why [%s] decal-link %d "
+               "list %p z %.3f..%.3f t %.1f %.1f %.1f %s",
+               (unsigned long)i, g->path ? "SHADER" : "cpu", g->elig, (unsigned long)find(s_order[i]),
+               r ? r->streak : 0, (unsigned long)g->n_vsh, (unsigned long)g->n_cpu_elig, (unsigned long)g->n_inelig, rs,
+               find(s_order[i]) != s_order[i] || g->decal, g->first_list, (double)k[23], (double)k[24], (double)k[3],
+               (double)k[7], (double)k[11], k[12] == (f32)GX_PERSPECTIVE ? "persp" : "ortho");
+    }
+}
+
+void gx_vsh_frame(void) {
+    s_frames_total++;
+    if (s_check_at != 0 && gx_perf_frame_no() == s_check_at) {
+        census_log();
+    }
+    /* sets of linked groups: eligible only together, the smallest streak */
+    static u8 set_elig[GROUPS];
+    static u16 set_min[GROUPS];
+    for (u32 i = 0; i < s_ngroups; i++) {
+        u32 gi = s_order[i];
+        set_elig[gi] = 1;
+        set_min[gi] = 0xFFFF;
+    }
+    for (u32 i = 0; i < s_ngroups; i++) {
+        u32 gi = s_order[i], r = find(gi);
+        const Group* g = &s_grp[gi];
+        if (!g->elig || s_group_poison) {
+            set_elig[r] = 0;
+        }
+        if (g->first_rec && g->first_rec != ~0u) {
+            u16 st = s_rec[g->first_rec - 1].streak;
+            set_min[r] = st < set_min[r] ? st : set_min[r];
+        }
+        s_st.groups_vsh += g->path;
+        s_st.groups_elig += g->elig;
+    }
+    for (u32 i = 0; i < s_ngroups; i++) {
+        u32 gi = s_order[i], r = find(gi);
+        if (s_grp[gi].elig && !set_elig[r]) {
+            s_st.decal_forced++; /* eligible itself, kept on the CPU by a linked group */
+        }
+    }
+    /* every list a group drew: the group set's new streak (the smallest over its groups) */
+    for (u32 i = 0; i < s_ntouch; i++) {
+        Rec* rc = &s_rec[s_touch[i].rec - 1];
+        u32 r = find(s_touch[i].group);
+        u32 ns = 0;
+        if (set_elig[r]) {
+            u32 m = set_min[r] == 0xFFFF ? rc->streak : set_min[r];
+            ns = m + 1 > 0xFFFF ? 0xFFFF : m + 1;
+        }
+        if (!rc->touched) {
+            rc->touched = 1;
+            rc->pending = (u16)ns;
+        } else if (ns < rc->pending) {
+            rc->pending = (u16)ns;
+        }
+    }
+    for (u32 i = 0; i < s_ntouch; i++) {
+        Rec* rc = &s_rec[s_touch[i].rec - 1];
+        if (!rc->touched) {
+            continue;
+        }
+        rc->touched = 0;
+        rc->streak = rc->pending;
+        u8 d = rc->streak >= s_k;
+        if (d != rc->decision) {
+            if (d) {
+                s_st.switches_up++;
+            } else {
+                s_st.switches_down++;
+            }
+            rc->decision = d;
+        }
+    }
+    s_st.groups += s_ngroups;
+    if (s_decal_this_frame) {
+        s_st.decal_frames++;
+        s_decal_frames_total++;
+    }
+    if (s_decal_this_frame & 1) {
+        s_st.decal_frames_imm++;
+    }
+    s_switch_total += s_st.switches_up + s_st.switches_down;
+    s_split_total += s_st.splits;
+    /* clear the frame */
+    for (u32 i = 0; i < s_ngroups; i++) {
+        s_grp[s_order[i]].used = 0;
+    }
+    s_ngroups = 0;
+    s_ntouch = 0;
+    s_nvps = 0;
+    s_group_poison = 0;
+    s_decal_this_frame = 0;
+    s_last_g = NULL;
+    s_last_ver = ~0u;
+    /* sum */
+    u32* dd = (u32*)&s_sum;
+    const u32* ss = (const u32*)&s_st;
+    for (size_t i = 0; i < sizeof(s_st) / 4; i++) {
+        dd[i] += ss[i];
+    }
+    memset(&s_st, 0, sizeof(s_st));
+}
+
+void gx_vsh_log(u32 frames) {
+    if (!gx_vsh_on) {
+        return;
+    }
+    u32 f = frames ? frames : 1;
+    const typeof(s_sum)* a = &s_sum;
+    PlatGpuStats gs;
+    plat_gpu_stats(&gs);
+    PLOG_I("gxstats   vsh: draws shader %lu (verts %lu, idx %lu) cpu-eligible %lu ineligible %lu (verts %lu) | groups %lu "
+           "shader %lu eligible %lu | switches up %lu down %lu (total %lu) splits %lu (total %lu) | gpu vsh draws %lu "
+           "(of %lu calls) consts %lu",
+           (unsigned long)(a->draws_vsh / f), (unsigned long)(a->verts_vsh / f), (unsigned long)(a->idx_vsh / f),
+           (unsigned long)(a->draws_cpu_elig / f), (unsigned long)(a->draws_inelig / f),
+           (unsigned long)(a->verts_inelig / f), (unsigned long)(a->groups / f), (unsigned long)(a->groups_vsh / f),
+           (unsigned long)(a->groups_elig / f), (unsigned long)a->switches_up, (unsigned long)a->switches_down,
+           (unsigned long)s_switch_total, (unsigned long)a->splits, (unsigned long)s_split_total,
+           (unsigned long)gs.vsh_draws, (unsigned long)gs.vsh_calls, (unsigned long)gs.vsh_consts);
+    PLOG_I("gxstats   vsh decals%s: %lu decal-like draws/frame (immediate %lu, lists on the cpu %lu, on the shader %lu), "
+           "%lu triggers/frame (immediate %lu, lists %lu), %lu of %lu frames with a trigger (%lu by an immediate "
+           "decal; total %lu of %lu), %lu groups/frame kept on the CPU by a link",
+           s_decal_rule ? "" : " (links off: counted only)", (unsigned long)(a->decal_draws / f),
+           (unsigned long)(a->decal_imm / f), (unsigned long)(a->decal_list_cpu / f),
+           (unsigned long)(a->decal_list_vsh / f), (unsigned long)(a->decal_triggers / f),
+           (unsigned long)(a->trig_imm / f), (unsigned long)(a->trig_list / f), (unsigned long)a->decal_frames,
+           (unsigned long)f, (unsigned long)a->decal_frames_imm, (unsigned long)s_decal_frames_total, (unsigned long)s_frames_total,
+           (unsigned long)(a->decal_forced / f));
+    for (u32 k = 0; k < 8 && s_trig_callers[k].count; k++) {
+        PLOG_I("gxstats   vsh decal trigger: immediate draw begun from %p (z func %u), %lu times so far",
+               s_trig_callers[k].caller, s_trig_callers[k].zfunc, (unsigned long)s_trig_callers[k].count);
+    }
+    char why[256];
+    u32 n = 0;
+    for (u32 b = 0; b < GXV_R_COUNT && n + 24 < sizeof(why); b++) {
+        if (a->reason_draws[b] || a->build_reason[b]) {
+            n += (u32)snprintf(why + n, sizeof(why) - n, " %c %lu/%lu", reason_letters[b],
+                               (unsigned long)(a->reason_draws[b] / f), (unsigned long)a->build_reason[b]);
+        }
+    }
+    why[n] = 0;
+    PLOG_I("gxstats   vsh streams: built %lu (%lu verts, %lu with s16 positions) failed %lu | segments %lu (%lu KB), "
+           "streams %lu KB, frees pending %lu | records full %lu groups full %lu | why (draws/frame / builds):%s",
+           (unsigned long)a->built, (unsigned long)a->built_verts, (unsigned long)a->built_s16_pos,
+           (unsigned long)a->build_fail, (unsigned long)s_nseg, (unsigned long)(s_seg_bytes / 1024),
+           (unsigned long)gs.stream_kb, (unsigned long)s_npending, (unsigned long)a->rec_full,
+           (unsigned long)a->group_full, why);
+    memset(&s_sum, 0, sizeof(s_sum));
+}

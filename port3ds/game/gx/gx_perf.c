@@ -186,6 +186,7 @@ void gx_perf_frame(void) {
            (unsigned long)(a->v_tg_nrm / f), (unsigned long)(a->v_tg_tex / f), (unsigned long)(a->v_tg_color / f),
            (unsigned long)(a->v_tg_post / f), (unsigned long)(a->v_tg_normalize / f));
     gx_dlcache_log(f);
+    gx_vsh_log(f);
     memset(&s_sum, 0, sizeof(s_sum));
     s_frames = 0;
 }

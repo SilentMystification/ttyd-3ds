@@ -14,6 +14,10 @@ static void vblank_thread(void* arg) {
     for (;;) {
         gspWaitForVBlank();
         s_count++;
+        /* HOME is seen here up to a game frame before the game thread's aptMainLoop reacts. */
+        if (aptShouldJumpToHome()) {
+            plat_cpu_limit_home_pressed();
+        }
         if (s_handler != NULL) {
             s_handler();
         }

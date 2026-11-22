@@ -41,6 +41,7 @@ static u64 s_boot_tick;
 static u32 s_cpu_limit = 80;
 static u32 s_cpu_limit_orig = 30; /* the limit before this process set its own */
 static int s_cpu_restored;
+static volatile int s_cpu_home_early; /* HOME press already lowered the limit (set before the suspend hook) */
 static aptHookCookie s_apt_cookie;
 
 void plat_cpu_limit_restore(void); /* below */
@@ -65,14 +66,39 @@ static void cpu_limit_set(u32 value, const char* why) {
     PLOG_I("cpu limit: %lu%% (%s) result %08lx", (unsigned long)value, why, (unsigned long)r);
 }
 
+/* Called from the vblank thread (60 Hz, independent of the game's frame rate)
+ * the first time aptShouldJumpToHome() is true, i.e. as soon as libctru's APT
+ * event thread has seen the HOME signal. The suspend hook below only runs
+ * inside aptMainLoop on the game thread, once per game frame, so this gets
+ * core 1 back to the HOME Menu sooner. Idempotent; the restore hook clears it.
+ * Makes an IPC call and takes no lock the game thread can hold. */
+void plat_cpu_limit_home_pressed(void) {
+    if (s_cpu_home_early) {
+        return;
+    }
+    s_cpu_home_early = 1;
+    char why[48];
+    snprintf(why, sizeof why, "HOME pressed, early, vblank %lu", (unsigned long)plat_vblank_count());
+    cpu_limit_set(30, why);
+}
+
 /* Runs in the thread that calls aptMainLoop (the game thread). The HOME Menu
  * and sleep get core 1 back; closing them restores the game's value. */
 static void apt_hook(APT_HookType type, void* param) {
     (void)param;
     switch (type) {
-    case APTHOOK_ONSUSPEND: cpu_limit_set(30, "HOME menu opens"); break;
+    case APTHOOK_ONSUSPEND:
+        if (s_cpu_home_early) {
+            PLOG_I("cpu limit: HOME menu opens (30%% already set early)");
+        } else {
+            cpu_limit_set(30, "HOME menu opens");
+        }
+        break;
     case APTHOOK_ONSLEEP: cpu_limit_set(30, "sleep"); break;
-    case APTHOOK_ONRESTORE: cpu_limit_set(s_cpu_limit, "HOME menu closed"); break;
+    case APTHOOK_ONRESTORE:
+        s_cpu_home_early = 0;
+        cpu_limit_set(s_cpu_limit, "HOME menu closed");
+        break;
     case APTHOOK_ONWAKEUP: cpu_limit_set(s_cpu_limit, "wake"); break;
     case APTHOOK_ONEXIT: plat_cpu_limit_restore(); break;
     default: break;

@@ -41,6 +41,7 @@ void plat_memplace_report(void);
 
 /* boot.c */
 int plat_started_by_netload(void);
+void plat_cpu_limit_home_pressed(void); /* vblank thread: HOME seen, lower the limit now */
 void plat_cpu_limit_init(void);      /* core 1 time limit and the APT hook that lowers it on HOME/sleep */
 void plat_set_gpu_shutdown(void (*fn)(void)); /* the GPU back end's teardown, for message screens */
 void plat_set_gpu_abort(void (*fn)(void));    /* teardown for the crash screen: must not wait for other threads */

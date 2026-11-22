@@ -176,6 +176,7 @@ class Ctx:
         self.busy_time = 0.0
         self.start = time.monotonic()
         self.tag = ""
+        self.counter0 = self.counter1 = None
         self.tag_pos = 0
         self.tag_re = re.compile(args.tag_re) if args.tag_log else None
 
@@ -333,6 +334,7 @@ def main():
     ap.add_argument("--tag-re", default=r"sweep: (\S+) \(story", help="regex whose group 1 is the tag (default: the map sweep's current map)")
     ap.add_argument("--tag-prefix", type=int, default=3, help="characters of the tag that make its area (default 3: gor_01 -> gor)")
     ap.add_argument("--start-after", help="regex in --tag-log: let the target run (no sampling) until it matches; --duration counts from then")
+    ap.add_argument("--counter", metavar="SYMBOL", help="a u32 variable (e.g. the game's frame counter) read at the start and end; prints its rate per wall second")
     ap.add_argument("--start-timeout", type=float, default=300.0)
     ap.add_argument("--qtm-mb", type=float, default=1.6, help="QTM budget the candidate table is judged against")
     ap.add_argument("--min-shared", type=int, default=5)
@@ -406,7 +408,14 @@ def main():
                     deadline = ctx.start + args.duration
                     print("pc_sample: --start-after matched, sampling", file=sys.stderr)
                 attached_once = True
+                if args.counter:
+                    caddr = elfsyms.load_symbols(elf)[args.counter].addr
+                    ctx.counter0 = (time.monotonic(), int.from_bytes(rsp.read(caddr, 4), "little"))
                 sample(ctx, tgt, deadline)
+                if args.counter:
+                    tgt.interrupt()
+                    t1, c1 = time.monotonic(), int.from_bytes(rsp.read(caddr, 4), "little")
+                    ctx.counter1 = (t1, c1)
             except (RSPError, OSError) as e:
                 print(f"pc_sample: {e}", file=sys.stderr)
                 if not args.follow:
@@ -425,6 +434,9 @@ def main():
              "rate_hz": round(ctx.stops / elapsed, 2) if elapsed else 0,
              "slow_samples": ctx.slow, "slowest_ms": round(ctx.slowest * 1000, 1),
              "final_interval_ms": round(ctx.interval * 1000, 1)}
+    if ctx.counter0 and ctx.counter1:
+        dt, dc = ctx.counter1[0] - ctx.counter0[0], ctx.counter1[1] - ctx.counter0[1]
+        print(f"counter {args.counter}: {dc} in {dt:.1f} s = {dc / dt:.2f} per second")
     threads, overall = analyse(samples, syms, args.top, args.idle_re, names)
 
     if not args.no_lines:

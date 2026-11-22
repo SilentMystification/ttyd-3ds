@@ -302,6 +302,12 @@ def main():
         LAST = args.last.resolve()
 
     build = args.build.resolve()
+    # A background job starts with SIGINT ignored, and SIGTERM would skip the finally blocks:
+    # turn both into an exception so the Azahar this run started always goes down with it.
+    def _on_signal(signum, _frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
     acquire_slot()
     if not args.show:
         start_xvfb()
@@ -341,6 +347,7 @@ def main():
     with open(stdout_path, "w") as so:
         proc = subprocess.Popen(flatpak_cmd([str(boot)]), env=run_env(), stdout=so, stderr=subprocess.STDOUT,
                                 start_new_session=True)
+        atexit.register(lambda p=proc: stop_azahar(p))
 
     until = re.compile(args.until) if args.until else None
     # Periodic lines the game writes even when it is stuck: they do not count as log growth for --stall.

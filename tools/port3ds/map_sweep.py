@@ -69,7 +69,18 @@ def run(build, todo, story, frames, party, timeout, fastboot=True):
     cmd = [sys.executable, str(ROOT / "tools/port3ds/run_azahar.py"), "--build", str(build),
            "--switches", switches, "--log", "3ds/ttyd/log.txt", "--until", r"sweep: (done|stopped)",
            "--timeout", str(timeout), "--stall", "60"] + EXTRA
-    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    child = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        out, err = child.communicate()
+    except BaseException:
+        # let run_azahar.py stop its Azahar (subprocess.run would SIGKILL it and orphan the emulator)
+        child.terminate()
+        try:
+            child.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            child.kill()
+        raise
+    proc = subprocess.CompletedProcess(cmd, child.returncode, out, err)
     log = (LAST / "game_log.txt").read_text(errors="replace")
     results, current = {}, None
     for line in log.splitlines():

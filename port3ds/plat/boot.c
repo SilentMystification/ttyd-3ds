@@ -19,6 +19,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <netinet/in.h>
+#include <3ds/3dslink.h>
 
 #include "plat_internal.h"
 
@@ -232,12 +234,16 @@ int main(int argc, char** argv) {
         message_screen("  The SD card cannot be used\n  (missing or write-protected).");
         return 0;
     }
-    s_netload = argc > 0 && argv[0] != NULL && strncmp(argv[0], "3dslink:", 8) == 0;
+    /* The Homebrew Launcher's netloader may not pass a "3dslink:" argv[0]; libctru's
+     * __3dslink_host (the pushing host) is set whenever the launcher gave it. */
+    s_netload = (argc > 0 && argv[0] != NULL && strncmp(argv[0], "3dslink:", 8) == 0) || __3dslink_host.s_addr != 0;
     plat_switches_load(argc, argv);
     plat_log_init(s_netload || plat_switch_has("livelog"));
     plat_crash_install_thread();
     plat_stack_register(0, "game", __stacksize__);
     PLOG_I("TTYD 3DS build %s, switches \"%s\"", PORT3DS_BUILD_STRING, plat_switches_text());
+    PLOG_I("boot: argc %d argv[0] \"%s\" 3dslink_host 0x%08lx netload %d", argc,
+           (argc > 0 && argv[0] != NULL) ? argv[0] : "(null)", (unsigned long)__3dslink_host.s_addr, s_netload);
 
     plat_cpu_limit_init();
     plat_memplace_init();

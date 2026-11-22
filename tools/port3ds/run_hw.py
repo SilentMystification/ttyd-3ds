@@ -11,6 +11,11 @@
    it by itself) and copies every line to the terminal and to
    build/hw-last/log.txt. The game keeps its last lines in a ring and sends
    them on connect, so nothing before the connection is lost.
+   The switches always include "livelog" (the game opens the log port for
+   any start), unless the switches include "nolivelog".
+   For a game started from the HOME Menu (the CIA), add "livelog" to
+   sdmc:/3ds/ttyd/debug3ds.txt, start it, and attach with --no-send:
+       tools/port3ds/run_hw.py --no-send --until "warp:" --timeout 300
 3. Stops on --until (pass), a [CRASH] line (fail), --timeout, or the game
    closing the connection (fail unless --until already matched).
 
@@ -45,6 +50,7 @@ def main():
     ap.add_argument("--switches", default="", help="space-separated switches, passed as arguments")
     ap.add_argument("--until", help="regex in the log that means success")
     ap.add_argument("--timeout", type=float, default=300.0)
+    ap.add_argument("--connect-timeout", type=float, default=60.0, help="seconds to retry the live log connection")
     ap.add_argument("--no-send", action="store_true", help="only connect to a game that is already running")
     args = ap.parse_args()
     if not args.ip:
@@ -52,24 +58,36 @@ def main():
         return 2
 
     OUT.mkdir(parents=True, exist_ok=True)
+    sw = args.switches.split()
+    if "nolivelog" in sw:
+        sw.remove("nolivelog")
+    elif "livelog" not in sw:
+        sw.append("livelog")
     if not args.no_send:
-        cmd = [find_3dslink(), "-a", args.ip, "-r", "10", str(args.build)] + args.switches.split()
+        cmd = [find_3dslink(), "-a", args.ip, "-r", "10", str(args.build)] + sw
         print("run_hw: " + " ".join(cmd), flush=True)
         if subprocess.run(cmd).returncode != 0:
             print("run_hw: FAIL: 3dslink could not send the build (is the Homebrew Launcher waiting? press Y)")
             return 1
 
-    deadline = time.monotonic() + args.timeout
     sock = None
-    while sock is None and time.monotonic() < deadline:
+    start = time.monotonic()
+    last_err = -1e9
+    print("run_hw: waiting for live log...", flush=True)
+    while sock is None:
         try:
             sock = socket.create_connection((args.ip, LIVE_PORT), timeout=5)
-        except OSError:
+        except OSError as e:
+            now = time.monotonic()
+            if now - start >= args.connect_timeout:
+                print(f"run_hw: FAIL: no live log on {args.ip}:{LIVE_PORT} after {args.connect_timeout:.0f} s "
+                      f"({e}; the game did not start, or crashed early: see sdmc:/3ds/ttyd/log.txt)")
+                return 1
+            if now - last_err >= 10:
+                print(f"run_hw: connect failed: {e}", flush=True)
+                last_err = now
             time.sleep(1)
-    if sock is None:
-        print(f"run_hw: FAIL: no live log on {args.ip}:{LIVE_PORT} (the game did not start, or crashed early:"
-              " see sdmc:/3ds/ttyd/log.txt)")
-        return 1
+    deadline = time.monotonic() + args.timeout
     sock.settimeout(1.0)
     until = re.compile(args.until) if args.until else None
     passed = False

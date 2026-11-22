@@ -130,7 +130,9 @@ tools/port3ds/run_hw.py --switches "map=gor_01 wdog=30 padscript=wait*250,a*3" -
 
 `run_hw.py` sends the `.3dsx` with 3dslink, passing the switches as arguments, and then connects to the game's live log on TCP port 17492. A netloaded game opens that port by itself. It prints and saves every line to `build/hw-last/log.txt` and stops like the Azahar runner. The game also writes `sdmc:/3ds/ttyd/log.txt` and keeps the previous run as `log.old`, so the report of a crash that cut the connection can be fetched with ftpd.
 
-A 3dsx gets the memory of the title the Homebrew Launcher runs in, and it does not get the QTM mapping. If the game reports at boot that the heap or linear heap is too small, install the CIA instead (copy `build/3ds/game/ttyd.cia` to the SD card and install it with FBI) and start it from the HOME Menu. A CIA's switches come from `sdmc:/3ds/ttyd/debug3ds.txt`. Its live log needs the `livelog` switch, and then `run_hw.py --no-send` connects to it.
+A 3dsx gets the memory of the title the Homebrew Launcher runs in, and it does not get the QTM mapping. If the game reports at boot that the heap or linear heap is too small, install the CIA instead (copy `build/3ds/game/ttyd.cia` to the SD card and install it with FBI) and start it from the HOME Menu. A CIA's switches come from `sdmc:/3ds/ttyd/debug3ds.txt`. Its live log needs the `livelog` switch.
+Put `livelog` in `sdmc:/3ds/ttyd/debug3ds.txt`, start the CIA, then run `run_hw.py --no-send --until ...` to attach (`run_hw.py` adds `livelog` itself when it sends a 3dsx).
+`--connect-timeout N` (default 60) is how long it retries the connection.
 
 The probe (`build/3ds/probe/ttyd_probe.3dsx`) shows its results on the top screen and writes `sdmc:/3ds/ttyd/probe.txt`.
 

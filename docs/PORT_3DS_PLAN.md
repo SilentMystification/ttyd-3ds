@@ -418,6 +418,34 @@ Every test is one command that returns a non-zero exit code on failure. All of t
   - The golden set and milestone checks also run the CIA, so the QTM path stays tested. Azahar gives a 3dsx a default ExHeader without the QTM mapping.
   - Phase 0 works out the exact CIA flow: either `azahar -i ttyd.cia` followed by booting the installed title's content, or booting the CIA's NCCH directly.
 
+### 9.1 Regions (added 2026-11-22)
+
+**One build per region.** The code differs per version at compile time: 6932 `VERSION` blocks in 864 files, and different struct layouts, data tables, REL sets (JP adds `dig` and `qiz`, PAL also `tst`) and symbol addresses. A single binary that picks the region at boot would need three renamed copies of all game code and data. So there are three builds of one CMake project:
+
+| Region | Configure with | Output | Unique ID (title) | Product code |
+|---|---|---|---|---|
+| US | `-DREGION=US` (default, `-DTTYD_VERSION=G8ME01`) | `build/3ds/game` | `0xFD886` (`000400000FD88600`) | `KTR-N-TTYD` |
+| JP | `-DREGION=JP` (`-DTTYD_VERSION=G8MJ01`) | `build/3ds/game_jp` | `0xFD88A` (`000400000FD88A00`) | `KTR-N-TTYJ` |
+| PAL | `-DREGION=PAL` (`-DTTYD_VERSION=G8MP01`) | `build/3ds/game_pal` | `0xFD88B` (`000400000FD88B00`) | `KTR-N-TTYE` |
+
+`tools/port3ds/build.sh . -DREGION=PAL` picks the output folder. The probe is `0xFD887`/`KTR-N-TTYP` and the ctr-devkit examples are `0xFD888` and `0xFD889`, so PAL takes `KTR-N-TTYE` (E for Europe). The HOME Menu name is "Paper Mario: The Thousand Year Door" for all three; the banner subtitle names the region for JP and PAL. Each build has its own generated sources (`port3ds/sources_<version>.cmake`, from `gen_sources.py --version`), swap tables (the probe is compiled with the version's defines), disc-data table and arena (`gen_disc_data.py --version`), and static REL set.
+
+**The disc check.** `DVDInit` reads the disc header before anything region-specific (the FST, main.dol, the RELs) and refuses another region's disc: "This build is for the US version (G8ME01); the disc is G8MP01."
+
+**Generators that need the disc.** Only the GameCube arena's high end (where the IPL puts the FST, from the disc's maximum FST size) is read from the disc itself. `gen_disc_data.py --disc <image>` reads it and fails with "needs the G8MP01 disc" for a missing or wrong image. The build passes `--disc` when `TTYD_DISC` names an image or `iso/<version>.iso` / `iso/game.iso` is this version's disc; otherwise G8ME01 uses its Dolphin-measured value (the same the disc gives) and JP and PAL use it as a stand-in, a few KiB off. To finish once a disc is available: put it at `iso/G8MJ01.iso` (or `iso/G8MP01.iso`) and re-run the region's build (the generated header then says `PORT_GAME_ARENA_HI_FROM_DISC 1`).
+
+**PAL 50/60 Hz.** As on the GameCube, the TV format follows the render mode the game configures (`VIConfigure`): the PAL build starts in `VI_PAL` (50 Hz) and the start-up prompt stays there or configures its EURGB60 mode (60 Hz); `VIGetTvFormat` returns the current format, so `gp->framerate` and every `FPS_FRAMES`/`FPS_EASE` follow it. NTSC, EURGB60 and MPAL retrace on every LCD vertical blank (59.83 Hz). In 50 Hz mode `vi.c` emulates a 20 ms retrace on the LCD's blanks: the retrace runs on the blank nearest each 20 ms tick (5 of every 6 blanks), so game frames and the game clocks run at 50 Hz, paced by this emulation and not by the LCD, and a frame is shown for one or two LCD refreshes. The game-time budget per frame is 2 retraces: 33 ms at 60 Hz, 40 ms at 50 Hz. The prompt preselects 60 Hz (the 3DS screen's rate); switch `hz=50` preselects 50 Hz. Tools that count game frames as 1/60 s (the deterministic test mode in 7.1) must use 1/50 s in 50 Hz mode.
+
+**Languages.** G8MP01's `marioStInit` takes its language from `OSGetLanguage` (the IPL setting). The port maps the 3DS system language (`CFGU_GetSystemLanguage`) onto it: French, German, Italian and Spanish as themselves, Dutch as Dutch (which the game shows in English, as on the GameCube), every other language as English. Switch `lang=en|de|fr|es|it|nl` overrides it. G8ME01 is always English and G8MJ01 always Japanese (its font encoding is SJIS).
+
+**Known gaps for JP and PAL** (none can be checked without their discs):
+- The digest map (`rels/dig`, JP and PAL) plays `demo.thp` through the SDK's THP decoder, which is paired-single assembly; `port3ds/game/thp.c` decodes every frame to black and the sound to silence, so the movie runs its length as a black screen.
+- JP's IPL font is SJIS; the port's ROM font (`os_font.c`) is ASCII only, and `romfont.c` draws the system messages from it.
+- PAL's 50 Hz render modes have a 568-line XFB (`xfbHeight` 0x238); the EFB is 480 lines in every mode and the port presents the EFB, so the image should be unchanged, but the display-copy scale is unchecked.
+- The arena's high end is the US value until the region's disc is seen by the generator (above).
+
+**Once the discs are available:** put them at `iso/G8MJ01.iso` and `iso/G8MP01.iso`, then for each region: rebuild (`tools/port3ds/build.sh . -DREGION=JP`, with the image under the repository so the Docker build sees it, or `-DTTYD_DISC=<path>`) and check that `build/3ds/game_jp/generated/port_disc_data_gen.h` says `PORT_GAME_ARENA_HI_FROM_DISC 1`; build `host_decode` with `-DTTYD_VERSION=G8MJ01` and run `host_decode --disc iso/G8MJ01.iso all` (every format must decode); copy the image to the Azahar profile's `sdmc:/3ds/ttyd/game.iso` and boot to the title, a new game and `map=gor_01`; run the 7.2 map sweep. For PAL also boot with `hz=50` and pick 50 Hz at the prompt (the log shows each `VI: TV format` change and `EURGB60:` choice), and boot once per `lang=` value.
+
 ## 10. Phases and exit criteria
 
 Each phase ends with a commit, updated docs, and passing tests for everything earlier.
@@ -454,7 +482,7 @@ Each step ends with a commit, a short entry in PORT_3DS_STATUS.md, and the earli
 | 7.5 Effects | Every effect (`src/effect/`, 77 files, plus 103 N64-style ones in `src/effect/n64/`) and every screen-copy, indirect-texture or z-texture scene. PICA-impossible ones get an equivalent registered as a per-game GX override (portability rule, section 1) | Each effect is seen at least once and compared with Dolphin; each equivalent is listed with a screenshot pair |
 | 7.6 Side content | Pit of 100 Trials, the Trouble Center, the Pianta Parlor games, the quiz shows, cooking, shops and badges, the ship/plane/paper/tube/boat transformations | Each one is entered and completed once |
 | 7.7 Systems | Save and load in every slot (copy and delete too), game over and continue, soft reset (B+X+Start) and the Select menu's Return to title, every pause-menu tab, mail and journal, options | All of it works in Azahar, and a save made on the 3DS loads after a restart |
-| 7.8 Regions | JP (G8MJ01) and PAL (G8MP01) disc images through the converter; PAL at 50 and 60 Hz and in all its languages | Boot, the title, a new game and the 7.2 map sweep pass for each region |
+| 7.8 Regions (**builds ready, 2026-11-22**: all three compile, link and refuse another region's disc in Azahar; JP and PAL untested in game for want of their discs; section 9.1) | JP (G8MJ01) and PAL (G8MP01) disc images through the converter; PAL at 50 and 60 Hz and in all its languages | Boot, the title, a new game and the 7.2 map sweep pass for each region |
 | 7.9 Packaging | The CIA install path (title ID `000400000FD88600`, product code `KTR-N-TTYD`, ExHeader checked against a retail title), first-boot conversion messages, the HOME Menu banner and icon, the 3dsx fallback (FCRAM, no QTM) | The CIA installs, boots and uninstalls cleanly on Azahar and on the console; the 3dsx path still works |
 
 The phase is done when 7.2 to 7.8 are all done. That is: the whole game completed once in Azahar, in story order, from a new file to the credits, with saves along the way.
@@ -483,9 +511,9 @@ These are asked in the conversation and recorded here with the answers once give
 3. Audio. **Answered: NDSP voices from the start**, with paper-cut's mixer as a host-side reference.
 4. Effects with no direct PICA equivalent (indirect warps, z-textures, more than 6 TEV stages). **Answered: close equivalents are acceptable**, each verified scene by scene against Dolphin, none skipped.
 5. Hardware. **Answered:** an N3DS that the agent reaches over the network, with 3dslink for netload and ftpd for pulling logs. Scripts read the console address from the `N3DS_IP` environment variable; there is no auto-discovery.
-6. Regions. **Answered:** US first. The converter accepts all three regions from the start; JP and PAL are brought up in phase 7.
+6. Regions. **Answered:** US first. The converter accepts all three regions from the start; JP and PAL are brought up in phase 7. All three are in the first release, as three builds (section 9.1).
 7. Original game bugs. **Answered:** keep them, so behaviour matches the original.
-8. CIA. **Answered:** unique ID `0xFD886` (title `000400000FD88600`) with product code `KTR-N-TTYD`, and plain original placeholder banner and icon art that can be replaced later.
+8. CIA. **Answered:** unique ID `0xFD886` (title `000400000FD88600`) with product code `KTR-N-TTYD`, and plain original placeholder banner and icon art that can be replaced later. JP is `0xFD88A` / `KTR-N-TTYJ` and PAL `0xFD88B` / `KTR-N-TTYE` (`KTR-N-TTYP` is the probe's); section 9.1.
 9. Git. **Answered:** work on a `port3ds` branch pushed to `SilentMystification/ttyd-3ds`, with PRs into `main` at phase boundaries.
 
 ## 12. Unverified assumptions (checked on hardware in phase 8)

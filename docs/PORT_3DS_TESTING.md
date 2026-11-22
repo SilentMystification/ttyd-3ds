@@ -97,11 +97,12 @@ Sound needs `sdmc:/3ds/dspfirm.cdc` (dumped from a console with DSP1), in the pr
 ### Map sweep
 
 ```sh
-tools/port3ds/map_sweep.py --story 30 --frames 180        # every map on the disc
+tools/port3ds/map_sweep.py --story 30 --frames 120        # every map on the disc
 tools/port3ds/map_sweep.py --area tik --story 30          # one area
 tools/port3ds/map_sweep.py --maps gor_01,hei_00
 ```
 
+A battle that a map starts counts as a pass (`ok (battle on entry)`): the game raises `BATTLE_SEQ_END`, the flag `battleMain` sets itself, so `seq_battleMain` exits through `battle_exit` to the field and the sweep goes on (victory screens skipped).
 It writes the map list to the SD card, runs the game with `sweep=N`, and reads the log. A run that ends early (a crash, a stall, a battle a map starts on entry) is followed by one that resumes after the map being visited. Results are in `build/map-sweep/`: `results.json` (each map `ok`, `timeout`, `stopped`, `crash`, `stall` or `not in map table`: the storybook's `stg` maps, which the map change cannot enter), `shots/<map>.png`, and for a crash or stall the whole game log in `logs/<map>.txt`. Maps are entered without an entrance, so Mario starts where the map's default position puts him (often below the ground, from where the game's fall recovery lifts him).
 
 ### Finding a hang

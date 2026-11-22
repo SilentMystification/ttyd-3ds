@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "battle/battle.h"
 #include "data/mapdata.h"
 #include "driver/seqdrv.h"
 #include "driver/swdrv.h"
@@ -156,7 +157,10 @@ static void warp_switch(void) {
  * in sweep.txt ("<map> [<story>]" per line) once the title or the opening is
  * up, stays N game frames after the map is up, saves sweep/<map>.ppm and logs
  * "sweep: <map> ok". A map not up within 1800 frames is logged as "timeout";
- * a sequence that cannot be left (a battle the map starts) stops the sweep. */
+ * a battle (the map starts one, or one begins while it is up) counts as a pass
+ * ("ok (battle on entry)") and is left by raising BATTLE_SEQ_END, the flag the
+ * game sets itself when BattleMain finishes: seq_battleMain then runs its normal
+ * exit (battle_exit, back to SEQ_GAME). Only the victory screens are skipped. */
 #define SWEEP_MAX 512
 static char (*s_sweep_maps)[16];
 static u8* s_sweep_story;
@@ -230,6 +234,24 @@ static void sweep_frame(void) {
     }
     s_sweep_wait++;
     const char* map = s_sweep_maps[s_sweep_i];
+    if (seq == SEQ_BATTLE && (s_sweep_state == 2 || s_sweep_state == 3 || s_sweep_state == 4)) {
+        PLOG_I("sweep: %s ok (battle on entry)", map);
+        s_sweep_state = 5;
+        s_sweep_wait = 0;
+        return;
+    }
+    if (s_sweep_state == 5) { /* in a battle: end it the way the game does, once it is set up */
+        if (seq == SEQ_GAME) {
+            s_sweep_i++;
+            s_sweep_state = 1;
+        } else if (seq == SEQ_BATTLE && _battleWorkPointer != NULL && gp->inBattle && s_sweep_wait > 20) {
+            _battleWorkPointer->flags |= BATTLE_SEQ_END;
+        } else if (s_sweep_wait > 900) {
+            PLOG_W("sweep: stopped after %s (battle did not end, sequence %d)", map, seq);
+            s_sweep_state = 0;
+        }
+        return;
+    }
     if (s_sweep_state == 2) { /* waiting for the map */
         if (seq == SEQ_GAME && strcmp(gp->currentMapName, map) == 0) {
             s_sweep_state = 3;

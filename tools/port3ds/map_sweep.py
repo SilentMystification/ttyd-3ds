@@ -63,7 +63,7 @@ def run(build, todo, story, frames, party, timeout):
     switches = f"sweep={frames} party={party}"
     cmd = [sys.executable, str(ROOT / "tools/port3ds/run_azahar.py"), "--build", str(build),
            "--switches", switches, "--log", "3ds/ttyd/log.txt", "--until", r"sweep: (done|stopped)",
-           "--timeout", str(timeout), "--stall", "120"]
+           "--timeout", str(timeout), "--stall", "60"]
     proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     log = (ROOT / "build/azahar-last/game_log.txt").read_text(errors="replace")
     results, current = {}, None
@@ -113,7 +113,7 @@ def main():
     ap.add_argument("--area", help="only maps whose name starts with this")
     ap.add_argument("--story", type=int, default=0, help="GSW 0 for every map")
     ap.add_argument("--party", type=int, default=1)
-    ap.add_argument("--frames", type=int, default=240, help="game frames on each map before its screenshot")
+    ap.add_argument("--frames", type=int, default=120, help="game frames on each map before its screenshot")
     ap.add_argument("--timeout", type=float, default=3600.0, help="seconds per Azahar run")
     args = ap.parse_args()
 

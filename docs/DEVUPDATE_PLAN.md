@@ -81,9 +81,19 @@ bool   devupdate_pending(void);                        /* an update is installed
 
 1. **Hardware check first:** a tiny test app that installs a CIA of *itself* from the SD card through AM while running, then relaunches with `aptSetChainloaderToSelf` and deliver arguments. It shows the received arguments on screen. This proves the core assumptions (self-install, relaunch, arguments survive; a cold start receives none) before anything else is built.
 2. **Library and PC tool,** with a `README.md` (API, protocol, the "dev only" warning) and an MIT `LICENSE`.
-3. **Example app** in `libs/ctr-devkit/examples/devupdate/`: prints its build number, so a push visibly changes it.
+3. **Example app** in `libs/ctr-devkit/examples/devupdate/`: prints its build number, so a push visibly changes it. Built as a 3dsx it doubles as the generic bootstrap (`devupdate-boot.3dsx`). Also test the jump into an installed title with deliver arguments.
 4. **TTYD integration** and tool support.
 5. **Done when:** a TTYD CIA build is pushed from the PC while the game runs, installs, relaunches into the new build (its log shows the new build string) and reattaches the live log, 10 times in a row with no console input. A deliberate corrupted push (bad CRC) is refused and leaves the old install working.
+
+## Bootstrap from a 3dsx (owner's idea, 2026-11-22)
+
+The first install needs no FBI either:
+1. 3dslink pushes a small generic **bootstrap 3dsx** (`devupdate-boot.3dsx`, built from the example app) to the Homebrew Launcher.
+2. The bootstrap runs the same `devupdate` receiver. `devupdate.py push <cia>` streams the CIA and the bootstrap installs it through AM. FBI installs CIAs the same way as a 3dsx; step 1 confirms `am:net` is in Luma's homebrew service list (`hbldr.c`).
+3. The bootstrap jumps into the installed title with `APT_PrepareToDoApplicationJump(0, titleId, MEDIATYPE_SD)` plus `APT_DoApplicationJump`, passing the switches as deliver arguments.
+4. From then on the installed title's own `devupdate` handles updates, relaunches and recovery.
+
+`devupdate.py bootstrap --cia app.cia [--switches ...]` does the whole sequence: 3dslink the bootstrap, push, install, jump. An app may instead embed its own CIA in its 3dsx and install itself. That's self-contained but makes every push about the CIA's size larger, so the generic bootstrap is preferred.
 
 ## Recovery mode and hardware test harness (owner's idea, 2026-11-22)
 

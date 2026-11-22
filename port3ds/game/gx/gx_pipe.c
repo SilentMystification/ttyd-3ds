@@ -480,8 +480,18 @@ void GXBegin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts) {
     port_gx_wg_ptr = s_pipe;
 }
 
+static int s_in_list; /* a GXCallDisplayList is running (for the counters) */
+static u32 s_list_kind; /* what the running list held: 1 primitives, 2 port opcodes, 4 raw primitives */
+
 static void draw_from_reader(Reader* r, u8 prim, u8 fmt, u32 n) {
     u32 done = 0;
+    if (gx_perf_on > 0) {
+        if (s_in_list) {
+            gx_perf.dl_verts += n;
+        } else {
+            gx_perf.imm_verts += n;
+        }
+    }
     while (done < n) {
         u32 chunk = n - done;
         if (chunk > sizeof(s_verts) / sizeof(s_verts[0])) {
@@ -495,8 +505,17 @@ static void draw_from_reader(Reader* r, u8 prim, u8 fmt, u32 n) {
             default: plat_fatal("GX: strip or fan of %lu vertices", (unsigned long)n);
             }
         }
+        u64 t0 = GX_PERF_T();
         for (u32 i = 0; i < chunk; i++) {
             read_vertex(r, fmt, &s_verts[i]);
+        }
+        if (gx_perf_on > 0) {
+            u64 dt = plat_ticks() - t0;
+            if (s_in_list) {
+                gx_perf.t_dl_decode += dt;
+            } else {
+                gx_perf.t_imm_decode += dt;
+            }
         }
         gx_draw_vertices(prim, s_verts, chunk);
         done += chunk;
@@ -540,7 +559,12 @@ void GXEnd(void) {
             }
         }
     } else if (s_nverts > 0) {
+        u64 t0 = GX_PERF_T();
         draw_from_reader(&r, s_prim, s_fmt, s_nverts);
+        if (gx_perf_on > 0) {
+            gx_perf.imm_prims++;
+            gx_perf.t_imm += plat_ticks() - t0;
+        }
     }
     port_gx_wg_ptr = s_pipe;
 }
@@ -579,6 +603,7 @@ static void run_commands(Reader* r, int from_list) {
                     encode_vertex(r, (u8)(op & 7));
                 }
             } else {
+                s_list_kind |= 1;
                 draw_from_reader(r, (u8)(op & 0xF8), (u8)(op & 7), n);
             }
             continue;
@@ -596,6 +621,7 @@ static void run_commands(Reader* r, int from_list) {
                 slots[i].u32 = rd_u32(r);
             }
             Reader sr = {slots, NULL, NULL};
+            s_list_kind |= 4;
             draw_from_reader(&sr, (u8)(pf & 0xF8), (u8)(pf & 7), n);
             continue;
         }
@@ -604,6 +630,7 @@ static void run_commands(Reader* r, int from_list) {
                 plat_fatal("GX: port opcode in the pipe");
             }
             r->p--;
+            s_list_kind |= 2;
             gx_dl_replay_port_op(&r->p, r->end);
             continue;
         }
@@ -665,8 +692,29 @@ void GXCallDisplayList(void* list, u32 nbytes) {
     s_list_caller = __builtin_return_address(0);
     s_list_start = (const u8*)list;
     s_list_bytes = nbytes;
+    if (gx_perf_on > 0) {
+        gx_perf_dl(list, nbytes);
+    }
+    u64 t0 = GX_PERF_T();
+    s_in_list = 1;
+    s_list_kind = 0;
     run_commands(&r, 1);
+    s_in_list = 0;
     s_list_caller = NULL;
+    if (gx_perf_on > 0) {
+        gx_perf.t_dl += plat_ticks() - t0;
+        gx_perf.dl_calls++;
+        gx_perf.dl_bytes += nbytes;
+        if (s_list_kind & 4) {
+            gx_perf.dl_raw++;
+        } else if (s_list_kind == 1) {
+            gx_perf.dl_vtx_only++;
+        } else if (s_list_kind == 2) {
+            gx_perf.dl_state_only++;
+        } else if (s_list_kind == 3) {
+            gx_perf.dl_mixed++;
+        }
+    }
 }
 
 void GXBeginDisplayList(void* list, u32 size) {

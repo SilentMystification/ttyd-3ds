@@ -37,6 +37,7 @@
 #include "manager/evtmgr.h"
 #include "mario/mario.h"
 #include "mario/mario_party.h"
+#include "mario/mario_pouch.h"
 #include "mario/mariost.h"
 #include "party.h"
 #include "pmario_sound.h"
@@ -78,7 +79,7 @@ static int parse_int(const char* p);
 
 /* key=N,N,... into out (at most max values); returns the count. */
 static int shot_list(const char* key, int* out, int max) {
-    char text[120];
+    char text[400];
     const char* p = text;
     int n = 0;
     if (!tst_sw_value(key, text, sizeof(text))) {
@@ -387,6 +388,71 @@ static char s_btl_word[32];
 static int s_btl_wait;
 static u32 s_btl_start;
 
+/* battle=A,B,C or battle=A-B: the battles one after another, each battlewait
+ * frames after the field is back, with Mario's and the partners' HP and FP
+ * refilled before each (so a lost battle with btlauto=fail does not end the
+ * list in a game over). */
+#define BTL_MAX 96
+static char s_btl_list[BTL_MAX][24];
+static int s_btl_n, s_btl_i;
+
+static void btl_add(const char* word) {
+    const char* dash = strchr(word, '-');
+    if (dash != NULL && dash > word && *word >= '0' && *word <= '9' && is_number(dash + 1)) {
+        int a = parse_int(word), b = parse_int(dash + 1);
+        for (; a <= b && s_btl_n < BTL_MAX; a++) {
+            sprintf(s_btl_list[s_btl_n++], "%d", a);
+        }
+    } else if (s_btl_n < BTL_MAX) {
+        strcpy(s_btl_list[s_btl_n++], word);
+    }
+}
+
+static void btl_read_list(const char* text) {
+    const char* p = text;
+    while (*p != '\0' && s_btl_n < BTL_MAX) {
+        char word[24];
+        const char* comma = strchr(p, ',');
+        int len = comma != NULL ? (int)(comma - p) : (int)strlen(p);
+        if (len > 23) {
+            len = 23;
+        }
+        memcpy(word, p, len);
+        word[len] = '\0';
+        if (word[0] != '\0') {
+            btl_add(word);
+        }
+        if (comma == NULL) {
+            break;
+        }
+        p = comma + 1;
+    }
+}
+
+static void btl_heal(void) {
+    PouchData* pouch = pouchGetPtr();
+    int i;
+    pouch->currentHP = pouch->maximumHP;
+    pouch->currentFP = pouch->maximumFP;
+    for (i = 0; i < 8; i++) {
+        pouch->partyData[i].currentHP = pouch->partyData[i].maximumHP;
+    }
+}
+
+/* The next battle of the list, or the end of it. */
+static void btl_next(void) {
+    s_btl_i++;
+    if (s_btl_i < s_btl_n) {
+        strcpy(s_btl_word, s_btl_list[s_btl_i]);
+        s_btl_state = 1;
+    } else {
+        if (s_btl_n > 1) {
+            tst_log("battle: done");
+        }
+        s_btl_state = 0;
+    }
+}
+
 static NpcEntry* battle_npc(void) {
     NpcWork* w = npcGetWorkPtr();
     NpcEntry* any = NULL;
@@ -521,15 +587,26 @@ static void battle_list(void) {
 static void battle_frame(u32 frame) {
     battle_list();
     if (s_btl_state < 0) {
+        char text[200];
         s_btl_state = 0;
-        if (tst_sw_value("battle", s_btl_word, sizeof(s_btl_word)) && s_btl_word[0] != '\0') {
+        if (tst_sw_value("battle", text, sizeof(text)) && text[0] != '\0') {
+            btl_read_list(text);
+        }
+        if (s_btl_n > 0) {
+            strcpy(s_btl_word, s_btl_list[0]);
             s_btl_wait = tst_sw_int("battlewait", 60);
             s_btl_state = 1;
-            tst_log("battle: %s after %d frames on the map", s_btl_word, s_btl_wait);
+            tst_log("battle: %s after %d frames on the map (%d in the list)", s_btl_word, s_btl_wait, s_btl_n);
         }
     }
     if (s_btl_state == 1 && s_map_frames >= (u32)s_btl_wait && seqGetSeq() == SEQ_GAME) {
+        if (s_btl_n > 1) {
+            btl_heal();
+        }
         battle_start(frame);
+        if (s_btl_state == 0) {
+            btl_next(); /* this one did not start */
+        }
     } else if (s_btl_state == 2 && frame > s_btl_start + 2 && seqGetSeq() == SEQ_GAME) {
         FieldBattleData* fbat = fbatGetPointer();
         PartyEntry* party = partyGetPtr(marioGetPartyId());
@@ -539,7 +616,7 @@ static void battle_frame(u32 frame) {
         if (party != NULL) {
             partyCtrlOn();
         }
-        s_btl_state = 0;
+        btl_next();
     }
 }
 

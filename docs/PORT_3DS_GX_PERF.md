@@ -123,9 +123,104 @@ Move `transform` and `texgen` into the vertex shader for the draws that fit, and
 
 ## Recommended order
 
-1. **(a) The decoded display-list cache.** It is self-contained (one new file and hooks in `gx_pipe.c`), it removes about a third of the game thread's GX time in every measured scene, its results are bit-identical by construction (the transform gets the same input), and it is the base for the PICA-ready vertex streams that (b) needs. Done on this branch, see "Results" below.
+1. **(a) The decoded display-list cache.** It is self-contained (one new file and hooks in `gx_pipe.c`), it removes the decode (a fifth of the frame) at the price of a full check per call, which nets 13-15% of the game thread's GX time in every measured scene, its results are bit-identical by construction (the transform gets the same input), and it is the base for the PICA-ready vertex streams that (b) needs. Done on this branch, see "Results" below.
 2. **(c), the cheap parts:** the separate state version for matrix loads, the fog LUT cache and the unlit fast path (game thread, `gx_draw.c` and `gx_state.c`), and the draw merge in `plat/gpu.c` (render thread). Each is small and can be A/B-tested alone. Coordinate the texture lookup with the texture-hash work in `gx_tex.c`, since fewer rebuilds mean fewer lookups.
 3. **(b) The vertex shader transform**, first for cached lists with one matrix, no lighting and `MTX2x4` texgen (every vertex measured here), fed by PICA-ready streams in the cache entries (linear memory, budgeted) and `u16` index lists, with the CPU path as the fallback. Then the immediate-mode draws, then the matrix palette and lighting with their own test scenes.
+
+## Results: the display-list cache (step 1)
+
+Implemented in `port3ds/game/gx/gx_dlcache.c`, hooked into `gx_pipe.c` (`GXCallDisplayList`, `draw_from_reader`, `read_vertex`). Switch `gxcache`: 0 off, 1 on (the default), 2 verify. Game-agnostic: it knows display lists, vertex state and memory, nothing about TTYD.
+
+**How it validates.** Every call checks every input of the decode:
+
+- a hash of all the list's bytes;
+- the vertex description and the attribute formats of the formats used;
+- the current matrix indices;
+- the array addresses and strides;
+- a hash of every array element the list's vertices read, at the indices they read (kept in the entry, 2 bytes per vertex and indexed attribute).
+
+Nothing is trusted across frames. A first version hashed each attribute's whole index range instead. Map lists index scattered parts of their mesh's array, so it hashed megabytes per frame and saved nothing (gor_01: list stage 219 ms with the cache against 214 ms without). Hashing only the elements read fixed that.
+
+**Memory.** Entries are malloc'd from the regular heap (the GPU never reads them) within `gxcachekb` (default 8192 KB). They are evicted least recently used first, but an entry used this frame or the last is never evicted: a frame that draws more lists than fit leaves the rest uncached instead of thrashing. A first version with 8192 entry slots thrashed right after the gor_01 load (7824 lists per frame, 0 hits); the slots are now 16384. The entry table is static (16384 x 80 bytes, 1.3 MB), plus capture buffers of 8192 vertices and 98304 indices.
+
+**Equivalence.**
+
+- `gxcache=2` decodes every hit again and compares it field by field with the entry: **0 mismatches in 310,140 hits** (gor_01, 60 frames).
+- Screenshots: `shots=100 shotmax=13`, game frames 800-1200, compared per pixel (`shotdiff.py`), with a second cache-off run as the noise floor because the game is not deterministic between runs:
+
+| Scene | off vs off (noise) | off vs on |
+|---|---|---|
+| gon_02 battle | identical (5 of 5) | **identical (5 of 5)** |
+| aaa_00 | — | **identical (5 of 5)** |
+| gor_01 | max 243, mean 0.50, worst shot 2.2% of pixels > 8 | max 255, mean 1.58, worst shot 5.3% > 8 |
+
+In gor_01 every differing pixel is on animated content: the walking NPC, the swinging rope and Goombella's idle animation. The static scene is identical. The game animates by time, and frames that finish sooner shift those animations.
+
+**Counters** (per frame, `gxstats=60`, frames 1200-1260):
+
+| | gor_01 | gon_02 | aaa_00 |
+|---|---|---|---|
+| Hit rate (of all list calls; the misses are state-only lists, never cached) | 95% (5169 of 5427) | 95% (2565 of 2698) | 93% (2624 of 2814) |
+| Hits as a share of cacheable lists | 100% | 100% | 100% |
+| Vertices replayed per frame | 28881 | 12663 | 13599 |
+| Built, changed, dynamic, evicted, full per frame | 0 | 0 | 0 |
+| Entries, memory | 10784, 6843 KB | 12189, 8191 KB (gon field lists still there, the budget is full, LRU working) | 6003, 3920 KB |
+
+**Time** (game thread, Azahar ticks, `gxstats` on in both runs):
+
+| | gor_01 off → on | gon_02 off → on | aaa_00 off → on |
+|---|---|---|---|
+| Display lists, inclusive | 210.2 → 174.3 ms | 99.5 → 84.3 ms | 105.3 → 87.8 ms |
+| of which decode | 69.6 → 0 | 32.4 → 0 | 35.0 → 0 |
+| of which cache lookup and validation | 0 → 43.5 | 0 → 22.7 | 0 → 22.3 |
+| GX total (lists + immediate mode) | 237.3 → 201.4 ms (**-15%**) | 113.6 → 98.6 ms (**-13%**) | 114.9 → 97.4 ms (**-15%**) |
+| Game frame | 267.8 → 234.1 ms (16 → 14 vblanks) | 134.1 → 117.6 ms (8 → 7 vblanks) | 134.0 → 117.6 ms (8 → 7 vblanks) |
+
+The frame times are whole vblanks (the game waits for the next one), so the stage times are the measure. The validation costs about 8 µs per list call in Azahar ticks, which includes the counters' own `svcGetSystemTick` calls (three per call). That is two thirds of what the decode cost. The remaining cost is the hashing: about 70 list bytes and 36 array bytes per vertex. The PC samples below show its share without the counters.
+
+**PC sampling** (`pc_sample.py --interval 200`, gor_01, no counters, same build, `gxcache=0` then `gxcache=1`). Azahar's stub slowed to about 1 Hz while other Azahar instances ran, so these are 81 and 46 game-thread samples: a direction, not a measurement.
+
+| Game-thread self time | cache off (81 samples) | cache on (46 samples) |
+|---|---|---|
+| `draw_from_reader` (decode) | 21.0% | 2.2% |
+| `run_commands` | 4.9% | 0% |
+| cache: `gather_hash`, `gx_hash32`, `gx_dlcache_call` | — | 8.7% (plus part of `memcmp`, 6.5%) |
+| `gx_draw_vertices` + `channel_color` (transform, unchanged) | 21.0% | 30.4% |
+| `hash_bytes` (texture lookup in `build_state`) | 6.2% | 13.0% |
+| waiting for the render thread | 16.0% | 6.5% |
+
+The decode and parse (26%) become about 9-15% of checking. The transform, the state rebuild and the texture lookup are now the largest shares: they are steps 2 and 3.
+
+**Ways to make a hit cheaper**, not done here because they trade correctness or need more measurement:
+
+- Hash the array elements once per frame per array, not per list. Unsafe if the game rewrites an array between two draws in one frame; it would need a write signal from the game (a per-game hook such as "this memory is static") or `DCStoreRange` hooks.
+- A trust window (Star3D: one full check, then none for 512 frames). Faster, but a list or array changed inside the window draws stale data. Not acceptable as the default under the "nothing stubbed, behaves like the original" rule; possible as an opt-in switch.
+- Fewer, larger draws through (c) and (b), so the per-call overhead counts less.
+
+## What the cache entries carry for the shader path
+
+The shader path (b) has to meet the rules in [PORT_3DS_GPU_OFFLOAD.md](PORT_3DS_GPU_OFFLOAD.md): no new z-fighting and no seams. A cache entry today holds:
+
+- the decoded vertices, exactly as `read_vertex` produced them (32-bit floats after the GX dequantisation);
+- the draws in call order (primitive, first vertex, count), already split as the CPU path splits them;
+- the attribute formats (type and `frac`) of the vertex formats used, and the array ranges.
+
+For (b), an entry gets a second, optional part built from the first, in linear memory and inside the same budget:
+
+- **Positions and texture coordinates as `s16` with one power-of-two scale per entry, only where that is exact.** For a fixed-point source (`GX_S16`, `GX_S8`, `GX_U8`, or `GX_U16` below 32768) the source value is the `s16` and the scale is `2^-frac`: exact by definition. For a float source the cache checks, for the entry's values, the largest number of fractional bits `k` any value needs and whether every `|v|·2^k` fits 32767. A power-of-two scale only moves the exponent, so the same source value comes out as the same 24-bit float whatever entry it is in: shared edges between entries stay identical (seam rule 4). An entry that fails the check keeps `float` attributes, never a rounded `s16`. `gxstats` logs how many built entries pass the check. In gor_01 (10122 entries built, 48851 vertices): **positions are exact in 10112 entries (99.5% of vertices)**, and **TEX0 is exact in all 8530 entries that have it**. So (b) can use `s16` streams for nearly everything, and floats for the few others.
+- **Normals as `s16` x 2^-14** (exact for `GX_S16` sources, `s8` x 2^-6 for `GX_S8`), colours as `u8`.
+- **`u16` triangle indices** for the entry's strips and fans, so one entry is one GPU draw, and the same index order as the CPU path's triangle assembly, so every pass of a multi-pass draw gets the same triangles.
+- The per-draw matrices (model x view pre-multiplied in 32-bit on the CPU, camera-relative) are not part of the entry: they come with the call, so every draw that shares a matrix uses bit-identical uniforms.
+
+## Risks of the cache
+
+- **Hash collisions.** A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.
+- **Memory.** Up to 8 MB of regular heap by default, plus 1.3 MB of static tables and about 1 MB of capture buffers. If `malloc` fails, the entry is dropped and counted (`alloc-fail`); the list is still drawn. gon_02 reached the budget, and LRU kept up (`full 0`).
+- **Validation cost.** The cache saves less than the decode because every hit is fully checked (see Results). Large indexed meshes get cheaper per vertex; tiny lists stay dominated by per-call costs.
+- **Not covered by a test here:** a list rewritten in place, or an array rewritten between frames, in a real scene. None changed in the four measured scenes. The code paths (changed, then dynamic after 4 changes) ran only in the verify mode's comparisons, not with real changes. A dedicated test would draw a list, change one byte of it and of its array, and expect `changed 1` and the new picture.
+- **Moving GX translation to the render thread** (`PORT_3DS_MULTICORE.md`). The cache's state is module-private and owned by whichever thread translates GX. Its inputs come in through a `GxState` pointer (`gx_dlcache_call(st, ...)`), not the global, so a translator thread with its own `GxState` replica can own it. Two things would block a translation that runs up to a frame late:
+  - It reads the list and the arrays **in game memory at translation time**, to hash and, on a miss, to decode. If the game thread has rewritten that memory in the meantime (the next frame's skinned arrays, a reused buffer), the translator sees the new bytes. That holds for the decode with or without the cache. The recorded call would have to carry a snapshot, or the game thread would have to keep the memory stable until the translator is done (double-buffered frames). The cache adds nothing new here, but its hash must be taken from the same bytes the decode reads.
+  - `gx_dlc_capturing`, the index capture and the frame number (`gx_perf_frame_no`) are globals of the translating thread. They must move with it, never be shared by two threads.
 
 ## For PORT_3DS_TESTING.md
 
@@ -134,3 +229,5 @@ Rows for the switch table:
 | Switch | Effect |
 |---|---|
 | `gxstats=N` | Every N game frames, logs `gxstats` lines with per-frame averages: display lists (calls, bytes, vertices, how many repeat unchanged from an earlier frame), immediate-mode primitives, draws, triangles and culled triangles, PICA state rebuilds, the render thread's draws and record bytes, the game thread's time per GX stage (list decode, state rebuild, transform, triangle assembly), the GX features the vertices use (lighting, texgen kinds, matrix indices, primitive types), and with `gxcache` the cache's hits and memory. Off by default; costs a few percent when on |
+| `gxcache=0/1/2` | The decoded display-list cache (`port3ds/game/gx/gx_dlcache.c`): 1 (default) draws repeated lists from their decoded vertices after checking every input; 0 decodes every list every time (A/B); 2 decodes every hit again and compares it with the cache (`mismatched` in the `gxstats` cache line, and one warning line) |
+| `gxcachekb=N` | The cache's memory budget in KB (default 8192) |

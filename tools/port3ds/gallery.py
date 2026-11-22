@@ -111,10 +111,20 @@ def run_port(args, switches, until, timeout, last):
     shutil.rmtree(sd / "gallery", ignore_errors=True)
     cmd = [sys.executable, str(REPO / "tools/port3ds/run_azahar.py"), "--build", str(args.cia), "--profile",
            str(AZ_PROFILE), "--last", str(last), "--switches", switches, "--until", until, "--timeout", str(timeout),
-           "--stall", str(args.stall)]
+           "--stall", str(args.stall), "--allow-hw-faults"]
     print("gallery: port:", switches[:200], flush=True)
     r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True)
     reason = (r.stdout.strip().splitlines() or ["?"])[-1]
+    # hardware-fault lines (unmapped accesses) are reported, not a reason to stop: count them per PC
+    alog = last / "azahar_log.txt"
+    if alog.exists():
+        faults = {}
+        for m in re.finditer(r"unmapped (\w+) 0x[0-9A-Fa-f]+ @ 0x[0-9A-Fa-f]+ at PC (0x[0-9A-Fa-f]+)",
+                             alog.read_text(errors="replace")):
+            faults[f"{m.group(1)} at PC {m.group(2)}"] = faults.get(f"{m.group(1)} at PC {m.group(2)}", 0) + 1
+        if faults:
+            (last / "hw_faults.json").write_text(json.dumps(faults, indent=1))
+            reason += f" [{sum(faults.values())} unmapped accesses, {len(faults)} PCs]"
     log = sd / "log.txt"
     text = log.read_text(errors="replace") if log.exists() else ""
     (last / "game_log.txt").parent.mkdir(parents=True, exist_ok=True)
@@ -228,13 +238,13 @@ def cmd_fx(args):
         stop = 760 + args.wait + len(batch) * args.gap + max(offsets)
         if args.gc_only:
             bn_tag = f"b{bn:02d}"
-            gok, greason, _ = run_gc(args, sw, stop, out / "gc", out / "logs" / f"gc_{bn_tag}")
+            gok, greason, _ = run_gc(args, sw, stop, out / "gc" / bn_tag, out / "logs" / f"gc_{bn_tag}")
             print(f"gallery: dolphin {bn_tag}: {greason}", flush=True)
             todo = todo[args.batch:]
             continue
         ok, reason, ptext = run_port(args, sw, r"fx: done", args.port_timeout_base + frames_needed / args.port_fps,
                                      out / "logs" / f"port_{tag}")
-        collect_port_shots(out / "port")
+        collect_port_shots(out / "port" / tag)
         pres = parse_fx(ptext, batch)
         done = [it for it in batch if it in pres]
         if not ok:
@@ -253,13 +263,14 @@ def cmd_fx(args):
             if len(done) < len(batch):
                 spawned = [pres[it]["spawn"] for it in done if "spawn" in pres[it]]
                 stop = (max(spawned) if spawned else 800) + max(offsets) + 5
-            gok, greason, gtext = run_gc(args, sw, stop, out / "gc", out / "logs" / f"gc_{tag}")
+            gok, greason, gtext = run_gc(args, sw, stop, out / "gc" / tag, out / "logs" / f"gc_{tag}")
             gres = parse_fx(gtext, batch)
             if not gok:
                 print(f"gallery: dolphin: {greason}")
         for it in done:
             r = pres[it]
             r["gc"] = gres.get(it)
+            r["batch"] = tag
             r["shots"] = [r["spawn"] + o for o in offsets] if "spawn" in r else []
             r["gc_shots"] = ([gres[it]["spawn"] + o for o in offsets] if gres.get(it) and "spawn" in gres[it]
                              else r["shots"])
@@ -331,7 +342,7 @@ def cmd_battle(args):
         ok, reason, ptext = run_port(args, sw, until, args.port_timeout_base + len(batch) * args.battle_frames
                                      / args.port_fps, out / "logs" / f"port_{tag}")
         if offsets:
-            collect_port_shots(out / "port")
+            collect_port_shots(out / "port" / tag)
         pres = parse_battles(ptext)
         done = []
         for it in batch:
@@ -343,6 +354,7 @@ def cmd_battle(args):
                 r["lines"] += [strip(l) for l in ptext.splitlines()[-10:]]
             elif "result" in r:
                 r["status"] = "ended"
+            r["batch"] = tag
             r["shots"] = [r["start"] + o for o in offsets] if "start" in r else []
             results["items"][it] = r
             done.append(it)
@@ -352,7 +364,7 @@ def cmd_battle(args):
             starts = [pres[it]["start"] for it in done if "start" in pres[it]]
             ends = [pres[it]["start"] + pres[it].get("frames", 0) for it in done if "start" in pres[it]]
             stop = max(ends + [s + max(offsets or [0]) for s in starts] + [800]) + 10
-            gok, greason, gtext = run_gc(args, sw, stop, (out / "gc") if offsets else None, out / "logs" / f"gc_{tag}")
+            gok, greason, gtext = run_gc(args, sw, stop, (out / "gc" / tag) if offsets else None, out / "logs" / f"gc_{tag}")
             gres = parse_battles(gtext)
             for it in done:
                 results["items"][it]["gc"] = gres.get(it)
@@ -466,9 +478,9 @@ def cmd_frames(args):
     sw = f"{args.switches} determ shotat={','.join(map(str, frames))} {args.extra}".strip()
     ok, reason, ptext = run_port(args, sw, rf"shot: f={max(frames)} ",
                                  args.port_timeout_base + max(frames) / args.port_fps, out / "logs" / "port")
-    collect_port_shots(out / "port")
+    collect_port_shots(out / "port" / "b01")
     if args.dolphin:
-        run_gc(args, sw, max(frames) + 2, out / "gc", out / "logs" / "gc")
+        run_gc(args, sw, max(frames) + 2, out / "gc" / "b01", out / "logs" / "gc")
     results = {"kind": "frames", "items": {f"f{f}": {"status": reason, "shots": [f], "lines": [], "warnings": []}
                                             for f in frames}}
     save_results(out, results)
@@ -489,11 +501,18 @@ def save_results(out, results):
 
 
 def score_items(out, results, args):
+    """Per pair: the plain difference. Then, where several items were shot at the same game frame (an fx= batch
+    puts the n-th effect of every batch at the same frame of the same scene), the excess over the median
+    difference of that frame: the scene's own port/GameCube difference (filtering, an NPC walking) cancels,
+    and what is left is the effect's. The score is the worst shot's excess (or plain mean without a baseline)."""
+    import numpy as np
+    by_frame = {}
     for it, r in results["items"].items():
         pairs = []
         for i, f in enumerate(r.get("shots", [])):
             g = (r.get("gc_shots") or r["shots"])[i]
-            pp, gp = out / "port" / f"f{f:05d}.png", out / "gc" / f"f{g:05d}.png"
+            b = r.get("batch", "b01")
+            pp, gp = out / "port" / b / f"f{f:05d}.png", out / "gc" / b / f"f{g:05d}.png"
             entry = {"port": pp.name if pp.exists() else None, "gc": gp.name if gp.exists() else None}
             if pp.exists() and gp.exists():
                 a, b = load_image(pp), load_image(gp)
@@ -506,10 +525,24 @@ def score_items(out, results, args):
                     dp = out / "diff" / f"{it.replace(':', '_')}_{i}.png"
                     save_diff(d, dp)
                     entry["diff"] = dp.name
+                    by_frame.setdefault(f, []).append((it, len(pairs), d.astype(np.uint8)))
             pairs.append(entry)
         r["pairs"] = pairs
+    for f, group in by_frame.items():
+        if len(group) < 3:
+            continue
+        base = np.median(np.stack([g[2] for g in group]), axis=0)
+        for it, i, d in group:
+            ex = np.clip(d.astype(np.float32) - base, 0, None)
+            p = results["items"][it]["pairs"][i]
+            p["excess"] = round(float(ex.mean()), 2)
+            p["excess_over"] = round(float((ex > args.pixel_threshold).mean() * 100), 2)
+            save_diff(ex, out / "diff" / p["diff"])
+    for r in results["items"].values():
+        pairs = r.get("pairs", [])
+        ex = [p["excess"] for p in pairs if "excess" in p]
         means = [p["mean"] for p in pairs if "mean" in p]
-        r["score"] = max(means) if means else None
+        r["score"] = max(ex) if ex else (max(means) if means else None)
 
 
 def report(out, results, args):
@@ -524,6 +557,8 @@ def report(out, results, args):
             cells = "".join(f'<td>{f"<img src={sub}/{p[k]} loading=lazy>" if p.get(k) else "-"}</td>'
                             for k, sub in (("port", "port"), ("gc", "gc"), ("diff", "diff")))
             stat = (f"mean {p['mean']} max {p['max']} over {p['over']}%" if "mean" in p else p.get("note", "no pair"))
+            if "excess" in p:
+                stat += f"; over the frame's median: {p['excess']}, {p['excess_over']}% over"
             imgs.append(f"<tr>{cells}<td>{html.escape(stat)}</td></tr>")
         info = [r.get("status", ""), f"spawn {r['spawn']}" if "spawn" in r else "",
                 f"alive+2: {r['alive2']}" if "alive2" in r else "", f"end: {r['end']}" if "end" in r else ""]

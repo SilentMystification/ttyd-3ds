@@ -285,11 +285,12 @@ void OSResetSystem(int reset, u32 resetCode, BOOL forceMenu) {
     (void)reset;
     (void)forceMenu;
     s_reset_code = resetCode;
-    /* A GameCube reset restarts the program; the port ends the process,
-     * which returns to the HOME Menu or Homebrew Launcher. */
+    /* A GameCube reset restarts the program. The port does a clean exit
+     * with a relaunch request (plat_quit), so GSP, the DSP and the audio
+     * thread are released; the HOME Menu or Homebrew Launcher then takes over. */
     plat_log(PLAT_LOG_WARN, "OSResetSystem(reset %d, code %08lx, menu %d)", reset, (unsigned long)resetCode,
              forceMenu);
-    plat_exit_process();
+    plat_quit(1);
 }
 
 void PPCHalt(void) {

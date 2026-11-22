@@ -74,6 +74,10 @@ void plat_wd_hold(int on);
  * caller then calls plat_shutdown(). */
 int plat_frame_poll(void);
 void plat_shutdown(void) __attribute__((noreturn));
+/* Clean exit for the game side (reset, Select menu exit): runs exit(), so the
+ * atexit handlers and APT/GSP teardown run. relaunch: ask APT to start the
+ * app again. */
+void plat_quit(int relaunch) __attribute__((noreturn));
 
 /* ---- Vertical blank (plat/vblank.c) ----
  * Calls `handler` on a dedicated thread at every top-screen vertical blank

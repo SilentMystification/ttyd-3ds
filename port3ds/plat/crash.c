@@ -32,6 +32,7 @@ static volatile u32 s_crash_ms; /* uptime in ms when a handler started, 0 if non
 static volatile u32 s_wd_hold;
 static int s_wd_limit_s = 10;
 static Thread s_wd_thread;
+static volatile int s_wd_quit; /* set by plat_wd_quiesce: the monitor returns */
 volatile uint32_t plat_wd_counter;
 
 typedef struct {
@@ -92,6 +93,9 @@ static void crash_printf(const char* fmt, ...) {
     plat_crash_line(buf, n);
 }
 
+/* Crash and watchdog exits only. svcExitProcess skips exit(), so the atexit
+ * handlers (audio, apt, gfx, soc) never run and the process dies holding GSP
+ * and the DSP. Normal exits go through plat_quit (boot.c). */
 void plat_exit_process(void) {
     for (int i = 0; i < 100 && s_wd_hold; i++) {
         svcSleepThread(10000000LL); /* a running save gets up to 1 s */
@@ -100,6 +104,15 @@ void plat_exit_process(void) {
     svcExitProcess();
     for (;;) {
     }
+}
+
+/* Before a normal exit: waits for a running save (the hold, as above), then
+ * stops the monitor so it cannot end the process while exit() runs. */
+void plat_wd_quiesce(void) {
+    for (int i = 0; i < 100 && s_wd_hold; i++) {
+        svcSleepThread(10000000LL);
+    }
+    s_wd_quit = 1;
 }
 
 static void report_common(void) {
@@ -183,6 +196,9 @@ static void watchdog_main(void* arg) {
     int stalled = 0;
     for (;;) {
         svcSleepThread(1000000000LL);
+        if (s_wd_quit) {
+            return;
+        }
         u32 started = s_crash_ms;
         if (started) {
             if (plat_uptime_ms() - started >= 3000u) {

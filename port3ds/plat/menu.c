@@ -139,7 +139,7 @@ static void activate(int dir) {
             if (dir == 0) {
                 if (s_exit_armed) {
                     PLOG_I("menu: exit");
-                    plat_shutdown();
+                    plat_quit(0);
                 }
                 s_exit_armed = 1;
             }

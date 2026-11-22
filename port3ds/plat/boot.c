@@ -91,17 +91,35 @@ int plat_frame_poll(void) {
     return aptMainLoop() ? 1 : 0;
 }
 
-void plat_shutdown(void) {
-    PLOG_I("shutdown: the system asked the app to close");
-    plat_log_stop();
-    plat_log_crash_close();
-    exit(0);
-}
-
 /* A message the user must read: shown on the top screen until START (or
  * the HOME Menu). Works before and after the game set up the GPU. */
 static void (*s_gpu_shutdown)(void);
 void plat_set_gpu_shutdown(void (*fn)(void)) { s_gpu_shutdown = fn; }
+
+void plat_wd_quiesce(void); /* crash.c */
+
+/* Normal exit. exit() runs the atexit handlers (ndsp, apt, gfx, soc), which
+ * the raw svcExitProcess in plat_exit_process would skip. relaunch: ask APT
+ * to start this app again when the process ends (the Homebrew Launcher may
+ * ignore it and just return). */
+void plat_quit(int relaunch) {
+    plat_wd_quiesce();
+    if (s_gpu_shutdown != NULL) {
+        s_gpu_shutdown(); /* waits for the render thread, then C3D_Fini and gfxExit */
+        s_gpu_shutdown = NULL;
+    }
+    plat_log_stop();
+    plat_log_crash_close();
+    if (relaunch) {
+        aptSetChainloaderToSelf();
+    }
+    exit(0);
+}
+
+void plat_shutdown(void) {
+    PLOG_I("shutdown: the system asked the app to close");
+    plat_quit(0);
+}
 
 static void message_screen(const char* text) {
     if (s_gpu_shutdown != NULL) {

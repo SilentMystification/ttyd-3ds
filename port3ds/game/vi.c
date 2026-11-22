@@ -31,6 +31,7 @@
 #include "plat/input.h"
 #include "plat/plat.h"
 #include "port3ds/os_internal.h"
+#include "test_mode.h"
 #include "version.h"
 
 static VIRetraceCallback s_pre, s_post;
@@ -43,11 +44,13 @@ static u64 s_frame_start;
 
 static void retrace(void) {
     port_irq_enter();
-    if (s_pre != NULL) {
+    /* determ (test mode): the callbacks run once per game frame, in VIWaitForRetrace */
+    int callbacks = !tst_determ();
+    if (s_pre != NULL && callbacks) {
         s_pre(s_retrace_count);
     }
     s_retrace_count++;
-    if (s_post != NULL) {
+    if (s_post != NULL && callbacks) {
         s_post(s_retrace_count);
     }
     port_irq_leave();
@@ -60,6 +63,11 @@ void VIInit(void) {
         return;
     }
     ready = 1;
+    if (tst_determ()) {
+        /* test mode: game time from the frame count, sound paced by the frame */
+        port_os_set_time_source(tst_game_time);
+        port_ai_set_frame_paced(1);
+    }
     OSInitThreadQueue(&s_retrace_queue);
     plat_vblank_start(retrace);
 }
@@ -341,8 +349,11 @@ void plat_memory_log(const char* when);
 
 static void frame_hooks(void) {
     s_frames++;
-    __atomic_store_n(&s_time_budget, (u32)OSMillisecondsToTicks(GAME_TIME_BUDGET_MS), __ATOMIC_RELAXED);
+    /* determ: exactly one retrace of game time per frame */
+    u32 budget = tst_determ() ? (u32)tst_retrace_ticks() : (u32)OSMillisecondsToTicks(GAME_TIME_BUDGET_MS);
+    __atomic_store_n(&s_time_budget, budget, __ATOMIC_RELAXED);
     port_debug_frame(s_frames);
+    tst_frame(s_frames);
     plat_input_frame();
     plat_set_phase("frame hooks");
     if (!plat_frame_poll()) {
@@ -380,14 +391,53 @@ static void frame_hooks(void) {
     plat_hud_frame(&st);
 }
 
-void VIWaitForRetrace(void) {
-    frame_hooks();
+static void wait_retrace(void) {
     u32 target = s_retrace_count;
     BOOL level = OSDisableInterrupts();
     while (s_retrace_count == target) {
         OSSleepThread(&s_retrace_queue);
     }
     OSRestoreInterrupts(level);
+}
+
+/* determ (test mode): DVD manager reads queued this frame finish first, then
+ * the frame's one retrace runs the game's callbacks with a virtual count and
+ * the frame's 1/60 s (1/50 s) of sound interrupts run. */
+static void determ_retrace(void) {
+    static u32 s_audio_acc;
+    int waits = 0;
+    while (tst_dvd_busy() && waits < 600) {
+        wait_retrace();
+        waits++;
+    }
+    if (waits == 600) {
+        PLOG_W("determ: DVD manager still busy after 600 retraces");
+    }
+    u32 count = tst_vretrace();
+    port_irq_enter();
+    if (s_pre != NULL) {
+        s_pre(count - 1);
+    }
+    if (s_post != NULL) {
+        s_post(count);
+    }
+    port_irq_leave();
+    u32 fps = VIGetTvFormat() == VI_PAL ? 50 : 60;
+    int quanta = 0;
+    s_audio_acc += 32000; /* samples per second, 160 per quantum */
+    while (s_audio_acc >= fps * 160) {
+        s_audio_acc -= fps * 160;
+        quanta++;
+    }
+    port_ai_pump(quanta);
+}
+
+void VIWaitForRetrace(void) {
+    frame_hooks();
+    wait_retrace();
+    if (tst_determ()) {
+        determ_retrace();
+    }
     s_frame_start = plat_ticks();
     plat_set_phase("game frame");
 }

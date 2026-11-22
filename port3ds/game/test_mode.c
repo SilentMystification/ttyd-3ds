@@ -254,9 +254,12 @@ static int rngtrace_on(void) {
     return s_rt_state == 1 && s_cur_frame >= s_rt_from && s_cur_frame <= s_rt_to;
 }
 
-void tst_rngtrace(unsigned long caller, u32 val) {
+int tst_rngtrace_wanted(void) { return rngtrace_on(); }
+
+void tst_rngtrace(unsigned long caller, unsigned long caller2, unsigned long caller3, u32 val) {
     if (rngtrace_on()) {
-        tst_log("[RNG] f=%lu caller=%08lx val=%lu", (unsigned long)s_cur_frame, caller, (unsigned long)val);
+        tst_log("[RNG] f=%lu caller=%08lx caller2=%08lx caller3=%08lx val=%lu", (unsigned long)s_cur_frame, caller,
+                caller2, caller3, (unsigned long)val);
     }
 }
 

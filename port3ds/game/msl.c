@@ -15,7 +15,21 @@ static u32 s_next = 1;
 int ttyd_rand(void) {
     s_next = s_next * 1103515245u + 12345u;
     u32 v = (s_next >> 16) & 0x7FFF;
-    tst_rngtrace((unsigned long)__builtin_return_address(0), v);
+    if (tst_rngtrace_wanted()) {
+        /* no frame pointers: the next callers are guessed from the stack, words
+         * that point after a BL in the code (stack words, so possibly stale) */
+        unsigned long found[2] = {0, 0};
+        int n = 0;
+        const unsigned long* sp = (const unsigned long*)__builtin_frame_address(0);
+        for (int i = 0; i < 96 && n < 2; i++) {
+            unsigned long w = sp[i];
+            if (w > 0x100004ul && w < 0x800000ul && (w & 3) == 0 &&
+                (*(const unsigned long*)(w - 4) >> 24) == 0xEB && w != (unsigned long)__builtin_return_address(0)) {
+                found[n++] = w;
+            }
+        }
+        tst_rngtrace((unsigned long)__builtin_return_address(0), found[0], found[1], v);
+    }
     return (int)v;
 }
 

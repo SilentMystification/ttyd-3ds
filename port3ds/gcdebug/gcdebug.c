@@ -143,11 +143,29 @@ static u32 s_rand_next = 1;
 
 int gcdbg_rand(void) {
     register u32 lr;
+    register u32 stk;
     u32 v;
+    u32 c2 = 0, c3 = 0;
     asm { mflr lr } /* the caller's address: nothing before this has changed LR */
+    asm { mr stk, r1 }
     s_rand_next = s_rand_next * 1103515245u + 12345u;
     v = (s_rand_next >> 16) & 0x7FFF;
-    tst_rngtrace(lr, v);
+    if (tst_rngtrace_wanted()) {
+        /* the back chain: our frame -> irand's frame (its LR slot is lr) -> irand's caller's frame, which holds
+         * the address irand returns to */
+        u32 sp1 = *(u32*)stk;
+        if (sp1 >= 0x80000000u && sp1 < 0x81800000u) {
+            u32 sp2 = *(u32*)sp1;
+            if (sp2 >= 0x80000000u && sp2 < 0x81800000u) {
+                u32 sp3 = *(u32*)sp2;
+                c2 = *(u32*)(sp2 + 4);
+                if (sp3 >= 0x80000000u && sp3 < 0x81800000u) {
+                    c3 = *(u32*)(sp3 + 4);
+                }
+            }
+        }
+    }
+    tst_rngtrace(lr, c2, c3, v);
     return (int)v;
 }
 

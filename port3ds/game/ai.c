@@ -59,19 +59,46 @@ static void stream_advance(void) {
     }
 }
 
+/* One quantum's interrupt: the block that starts now, the DMA callback
+ * naming the next, the stream counter. Under the interrupt lock. */
+static void quantum_irq(u32* start, u32* length) {
+    *start = 0;
+    *length = 0;
+    if (s_dma_enabled) {
+        s_block_start = *start = s_dma_start;
+        s_block_length = *length = s_dma_length;
+        if (s_dma_callback != NULL) {
+            s_dma_callback();
+        }
+    }
+    stream_advance();
+}
+
+/* Frame-paced audio (a test mode): the interrupts run from port_ai_pump on
+ * the caller's thread, so sound state advances with the game frame, not
+ * with the output clock; the output gets silence. */
+static volatile int s_frame_paced;
+
+void port_ai_set_frame_paced(int on) { s_frame_paced = on; }
+
+void port_ai_pump(int quanta) {
+    u32 start, length;
+    while (quanta-- > 0) {
+        port_irq_enter();
+        quantum_irq(&start, &length);
+        port_irq_leave();
+    }
+}
+
 static void ai_fill(int16_t* out, uint32_t frames) {
+    if (s_frame_paced) {
+        memset(out, 0, frames * 4);
+        return;
+    }
     while (frames >= QUANTUM_FRAMES) {
         port_irq_enter();
-        u32 start = 0, length = 0;
-        if (s_dma_enabled) {
-            /* The block that starts now; the interrupt names the next. */
-            s_block_start = start = s_dma_start;
-            s_block_length = length = s_dma_length;
-            if (s_dma_callback != NULL) {
-                s_dma_callback();
-            }
-        }
-        stream_advance();
+        u32 start, length;
+        quantum_irq(&start, &length); /* the interrupt names the next block */
         port_irq_leave();
 
         if (length > QUANTUM_BYTES) {

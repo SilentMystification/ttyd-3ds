@@ -17,6 +17,9 @@ int ttyd_rand(void) {
 
 void ttyd_srand(unsigned int seed) { s_next = seed; }
 
+/* The generator's state, for the test mode's gwdump lines. */
+u32 ttyd_rand_state(void) { return s_next; }
+
 /* MSL's "C" locale table: A-Z map to a-z, everything else to itself. */
 #define L(c) ((c) >= 'A' && (c) <= 'Z' ? (c) + 32 : (c))
 #define ROW(b) L(b + 0), L(b + 1), L(b + 2), L(b + 3), L(b + 4), L(b + 5), L(b + 6), L(b + 7), \

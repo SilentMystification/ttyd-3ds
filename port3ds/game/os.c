@@ -71,11 +71,21 @@ static void time_init(void) {
     s_time_base = ms >= MS_1900_TO_2000 ? (s64)((ms - MS_1900_TO_2000) * (GC_TIMER_HZ / 1000u)) : 0;
 }
 
-OSTime OSGetTime(void) {
+OSTime port_os_real_time(void) {
     u64 d = plat_ticks() - s_boot_ticks;
     u64 whole = d / PLAT_TICKS_PER_SEC;
     u64 part = d % PLAT_TICKS_PER_SEC;
     return s_time_base + (s64)(whole * GC_TIMER_HZ + part * GC_TIMER_HZ / PLAT_TICKS_PER_SEC);
+}
+
+/* A test mode can replace the game's clock (port_os_set_time_source). */
+static OSTime (*volatile s_time_source)(void);
+
+void port_os_set_time_source(OSTime (*source)(void)) { s_time_source = source; }
+
+OSTime OSGetTime(void) {
+    OSTime (*source)(void) = s_time_source;
+    return source != NULL ? source() : port_os_real_time();
 }
 
 OSTick OSGetTick(void) { return (OSTick)OSGetTime(); }

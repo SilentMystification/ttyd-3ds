@@ -3,7 +3,7 @@
 Status: planned 2026-11-22, not started.
 
 Decisions (owner):
-- It is built in this repository as a self-contained folder, `libs/ctr-devupdate/`, and moves to its own repository once it has proved itself.
+- It is built in this repository as a self-contained folder, `libs/ctr-devkit/devupdate/` (part of the ctr-devkit family, see CTR_DEVKIT_PLAN.md), and moves to its own repository once it has proved itself.
 - MIT licence.
 - No dependency on TTYD or on the port's `plat/` layer. It uses only libctru, so any libctru app can drop it in.
 
@@ -57,7 +57,7 @@ bool   devupdate_pending(void);                        /* an update is installed
   - Off unless the app calls `devupdate_start`, and our games call it only in dev builds or behind a switch.
   - Optional token, LAN only, and nothing but CIA install and restart is exposed.
 
-### PC tool (`libs/ctr-devupdate/devupdate.py`, Python 3, stdlib only)
+### PC tool (`libs/ctr-devkit/devupdate/devupdate.py`, Python 3, stdlib only)
 
 - `push <cia>`: connect, send the header and stream the file, show progress, wait for `done`, and report the relaunch.
 - `ping`, `restart`.
@@ -75,7 +75,7 @@ bool   devupdate_pending(void);                        /* an update is installed
 
 1. **Hardware check first:** a tiny test app that installs a CIA of *itself* from the SD card through AM while running, then relaunches with `aptSetChainloaderToSelf`. This proves the core assumption before anything else is built.
 2. **Library and PC tool,** with a `README.md` (API, protocol, the "dev only" warning) and an MIT `LICENSE`.
-3. **Example app** in `libs/ctr-devupdate/example/`: prints its build number, so a push visibly changes it.
+3. **Example app** in `libs/ctr-devkit/examples/devupdate/`: prints its build number, so a push visibly changes it.
 4. **TTYD integration** and tool support.
 5. **Done when:** a TTYD CIA build is pushed from the PC while the game runs, installs, relaunches into the new build (its log shows the new build string) and reattaches the live log, 10 times in a row with no console input. A deliberate corrupted push (bad CRC) is refused and leaves the old install working.
 

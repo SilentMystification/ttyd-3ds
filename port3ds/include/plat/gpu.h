@@ -141,12 +141,90 @@ void plat_gpu_sync(void);
 /* Reads one EFB pixel (GXPeekARGB): waits for the GPU. */
 uint32_t plat_gpu_peek_argb(uint16_t x, uint16_t y);
 
+/* ---- Vertex-shader path (front end switch gxvsh) ----
+ * The GPU transforms a stream the front end built once (a cached display
+ * list): object-space positions, colours and texture coordinates in linear
+ * memory, drawn with u16 triangle indices. Per draw the front end gives the
+ * uniform block (clip rows = projection x position matrix, multiplied on the
+ * CPU in 32-bit float; texture rows; colour selection) and the stream.
+ *
+ * Stereo: the clip rows are the GX clip space, before the screen rotation;
+ * the back end composes the rotation (and, for a second eye, a per-eye
+ * clip-space offset) on the render thread, so a record can be replayed once
+ * per eye without re-recording. `flags` says what an eye offset needs. */
+void* plat_gpu_stream_alloc(uint32_t bytes);            /* linear memory, 16-byte aligned; NULL when out */
+void plat_gpu_stream_commit(const void* p, uint32_t bytes); /* the CPU wrote it: flush before the GPU reads */
+void plat_gpu_stream_free(void* p);                     /* freed once no frame in flight can read it */
+
+enum { PLAT_VSH_ORTHO = 1u }; /* PlatGpuVshConst.flags: the projection is orthographic */
+
+typedef struct {
+    float clip[4][4];   /* clip x, y, z, w = row . (x, y, z, 1), GX clip space (unrotated) */
+    float tex[6][4];    /* texture unit u: s row 2u, t row 2u + 1, applied to (slot value, 1, 1) */
+    float clrmix[4];    /* per component: 1 takes the vertex colour, 0 takes matclr */
+    float matclr[4];    /* 0..255 */
+    uint32_t flags;
+    uint32_t pad[3];
+} PlatGpuVshConst;
+
+/* Stream layout word: which attributes are s16 (else float), the number of
+ * texture slots, the stride. The attributes lie in this order: the float
+ * ones (position, then slots 0..2), the s16 ones (same order), the colour
+ * (u8 x 4), so each is naturally aligned; the stride is a multiple of 4. */
+#define PLAT_VSH_POS_S16 0x1u
+#define PLAT_VSH_NSLOTS(l) (((l) >> 1) & 3u)
+#define PLAT_VSH_SLOT_S16(i) (0x8u << (i))
+#define PLAT_VSH_STRIDE(l) (((l) >> 8) & 0xFFu)
+
+/* Byte offsets of position, colour and slots 0..2 (-1: none); returns the stride. */
+static inline uint32_t plat_vsh_layout(uint32_t pos_s16, uint32_t nslots, uint32_t slot_s16_mask, int32_t off[5]) {
+    uint32_t o = 0;
+    for (int pass = 0; pass < 2; pass++) { /* 0: floats, 1: s16 */
+        if ((pos_s16 != 0) == (pass == 1)) {
+            off[0] = (int32_t)o;
+            o += pass ? 6u : 12u;
+        }
+        for (uint32_t i = 0; i < 3; i++) {
+            if (i >= nslots) {
+                off[2 + i] = -1;
+            } else if (((slot_s16_mask >> i) & 1u) == (pass == 1 ? 1u : 0u)) {
+                off[2 + i] = (int32_t)o;
+                o += pass ? 4u : 8u;
+            }
+        }
+    }
+    off[1] = (int32_t)o;
+    o += 4;
+    return (o + 3u) & ~3u;
+}
+
+static inline uint32_t plat_vsh_layout_word(uint32_t pos_s16, uint32_t nslots, uint32_t slot_s16_mask) {
+    int32_t off[5];
+    uint32_t stride = plat_vsh_layout(pos_s16, nslots, slot_s16_mask, off);
+    return (pos_s16 ? PLAT_VSH_POS_S16 : 0u) | (nslots & 3u) << 1 | (slot_s16_mask & 7u) << 3 | stride << 8;
+}
+
+/* Scale word of a draw: bits 0-7 the position's power-of-two exponent k
+ * (value = s16 x 2^-k; 0 for floats); byte 1 + u for texture unit u: bits 0-1
+ * the stream slot it reads (3: none, the coordinate source is absent), bits
+ * 2-7 that slot's k. */
+#define PLAT_VSH_UNIT(slot, k) ((((uint32_t)(k) & 63u) << 2) | ((uint32_t)(slot) & 3u))
+
+/* The uniform block for the following shader draws (copied; recorded only when it changed). */
+void plat_gpu_vsh_const(const PlatGpuVshConst* c);
+/* Triangles of a stream: `nidx` u16 indices (copied) into the stream at `stream`.
+ * cull: 0 none, 1 GX front faces, 2 GX back faces (GX's front is clockwise on screen). */
+void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, const uint16_t* idx,
+                       uint32_t nidx);
+
 typedef struct {
     uint32_t draws, vertices, state_changes;
     uint32_t record_bytes;
     uint32_t segments; /* extra submits in a frame (record or vertex arena full) */
     uint32_t render_us, gpu_us;
     uint32_t calls; /* plat_gpu_draw calls; `draws` is the draw commands after merging */
+    uint32_t vsh_draws, vsh_calls, vsh_indices, vsh_consts; /* shader path: commands after merging, calls, indices, uniform blocks */
+    uint32_t stream_kb, stream_pending; /* linear memory of live streams; frees waiting for the frames in flight */
 } PlatGpuStats;
 void plat_gpu_stats(PlatGpuStats* out);
 uint32_t plat_gpu_present_count(void); /* frames presented so far (the shot number) */

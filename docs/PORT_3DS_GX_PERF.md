@@ -332,6 +332,82 @@ Attributes the draw does not read become fixed attributes (no per-vertex cost, S
 
 **Acceptance** is the list in PORT_3DS_GPU_OFFLOAD.md (image, depth, seam and flicker diffs, coverage census), with `gxvsh=0/1` and the per-scene noise floor from two CPU-path runs.
 
+**Additions (planner, before the build):**
+
+- **Stereo-ready.** The uniform layout and the record command must allow drawing the same streams twice with a per-eye projection, without re-recording. Stereo itself is not built yet.
+- **Hysteresis.** A group moves to the shader only after K fully eligible frames in a row (K = 30, `gxvshk`), and back to the CPU at once. `gxstats` counts the switches; a count that keeps climbing in a scene is a bug.
+- **Decals under another matrix.** A `GXBegin` draw with depth compare EQUAL or LEQUAL and depth writes off (decal-like) forces every shader group drawn earlier in the same viewport and depth range onto the CPU for the next frame, with the same hysteresis. How often that triggers is measured; if it is most frames of a scene, that is reported, not tuned around.
+
+## Built: the vertex-shader path (`gxvsh`, step 3)
+
+Implemented on `port3ds` in `port3ds/game/gx/gx_vsh.c` (streams, pass groups, hysteresis, decal links, census), `gx_draw.c` (`gx_draw_vsh`: eligibility of the state and the uniform block), `gx_dlcache.c` (a stream per entry, the hit path), `plat/gpu.c` (record commands and replay) and `port3ds/shaders/gx.v.pica`. Default off (`gxvsh=0`); see "Results" below for why.
+
+**Shader** (`gx.v.pica`). One program; bool `vsh` (b0) picks the path per draw. The CPU path's instructions are unchanged (rotation `dp4`s, colour scale). The shader path: `mul` by the stream's power-of-two scale, one `dp4` per clip component with the CPU's clip rows, colour as vertex x mix + constant (each product is x1 or x0, so exact), and per texture unit (slot x weight, 1, 1) dotted with the texture matrix's two rows. Branches compute temporaries; after the join each of the 5 outputs is written once, in full. `tools/port3ds/check_vsh.py` runs in the build (CMake target `ttyd_gx_shader_check`) and fails it on an output written twice, partially, inside a branch or outside `main`, or on `b15`.
+
+**Streams.** Built once per cache entry when it is made (`gxvsh=1` only), in pool segments of 16384 vertices of one stride (linear memory, `gxvshkb`, default 6144 KB), and counted in the cache budget. Attribute order: floats, then s16, then the u8 colour, so every attribute is naturally aligned and the stride is a multiple of 4. Exactness: a fixed-point source keeps its own `frac` as the exponent (checked value by value), a float source uses the smallest exponent that makes every value an integer if those fit s16, else floats (`gxvshs16=0` forces floats). Indices are u16 from the segment base, in `gx_draw_vertices`' triangle order. A freed range is reused only after 3 presented frames.
+
+Deviations from the design, and why:
+
+- **The stream scale is a per-draw uniform (`vscale`, `texsel`), not folded into the clip rows.** Folding it in would make the uniform block differ per entry and stop merging. The result is the same bits: the shader multiplies the s16 value by 2^-k (exact in 24-bit float), and a power-of-two factor only moves the exponent of every product in the `dp4`. The scale word is part of the draw command; consecutive draws merge only when it matches.
+- **Pass-group key:** position matrix, projection and the whole viewport (not only its depth range), so a group never spans two viewports. **Across frames** a group is known by its lists: every list's record keeps the streak of the group it was drawn in, and a group's path for the frame is read from its first list's record. A key of matrix bits alone would make every group new each frame while the camera moves.
+- **Decals.** The planner's rule (an immediate-mode decal-like draw: every earlier group in its viewport goes to the CPU with it) is built as a link: the decal's group and those groups are one set at the frame's end, eligible only together, with one streak. A display-list decal under another matrix is linked the same way with the earlier list groups (immediate-only groups left out), so a list decal and its floor always take one path. `gxvshdecal=0` turns links off for measuring the path itself.
+- **`MTX3x4` texgen stays on the CPU** (unit 0 would need the PICA's projective texture mode); no measured vertex uses it.
+- **Culling** is the PICA's (`C3D_CullFace`), mapped from GX's mode with the screen rotation's determinant. The CPU path does not cull a triangle with a vertex behind the eye; the PICA culls after clipping, as GX does. Only back faces that cross the near plane can differ.
+
+**Stereo (planned, not built).** The record stays eye-independent. CPU-path vertices are GX clip positions, and a shader draw's `CMD_VSH_CONST` carries the unrotated GX clip rows (projection x position matrix) and `PLAT_VSH_ORTHO`; the render thread composes the screen rotation at replay (`rot0`/`rot1` for the CPU path, the clip rows for the shader path). A stereo frame replays the same record twice, once per eye target, composing a per-eye clip-space shear before the rotation: x' = x + a·z + b·w, with a and b from the 3D slider, the eye distance and the convergence depth for perspective draws, and a = 0 with a fixed layer offset b (or none) for orthographic ones. For the shader path that is row_x' = row_x + a·row_z + b·row_w, in 32-bit on the render thread; for the CPU path the same shear goes into `rot0`. The z and w rows are untouched, so both eyes keep the same depth, and every draw of a pass group still gets one set of uniforms per eye, so the seam and z-fighting rules hold per eye. Still to do for stereo: the CPU path's `CMD_DRAW` must carry the projection type (one bit) so an orthographic layer gets its own shear; a second EFB target and its present; and per-eye EFB copies.
+
+## Results: the vertex-shader path
+
+Azahar, build of 2026-11-22. `tools/port3ds/vsh_accept.py` per scene: the frame clear set to magenta (`gxclearrgb=FF00FF`), 24 consecutive shots from presented frame 1140 with their depth buffers (`gxdepthshot`), `gxstats=60`. Runs per scene: two CPU-path runs (`gxvsh=0`, the noise floor), the shader path with decal links off (`gxvsh=1 gxvshdecal=0`, which measures the path's own precision), and the shader path as it would ship (`gxvsh=1`). The game animates by time, and the shader runs have other frame times, so whole-frame diffs differ on every animated object; the precision tests use the **static pixels** (colour and depth unchanged over all 24 shots of both runs), and the flicker test counts A-B-A flips at pixels the CPU run keeps static, with the depth of the two frames within 16 units (a near-coplanar surface winning, not an animation).
+
+**Precision (links off), per scene:**
+
+| Scene | static drawn pixels | colour max diff | depth \|dz\| max (24-bit units) | dz 1-3 / 4-15 / >= 16 | order flips | seams (CPU / shader) | flicker (CPU-B / shader-default / links off) |
+|---|---|---|---|---|---|---|---|
+| gor_01 | 267,920 | 2 | 4 | 2817 / 4 / 0 | 0 | 0 / 0 | 0 / 4 / 4 |
+| gon_02 (battle) | 285,076 | 2 | 4 | 243 / 1 / 0 | 0 | 0 / 0 | 0 / 0 / 0 |
+| aaa_00 | 291,840 | 145 (1 pixel) | 4 | 5465 / 16 / 0 | 1 pixel | 0 / 0 | 0 / 0 / 0 |
+| tik_01 | 278,578 | 1 | 4 | 1461 / 6 / 0 | 0 | 0 / 0 | 0 / 2 / 3 |
+| hei_01 | 256,246 | 2 | 2 | 627 / 0 / 0 | 0 | 0 / 0 | 0 / 1 / 1 |
+| jin_00 (fog, effects) | 291,840 | 58 (1 pixel) | 4 | 7246 / 17 / 0 | 1 pixel | 0 / 0 | 0 / 0 / 0 |
+
+- CPU vs CPU is bit-identical on static pixels in every scene (colour and depth).
+- The shader path moves depth by at most 4 units of 2^24 (one or two 24-bit-float quanta at these depths), no cluster of depth differences, no seam (no magenta inside geometry on either path), no new flicker: the flicker pixels of the links-off runs are on animated characters and appear identically in the default run of gor_01, tik_01 and hei_01, which draws everything on the CPU there.
+- **One pixel each in aaa_00 and jin_00 changes owner** (aaa_00 (130, 129): a bright and a dark face meeting at an edge, depth 2 units apart; stable in all 24 frames, no flicker). That is a rasterisation tie on a shared edge between two faces at a crease, decided by the vertices' last bits. The offload rules say a cluster along an edge fails; a single stable pixel is listed here for the owner to judge.
+
+**The decal rule as specified triggers in most frames, so it is reported, not tuned:**
+
+| Scene | frames with an immediate-decal trigger (of 60) | what draws it | effect in the default `gxvsh=1` run |
+|---|---|---|---|
+| gor_01 | 60 | `animdrv.c` `renderProc` (characters, LEQUAL, no depth write) | all 207 eligible groups stay on the CPU |
+| tik_01 | 60 | `animdrv.c` `renderProc` | all 27 eligible groups on the CPU |
+| jin_00 | 60 | `animdrv.c` `renderProc` | all 61 eligible groups on the CPU |
+| hei_01 | 8-10 | `eff_fukidashi.c` `effFukidashiDisp`, `eff_kemuri.c` `effKemuriDisp` (intermittent) | **the set of 478 lists keeps switching**: 478, 0, 0, 478, 956, 0, 0, 478 switches per 60-frame window, 2390 by frame 1260 (a count that keeps climbing) |
+| gon_02 | 0 in the battle (2-39 per window during its opening) | `renderProc` | 91 groups on the shader; 3 whole-set transitions (2521 lists each) during the opening, then 0 |
+| aaa_00 | 0 | — | 126 groups on the shader, no switch after the first |
+
+Characters are drawn in immediate mode after the map with depth compare LEQUAL and depth writes off, in every field scene, so the rule (every earlier group of the viewport to the CPU) keeps whole maps on the CPU. In hei_01 an intermittent effect makes the map set flip between paths every 30-60 frames, each flip shifting its depth by up to 4 units; that is the oscillation the hysteresis was meant to prevent, caused by the rule itself. The links of display-list decals (the extension) never triggered a CPU fallback here: list decal sets were always eligible together.
+
+**Speed** (game-thread ms per frame and stages, `gxstats` on; Azahar):
+
+| Scene | frame CPU / links off / default | dl stage | transform + assembly | render thread | GPU draw commands of shader calls |
+|---|---|---|---|---|---|
+| gor_01 | 168.0 / **133.8** / 183.9 | 120.5 / 74.2 / 128.9 | 65.5 / 3.8 / 65.3 | 11.4 / 26.0 / 18.5 | 315 of 5169 |
+| gon_02 | 83.6 / **66.9** / **66.9** | 57.9 / 36.8 / 36.8 | 31.0 / 2.3 / 2.3 | 9.6 / 14.8 / 15.1 | 142 of 2565 |
+| aaa_00 | 83.6 / **66.9** / **66.9** | 61.5 / 39.2 / 39.2 | 31.7 / 1.5 / 1.5 | 9.3 / 16.0 / 16.0 | |
+| tik_01 | 50.2 / 44.0 / 50.2 | 22.1 / 14.0 / 24.0 | 13.1 / 2.0 / 13.2 | 12.2 / 19.5 / 10.1 | |
+| hei_01 | 50.2 / 50.2 / 50.2 | 19.3 / 14.4 / 18.6 | 9.4 / 2.4 / 7.0 | 11.9 / 16.8 / 18.4 | |
+| jin_00 | 72.5 / **66.9** / 83.6 | 41.5 / 26.5 / 44.5 | 24.3 / 4.1 / 24.3 | 19.1 / 19.4 / 16.7 | |
+
+- Where the shader path runs, the transform and assembly stages drop by 85-95% and frames drop by 1-3 vblanks (gor_01 -20%, gon_02 and aaa_00 -20%).
+- The render thread grows (more uniform and buffer setup per draw command); on hardware each citro3d draw costs 36-66 µs, so the 142-315 shader commands per frame need measuring there.
+- PC sampling (`pc_sample.py --interval 200`, gor_01, 90 s from the warp, no counters, about 265 stops each; direction only): `gxvsh=0` against `gxvsh=1 gxvshdecal=0`. Game thread: `gx_draw_vertices` 18.0% -> 3.4% of samples, waiting in `submit` 16.9% -> 12.8%; new costs: `memcmp` 9.1% (mostly `plat_gpu_vsh_const` comparing the 160-byte uniform block on every call), `gx_dlcache_call` with the inlined `gx_draw_vsh` 9.1%, `memcpy` 4.2% (indices into the record), `gx_vsh_route` 2.6%. Render thread busy 24.4% -> 32.8% of stops. The first two are the next things to cut (send the block only when it was rebuilt; skip the group lookup while the matrix version is unchanged).
+- **When every group stays on the CPU (the default run in gor_01, tik_01, jin_00), routing costs time**: gor_01 +16 ms per frame (dl stage +8.4 ms: the per-call group and record lookups, the state preparation, then the replay as before), jin_00 +11 ms.
+
+**Default: `gxvsh=0`.** The shader path's own precision passes in all six scenes (two single stable edge pixels listed above), but as specified it does not run in gor_01, tik_01 or jin_00 (the character decal rule), oscillates in hei_01, and costs 10-16 ms per frame where it does not run. Options for the planner (none built): narrow the rule to decals that can be coplanar with a group, for example by comparing the decal's screen rectangle and depth range with each earlier group's; or move the immediate-mode characters (`animdrv`) to the shader path (step 4), so a character decal and the floor share the path; or skip the routing work entirely for a viewport once an immediate decal has appeared in it this frame, to remove the cost where nothing can move.
+
+**Hysteresis and splits.** `gxvshk=30`. Steady state: 0 switches and 0 splits in every scene except hei_01's default run (above). Switches count list records, so one set transition counts every list in it (2521 in gon_02).
+
 ## Risks of the cache
 
 - **Hash collisions.** A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.
@@ -357,3 +433,12 @@ Rows for the switch table:
 | `gxfogcache=0/1` | 1 (default): the fog LUT is recomputed only when the fog parameters change and goes to the back end with an id instead of being hashed; 0 recomputes and hashes it on every rebuild (A/B) |
 | `gxunlit=0/1` | 1 (default): unlit colour channels skip `channel_color` and the eye-space normal; 0 the general path (A/B) |
 | `gxmerge=0/1` | 1 (default): consecutive draws with nothing recorded between them extend one draw command (`plat/gpu.c`); 0 one command per draw (A/B). `gxstats` shows `gpu draws N (of M calls)` |
+| `gxvsh=0/1` | The vertex-shader path (`port3ds/game/gx/gx_vsh.c`). 0 (default): every vertex is transformed on the CPU. 1: each display-list cache entry gets a PICA stream, and the cached lists of a pass group (same position matrix, projection and viewport) that was fully eligible for `gxvshk` frames in a row are transformed by the vertex shader. `gxstats` adds `vsh` lines: shader, CPU-eligible and ineligible draws, groups, switches, splits, decal links and triggers, streams and the reasons draws stay on the CPU |
+| `gxvshk=N` | Hysteresis of the shader path: fully eligible frames in a row before a group moves to the shader (default 30). It moves back to the CPU at once |
+| `gxvshdecal=0/1` | 1 (default): a decal-like draw (depth compare EQUAL or LEQUAL, no depth write) links its group with the groups drawn earlier in its viewport (an immediate-mode one with all of them, a list one with the list groups), so they take one path. 0: links off, only counted; for measuring the shader path itself, it breaks the offload rules |
+| `gxvsh_check=N` | Logs every pass group of game frame N (`gxvsh census`): path, eligibility, streak, draws per path, the reasons for CPU draws, decal links, first list, depth range, translation, projection type |
+| `gxvshs16=0/1` | 1 (default): stream positions and texture coordinates as s16 with a power-of-two scale where that is exact; 0 always floats (A/B) |
+| `gxvshkb=N` | Linear memory for the stream segments in KB (default 6144) |
+| `gxdepthshot` | Each shot (`shots=N`) also saves the EFB depth buffer as `shots/NNNNN.dep` (`DEP1 608 480`, one little-endian D24S8 word per pixel). Debug only |
+| `gxclearrgb=RRGGBB` | Test only: the frame clear uses this colour instead of the game's (the seam test clears to `FF00FF`) |
+| `shotfrom=N` | The first presented frame a shot may be. With `shots=1 shotmax=K`, K consecutive frames (the flicker test) |

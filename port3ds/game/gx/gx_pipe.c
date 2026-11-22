@@ -494,6 +494,7 @@ void GXBegin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts) {
 }
 
 static int s_in_list; /* a GXCallDisplayList is running (for the counters) */
+int gx_pipe_in_list(void) { return s_in_list; }
 static u32 s_list_kind; /* what the running list held: 1 primitives, 2 port opcodes, 4 raw primitives */
 
 static void draw_from_reader(Reader* r, u8 prim, u8 fmt, u32 n) {

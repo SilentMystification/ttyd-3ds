@@ -316,4 +316,69 @@ static inline void gx_dlc_track(int attr, u32 idx) {
 void gx_dlcache_frame(void);
 void gx_dlcache_log(u32 frames);
 
+/* One draw of a cached list (a captured primitive): vertices [first, first + count). */
+typedef struct {
+    u8 prim;
+    u8 pad;
+    u16 count_hi; /* unused: counts fit 16 bits (chunks of at most 4096) */
+    u32 first;
+    u32 count;
+} GxDlcDraw;
+
+/* ---- gx_vsh.c: the vertex-shader path (switch gxvsh, default 0) ----
+ * A cached list's vertices as a PICA stream (linear memory, built once), and
+ * the pass-group table that decides, per group of draws sharing a matrix,
+ * projection and viewport, whether the GPU or the CPU transforms them. */
+extern u32 gx_xf_version; /* bumped by matrix, projection and current-matrix changes (gx_state.c) */
+extern int gx_vsh_on;
+extern int gx_vsh_noted; /* the draws being made were routed already (a cached list replayed on the CPU) */
+
+/* Why a draw cannot take the shader path (a bit each; the census counts them). */
+enum {
+    GXV_R_IMM = 1u << 0,       /* immediate mode (GXBegin) */
+    GXV_R_MISS = 1u << 1,      /* a list decoded, not drawn from the cache */
+    GXV_R_PNMTXIDX = 1u << 2,  /* per-vertex matrix index */
+    GXV_R_TEXMTXIDX = 1u << 3, /* per-vertex texture matrix index */
+    GXV_R_PRIM = 1u << 4,      /* lines or points */
+    GXV_R_SLOTS = 1u << 5,     /* more than 3 texture coordinate attributes */
+    GXV_R_POOL = 1u << 6,      /* no stream memory */
+    GXV_R_BBOX = 1u << 7,      /* bounding box armed */
+    GXV_R_LIT = 1u << 8,       /* GX lighting on the colour used */
+    GXV_R_TWOCHAN = 1u << 9,   /* a texgen reads a colour (or SRTG) */
+    GXV_R_CLR1 = 1u << 10,     /* colour channel 1 from the vertex */
+    GXV_R_TGFUNC = 1u << 11,   /* texgen not MTX2x4 */
+    GXV_R_TGSRC = 1u << 12,    /* texgen source not a texture coordinate */
+    GXV_R_TGPOST = 1u << 13,   /* post-transform texture matrix */
+    GXV_R_GROUPFULL = 1u << 14,/* the pass-group table is full */
+    GXV_R_COUNT = 15
+};
+
+typedef struct {
+    u32 seg;           /* pool segment */
+    u32 first, nverts; /* vertices in the segment */
+    u32 layout;        /* PLAT_VSH_* layout word */
+    u8 posk;           /* position = s16 x 2^-posk (0 for floats) */
+    u8 attr_slot[8];   /* stream slot of GX_VA_TEX0 + n, 0xFF when absent */
+    u8 slot_k[3];
+    u32 nidx;
+    u32 bytes;         /* memory it takes (vertex bytes and this struct), for the cache budget */
+    u16 idx[];         /* triangle list, indices from the segment's base */
+} GxVshStream;
+
+void gx_vsh_init(void);
+/* The stream of a cache entry, or NULL with *reason set. */
+GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, u32 nd, const u8* vtx_desc,
+                                 const GxAttrFmt (*vat)[GX_VA_MAX_ATTR], u8 fmt_mask, u32* reason);
+void gx_vsh_stream_free(GxVshStream* s); /* the vertices are reused only after the frames in flight */
+const void* gx_vsh_stream_base(const GxVshStream* s);
+/* Routes one draw under position matrix `pnmtx`: `reasons` 0 for a shader-eligible
+ * cached list (`list`, `nbytes`), else why not. Returns 1 for the shader path. */
+int gx_vsh_route(u32 pnmtx, u32 reasons, const void* list, u32 nbytes, u32 nverts);
+void gx_vsh_count_shader(u32 nverts, u32 nidx);
+void gx_vsh_frame(void); /* frame boundary: hysteresis, decal links, counters */
+void gx_vsh_log(u32 frames);
+/* gx_draw.c: draws a cached entry through the shader when its group takes that path; 0: draw it on the CPU. */
+int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nbytes, u32 nverts);
+int gx_pipe_in_list(void);
+
 #endif

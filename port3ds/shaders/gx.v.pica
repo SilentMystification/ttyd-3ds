@@ -1,12 +1,36 @@
-; Pass-through vertex shader for the GX front end (port3ds/game/gx/gx_draw.c).
+; Vertex shader for the GX front end (port3ds/game/gx/gx_draw.c).
 ;
-; The front end transforms, lights and texture-maps vertices on the CPU; this
-; shader only applies the 90-degree rotation of the 3DS screens to the clip
-; position (rot0/rot1 rows, chosen by the back end) and scales the 8-bit
-; color to 0..1. Every output register is written whole: a partial write
-; hangs the Old 3DS GPU (lesson from the Animal Crossing 3DS port).
+; Two paths, chosen per draw by the boolean uniform `vsh` (never b15):
+;
+;  - CPU path (vsh false): the front end transformed, lit and texture-mapped
+;    the vertices on the CPU. v0 is the clip position, v1 the 8-bit colour,
+;    v2-v4 the texture coordinates of PICA units 0-2. The shader only applies
+;    the 90-degree rotation of the 3DS screens to the clip position (rot0/rot1,
+;    chosen by the back end) and scales the colour to 0..1.
+;
+;  - Shader path (vsh true, switch gxvsh): a cached display list's stream
+;    (gx_vsh.c). v0 is the object-space position (s16 or float, w = 1), v1 the
+;    vertex colour, v2-v4 the stream's texture coordinate slots 0-2. The CPU
+;    pre-multiplied projection x position matrix in 32-bit float (clip rows,
+;    with the screen rotation folded in by the back end); the shader does one
+;    dp4 per clip component and nothing else to the position. vscale and
+;    texsel carry the stream's power-of-two scales (exact: they only move the
+;    exponent) and which slot each texture unit reads.
+;
+; Output discipline (hardware rule: a partial or repeated output write hangs
+; the GPU): the branches compute temporaries only, and after the join every
+; output register is written exactly once, from a temporary, with the full
+; mask. tools/port3ds/check_vsh.py enforces this at build time.
 
-.fvec rot0, rot1
+.fvec rot0, rot1        ; CPU path: clip -> rotated target clip (x, y rows)
+.fvec clip[4]           ; shader path: rotated clip rows (x, y, z, w)
+.fvec texrow[6]         ; shader path: s and t rows of units 0, 1, 2
+.fvec texsel[3]         ; shader path: per unit, weights of slots v2, v3, v4 (scale or 0)
+.fvec vscale            ; shader path: position scale (s, s, s, 1)
+.fvec clrmix            ; shader path: per component 1 = vertex colour, 0 = constant
+.fvec matclr            ; shader path: constant colour (0..255), 0 where clrmix is 1
+
+.bool vsh
 
 .constf consts(0.0039215686, 1.0, 0.0, 0.0)
 .alias inv255 consts.xxxx
@@ -24,19 +48,63 @@
 .alias intc2 v4
 
 .proc main
-    mov r0, inpos
-    dp4 r0.x, rot0, inpos
-    dp4 r0.y, rot1, inpos
+    ifu vsh
+        ; position: one straight-line path, no branch inside it
+        mul r2, vscale, inpos
+        dp4 r0.x, clip[0], r2
+        dp4 r0.y, clip[1], r2
+        dp4 r0.z, clip[2], r2
+        dp4 r0.w, clip[3], r2
+
+        ; colour: vertex x mix + constant (each product is x1 or x0: exact)
+        mul r5, clrmix, inclr
+        add r5, matclr, r5
+
+        ; unit 0: (slot x weight, 1, 1) . (m0, m1, m2, m3)
+        mul r4, texsel[0].xxxx, intc0
+        mad r4, intc1, texsel[0].yyyy, r4
+        mad r4, intc2, texsel[0].zzzz, r4
+        mov r4.zw, consts.yy
+        mov r1, consts.zzzy
+        dp4 r1.x, texrow[0], r4
+        dp4 r1.y, texrow[1], r4
+
+        ; unit 1
+        mul r4, texsel[1].xxxx, intc0
+        mad r4, intc1, texsel[1].yyyy, r4
+        mad r4, intc2, texsel[1].zzzz, r4
+        mov r4.zw, consts.yy
+        mov r3, consts.zzzy
+        dp4 r3.x, texrow[2], r4
+        dp4 r3.y, texrow[3], r4
+
+        ; unit 2
+        mul r4, texsel[2].xxxx, intc0
+        mad r4, intc1, texsel[2].yyyy, r4
+        mad r4, intc2, texsel[2].zzzz, r4
+        mov r4.zw, consts.yy
+        mov r6, consts.zzzy
+        dp4 r6.x, texrow[4], r4
+        dp4 r6.y, texrow[5], r4
+    .else
+        mov r0, inpos
+        dp4 r0.x, rot0, inpos
+        dp4 r0.y, rot1, inpos
+
+        mov r5, inclr
+
+        mov r1, consts.zzzy
+        mov r1.xy, intc0
+        mov r3, consts.zzzy
+        mov r3.xy, intc1
+        mov r6, consts.zzzy
+        mov r6.xy, intc2
+    .end
+
     mov outpos, r0
-
-    mul outclr, inv255, inclr
-
-    mov r1, consts.zzzy
-    mov r1.xy, intc0
+    mul outclr, inv255, r5
     mov outtc0, r1
-    mov r1.xy, intc1
-    mov outtc1, r1
-    mov r1.xy, intc2
-    mov outtc2, r1
+    mov outtc1, r3
+    mov outtc2, r6
     end
 .end

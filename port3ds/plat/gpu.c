@@ -38,7 +38,17 @@
 #define ARENA_VERTICES (96 * 1024)
 #define RECORD_BYTES (512u << 10) /* two records fill the 1 MiB gx record budget in QTM */
 
-enum { CMD_STATE = 1, CMD_FOG, CMD_DRAW, CMD_CLEAR, CMD_COPY, CMD_FRAME_END, CMD_SEGMENT_END };
+#define INDEX_ARENA (192 * 1024) /* u16 indices of shader-path draws per record */
+#define STREAM_PENDING 4096       /* stream frees waiting for the frames in flight */
+
+enum { CMD_STATE = 1, CMD_FOG, CMD_DRAW, CMD_CLEAR, CMD_COPY, CMD_FRAME_END, CMD_SEGMENT_END, CMD_VSH_CONST, CMD_VSH_DRAW };
+
+/* CMD_VSH_DRAW body */
+typedef struct {
+    const void* stream;
+    u32 layout, scales, cull;
+    u32 first, count; /* indices in the record's index arena */
+} VshDraw;
 
 typedef struct {
     u16 type;
@@ -50,6 +60,8 @@ typedef struct {
     u32 used;
     PlatGpuVertex* verts;
     u32 nverts;
+    u16* idx; /* index arena (linear) of the shader-path draws */
+    u32 nidx;
     int present;
 } Record;
 
@@ -73,6 +85,8 @@ static C3D_RenderTarget* s_efb;
 static DVLB_s* s_dvlb;
 static shaderProgram_s s_prog;
 static int s_uloc_rot0, s_uloc_rot1;
+/* shader path (vsh) uniforms */
+static int s_uloc_vsh, s_uloc_clip, s_uloc_texrow, s_uloc_texsel, s_uloc_vscale, s_uloc_clrmix, s_uloc_matclr;
 static C3D_AttrInfo s_attr;
 static TexSlot s_tex[MAX_TEX];
 /* Bound to texture units the draw does not use: citro3d's C3D_TexBind
@@ -86,12 +100,21 @@ static u32 s_last_fog_hash;
 static u32 s_last_fog_id; /* PlatGpuState.fog_lut_id of the last LUT sent (0: s_last_fog_hash is) */
 static PlatGpuStats s_stats, s_stats_frame;
 static int s_rot;              /* orientation mode, see efb_to_target */
-static u32 s_shots_every, s_shots_left;
+static u32 s_shots_every, s_shots_left, s_shots_from;
 /* switch gxmerge (default 1): a draw that continues the previous one in the
  * vertex arena, with no command between them, extends its CMD_DRAW */
 static int s_merge = 1;
 static u32* s_last_draw;              /* body of the last command when it is a CMD_DRAW */
 static PlatGpuVertex* s_last_alloc;   /* the last plat_gpu_alloc_vertices block, until its draw */
+static VshDraw* s_last_vdraw;         /* body of the last command when it is a CMD_VSH_DRAW */
+static PlatGpuVshConst s_last_vconst;
+static int s_last_vconst_valid;       /* s_last_vconst was recorded in the current record */
+static struct {
+    void* p;
+    u32 frame;
+} s_stream_pending[STREAM_PENDING];
+static u32 s_stream_npending, s_stream_bytes;
+static int s_depth_shots; /* switch gxdepthshot: every shot also saves the depth buffer */
 
 /* ---- Orientation ----
  * EFB pixel (x, y) -> target pixel. Mode 0 is the layout citro3d uses for
@@ -159,6 +182,7 @@ static void* rec_put(u16 type, u32 size) {
     h->size = (u16)(need - sizeof(CmdHead));
     r->used += need;
     s_last_draw = NULL; /* plat_gpu_draw sets it again for a draw */
+    s_last_vdraw = NULL;
     return h + 1;
 }
 
@@ -186,7 +210,10 @@ static void submit(int present) {
     s_cur ^= 1;
     s_rec[s_cur].used = 0;
     s_rec[s_cur].nverts = 0;
+    s_rec[s_cur].nidx = 0;
     s_last_draw = NULL;
+    s_last_vdraw = NULL;
+    s_last_vconst_valid = 0;
     s_last_alloc = NULL;
     memset(&s_last_state, 0xFF, sizeof(s_last_state));
     s_last_state_valid = 0;
@@ -202,10 +229,15 @@ static void end_segment(void) {
      * state in force goes at the start of the next record too. */
     PlatGpuState keep = s_last_state;
     int have_state = s_last_state_valid;
+    PlatGpuVshConst keep_v = s_last_vconst;
+    int have_v = s_last_vconst_valid;
     rec_put(CMD_SEGMENT_END, 0);
     submit(0);
     if (have_state) {
         plat_gpu_set_state(&keep);
+    }
+    if (have_v) {
+        plat_gpu_vsh_const(&keep_v);
     }
 }
 
@@ -302,6 +334,93 @@ void plat_gpu_draw(const PlatGpuVertex* vertices, uint32_t count) {
     }
 }
 
+/* ---- Shader path: streams and draws (game thread) ---- */
+
+static void stream_reap(int all) {
+    u32 k = 0;
+    for (u32 i = 0; i < s_stream_npending; i++) {
+        if (all || s_frame_counter >= s_stream_pending[i].frame) {
+            s_stream_bytes -= linearGetSize(s_stream_pending[i].p);
+            linearFree(s_stream_pending[i].p);
+        } else {
+            s_stream_pending[k++] = s_stream_pending[i];
+        }
+    }
+    s_stream_npending = k;
+}
+
+void* plat_gpu_stream_alloc(uint32_t bytes) {
+    stream_reap(0);
+    void* p = linearMemAlign(bytes, 16);
+    if (p != NULL) {
+        s_stream_bytes += linearGetSize(p);
+    }
+    return p;
+}
+
+void plat_gpu_stream_commit(const void* p, uint32_t bytes) { GSPGPU_FlushDataCache(p, bytes); }
+
+void plat_gpu_stream_free(void* p) {
+    if (p == NULL) {
+        return;
+    }
+    if (s_stream_npending == STREAM_PENDING) {
+        /* the queue is full: wait until the render thread is idle, then nothing in flight reads them */
+        plat_gpu_sync();
+        stream_reap(1);
+    }
+    /* the record being written and the one being rendered may both read it */
+    s_stream_pending[s_stream_npending].p = p;
+    s_stream_pending[s_stream_npending].frame = s_frame_counter + 3;
+    s_stream_npending++;
+}
+
+void plat_gpu_vsh_const(const PlatGpuVshConst* c) {
+    if (s_last_vconst_valid && memcmp(&s_last_vconst, c, sizeof(*c)) == 0) {
+        return;
+    }
+    PlatGpuVshConst* d = rec_put(CMD_VSH_CONST, sizeof(*c));
+    if (d != NULL) {
+        *d = *c;
+        s_last_vconst = *c;
+        s_last_vconst_valid = 1;
+        s_stats_frame.vsh_consts++;
+    }
+}
+
+void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, const uint16_t* idx,
+                       uint32_t nidx) {
+    if (stream == NULL || nidx < 3 || nidx > INDEX_ARENA || PLAT_VSH_STRIDE(layout) == 0) {
+        return;
+    }
+    nidx -= nidx % 3;
+    Record* r = &s_rec[s_cur];
+    if (r->nidx + nidx > INDEX_ARENA || r->used + sizeof(CmdHead) + sizeof(VshDraw) + 64 > RECORD_BYTES) {
+        flush_segment();
+        r = &s_rec[s_cur];
+    }
+    if (!s_last_vconst_valid) {
+        return; /* no uniform block in this record (cannot happen: end_segment puts it back) */
+    }
+    u32 first = r->nidx;
+    memcpy(r->idx + first, idx, nidx * sizeof(u16));
+    r->nidx += nidx;
+    s_stats_frame.vsh_calls++;
+    s_stats_frame.vsh_indices += nidx;
+    VshDraw* l = s_last_vdraw;
+    if (s_merge && l != NULL && l->stream == stream && l->layout == layout && l->scales == scales && l->cull == cull &&
+        l->first + l->count == first) {
+        l->count += nidx; /* same uniforms, stream and scales, nothing recorded since: one draw */
+        return;
+    }
+    VshDraw* d = rec_put(CMD_VSH_DRAW, sizeof(VshDraw));
+    if (d != NULL) {
+        *d = (VshDraw){stream, layout, scales, cull, first, nidx};
+        s_last_vdraw = d;
+        s_stats_frame.vsh_draws++;
+    }
+}
+
 void plat_gpu_clear(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint32_t rgba, uint32_t depth24, int clear_color,
                     int clear_depth) {
     u32* d = rec_put(CMD_CLEAR, 16);
@@ -343,8 +462,15 @@ void plat_gpu_frame_end(uint16_t efb_w, uint16_t efb_h) {
     s_stats.record_bytes = s_stats_frame.record_bytes;
     s_stats.segments = s_stats_frame.segments;
     s_stats.calls = s_stats_frame.calls;
+    s_stats.vsh_draws = s_stats_frame.vsh_draws;
+    s_stats.vsh_calls = s_stats_frame.vsh_calls;
+    s_stats.vsh_indices = s_stats_frame.vsh_indices;
+    s_stats.vsh_consts = s_stats_frame.vsh_consts;
+    s_stats.stream_kb = s_stream_bytes >> 10;
+    s_stats.stream_pending = s_stream_npending;
     memset(&s_stats_frame, 0, sizeof(s_stats_frame));
     s_frame_counter++;
+    stream_reap(0);
 }
 
 void plat_gpu_sync(void) {
@@ -709,6 +835,126 @@ static void present(void) {
     rot_uniforms();
 }
 
+/* ---- Shader path replay (render thread) ---- */
+
+/* The screen rotation's x and y rows (as rot_uniforms). */
+static void rot_rows(float r0[4], float r1[4]) {
+    static const float rows[4][2][4] = {
+        {{0, 1, 0, 0}, {1, 0, 0, 0}},
+        {{0, -1, 0, 0}, {1, 0, 0, 0}},
+        {{0, 1, 0, 0}, {-1, 0, 0, 0}},
+        {{0, -1, 0, 0}, {-1, 0, 0, 0}},
+    };
+    memcpy(r0, rows[s_rot][0], 16);
+    memcpy(r1, rows[s_rot][1], 16);
+}
+
+/* Uniforms of a CMD_VSH_CONST. The clip rows come unrotated; the rotation
+ * rows hold only 0 and +-1, so composing them on the CPU is exact (a row is
+ * picked and maybe negated). A second eye pass would compose its clip-space
+ * offset here too, from the same record. */
+static void vsh_apply_const(const PlatGpuVshConst* c) {
+    float r[2][4];
+    rot_rows(r[0], r[1]);
+    for (int k = 0; k < 2; k++) {
+        float row[4];
+        for (int j = 0; j < 4; j++) {
+            row[j] = 0.0f;
+            for (int i = 0; i < 4; i++) {
+                if (r[k][i] != 0.0f) {
+                    row[j] += r[k][i] * c->clip[i][j];
+                }
+            }
+        }
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clip + k, row[0], row[1], row[2], row[3]);
+    }
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clip + 2, c->clip[2][0], c->clip[2][1], c->clip[2][2], c->clip[2][3]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clip + 3, c->clip[3][0], c->clip[3][1], c->clip[3][2], c->clip[3][3]);
+    for (int i = 0; i < 6; i++) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_texrow + i, c->tex[i][0], c->tex[i][1], c->tex[i][2], c->tex[i][3]);
+    }
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clrmix, c->clrmix[0], c->clrmix[1], c->clrmix[2], c->clrmix[3]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_matclr, c->matclr[0], c->matclr[1], c->matclr[2], c->matclr[3]);
+}
+
+static float pow2_neg(u32 k) {
+    float f = 1.0f;
+    while (k-- > 0) {
+        f *= 0.5f;
+    }
+    return f;
+}
+
+static void vsh_apply_scales(u32 scales) {
+    float s = pow2_neg(scales & 0xFF);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_vscale, s, s, s, 1.0f);
+    for (int u = 0; u < 3; u++) {
+        u32 b = scales >> (8 + 8 * u) & 0xFF;
+        u32 slot = b & 3;
+        float w = pow2_neg(b >> 2);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_texsel + u, slot == 0 ? w : 0.0f, slot == 1 ? w : 0.0f,
+                      slot == 2 ? w : 0.0f, 0.0f);
+    }
+}
+
+/* Vertex loaders for a stream layout: position v0, colour v1, slots v2-v4;
+ * registers the stream lacks are fixed attributes (0). */
+static void vsh_apply_layout(const void* stream, u32 layout, C3D_AttrInfo* ai, C3D_BufInfo* vbi) {
+    int32_t off[5];
+    u32 nslots = PLAT_VSH_NSLOTS(layout);
+    u32 stride = plat_vsh_layout(layout & PLAT_VSH_POS_S16, nslots, layout >> 3 & 7, off);
+    /* buffer order: the present attributes sorted by offset */
+    int order[5], n = 0;
+    for (int a = 0; a < 5; a++) {
+        if (off[a] >= 0) {
+            int k = n++;
+            while (k > 0 && off[order[k - 1]] > off[a]) {
+                order[k] = order[k - 1];
+                k--;
+            }
+            order[k] = a;
+        }
+    }
+    AttrInfo_Init(ai);
+    for (int i = 0; i < n; i++) {
+        int a = order[i];
+        if (a == 0) {
+            AttrInfo_AddLoader(ai, 0, (layout & PLAT_VSH_POS_S16) ? GPU_SHORT : GPU_FLOAT, 3);
+        } else if (a == 1) {
+            AttrInfo_AddLoader(ai, 1, GPU_UNSIGNED_BYTE, 4);
+        } else {
+            AttrInfo_AddLoader(ai, a, (layout & PLAT_VSH_SLOT_S16(a - 2)) ? GPU_SHORT : GPU_FLOAT, 2);
+        }
+    }
+    int fixed[3], nfixed = 0;
+    for (int a = 2; a < 5; a++) {
+        if (off[a] < 0) {
+            fixed[nfixed++] = AttrInfo_AddFixed(ai, a);
+        }
+    }
+    BufInfo_Init(vbi);
+    BufInfo_Add(vbi, stream, (ptrdiff_t)stride, n, 0x43210ull & ((1ull << (4 * n)) - 1));
+    C3D_SetAttrInfo(ai);
+    C3D_SetBufInfo(vbi);
+    for (int i = 0; i < nfixed; i++) {
+        if (fixed[i] >= 0) {
+            C3D_FixedAttribSet(fixed[i], 0, 0, 0, 0);
+        }
+    }
+}
+
+/* GX cull mode -> PICA. GX's front face is counter-clockwise in its clip
+ * space (clockwise on the y-down screen); the screen rotation keeps the
+ * winding when its determinant is positive (rot 1, 2) and flips it otherwise. */
+static GPU_CULLMODE vsh_cull(u32 cull) {
+    if (cull == 0) {
+        return GPU_CULL_NONE;
+    }
+    int flips = s_rot == 0 || s_rot == 3;
+    int cull_ccw = (cull == 1) != flips; /* the faces to drop are CCW on the target */
+    return cull_ccw ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW;
+}
+
 static void render_record(Record* r) {
     u64 t0 = svcGetSystemTick();
     reap_targets();
@@ -722,6 +968,28 @@ static void render_record(Record* r) {
     BufInfo_Add(&bi, r->verts, sizeof(PlatGpuVertex), 5, 0x43210);
     C3D_SetBufInfo(&bi);
     GSPGPU_FlushDataCache(r->verts, r->nverts * sizeof(PlatGpuVertex));
+    if (r->nidx > 0) {
+        GSPGPU_FlushDataCache(r->idx, r->nidx * sizeof(u16));
+    }
+    /* shader path: vsh is on from a CMD_VSH_DRAW until the next other draw */
+    static C3D_AttrInfo vai;
+    static C3D_BufInfo vbi;
+    int vsh_mode = 0;
+    const void* v_stream = NULL;
+    u32 v_layout = 0, v_scales = 0xFFFFFFFFu, v_cull = 0;
+    C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_vsh, false);
+#define LEAVE_VSH()                                                \
+    do {                                                           \
+        if (vsh_mode) {                                            \
+            vsh_mode = 0;                                          \
+            C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_vsh, false); \
+            C3D_SetAttrInfo(&s_attr);                              \
+            C3D_SetBufInfo(&bi);                                   \
+            C3D_CullFace(GPU_CULL_NONE);                           \
+            v_stream = NULL;                                       \
+            v_cull = 0;                                            \
+        }                                                          \
+    } while (0)
     u8* p = r->data;
     u8* end = r->data + r->used;
     /* A clear or a copy draws with its own state (immediate mode, which
@@ -737,8 +1005,9 @@ static void render_record(Record* r) {
         switch (h->type) {
         case CMD_STATE:
             cur_state = (const PlatGpuState*)body;
-            apply_state(cur_state);
+            apply_state(cur_state); /* cull none */
             restore = 0;
+            v_cull = 0;
             break;
         case CMD_FOG: {
             static C3D_FogLut lut;
@@ -752,6 +1021,7 @@ static void render_record(Record* r) {
                 n_skip++;
             }
             if (cur_state != NULL && d[1] >= 3) {
+                LEAVE_VSH();
                 if (restore) {
                     apply_state(cur_state);
                     restore = 0;
@@ -762,8 +1032,49 @@ static void render_record(Record* r) {
             }
             break;
         }
+        case CMD_VSH_CONST:
+            vsh_apply_const((const PlatGpuVshConst*)body);
+            break;
+        case CMD_VSH_DRAW: {
+            const VshDraw* d = (const VshDraw*)body;
+            if (cur_state == NULL) {
+                n_skip++;
+                break;
+            }
+            if (d->count < 3 || d->first + d->count > r->nidx) {
+                break; /* bounds: never draw past the index arena */
+            }
+            if (restore) {
+                apply_state(cur_state); /* also sets cull none */
+                restore = 0;
+                v_cull = 0;
+            }
+            if (!vsh_mode) {
+                vsh_mode = 1;
+                C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_vsh, true);
+                v_stream = NULL;
+            }
+            if (d->stream != v_stream || d->layout != v_layout) {
+                vsh_apply_layout(d->stream, d->layout, &vai, &vbi);
+                v_stream = d->stream;
+                v_layout = d->layout;
+            }
+            if (d->scales != v_scales) {
+                vsh_apply_scales(d->scales);
+                v_scales = d->scales;
+            }
+            if (d->cull != v_cull) {
+                C3D_CullFace(vsh_cull(d->cull));
+                v_cull = d->cull;
+            }
+            C3D_DrawElements(GPU_TRIANGLES, (int)d->count, C3D_UNSIGNED_SHORT, r->idx + d->first);
+            n_draw++;
+            after_last_draw = 0;
+            break;
+        }
         case CMD_CLEAR: {
             const u32* d = (const u32*)body;
+            LEAVE_VSH();
             draw_rect_quad(r, (u16)d[0], (u16)(d[0] >> 16), (u16)d[1], (u16)(d[1] >> 16), d[2], d[3] & 0xFFFFFF,
                            (d[3] >> 24) & 1, (d[3] >> 25) & 1);
             n_clear++;
@@ -775,6 +1086,7 @@ static void render_record(Record* r) {
         }
         case CMD_COPY: {
             const u32* d = (const u32*)body;
+            LEAVE_VSH();
             copy_to_texture((u16)d[0], (u16)(d[0] >> 16), (u16)d[1], (u16)(d[1] >> 16), d[3], d[4] & 0xFFFF,
                             d[4] >> 16);
             n_copy++;
@@ -787,6 +1099,8 @@ static void render_record(Record* r) {
         default: break;
         }
     }
+    LEAVE_VSH();
+#undef LEAVE_VSH
     if (r->present) {
         present();
     }
@@ -957,7 +1271,7 @@ uint32_t plat_gpu_peek_argb(uint16_t x, uint16_t y) {
 static void take_shot(void) {
     static u32 frame;
     frame++;
-    if (frame % s_shots_every != 0 || s_shots_left == 0) {
+    if (frame < s_shots_from || frame % s_shots_every != 0 || s_shots_left == 0) {
         return;
     }
     s_shots_left--;
@@ -970,6 +1284,45 @@ void plat_gpu_shot(const char* path) {
     }
     snprintf(s_named_path, sizeof(s_named_path), "%s", path);
     __atomic_store_n(&s_named_shot, 1, __ATOMIC_RELEASE);
+}
+
+/* Switch gxdepthshot (debug only): the EFB's depth buffer next to each shot,
+ * as <shot>.dep: "DEP1 608 480\n" and one little-endian word per pixel, rows
+ * top to bottom (D24S8: the depth is the low 24 bits). Copied to linear
+ * memory by the GPU like the colour (a CPU read of VRAM can miss what the
+ * GPU drew). */
+static void capture_depth(u32* buf, const char* path) {
+    char dpath[56];
+    size_t n = strlen(path);
+    if (n < 4 || n + 1 > sizeof(dpath)) {
+        return;
+    }
+    memcpy(dpath, path, n - 4);
+    memcpy(dpath + n - 4, ".dep", 5);
+    const u32 bytes = TARGET_W * TARGET_H * 4;
+    const u32 dim = GX_BUFFER_DIM(TARGET_W, TARGET_H);
+    GSPGPU_InvalidateDataCache(buf, bytes);
+    C3D_SyncDisplayTransfer((u32*)s_efb->frameBuf.depthBuf, dim, buf, dim,
+                            GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                                GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
+                                GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+    GSPGPU_InvalidateDataCache(buf, bytes);
+    FILE* f = fopen(dpath, "wb");
+    if (f == NULL) {
+        return;
+    }
+    fprintf(f, "DEP1 608 480\n");
+    static u32 row[608];
+    for (int y = 0; y < 480; y++) {
+        for (int x = 0; x < 608; x++) {
+            float tx, ty, tw, th;
+            efb_to_target_rect((float)x, (float)y, 1, 1, &tx, &ty, &tw, &th);
+            u32 px = (u32)tx, py = TARGET_H - 1 - (u32)ty;
+            row[x] = buf[py * TARGET_W + px];
+        }
+        fwrite(row, 4, 608, f);
+    }
+    fclose(f);
 }
 
 /* The EFB (608x480, as the game drew it) to a PPM file. */
@@ -1013,6 +1366,9 @@ static void capture_efb(const Record* r, const char* path) {
         fwrite(row, 1, sizeof(row), f);
     }
     fclose(f);
+    if (s_depth_shots) {
+        capture_depth(buf, path);
+    }
     PLOG_I("shot %s: this record %lu bytes %lu vertices; %lu draws, %lu vertices, %lu states, %lu record bytes, %lu segments", path,
            (unsigned long)r->used, (unsigned long)r->nverts,
            (unsigned long)s_stats.draws, (unsigned long)s_stats.vertices, (unsigned long)s_stats.state_changes,
@@ -1135,6 +1491,19 @@ void plat_gpu_init(void) {
     shaderProgramSetVsh(&s_prog, &s_dvlb->DVLE[0]);
     s_uloc_rot0 = shaderInstanceGetUniformLocation(s_prog.vertexShader, "rot0");
     s_uloc_rot1 = shaderInstanceGetUniformLocation(s_prog.vertexShader, "rot1");
+    s_uloc_vsh = shaderInstanceGetUniformLocation(s_prog.vertexShader, "vsh");
+    s_uloc_clip = shaderInstanceGetUniformLocation(s_prog.vertexShader, "clip");
+    s_uloc_texrow = shaderInstanceGetUniformLocation(s_prog.vertexShader, "texrow");
+    s_uloc_texsel = shaderInstanceGetUniformLocation(s_prog.vertexShader, "texsel");
+    s_uloc_vscale = shaderInstanceGetUniformLocation(s_prog.vertexShader, "vscale");
+    s_uloc_clrmix = shaderInstanceGetUniformLocation(s_prog.vertexShader, "clrmix");
+    s_uloc_matclr = shaderInstanceGetUniformLocation(s_prog.vertexShader, "matclr");
+    /* C3D_BoolUnifSet takes the location (b0 is 0x68); b15 must stay unused */
+    if (s_uloc_vsh < 0x68 || s_uloc_vsh >= 0x68 + 15 || s_uloc_clip < 0 || s_uloc_texrow < 0 || s_uloc_texsel < 0 ||
+        s_uloc_vscale < 0 || s_uloc_clrmix < 0 || s_uloc_matclr < 0) {
+        plat_fatal("gpu: shader uniforms missing (vsh %d clip %d texrow %d texsel %d)", s_uloc_vsh, s_uloc_clip,
+                   s_uloc_texrow, s_uloc_texsel);
+    }
     AttrInfo_Init(&s_attr);
     AttrInfo_AddLoader(&s_attr, 0, GPU_FLOAT, 4);
     AttrInfo_AddLoader(&s_attr, 1, GPU_UNSIGNED_BYTE, 4);
@@ -1145,13 +1514,16 @@ void plat_gpu_init(void) {
     for (int i = 0; i < 2; i++) {
         s_rec[i].data = plat_place_alloc(PLAT_PLACE_GX_RECORD, RECORD_BYTES, 64);
         s_rec[i].verts = linearAlloc(ARENA_VERTICES * sizeof(PlatGpuVertex));
-        if (s_rec[i].data == NULL || s_rec[i].verts == NULL) {
+        s_rec[i].idx = linearAlloc(INDEX_ARENA * sizeof(u16));
+        if (s_rec[i].data == NULL || s_rec[i].verts == NULL || s_rec[i].idx == NULL) {
             plat_fatal("gpu: no memory for frame records");
         }
     }
     memset(&s_last_state, 0xFF, sizeof(s_last_state));
     s_shots_every = (u32)plat_switch_int("shots", 0);
     s_shots_left = (u32)plat_switch_int("shotmax", 200);
+    s_depth_shots = plat_switch_has("gxdepthshot");
+    s_shots_from = (u32)plat_switch_int("shotfrom", 0); /* first presented frame a shot may be (shots=1: consecutive frames) */
     char dumpcopy[32];
     if (s_shots_every || plat_switch_value("gxdumpcopy", dumpcopy, sizeof(dumpcopy))) { /* its shots go there too */
         mkdir("shots", 0777);

@@ -96,10 +96,13 @@ static void crash_printf(const char* fmt, ...) {
 /* Crash and watchdog exits only. svcExitProcess skips exit(), so the atexit
  * handlers (audio, apt, gfx, soc) never run and the process dies holding GSP
  * and the DSP. Normal exits go through plat_quit (boot.c). */
+void plat_cpu_limit_restore(void); /* boot.c */
+
 void plat_exit_process(void) {
     for (int i = 0; i < 100 && s_wd_hold; i++) {
         svcSleepThread(10000000LL); /* a running save gets up to 1 s */
     }
+    plat_cpu_limit_restore();
     plat_log_crash_close();
     svcExitProcess();
     for (;;) {

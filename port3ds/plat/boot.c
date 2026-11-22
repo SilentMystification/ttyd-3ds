@@ -37,7 +37,11 @@ static int s_new3ds;
 static int s_netload;
 static u64 s_boot_tick;
 static u32 s_cpu_limit = 80;
+static u32 s_cpu_limit_orig = 30; /* the limit before this process set its own */
+static int s_cpu_restored;
 static aptHookCookie s_apt_cookie;
+
+void plat_cpu_limit_restore(void); /* below */
 
 uint64_t plat_ticks(void) { return svcGetSystemTick(); }
 uint32_t plat_uptime_ms(void) { return (uint32_t)((svcGetSystemTick() - s_boot_tick) / (PLAT_TICKS_PER_SEC / 1000u)); }
@@ -68,12 +72,31 @@ static void apt_hook(APT_HookType type, void* param) {
     case APTHOOK_ONSLEEP: cpu_limit_set(30, "sleep"); break;
     case APTHOOK_ONRESTORE: cpu_limit_set(s_cpu_limit, "HOME menu closed"); break;
     case APTHOOK_ONWAKEUP: cpu_limit_set(s_cpu_limit, "wake"); break;
-    case APTHOOK_ONEXIT: cpu_limit_set(30, "exit"); break;
+    case APTHOOK_ONEXIT: plat_cpu_limit_restore(); break;
     default: break;
     }
 }
 
+/* Puts back the limit the process had before plat_cpu_limit_init. The
+ * Homebrew Launcher runs in this process after a title takeover, so a limit
+ * left at 80 would starve its netloader of core 1. */
+void plat_cpu_limit_restore(void) {
+    if (s_cpu_restored) {
+        return;
+    }
+    s_cpu_restored = 1;
+    Result r = APT_SetAppCpuTimeLimit(s_cpu_limit_orig);
+    PLOG_I("cpu limit: restored to %lu%% result %08lx", (unsigned long)s_cpu_limit_orig, (unsigned long)r);
+}
+
 void plat_cpu_limit_init(void) {
+    u32 orig = 0;
+    if (R_SUCCEEDED(APT_GetAppCpuTimeLimit(&orig))) {
+        s_cpu_limit_orig = orig;
+    } else {
+        s_cpu_limit_orig = 30;
+    }
+    PLOG_I("cpu limit: before this process %lu%%", (unsigned long)s_cpu_limit_orig);
     s_cpu_limit = (u32)plat_switch_int("cpulimit", 80);
     if (s_cpu_limit < 5 || s_cpu_limit > 80) {
         s_cpu_limit = 80;
@@ -108,6 +131,7 @@ void plat_quit(int relaunch) {
         s_gpu_shutdown(); /* waits for the render thread, then C3D_Fini and gfxExit */
         s_gpu_shutdown = NULL;
     }
+    plat_cpu_limit_restore();
     plat_log_stop();
     plat_log_crash_close();
     if (relaunch) {

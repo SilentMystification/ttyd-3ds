@@ -607,6 +607,11 @@ static void* s_list_caller;
 static const u8* s_list_start;
 static u32 s_list_bytes;
 
+void gx_pipe_cur_list(const void** list, u32* nbytes) {
+    *list = s_list_start;
+    *nbytes = s_list_bytes;
+}
+
 static void run_commands(Reader* r, int from_list) {
     for (;;) {
         if (r->slot == NULL && r->p >= r->end) {

@@ -1,5 +1,5 @@
-/* The vertex-shader path (switch gxvsh, default 0): cached display lists
- * transformed by the PICA200 instead of the CPU. Rules and acceptance tests:
+/* The vertex-shader path (switch gxvsh): GX draws transformed by the PICA200
+ * instead of the CPU. Rules and acceptance tests:
  * docs/PORT_3DS_GPU_OFFLOAD.md; design: docs/PORT_3DS_GX_PERF.md, "Design:
  * the vertex-shader path against the offload rules".
  *
@@ -22,16 +22,23 @@
  * was fully eligible for K consecutive frames (switch gxvshk, default 30),
  * and drops back to the CPU at once: in the frame an ineligible draw
  * appears, the group's later draws go to the CPU (a split, counted), and the
- * next frame starts on the CPU. Across frames a group is known by its lists:
- * each list's record keeps the streak of the group it was drawn in, and a
- * group's path for the frame is read from the record of its first list.
+ * next frame starts on the CPU. Across frames a group is known by its lists
+ * (and immediate draws by the code that began them): each one's record keeps
+ * the streak of the group it was drawn in, and a group's path for the frame
+ * is read from the record of its first eligible draw.
+ *
+ * Immediate mode and decoded lists. GXBegin/GXEnd draws, and lists decoded
+ * rather than drawn from the cache, write their vertices to a per-frame ring
+ * of chunks (gx_vsh_imm_*) and take the same group decision, so characters,
+ * effects and the map share a path.
  *
  * Decals (coplanar draws under another matrix, which the group key cannot
- * see). A draw with depth compare EQUAL or LEQUAL and depth writes off links
- * its group with every group drawn earlier in the same viewport: linked
- * groups count as one at the frame's end (eligible only together, the same
- * streak), so a CPU-only decal (immediate mode) keeps them all on the CPU.
- *
+ * see). Two shader-path draws follow the same arithmetic, so only a
+ * decal-like draw (depth EQUAL, or LEQUAL with depth writes off) made on the
+ * CPU path links its group with the groups drawn earlier in its viewport
+ * that take or could take the shader path. Linked groups count as one at the
+ * frame's end: eligible only together, with the largest streak of the set.
+
  * Game-agnostic: display lists, vertex state and matrices only. */
 #include <stddef.h>
 #include <stdint.h>
@@ -181,14 +188,15 @@ static struct {
     u32 reason_draws[GXV_R_COUNT];
     u32 groups, groups_vsh, groups_elig, splits, switches_up, switches_down, rec_full, group_full;
     u32 decal_draws, decal_triggers, decal_frames, decal_forced;
-    u32 decal_imm, decal_list_cpu, decal_list_vsh, trig_imm, trig_list, decal_frames_imm;
+    u32 decal_imm, decal_list_cpu, decal_vsh, trig_imm, trig_list, decal_frames_imm;
+    u32 imm_vsh, imm_verts_vsh, imm_room_fail;
     u32 built, build_fail, built_s16_pos, built_verts;
     u32 build_reason[GXV_R_COUNT];
 } s_st, s_sum;
 static u32 s_switch_total, s_split_total, s_frames_total, s_decal_frames_total;
 
 void gx_vsh_init(void) {
-    gx_vsh_on = plat_switch_int("gxvsh", 0) != 0;
+    gx_vsh_on = plat_switch_int("gxvsh", 1) != 0; /* default on: PORT_3DS_GX_PERF.md, "Round 2" */
     int k = plat_switch_int("gxvshk", 30);
     s_k = k < 1 ? 1 : (u32)k;
     s_check_at = (u32)plat_switch_int("gxvsh_check", 0);
@@ -306,6 +314,41 @@ static u32 tri_count(u8 prim, u32 n) {
     case GX_TRIANGLEFAN: return n >= 3 ? n - 2 : 0;
     default: return 0;
     }
+}
+
+/* Triangle indices of one primitive of n vertices from index b, in
+ * gx_draw_vertices' order (quad split, strip parity, fan order). */
+static u16* emit_tris(u8 prim, u32 b, u32 n, u16* ix) {
+    switch (prim) {
+    case GX_QUADS:
+        for (u32 q = 0; q + 3 < n; q += 4) {
+            *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 1), *ix++ = (u16)(b + q + 2);
+            *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 2), *ix++ = (u16)(b + q + 3);
+        }
+        break;
+    case GX_TRIANGLES:
+        for (u32 q = 0; q + 2 < n; q += 3) {
+            *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 1), *ix++ = (u16)(b + q + 2);
+        }
+        break;
+    case GX_TRIANGLESTRIP:
+        for (u32 q = 0; q + 2 < n; q++) {
+            if (q & 1) {
+                *ix++ = (u16)(b + q + 1), *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 2);
+            } else {
+                *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 1), *ix++ = (u16)(b + q + 2);
+            }
+        }
+        break;
+    case GX_TRIANGLEFAN:
+        for (u32 q = 1; q + 1 < n; q++) {
+            *ix++ = (u16)b, *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 1);
+        }
+        break;
+    default:
+        break;
+    }
+    return ix;
 }
 
 static inline void put_s16(u8* p, f32 v, f32 sc) {
@@ -438,40 +481,133 @@ GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, 
     /* indices, in gx_draw_vertices' triangle order */
     u16* ix = s->idx;
     for (u32 i = 0; i < nd; i++) {
-        u32 b = first + d[i].first, n = d[i].count;
-        switch (d[i].prim) {
-        case GX_QUADS:
-            for (u32 q = 0; q + 3 < n; q += 4) {
-                *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 1), *ix++ = (u16)(b + q + 2);
-                *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 2), *ix++ = (u16)(b + q + 3);
-            }
-            break;
-        case GX_TRIANGLES:
-            for (u32 q = 0; q + 2 < n; q += 3) {
-                *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 1), *ix++ = (u16)(b + q + 2);
-            }
-            break;
-        case GX_TRIANGLESTRIP:
-            for (u32 q = 0; q + 2 < n; q++) {
-                if (q & 1) {
-                    *ix++ = (u16)(b + q + 1), *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 2);
-                } else {
-                    *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 1), *ix++ = (u16)(b + q + 2);
-                }
-            }
-            break;
-        default: /* fan */
-            for (u32 q = 1; q + 1 < n; q++) {
-                *ix++ = (u16)b, *ix++ = (u16)(b + q), *ix++ = (u16)(b + q + 1);
-            }
-            break;
-        }
+        ix = emit_tris(d[i].prim, first + d[i].first, d[i].count, ix);
     }
     s_st.built++;
     s_st.built_verts += nv;
     s_st.built_s16_pos += posk >= 0;
     *reason = 0;
     return s;
+}
+
+/* ---- Immediate mode (GXBegin/GXEnd): per-frame streams in a ring ----
+ * Immediate vertices change every frame, so they get no cache entry: each
+ * eligible draw writes its vertices (floats: the CPU path's own values, no
+ * exactness question) to the current chunk of a ring, and a chunk is reused
+ * only once every frame that drew from it has left the GPU (3 presented
+ * frames). Consecutive draws in a chunk index from its base, so they can
+ * merge like cached ones. One layout: float position, three float slots (the
+ * first three texture coordinate attributes the draw has), u8 colour. */
+
+#define IMM_CHUNKS 8
+#define IMM_CHUNK_VERTS 16384
+#define IMM_MAX_VERTS 4096 /* gx_pipe.c draws at most this many vertices at once */
+
+static struct {
+    u8* base;
+    u32 used;
+    u32 last_frame; /* presented-frame count when it was last written */
+} s_imm[IMM_CHUNKS];
+static int s_imm_cur = -1;
+static u32 s_imm_stride, s_imm_layout;
+static int32_t s_imm_off[5];
+static u16 s_imm_idx[IMM_MAX_VERTS * 3 * 2];
+static GxVshImm s_imm_out;
+
+/* Why an immediate draw of `prim`, n vertices, cannot use a stream (0: it can). */
+u32 gx_vsh_imm_reasons(u8 prim, u32 n) {
+    u32 why = 0;
+    if (gx.vtx_desc[GX_VA_PNMTXIDX] != GX_NONE) {
+        why |= GXV_R_PNMTXIDX;
+    }
+    u32 slots = 0;
+    for (int t = 0; t < 8; t++) {
+        if (gx.vtx_desc[GX_VA_TEX0MTXIDX + t] != GX_NONE) {
+            why |= GXV_R_TEXMTXIDX;
+        }
+        slots += gx.vtx_desc[GX_VA_TEX0 + t] != GX_NONE;
+    }
+    if (slots > 3) {
+        why |= GXV_R_SLOTS;
+    }
+    if (tri_count(prim, n) == 0 || n > IMM_MAX_VERTS) {
+        why |= GXV_R_PRIM; /* lines, points, or nothing to draw */
+    }
+    return why;
+}
+
+/* Room for n vertices in the ring (a fresh chunk when the current one is full). */
+int gx_vsh_imm_room(u32 n) {
+    if (s_imm_cur >= 0 && s_imm[s_imm_cur].used + n <= IMM_CHUNK_VERTS) {
+        return 1;
+    }
+    if (s_imm_stride == 0) {
+        s_imm_stride = plat_vsh_layout(0, 3, 0, s_imm_off);
+        s_imm_layout = plat_vsh_layout_word(0, 3, 0);
+    }
+    u32 now = plat_gpu_present_count();
+    for (int i = 0; i < IMM_CHUNKS; i++) {
+        if (i == s_imm_cur) {
+            continue;
+        }
+        if (s_imm[i].base == NULL) {
+            s_imm[i].base = plat_gpu_stream_alloc(IMM_CHUNK_VERTS * s_imm_stride);
+            if (s_imm[i].base == NULL) {
+                break;
+            }
+            s_imm[i].last_frame = now - 3;
+        }
+        if ((s32)(now - s_imm[i].last_frame) >= 3) {
+            s_imm_cur = i;
+            s_imm[i].used = 0;
+            return 1;
+        }
+    }
+    s_st.imm_room_fail++;
+    return 0;
+}
+
+/* Writes an immediate draw (room checked) and returns its stream. */
+const GxVshImm* gx_vsh_imm_build(u8 prim, const GxVertex* v, u32 n) {
+    typeof(s_imm[0])* c = &s_imm[s_imm_cur];
+    u32 first = c->used;
+    u8 slot_attr[3] = {0, 0, 0};
+    u32 nslots = 0;
+    memset(s_imm_out.attr_slot, 0xFF, sizeof(s_imm_out.attr_slot));
+    for (int t = 0; t < 8 && nslots < 3; t++) {
+        if (gx.vtx_desc[GX_VA_TEX0 + t] != GX_NONE) {
+            s_imm_out.attr_slot[t] = (u8)nslots;
+            slot_attr[nslots++] = (u8)t;
+        }
+    }
+    u8* out = c->base + first * s_imm_stride;
+    for (u32 i = 0; i < n; i++) {
+        u8* p = out + i * s_imm_stride;
+        memcpy(p + s_imm_off[0], v[i].pos, 12);
+        for (u32 k = 0; k < 3; k++) {
+            if (k < nslots) {
+                memcpy(p + s_imm_off[2 + k], v[i].tex[slot_attr[k]], 8);
+            } else {
+                memset(p + s_imm_off[2 + k], 0, 8);
+            }
+        }
+        const GXColor* cl = &v[i].clr[0];
+        p[s_imm_off[1] + 0] = cl->r;
+        p[s_imm_off[1] + 1] = cl->g;
+        p[s_imm_off[1] + 2] = cl->b;
+        p[s_imm_off[1] + 3] = cl->a;
+    }
+    plat_gpu_stream_commit(out, n * s_imm_stride);
+    c->used += n;
+    c->last_frame = plat_gpu_present_count();
+    u16* end = emit_tris(prim, first, n, s_imm_idx);
+    s_imm_out.base = c->base;
+    s_imm_out.layout = s_imm_layout;
+    s_imm_out.idx = s_imm_idx;
+    s_imm_out.nidx = (u32)(end - s_imm_idx);
+    s_st.imm_vsh++;
+    s_st.imm_verts_vsh += n;
+    return &s_imm_out;
 }
 
 void gx_vsh_stream_free(GxVshStream* s) {
@@ -543,6 +679,7 @@ static struct {
     const void* caller;
     u32 count;
     u8 zfunc;
+    u32 why; /* why the decal was on the CPU (GXV_R_*; 0: eligible, its group still counting) */
 } s_trig_callers[8]; /* the code that began the immediate decals that triggered (GXBegin's caller) */
 
 static u32 hash_words(const u32* w, u32 n) {
@@ -673,19 +810,23 @@ static int decal_like(void) {
     return gx.z_enable && (gx.z_func == GX_EQUAL || gx.z_func == GX_LEQUAL) && !gx.z_update;
 }
 
-/* A decal-like draw in group g. An immediate-mode one (always on the CPU)
- * links g with every group drawn so far in its viewport, so all of them are
- * ineligible together: the rule for decals the group key cannot see. A list
- * one links g with the list groups drawn so far in its viewport, so they
- * take one path (eligible together, the same streak) whatever their
- * matrices; groups of immediate draws only are left out of those links. */
-static void decal_link(Group* g, u32 reasons, int path) {
+/* A decal-like draw (depth EQUAL, or LEQUAL with no depth write) in group g.
+ * Two shader-path draws follow the same arithmetic, whatever their matrices,
+ * so only a decal drawn on the CPU path needs protecting: it links its group
+ * with every group drawn earlier in its viewport that takes, or could take,
+ * the shader path. Linked groups count as one at the frame's end (eligible
+ * only together, one streak), so a CPU decal that stays ineligible keeps
+ * them on the CPU, and an eligible one moves with them. The link acts from
+ * the next frame: in the frame a CPU decal first appears, groups drawn
+ * before it may already have taken the shader path. */
+static void decal_link(Group* g, u32 reasons, int path, int imm) {
     s_st.decal_draws++;
-    int imm = (reasons & (GXV_R_IMM | GXV_R_MISS)) != 0;
+    if (path) {
+        s_st.decal_vsh++;
+        return;
+    }
     if (imm) {
         s_st.decal_imm++;
-    } else if (path) {
-        s_st.decal_list_vsh++;
     } else {
         s_st.decal_list_cpu++;
     }
@@ -695,49 +836,46 @@ static void decal_link(Group* g, u32 reasons, int path) {
     }
     typeof(s_vps[0])* vp = &s_vps[g->vp];
     u32 gi = (u32)(g - s_grp);
-    int* root = imm ? &vp->root_all : &vp->root_list;
-    u32* linked = imm ? &vp->linked_all : &vp->linked_list;
-    if (*root < 0) {
-        *root = (int)gi;
+    if (vp->root_all < 0) {
+        vp->root_all = (int)gi;
     }
     int trig = 0;
-    for (u32 i = *linked; i < vp->n; i++) {
+    for (u32 i = vp->linked_all; i < vp->n; i++) {
         u32 o = vp->groups[i];
-        if (!imm && !s_grp[o].lists && o != gi) {
-            continue; /* no list drawn in it (yet): immediate draws only */
+        if (o == gi || !(s_grp[o].path || s_grp[o].elig)) {
+            continue; /* ineligible groups stay on the CPU anyway (eligibility only drops in a frame) */
         }
-        if (o != gi && (s_grp[o].path || s_grp[o].elig)) {
-            trig = 1; /* a group that takes, or could take, the shader path */
-        }
+        trig = 1;
         if (s_decal_rule) {
-            unite((u32)*root, o);
+            unite((u32)vp->root_all, o);
         }
     }
-    *linked = vp->n;
+    vp->linked_all = vp->n;
     if (s_decal_rule) {
-        unite((u32)*root, gi);
+        unite((u32)vp->root_all, gi);
     }
     if (trig) {
         s_st.decal_triggers++;
         if (imm) {
             s_st.trig_imm++;
-            const void* c = (reasons & GXV_R_IMM) ? gx_begin_caller : NULL;
-            for (u32 k = 0; k < 8; k++) {
-                if (s_trig_callers[k].caller == c || s_trig_callers[k].count == 0) {
-                    s_trig_callers[k].caller = c;
-                    s_trig_callers[k].count++;
-                    s_trig_callers[k].zfunc = gx.z_func;
-                    break;
-                }
-            }
         } else {
             s_st.trig_list++;
+        }
+        const void* c = imm ? gx_begin_caller : NULL;
+        for (u32 k = 0; k < 8; k++) {
+            if (s_trig_callers[k].caller == c || s_trig_callers[k].count == 0) {
+                s_trig_callers[k].caller = c;
+                s_trig_callers[k].count++;
+                s_trig_callers[k].zfunc = gx.z_func;
+                s_trig_callers[k].why = reasons;
+                break;
+            }
         }
         s_decal_this_frame |= imm ? 1 : 2;
     }
 }
 
-int gx_vsh_route(u32 pnmtx, u32 reasons, const void* list, u32 nbytes, u32 nverts) {
+int gx_vsh_route(u32 pnmtx, u32 reasons, const void* list, u32 nbytes, u32 nverts, int imm) {
     Group* g = group_for(pnmtx);
     if (g == NULL) {
         s_st.draws_inelig++;
@@ -749,7 +887,7 @@ int gx_vsh_route(u32 pnmtx, u32 reasons, const void* list, u32 nbytes, u32 nvert
         return 0;
     }
     int path = 0;
-    if (list != NULL || (reasons & GXV_R_MISS)) {
+    if (!imm) {
         g->lists = 1;
     }
     if (reasons != 0) {
@@ -786,7 +924,7 @@ int gx_vsh_route(u32 pnmtx, u32 reasons, const void* list, u32 nbytes, u32 nvert
         }
     }
     if (decal_like()) {
-        decal_link(g, reasons, path);
+        decal_link(g, reasons, path, imm);
     }
     return path;
 }
@@ -828,9 +966,12 @@ void gx_vsh_frame(void) {
     if (s_check_at != 0 && gx_perf_frame_no() == s_check_at) {
         census_log();
     }
-    /* sets of linked groups: eligible only together, the smallest streak */
+    /* sets of linked groups: eligible only together, one streak: the largest
+     * of the set, so a group that joins an established set (a new decal over a
+     * floor already on the shader) moves to the floor's path, instead of
+     * pulling the floor back to the CPU for K frames */
     static u8 set_elig[GROUPS];
-    static u16 set_min[GROUPS];
+    static u16 set_min[GROUPS]; /* the set's streak (0xFFFF: no record in the set) */
     for (u32 i = 0; i < s_ngroups; i++) {
         u32 gi = s_order[i];
         set_elig[gi] = 1;
@@ -844,7 +985,7 @@ void gx_vsh_frame(void) {
         }
         if (g->first_rec && g->first_rec != ~0u) {
             u16 st = s_rec[g->first_rec - 1].streak;
-            set_min[r] = st < set_min[r] ? st : set_min[r];
+            set_min[r] = set_min[r] == 0xFFFF || st > set_min[r] ? st : set_min[r];
         }
         s_st.groups_vsh += g->path;
         s_st.groups_elig += g->elig;
@@ -855,7 +996,7 @@ void gx_vsh_frame(void) {
             s_st.decal_forced++; /* eligible itself, kept on the CPU by a linked group */
         }
     }
-    /* every list a group drew: the group set's new streak (the smallest over its groups) */
+    /* every list a group drew: its group set's new streak (a list drawn in several sets takes the smallest) */
     for (u32 i = 0; i < s_ntouch; i++) {
         Rec* rc = &s_rec[s_touch[i].rec - 1];
         u32 r = find(s_touch[i].group);
@@ -935,18 +1076,21 @@ void gx_vsh_log(u32 frames) {
            (unsigned long)(a->groups_elig / f), (unsigned long)a->switches_up, (unsigned long)a->switches_down,
            (unsigned long)s_switch_total, (unsigned long)a->splits, (unsigned long)s_split_total,
            (unsigned long)gs.vsh_draws, (unsigned long)gs.vsh_calls, (unsigned long)gs.vsh_consts);
-    PLOG_I("gxstats   vsh decals%s: %lu decal-like draws/frame (immediate %lu, lists on the cpu %lu, on the shader %lu), "
+    PLOG_I("gxstats   vsh decals%s: %lu decal-like draws/frame (on the cpu: immediate %lu, lists %lu; on the shader %lu), "
            "%lu triggers/frame (immediate %lu, lists %lu), %lu of %lu frames with a trigger (%lu by an immediate "
-           "decal; total %lu of %lu), %lu groups/frame kept on the CPU by a link",
+           "decal; total %lu of %lu), %lu groups/frame kept on the CPU by a link | immediate on the shader %lu draws "
+           "%lu verts/frame, ring full %lu",
            s_decal_rule ? "" : " (links off: counted only)", (unsigned long)(a->decal_draws / f),
            (unsigned long)(a->decal_imm / f), (unsigned long)(a->decal_list_cpu / f),
-           (unsigned long)(a->decal_list_vsh / f), (unsigned long)(a->decal_triggers / f),
+           (unsigned long)(a->decal_vsh / f), (unsigned long)(a->decal_triggers / f),
            (unsigned long)(a->trig_imm / f), (unsigned long)(a->trig_list / f), (unsigned long)a->decal_frames,
            (unsigned long)f, (unsigned long)a->decal_frames_imm, (unsigned long)s_decal_frames_total, (unsigned long)s_frames_total,
-           (unsigned long)(a->decal_forced / f));
+           (unsigned long)(a->decal_forced / f), (unsigned long)(a->imm_vsh / f), (unsigned long)(a->imm_verts_vsh / f),
+           (unsigned long)a->imm_room_fail);
     for (u32 k = 0; k < 8 && s_trig_callers[k].count; k++) {
-        PLOG_I("gxstats   vsh decal trigger: immediate draw begun from %p (z func %u), %lu times so far",
-               s_trig_callers[k].caller, s_trig_callers[k].zfunc, (unsigned long)s_trig_callers[k].count);
+        PLOG_I("gxstats   vsh decal trigger: CPU decal %s %p (z func %u, on the CPU for %#lx), %lu times so far",
+               s_trig_callers[k].caller ? "begun from" : "from a display list", s_trig_callers[k].caller,
+               s_trig_callers[k].zfunc, (unsigned long)s_trig_callers[k].why, (unsigned long)s_trig_callers[k].count);
     }
     char why[256];
     u32 n = 0;

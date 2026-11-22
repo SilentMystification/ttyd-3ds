@@ -48,7 +48,7 @@ def sdmc_dir(profile):
 
 
 def cmd_run(a):
-    dest = OUT / a.scene / a.tag
+    dest = OUT / (a.name or a.scene) / a.tag
     profile = (REPO / "build" / "azahar-profile") if a.profile is None else Path(a.profile)
     shots = sdmc_dir(profile) / "shots"
     if shots.exists():
@@ -338,9 +338,9 @@ def summarize_depth(res):
 
 
 def cmd_report(a):
-    base = OUT / a.scene
+    base = OUT / (a.name or a.scene)
     ref = base / a.ref
-    lines = [f"## {a.scene}"]
+    lines = [f"## {a.name or a.scene}"]
     runs = [a.ref] + ([a.noise] if a.noise else []) + a.test
     for t in runs:
         st = gxstats(base / t)
@@ -393,6 +393,7 @@ def main():
     r = sub.add_parser("run")
     r.add_argument("--scene", required=True)
     r.add_argument("--story", type=int)
+    r.add_argument("--name", help="results folder name (default: the scene), for two setups of one map")
     r.add_argument("--tag", required=True)
     r.add_argument("--switches", default="")
     r.add_argument("--first", type=int, default=1140, help="first presented frame shot")
@@ -404,6 +405,7 @@ def main():
     p.add_argument("--scene", required=True)
     p.add_argument("--ref", required=True)
     p.add_argument("--noise")
+    p.add_argument("--name")
     p.add_argument("--test", action="append", default=[])
     a = ap.parse_args()
     return cmd_run(a) if a.cmd == "run" else cmd_report(a)

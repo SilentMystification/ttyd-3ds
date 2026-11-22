@@ -408,6 +408,40 @@ Characters are drawn in immediate mode after the map with depth compare LEQUAL a
 
 **Hysteresis and splits.** `gxvshk=30`. Steady state: 0 switches and 0 splits in every scene except hei_01's default run (above). Switches count list records, so one set transition counts every list in it (2521 in gon_02).
 
+## Round 2: immediate mode on the shader, narrower decal rule, default on
+
+Planner's round-2 brief: put immediate-mode draws on the shader path too, so characters and the map share a path; link groups only for a decal drawn on the CPU path; replace the per-draw uniform-block compare; rerun the suite plus an effects-heavy battle; switch the default to 1 only if every test passes in every scene with no oscillation and no frame slower than the CPU path.
+
+**What changed:**
+
+- **Immediate mode and decoded lists on the shader path.** `GXBegin`/`GXEnd` draws (`animdrv` characters, effects, windows) and display lists being decoded (first call, changed or uncacheable) write their vertices to a per-frame ring: 8 chunks of 16384 vertices in linear memory, one layout (float position, three float slots, u8 colour), a chunk reused 3 presented frames after it was last written. They take the same pass-group decision as cached lists. Across frames an immediate draw is known by the code that began it, a decoded list by its address (as its cached hits are). Lighting, lines, points, the bounding box, per-vertex matrix indices and `MTX3x4` texgen stay on the CPU. `gxvshimm=0` keeps immediate draws on the CPU.
+- **Decal rule.** A decal-like draw (depth EQUAL, or LEQUAL with no depth write) links groups only when it is itself on the CPU path; it links the earlier groups of its viewport that take or could take the shader path. A linked set takes the largest streak of its members, so a new decal over a floor already on the shader joins the floor's path instead of pulling the floor back to the CPU for K frames (with the smallest streak, hei_01 dropped its map set every time a speech bubble or smoke appeared).
+- **Uniform block id.** `gx_draw.c` compares a rebuilt block with the last one once per rebuild and gives it a new id only when it changed; `plat_gpu_vsh_const(c, id)` compares ids. The 160-byte `memcmp` per draw is gone.
+- **Stream flushes** are batched: `plat_gpu_stream_commit` records the range, and the ranges are flushed once before a record is submitted. A `GSPGPU_FlushDataCache` per immediate draw had made the immediate stage slower than the CPU path (gor_01 17 -> 40 ms).
+
+**Results** (Azahar; `vsh_accept.py`, 24 consecutive shots from presented frame 1140, magenta clear, depth shots; two CPU runs, one `gxvsh=1` run):
+
+| Scene | frame CPU -> gxvsh=1 (ms) | groups on the shader | static px: colour max / depth max | seams | flicker (CPU-B / shader) | steady-state switches |
+|---|---|---|---|---|---|---|
+| gor_01 | 168.0 -> **117.0** | 395 of 395 | 2 / 4 | 0 / 0 | 0 / 0 | 0 |
+| gon_02 (battle) | 83.6 -> **66.9** | 180 of 180 | 1 / 4 | 0 / 0 | 0 / 0 | 0 |
+| aaa_00 | 83.6 -> **66.9** | 191 of 191 | 145 (1 pixel) / 4 | 0 / 0 | 0 / 0 | 0 |
+| tik_01 | 50.2 -> **33.5** | 98 of 98 | 1 / 4 | 0 / 0 | 0 / 26 px (see below) | 0 |
+| hei_01 | 50.2 -> 50.2 (vblank-bound; dl stage 19.3 -> 13.7) | 201 of 201 | 2 / 2 | 0 / 0 | 0 / 0 | 0 |
+| jin_00 (fog, effects) | 72.5 -> **50.2** | 135 of 135 | 58 (1 pixel) / 4 | 0 / 0 | 0 / 0 | 0 |
+| gon_02 + `btlauto=perfect` (attacks, effects) | 84.2 -> **67.0** | 192 of 194 | (camera moves: no static pixels) | 0 / 0 | 0 / 0 | 0-6 per window, all up |
+
+- Static-pixel depth differences stay within 4 units of 2^24 (one or two 24-bit-float quanta), with no cluster and no order flip; the single stable edge pixels of aaa_00 and jin_00 are the same as in round 1.
+- The effects battle is deterministic between runs in game frames for one of the CPU runs: `gxvsh=1` against that run (cpuB) differs in 3 pixels over 24 frames (single edge pixels, frames 1151 and 1156), with depth within 15 units on 99.99% of pixels. The other CPU run (cpuA) differs from both by the battle's own timing (mean 5, 12.6% of pixels > 8).
+- tik_01's 26 flicker pixels: an animated object whose colour changes at one depth in the first five shader frames and that is gone after; the CPU run is at another phase of it (the shader run's frames are 33 ms against 50 ms). Characters' idle animations give the rest. No two surfaces alternate.
+- **Decal triggers:** 0 per frame in the steady state of every scene. CPU-path decal-like draws: 0 per frame in all seven scenes once groups settle; the triggers that remain happen while a new group counts up (eligible, linked, then promoted with its set).
+- **Switches:** after a map's first K frames, 0 down-switches in every scene; the only ups are records seen for the first time (a new effect or window). hei_01 (round 1: 478, 0, 0, 478, 956, 0, 0, 478 per window) now 572 at the map load, then 1, 1, 0, 0, 3, 0, 0, 0, all up.
+- **Render thread** (Azahar, ms): gor_01 11.4 -> 23.4, gon_02 9.6 -> 20.5, aaa_00 9.4 -> 22.5, tik_01 12.0 -> 7.7, hei_01 11.5 -> 20.7, jin_00 3.7 -> 7.4, effects battle 9.9 -> 21.3. It stays well under the game thread in every scene here; on hardware each citro3d draw costs 36-66 µs, and gor_01 now issues about 570 shader draw commands per frame (of 5560 calls), so the render thread is the first thing to measure on the console.
+
+- **PC sampling** (gor_01, `gxvsh=1`, 170 stops, direction only): the uniform-block `memcmp` is gone (9.1% in round 1). The game thread's largest GX entries now are `gx_dlcache_call` (9.4%, with the inlined routing), `GSPGPU_FlushDataCache` from the per-record stream flush (8.2%; the next thing to cut: flush only ranges written since the last submit, which it does, so this is the syscall's own cost in Azahar), `rec_for` (4.7%), `memcpy` of indices (3.5%) and `gx_vsh_frame` (3.5%).
+
+**Default: `gxvsh=1`.** Every test passes in every scene above, with no oscillation, and no frame is slower than the CPU path (Azahar). Not verified on hardware: the stream attribute layout, fixed attributes, index offsets, the cull mapping (set empirically in Azahar), the bool uniform, and the render-thread cost. `gxvsh=0` is the fallback for A/B and for any hardware problem.
+
 ## Risks of the cache
 
 - **Hash collisions.** A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.
@@ -433,9 +467,10 @@ Rows for the switch table:
 | `gxfogcache=0/1` | 1 (default): the fog LUT is recomputed only when the fog parameters change and goes to the back end with an id instead of being hashed; 0 recomputes and hashes it on every rebuild (A/B) |
 | `gxunlit=0/1` | 1 (default): unlit colour channels skip `channel_color` and the eye-space normal; 0 the general path (A/B) |
 | `gxmerge=0/1` | 1 (default): consecutive draws with nothing recorded between them extend one draw command (`plat/gpu.c`); 0 one command per draw (A/B). `gxstats` shows `gpu draws N (of M calls)` |
-| `gxvsh=0/1` | The vertex-shader path (`port3ds/game/gx/gx_vsh.c`). 0 (default): every vertex is transformed on the CPU. 1: each display-list cache entry gets a PICA stream, and the cached lists of a pass group (same position matrix, projection and viewport) that was fully eligible for `gxvshk` frames in a row are transformed by the vertex shader. `gxstats` adds `vsh` lines: shader, CPU-eligible and ineligible draws, groups, switches, splits, decal links and triggers, streams and the reasons draws stay on the CPU |
+| `gxvsh=0/1` | The vertex-shader path (`port3ds/game/gx/gx_vsh.c`). 1 (default): each display-list cache entry gets a PICA stream, immediate-mode draws and decoded lists go through a per-frame ring, and the draws of a pass group (same position matrix, projection and viewport) that was fully eligible for `gxvshk` frames in a row are transformed by the vertex shader. 0: every vertex is transformed on the CPU (A/B, hardware fallback). `gxstats` adds `vsh` lines: shader, CPU-eligible and ineligible draws, groups, switches, splits, decal links and triggers, streams and the reasons draws stay on the CPU |
 | `gxvshk=N` | Hysteresis of the shader path: fully eligible frames in a row before a group moves to the shader (default 30). It moves back to the CPU at once |
-| `gxvshdecal=0/1` | 1 (default): a decal-like draw (depth compare EQUAL or LEQUAL, no depth write) links its group with the groups drawn earlier in its viewport (an immediate-mode one with all of them, a list one with the list groups), so they take one path. 0: links off, only counted; for measuring the shader path itself, it breaks the offload rules |
+| `gxvshdecal=0/1` | 1 (default): a decal-like draw (depth compare EQUAL, or LEQUAL with no depth write) made on the CPU path links its group with the groups drawn earlier in its viewport that take or could take the shader path, so they take one path. 0: links off, only counted; for measuring the shader path itself, it breaks the offload rules |
+| `gxvshimm=0/1` | 1 (default): immediate-mode draws and decoded display lists may take the shader path (per-frame ring); 0 keeps them on the CPU |
 | `gxvsh_check=N` | Logs every pass group of game frame N (`gxvsh census`): path, eligibility, streak, draws per path, the reasons for CPU draws, decal links, first list, depth range, translation, projection type |
 | `gxvshs16=0/1` | 1 (default): stream positions and texture coordinates as s16 with a power-of-two scale where that is exact; 0 always floats (A/B) |
 | `gxvshkb=N` | Linear memory for the stream segments in KB (default 6144) |

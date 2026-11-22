@@ -153,7 +153,7 @@ uint32_t plat_gpu_peek_argb(uint16_t x, uint16_t y);
  * clip-space offset) on the render thread, so a record can be replayed once
  * per eye without re-recording. `flags` says what an eye offset needs. */
 void* plat_gpu_stream_alloc(uint32_t bytes);            /* linear memory, 16-byte aligned; NULL when out */
-void plat_gpu_stream_commit(const void* p, uint32_t bytes); /* the CPU wrote it: flush before the GPU reads */
+void plat_gpu_stream_commit(const void* p, uint32_t bytes); /* the CPU wrote it: flushed before the record goes to the GPU */
 void plat_gpu_stream_free(void* p);                     /* freed once no frame in flight can read it */
 
 enum { PLAT_VSH_ORTHO = 1u }; /* PlatGpuVshConst.flags: the projection is orthographic */
@@ -210,8 +210,10 @@ static inline uint32_t plat_vsh_layout_word(uint32_t pos_s16, uint32_t nslots, u
  * 2-7 that slot's k. */
 #define PLAT_VSH_UNIT(slot, k) ((((uint32_t)(k) & 63u) << 2) | ((uint32_t)(slot) & 3u))
 
-/* The uniform block for the following shader draws (copied; recorded only when it changed). */
-void plat_gpu_vsh_const(const PlatGpuVshConst* c);
+/* The uniform block for the following shader draws (copied; recorded only when it changed).
+ * `id` names its contents: the same nonzero id always means the same block,
+ * so an unchanged id is skipped without comparing; 0 compares the bytes. */
+void plat_gpu_vsh_const(const PlatGpuVshConst* c, uint32_t id);
 /* Triangles of a stream: `nidx` u16 indices (copied) into the stream at `stream`.
  * cull: 0 none, 1 GX front faces, 2 GX back faces (GX's front is clockwise on screen). */
 void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, const uint16_t* idx,

@@ -88,6 +88,7 @@ void gx_opts_init(void) {
     gx_opt_statever = plat_switch_int("gxstatever", 0) != 0; /* off by default: fewer rebuilds, but no time saved (PORT_3DS_GX_PERF.md) */
     gx_opt_fogcache = plat_switch_int("gxfogcache", 1) != 0;
     gx_opt_unlit = plat_switch_int("gxunlit", 1) != 0;
+    gx_vsh_imm_on = plat_switch_int("gxvshimm", 1) != 0;
     PLOG_I("gx: statever %d fogcache %d unlit %d", gx_opt_statever, gx_opt_fogcache, gx_opt_unlit);
     gx_vsh_init();
 }
@@ -829,10 +830,15 @@ static u32 s_vsh_ver = ~0u, s_vsh_xfv = ~0u, s_vsh_pn = ~0u;
 static u32 s_vsh_reasons;     /* why the state keeps draws on the CPU (GXV_R_*), 0 if it does not */
 static u8 s_vsh_unit_attr[3]; /* GX texture coordinate attribute each PICA unit's texgen reads, 0xFF none */
 static PlatGpuVshConst s_vsh_const;
+/* The block's id: a new one only when a rebuild changed the block (so the
+ * back end compares ids, not 160 bytes, per draw; and equal rebuilds after a
+ * setter call keep the draws merging). */
+static u32 s_vsh_const_id;
 
 static void vsh_prepare(void) {
     u32 why = 0;
-    PlatGpuVshConst* c = &s_vsh_const;
+    PlatGpuVshConst cb;
+    PlatGpuVshConst* c = &cb;
     memset(c, 0, sizeof(*c));
     if (s_need_both) {
         why |= GXV_R_TWOCHAN;
@@ -894,6 +900,57 @@ static void vsh_prepare(void) {
     }
     c->flags = p[0] == (f32)GX_PERSPECTIVE ? 0u : PLAT_VSH_ORTHO;
     s_vsh_reasons = why;
+    if (s_vsh_const_id == 0 || !gx_mem_equal(c, &s_vsh_const, sizeof(*c))) {
+        s_vsh_const = *c;
+        if (++s_vsh_const_id == 0) {
+            s_vsh_const_id = 1;
+        }
+    }
+}
+
+static void vsh_state(void) {
+    if (s_vsh_ver != gx.version || s_vsh_xfv != gx_xf_version || s_vsh_pn != gx.cur_pnmtx) {
+        vsh_prepare();
+        s_vsh_ver = gx.version;
+        s_vsh_xfv = gx_xf_version;
+        s_vsh_pn = gx.cur_pnmtx;
+    }
+}
+
+static u32 vsh_cull(void) { return gx.cull == GX_CULL_FRONT ? 1u : gx.cull == GX_CULL_BACK ? 2u : 0u; }
+
+int gx_vsh_imm_on = 1; /* switch gxvshimm (default 1): immediate-mode draws may take the shader path */
+
+/* An immediate-mode draw (GXBegin/GXEnd) on the shader path, when its group
+ * takes it: the vertices go to this frame's ring. 0: draw it on the CPU (it
+ * was routed already). */
+static int draw_vsh_imm(u8 prim, const GxVertex* v, u32 n, const void* ident, u32 ident_n, int imm) {
+    vsh_state();
+    u32 why = gx_vsh_imm_on ? s_vsh_reasons | gx_vsh_imm_reasons(prim, n) : GXV_R_IMM;
+    if (gx_bbox_active) {
+        why |= GXV_R_BBOX;
+    }
+    if (why == 0 && !gx_vsh_imm_room(n)) {
+        why = GXV_R_POOL;
+    }
+    if (!gx_vsh_route(v[0].pnmtx, why, ident, ident_n, n, imm)) {
+        return 0;
+    }
+    if (gx.cull == GX_CULL_ALL) {
+        return 1;
+    }
+    const GxVshImm* im = gx_vsh_imm_build(prim, v, n);
+    u32 scales = 0;
+    for (int u = 0; u < 3; u++) {
+        u8 a = s_vsh_unit_attr[u];
+        u32 slot = a < 8 ? im->attr_slot[a] : 0xFF;
+        scales |= (slot < 3 ? PLAT_VSH_UNIT(slot, 0) : PLAT_VSH_UNIT(3, 0)) << (8 + 8 * u);
+    }
+    plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
+    plat_gpu_vsh_draw(im->base, im->layout, scales, vsh_cull(), im->idx, im->nidx);
+    gx_vsh_count_shader(n, im->nidx);
+    gx_stat_draws++;
+    return 1;
 }
 
 int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nbytes, u32 nverts) {
@@ -901,17 +958,12 @@ int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nb
     if (empty_target()) {
         return 1; /* the CPU path would draw nothing either */
     }
-    if (s_vsh_ver != gx.version || s_vsh_xfv != gx_xf_version || s_vsh_pn != gx.cur_pnmtx) {
-        vsh_prepare();
-        s_vsh_ver = gx.version;
-        s_vsh_xfv = gx_xf_version;
-        s_vsh_pn = gx.cur_pnmtx;
-    }
+    vsh_state();
     u32 why = s == NULL ? (entry_reason ? entry_reason : GXV_R_POOL) : s_vsh_reasons;
     if (gx_bbox_active) {
         why |= GXV_R_BBOX; /* GXReadBoundingBox needs the window positions on the CPU */
     }
-    if (!gx_vsh_route(gx.cur_pnmtx, why, list, nbytes, nverts)) {
+    if (!gx_vsh_route(gx.cur_pnmtx, why, list, nbytes, nverts, 0)) {
         return 0;
     }
     if (gx.cull == GX_CULL_ALL) {
@@ -923,9 +975,8 @@ int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nb
         u32 slot = a < 8 ? s->attr_slot[a] : 0xFF;
         scales |= (slot < 3 ? PLAT_VSH_UNIT(slot, s->slot_k[slot]) : PLAT_VSH_UNIT(3, 0)) << (8 + 8 * u);
     }
-    u32 cull = gx.cull == GX_CULL_FRONT ? 1u : gx.cull == GX_CULL_BACK ? 2u : 0u;
-    plat_gpu_vsh_const(&s_vsh_const);
-    plat_gpu_vsh_draw(gx_vsh_stream_base(s), s->layout, scales, cull, s->idx, s->nidx);
+    plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
+    plat_gpu_vsh_draw(gx_vsh_stream_base(s), s->layout, scales, vsh_cull(), s->idx, s->nidx);
     gx_vsh_count_shader(nverts, s->nidx);
     gx_stat_draws++;
     return 1;
@@ -937,8 +988,26 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
     }
     ensure_state();
     if (gx_vsh_on && !gx_vsh_noted) {
-        /* a draw only the CPU path makes (immediate mode, a decoded list): its group goes to the CPU */
-        u32 why = gx_pipe_in_list() ? GXV_R_MISS : GXV_R_IMM;
+        int in_list = gx_pipe_in_list();
+        if (gx.vtx_desc[GX_VA_PNMTXIDX] == GX_NONE) {
+            /* immediate mode, or a display list being decoded (first call, changed, uncached): the shader
+             * path from this frame's ring when the draw and its group can take it. Known across frames by
+             * the code that began it, or by the list (as its cached hits are). */
+            if (empty_target()) {
+                return;
+            }
+            const void* ident = gx_begin_caller;
+            u32 ident_n = 0xFFFFFFFFu;
+            if (in_list) {
+                gx_pipe_cur_list(&ident, &ident_n);
+            }
+            if (draw_vsh_imm(prim, v, n, ident, ident_n, !in_list)) {
+                return;
+            }
+            goto routed;
+        }
+        /* a draw only the CPU path makes (a decoded list, per-vertex matrices): its group goes to the CPU */
+        u32 why = in_list ? GXV_R_MISS : GXV_R_IMM;
         if (gx.vtx_desc[GX_VA_PNMTXIDX] != GX_NONE) {
             u32 seen = 0;
             for (u32 i = 0; i < n; i++) {
@@ -946,13 +1015,14 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
             }
             for (u32 m = 0; m < GX_POS_MTX_COUNT; m++) {
                 if (seen >> m & 1) {
-                    gx_vsh_route(m, why | GXV_R_PNMTXIDX, NULL, 0, n);
+                    gx_vsh_route(m, why | GXV_R_PNMTXIDX, NULL, 0, n, !in_list);
                 }
             }
         } else {
-            gx_vsh_route(v[0].pnmtx, why, NULL, 0, n);
+            gx_vsh_route(v[0].pnmtx, why, NULL, 0, n, !in_list);
         }
     }
+routed:
     if (empty_target()) {
         return;
     }

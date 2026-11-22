@@ -54,7 +54,11 @@ void plat_memplace_init(void) {
     if (total > QTM_BYTES) {
         plat_fatal("memplace: budgets total %lu bytes, QTM has %lu", (unsigned long)total, (unsigned long)QTM_BYTES);
     }
-    s_qtm = qtm_mapped();
+    /* QTM RAM is also used by the system qtm sysmodule. Writing it without
+     * the qtm switch crashed the console at boot (Luma dump: qtm, NULL
+     * read), so the buffers stay in FCRAM unless the switch asks for QTM. */
+    int mapped = qtm_mapped();
+    s_qtm = plat_switch_has("qtm") && mapped;
     u8* next = (u8*)QTM_VADDR;
     for (int i = 0; i < PLAT_PLACE_COUNT; i++) {
         Placement* p = &s_table[i];
@@ -71,6 +75,9 @@ void plat_memplace_init(void) {
     if (s_qtm) {
         PLOG_I("[MEM] QTM mapped at %08lx, %lu of %lu bytes placed", (unsigned long)QTM_VADDR, (unsigned long)total,
                (unsigned long)QTM_BYTES);
+    } else if (mapped) {
+        PLOG_W("[MEM] QTM mapped but not used (the system qtm module owns it; switch qtm to use it), using FCRAM (%lu bytes)",
+               (unsigned long)total);
     } else {
         PLOG_W("[MEM] QTM unavailable, using FCRAM (%lu bytes)", (unsigned long)total);
     }

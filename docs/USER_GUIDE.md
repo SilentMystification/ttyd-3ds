@@ -1,0 +1,145 @@
+# Paper Mario: The Thousand-Year Door on New 3DS: user guide
+
+This guide is for players. It tells you how to install the port and play it.
+Developers should read [BUILDING.md](BUILDING.md) and [PORT_3DS_TESTING.md](PORT_3DS_TESTING.md) instead.
+
+Facts in this guide come from the port's source code. A fact the code does not prove is marked **(unverified)**.
+At the time of writing the port had been run only in the Azahar emulator, not on a real console, so anything about
+real hardware is unverified.
+
+## What you need
+
+- A **New 3DS, New 3DS XL or New 2DS XL**. An Old 3DS or Old 2DS cannot run the port. It shows a message and stops.
+- **Custom firmware** (Luma3DS) on the console, and **FBI** to install the file.
+- An SD card with free space for the disc image (about 1.4 GB).
+- **Your own copy of the game**: a disc image you dumped yourself from your own disc.
+  - The port contains **no game data**. It reads everything from your disc image.
+  - The image must be a plain `.iso` (a full GameCube disc image). Compressed or trimmed formats such as RVZ, GCZ,
+    CISO or NKit are not read. Convert them to `.iso` first (Dolphin can do this: right-click the game, Convert).
+  - The port checks the game ID. At the moment only the **US release (G8ME01, revision 0)** is built.
+    The JP (G8MJ01) and PAL (G8MP01) builds are planned but not available yet.
+    A build only starts with the disc it was made for.
+
+## Installing
+
+1. Get `ttyd.cia`.
+2. Install it with FBI. Either:
+   - copy `ttyd.cia` to the SD card, open FBI, choose SD, find the file, and choose Install CIA; or
+   - in FBI choose Remote Install, then Receive URLs over the network, and send the file from a computer.
+3. Make the folder `sdmc:/3ds/ttyd/` on the SD card if it is not there yet. The port also makes it on first start.
+4. Copy your disc image to **`sdmc:/3ds/ttyd/game.iso`**. The name must be exactly `game.iso`.
+5. Start **TTYD 3DS** from the HOME Menu.
+
+The CIA is the supported way to run the port. It sets the memory mode and the clock speed that the game needs.
+The `.3dsx` file for the Homebrew Launcher may be refused for lack of memory. If you see "Not enough memory",
+install the CIA.
+
+## First boot
+
+- The port opens `game.iso`, checks it, and reads the file table. It then starts the game.
+- There is **no separate conversion step** and no progress bar. The port converts models, maps and textures
+  from the disc while you play, as the game loads them.
+- You see the game's own logos, then the title screen.
+- The bottom screen shows a small status line at the top and a scrolling log. This is normal.
+- How long the start takes on a real console is unverified. In Azahar the title screen appears
+  after about 800 game frames.
+- If something is wrong with the disc image or the SD card, you see a black text screen. See Troubleshooting.
+
+## Controls
+
+The game sees one GameCube controller. The 3DS maps to it like this:
+
+| 3DS | GameCube |
+| --- | --- |
+| A, B, X, Y | A, B, X, Y |
+| START | START |
+| D-pad | D-pad |
+| Circle Pad | Control stick |
+| C-stick (New 3DS) | C-stick |
+| L | L (fully pressed) |
+| R | R (fully pressed) |
+| ZR | Z |
+
+- ZL does nothing.
+- The touch screen is not used.
+- Rumble does not exist on the 3DS, so the game's rumble option does nothing.
+- SELECT opens the **Select menu**. It is a **developer menu**, not an options menu.
+  - General tab: turn the status line on or off, return to the title screen, exit to the HOME Menu (press A twice).
+  - Debug tab: log level and warping to any map.
+  - L or R changes the tab. Up and Down move. Left, Right or A change a value. B or SELECT closes it.
+  - While it is open the game gets no input.
+  - Warping can break the story. Do not use it in a save you care about.
+- A proper options menu for players is planned. It does not exist yet.
+- The game's own soft reset (hold B, X and START) is unverified.
+
+## Saves
+
+- The port keeps your saves as files on the SD card, in the folder **`sdmc:/3ds/ttyd/card/`**.
+- The game uses one memory card file. For the US release it is
+  `01-G8ME-mariost_save_file.gci`. All four save slots are inside it.
+- The folder acts as a memory card in slot A with 2043 free blocks.
+  The game makes the file the first time you start a new file.
+- The files use the same container as the GameCube memory card "GCI" format that Dolphin uses.
+- **Back up** by copying the whole `sdmc:/3ds/ttyd/card/` folder to your computer. To restore, copy it back
+  while the game is closed.
+- **Dolphin saves: moving them between Dolphin and the port does not work yet.**
+  - The folder, file name and file header match what Dolphin uses.
+  - The save data inside does not. The port keeps it in the 3DS's byte order. The GameCube and Dolphin use the opposite order.
+  - A save copied from Dolphin is seen by the game as **corrupted** (all four slots). A save from the port is not a valid Dolphin save.
+  - Nothing is damaged by trying. Keep a backup anyway.
+  - This is tracked as a known gap. When it is fixed, the steps will be: in Dolphin, export with Tools,
+    Memory Card Manager (or copy the `.gci` from Dolphin's folder `User/GC/USA/Card A/`)
+    (unverified: Dolphin paths), then copy the file to `sdmc:/3ds/ttyd/card/`. The file name does not matter.
+    The port finds the save by the name written inside the file.
+- A save from another region is ignored. The log says, for example, "a JP save (G8MJ), this build reads G8ME saves".
+  The game then shows no such save.
+- A file that is shorter than it should be is ignored. The log says so.
+
+## Troubleshooting
+
+### Messages on a black screen
+
+The port shows these and waits for START. Press START to leave.
+
+| Message | What to do |
+| --- | --- |
+| This port needs a New 3DS, New 3DS XL or New 2DS XL. | Use a New 3DS family console. |
+| The SD card cannot be used (missing or write-protected). | Put in the SD card. Make sure it is not write-protected. |
+| No disc image found. Copy your Paper Mario: The Thousand-Year Door disc image (G8ME01) to sdmc:/3ds/ttyd/game.iso | Put the image at that exact path and name. |
+| sdmc:/3ds/ttyd/game.iso cannot be read. | Check the file. Copy it again. |
+| sdmc:/3ds/ttyd/game.iso is not the right game: found X, this build needs G8ME01. | Wrong game or wrong region. If X is not letters (shown as ?), the file is probably a compressed format. Convert it to a plain `.iso`. |
+| This build supports revision 0 of G8ME01; the image is revision N. | Use a revision 0 disc image. |
+| The disc image's file table cannot be read. / is damaged. | The image is damaged or cut short. Dump or copy it again. |
+| Not enough memory: heap ... linear ... Install the CIA and start it from the HOME Menu. | Install the CIA instead of using the `.3dsx`. |
+
+### The game stops or shows a crash screen
+
+- The port has a crash handler. It shows a report on the screen. Press START to exit.
+- It also saves the report to **`sdmc:/3ds/ttyd/crash.txt`**. The file keeps old reports, and new ones are added to the end.
+- The normal log of the last run is **`sdmc:/3ds/ttyd/log.txt`**.
+- A watchdog ends a run that stops responding for 10 seconds, and reports it as a crash.
+
+### Saves
+
+- A slot that says **File corrupted. This file must be erased.** failed the game's own check.
+  The game keeps two copies of each slot. It shows the slot as corrupted only when both copies fail.
+  Use Erase Data on that slot, then start a new game in it. Restore a backup if you have one.
+- A save you copied from Dolphin shows as corrupted in all four slots. See Saves.
+
+### Making a bug report
+
+Please include:
+
+1. What you did, and what you expected.
+2. The build string. It is the first line of `log.txt`, like `TTYD 3DS build #240 f4b3cc42`, and it is shown on the error screens.
+3. Your console model (New 3DS, New 3DS XL, New 2DS XL) and your Luma3DS version.
+4. Where in the game it happened (the map name is in the status line on the bottom screen).
+5. The files `sdmc:/3ds/ttyd/crash.txt` and `sdmc:/3ds/ttyd/log.txt`.
+6. Do not send your disc image or your save files unless asked. They contain nothing the port needs for a bug report
+   except when the bug is about saves.
+
+## Legal
+
+This port needs your own copy of the game. It contains no game data and does not help you get one.
+It is a fan project. It is **not affiliated with or endorsed by Nintendo** or Intelligent Systems.
+"Paper Mario" and "The Thousand-Year Door" belong to their owners.

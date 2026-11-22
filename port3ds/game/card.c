@@ -116,6 +116,26 @@ static void own_ids(u8 game[4], u8 company[2]) {
     memcpy(company, "01", 2);
 }
 
+/* Why a GCI in the card folder is not offered to the game, in words for the log. */
+static const char* foreign_region(const u8 game[4], const u8 company[2]) {
+    if (memcmp(company, "01", 2) != 0) {
+        return NULL;
+    }
+    if (memcmp(game, "G8ME", 4) == 0) {
+        return "US";
+    }
+    if (memcmp(game, "G8MJ", 4) == 0) {
+        return "JP";
+    }
+    if (memcmp(game, "G8MP", 4) == 0) {
+        return "PAL";
+    }
+    return NULL;
+}
+
+/* Reads the folder. The game's lookup key is the entry inside the file (game code, maker code, file name), not the
+ * host file name, so a GCI copied in from Dolphin works under any name. A file is skipped with a log line when it is
+ * not a usable GCI: too short for its block count, or made by another game or another region's release. */
 static void scan(void) {
     memset(s_files, 0, sizeof(s_files));
     mkdir(CARD_DIR, 0777);
@@ -123,6 +143,8 @@ static void scan(void) {
     if (d == NULL) {
         return;
     }
+    u8 game[4], company[2];
+    own_ids(game, company);
     struct dirent* de;
     int n = 0;
     while ((de = readdir(d)) != NULL && n < MAX_FILES) {
@@ -137,12 +159,59 @@ static void scan(void) {
             continue;
         }
         u8 hdr[64];
-        if (fread(hdr, 1, 64, f) == 64) {
-            dir_from_disk(hdr, &s->dir);
-            s->used = 1;
-            n++;
+        long size = -1;
+        int have = fread(hdr, 1, 64, f) == 64;
+        if (have && fseek(f, 0, SEEK_END) == 0) {
+            size = ftell(f);
         }
         fclose(f);
+        if (!have) {
+            PLOG_W("card: %s skipped: shorter than a GCI header", de->d_name);
+            continue;
+        }
+        CARDDir e;
+        dir_from_disk(hdr, &e);
+        if (memcmp(e.gameName, game, 4) != 0 || memcmp(e.company, company, 2) != 0) {
+            const char* region = foreign_region(e.gameName, e.company);
+            if (region != NULL) {
+                PLOG_W("card: %s skipped: a %s save (%.4s), this build reads %.4s saves", de->d_name, region,
+                       (const char*)e.gameName, (const char*)game);
+            } else {
+                PLOG_I("card: %s skipped: another game's file (%.4s/%.2s)", de->d_name, (const char*)e.gameName,
+                       (const char*)e.company);
+            }
+            continue;
+        }
+        if (e.length == 0 || size < 64 + (long)e.length * SECTOR) {
+            PLOG_W("card: %s skipped: %ld bytes, but its header says %u blocks (%ld bytes)", de->d_name, size,
+                   (unsigned)e.length, 64 + (long)e.length * SECTOR);
+            continue;
+        }
+        /* Two files with one name inside (a copy kept under another name): the newer one is the save. */
+        int dup = -1;
+        for (int i = 0; i < n; i++) {
+            if (s_files[i].used && strncmp((const char*)s_files[i].dir.fileName, (const char*)e.fileName,
+                                           CARD_FILENAME_MAX) == 0) {
+                dup = i;
+                break;
+            }
+        }
+        if (dup >= 0) {
+            Slot* o = &s_files[dup];
+            int newer = e.time > o->dir.time;
+            PLOG_W("card: %s and %s hold the same save file; using the %s one", o->path + sizeof(CARD_DIR),
+                   de->d_name, newer ? "second (newer)" : "first");
+            if (newer) {
+                strcpy(o->path, s->path);
+                o->dir = e;
+            }
+            continue;
+        }
+        s->dir = e;
+        s->used = 1;
+        PLOG_I("card: %s: \"%.32s\", %u blocks, copy count %u", de->d_name, (const char*)e.fileName,
+               (unsigned)e.length, (unsigned)e.copyTimes);
+        n++;
     }
     closedir(d);
 }

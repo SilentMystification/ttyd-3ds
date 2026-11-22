@@ -375,7 +375,7 @@ Player settings live in `sdmc:/3ds/ttyd/options.txt` as `key=value` lines ending
 - **Record:** `determ gwdump=10 padscript=... padrec=run.tpad`. Add `determ` if the file is to be replayed under it; the header notes it.
 - **Replay:** `determ gwdump=10 padfile=run.tpad`, with no `padscript`. The `gwdump` stream matches the recorded run's record for record, apart from the lines after the file's end in a longer run. Compare with `tools/port3ds/gw_diff.py --logs A B`.
 - **Dolphin movies:** `tools/port3ds/dtm2pad.py dtm2pad movie.dtm out.tpad` converts controller 1 of a GameCube DTM; `pad2txt out.tpad` lists the frames; `selftest` checks the converter on a synthetic movie. The conversion is tested on a synthetic movie only; whether a real movie lines up with the port's boot frames is untested.
-- **GC debug DOL:** `padfile=/name.tpad` reads the file through `DVDOpen` from the extracted disc folder (`build/<disc>/files/name.tpad`, put there by hand; at most 8192 frames) and logs the same `[PAD]` lines. It has no `padrec=`.
+- **GC debug DOL:** `padfile=/name.tpad` reads the file through `DVDOpen` from the extracted disc folder (`build/<disc>/files/name.tpad`, put there by hand, for example `build/gcdebug-disc/files/`; at most 8192 frames) and logs the same `[PAD]` lines. It has no `padrec=`. Checked in Dolphin: a 1888-frame file recorded in the port under `determ` loads and ends at frame 1888.
 - **Limits:** the Select menu and the Options menu still take the live input while open. A first run after a fresh Azahar profile can differ from later runs in `rng` (seen once at game frame 1160; two later runs of the same switches matched each other and the replay).
 
 ### THP movies

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "options_internal.h"
 #include "plat/input.h"
 #include "plat_internal.h"
 
@@ -91,28 +92,65 @@ void plat_input_scan(PlatInput* out) {
     }
 }
 
+static uint32_t s_prev_held; /* last effective key state, for press edges */
+static uint32_t s_block;     /* keys held when a menu closed: hidden from the game until released */
+
+static int script_active(void) { return s_step < s_steps; }
+
+/* The effective key state: the script's while one runs, else the hardware's. */
+static uint32_t effective_held(uint32_t hw) { return script_active() ? s_script[s_step].keys : hw; }
+
+static void script_advance(void) {
+    if (s_step < s_steps && ++s_step_frames >= s_script[s_step].frames) {
+        s_step_frames = 0;
+        if (++s_step == s_steps) {
+            PLOG_I("padscript: done");
+        }
+    }
+}
+
+/* The options menu's loop (plat/options_menu.c) polls here, about every 16 ms:
+ * scripted steps count one per call, as they count one per game frame outside. */
+uint32_t plat_input_modal_poll(void) {
+    hidScanInput();
+    if (!s_script_loaded) {
+        script_load();
+    }
+    uint32_t held = effective_held(hidKeysHeld());
+    if (script_active()) {
+        script_advance();
+    }
+    s_prev_held = held;
+    return held;
+}
+
+void plat_input_menu_closed(void) { s_block = s_prev_held; }
+
 static void scan(PlatInput* out) {
     memset(out, 0, sizeof(*out));
     hidScanInput();
     if (!s_script_loaded) {
         script_load();
     }
-    uint32_t held = hidKeysHeld();
+    uint32_t held = effective_held(hidKeysHeld());
+    uint32_t down = held & ~s_prev_held;
+    s_prev_held = held;
     circlePosition cp, cs;
     hidCircleRead(&cp);
     hidCstickRead(&cs);
 
-    if (plat_menu_input(held, hidKeysDown())) {
-        return; /* the Select menu has the input */
+    if (plat_menu_input(held, down)) {
+        return; /* a menu has the input */
     }
-    if (s_step < s_steps) {
+    s_block &= held;
+    if (script_active()) {
         const ScriptStep* st = &s_script[s_step];
-        out->held = st->keys;
+        out->held = st->keys & ~s_block;
         out->circle_x = st->cx;
         out->circle_y = st->cy;
         return;
     }
-    out->held = held;
+    out->held = held & ~s_block;
     out->circle_x = cp.dx;
     out->circle_y = cp.dy;
     out->cstick_x = cs.dx;
@@ -131,10 +169,7 @@ void plat_input_frame(void) {
     if (!s_script_loaded) {
         script_load();
     }
-    if (s_step < s_steps && ++s_step_frames >= s_script[s_step].frames) {
-        s_step_frames = 0;
-        if (++s_step == s_steps) {
-            PLOG_I("padscript: done");
-        }
-    }
+    plat_options_tick();
+    plat_menu_frame(); /* runs the options menu while it is open: the game waits here */
+    script_advance();
 }

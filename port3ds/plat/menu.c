@@ -7,21 +7,29 @@
  *   rows 17-30 the log (plat/log.c prints there)
  * Only changed lines are rewritten, so the screen does not flicker.
  *
- * Select opens and closes the menu. L/R change tab, Up/Down move, Left/
- * Right/A change a value or run an action, B closes. While it is open the
- * game sees no input.
+ * Two menus share the screen:
+ *  - the player Options menu (plat/options_menu.c), opened with SELECT or by
+ *    touching the "Options" button on row 3 (right side). The game is paused
+ *    while it is open.
+ *  - this file's developer Select menu, only with the switch "devmenu" (or a
+ *    build with PORT3DS_DEV_BUILD): ZL+SELECT opens and closes it. L/R change
+ *    tab, Up/Down move, Left/Right/A change a value or run an action, B
+ *    closes. While it is open the game sees no input but keeps running.
+ * The HUD (rows 1-2) follows the player's HUD option: off, FPS only or full.
  */
 #include <stdio.h>
 #include <string.h>
 
+#include "options_internal.h"
 #include "plat/hud.h"
+#include "plat/input.h"
 #include "plat_internal.h"
 
 enum { TAB_GENERAL, TAB_DEBUG, TAB_COUNT };
 
 static int s_console_up;
 static int s_open, s_tab, s_row;
-static int s_hud_on = 1;
+static int s_hud_drawn = -1; /* HUD mode whose rows are on screen */
 static int s_exit_armed;
 static volatile int s_reset_request;
 static char s_warp_map[16], s_warp_bero[16];
@@ -50,6 +58,26 @@ static void at(int row, const char* text) {
     printf("\x1b[%d;1H%-40.40s", row, text);
     consoleSetWindow(&s_console, 0, 16, 40, 14);
     printf("\x1b[u");
+}
+
+void plat_console_row(int row, const char* text) { at(row, text); }
+int plat_console_ready(void) { return s_console_up; }
+
+/* The developer menu is for dev builds and the "devmenu" switch; players get Options. */
+static int dev_menu_enabled(void) {
+#ifdef PORT3DS_DEV_BUILD
+    return 1;
+#else
+    return plat_switch_has("devmenu");
+#endif
+}
+
+static void draw_options_button(void) {
+    if (!s_console_up || !plat_console_trylock()) {
+        return;
+    }
+    at(3, "                               [Options]");
+    plat_console_unlock();
 }
 
 int plat_reset_requested(void) {
@@ -91,7 +119,10 @@ static void draw_menu(void) {
         const char* cur = r == s_row ? ">" : " ";
         if (s_tab == TAB_GENERAL) {
             switch (r) {
-            case 0: snprintf(line, sizeof(line), "%s HUD: %s", cur, s_hud_on ? "on" : "off"); break;
+            case 0:
+                snprintf(line, sizeof(line), "%s HUD: %s", cur,
+                         (const char* const[]){"off", "fps", "full"}[opt_get_hud_mode()]);
+                break;
             case 1: snprintf(line, sizeof(line), "%s Return to title", cur); break;
             case 2:
                 snprintf(line, sizeof(line), "%s Exit to HOME Menu%s", cur, s_exit_armed ? " (A again)" : "");
@@ -127,7 +158,7 @@ static void clear_menu(void) {
 static void activate(int dir) {
     if (s_tab == TAB_GENERAL) {
         switch (s_row) {
-        case 0: s_hud_on = !s_hud_on; break;
+        case 0: plat_opt_set(PLAT_OPT_KEY_HUD, (opt_get_hud_mode() + (dir < 0 ? 2 : 1)) % 3); break;
         case 1:
             if (dir == 0) {
                 s_reset_request = 4;
@@ -169,13 +200,29 @@ static void activate(int dir) {
 }
 
 int plat_menu_input(uint32_t held, uint32_t down) {
-    (void)held;
-    if (down & KEY_SELECT) {
-        s_open = !s_open;
-        s_exit_armed = 0;
-        if (!s_open) {
+    if (plat_options_menu_is_open()) {
+        return 1; /* opened this frame; the frame hook runs it */
+    }
+    int touch_button = 0;
+    if (down & PLAT_KEY_TOUCH) {
+        touchPosition tp;
+        hidTouchRead(&tp);
+        touch_button = tp.py < 40 && tp.px >= 216;
+    }
+    if (down & PLAT_KEY_SELECT) {
+        if (s_open) {
+            s_open = 0;
             clear_menu();
+        } else if (dev_menu_enabled() && (held & PLAT_KEY_ZL)) {
+            s_open = 1;
+            s_exit_armed = 0;
+        } else {
+            touch_button = 1;
         }
+    }
+    if (touch_button && !s_open) {
+        plat_options_menu_open();
+        return plat_options_menu_is_open();
     }
     if (!s_open) {
         return 0;
@@ -226,16 +273,49 @@ void plat_hud_frame(const PlatHudStats* stats) {
     s_fps = dt ? (float)(stats->frames - s_last_frames) * 1000.0f / (float)dt : 0.0f;
     s_last_hud_ms = now;
     s_last_frames = stats->frames;
-    if (!s_console_up || !s_hud_on || !plat_console_trylock()) {
+    if (!s_console_up || !plat_console_trylock()) {
         return;
     }
+    int mode = opt_get_hud_mode();
     char line[48];
-    snprintf(line, sizeof(line), "%s %-8s %4.1ffps %s", plat_build_string(), s_stats.map, (double)s_fps,
-             plat_qtm_available() ? "QTM" : "QTM:off");
-    at(1, line);
-    snprintf(line, sizeof(line), "cpu%5.1f gpu%5.1fms d%4lu v%5lu h%luK", (double)s_stats.frame_us / 1000.0,
-             (double)s_stats.gpu_us / 1000.0, (unsigned long)s_stats.draws, (unsigned long)s_stats.vertices,
-             (unsigned long)s_stats.heap_free_kb);
-    at(2, line);
+    if (mode == PLAT_OPT_HUD_FULL) {
+        snprintf(line, sizeof(line), "%s %-8s %4.1ffps %s", plat_build_string(), s_stats.map, (double)s_fps,
+                 plat_qtm_available() ? "QTM" : "QTM:off");
+        at(1, line);
+        snprintf(line, sizeof(line), "cpu%5.1f gpu%5.1fms d%4lu v%5lu h%luK", (double)s_stats.frame_us / 1000.0,
+                 (double)s_stats.gpu_us / 1000.0, (unsigned long)s_stats.draws, (unsigned long)s_stats.vertices,
+                 (unsigned long)s_stats.heap_free_kb);
+        at(2, line);
+    } else if (mode == PLAT_OPT_HUD_FPS) {
+        snprintf(line, sizeof(line), "%4.1f fps", (double)s_fps);
+        at(1, line);
+        if (s_hud_drawn != mode) {
+            at(2, "");
+        }
+    } else if (s_hud_drawn != mode) {
+        at(1, "");
+        at(2, "");
+    }
+    s_hud_drawn = mode;
     plat_console_unlock();
+    if (!s_open) {
+        draw_options_button();
+    }
+}
+
+/* From the frame hook (plat/input.c): the player Options menu runs here, so the
+ * game thread (and game time) stands still while it is open. */
+void plat_menu_frame(void) {
+    if (!plat_options_menu_is_open()) {
+        return;
+    }
+    plat_options_menu_run();
+    if (s_console_up && plat_console_trylock()) {
+        for (int r = 3; r <= 16; r++) {
+            at(r, "");
+        }
+        plat_console_unlock();
+    }
+    s_hud_drawn = -1;
+    draw_options_button();
 }

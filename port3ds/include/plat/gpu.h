@@ -103,6 +103,11 @@ typedef struct {
     uint8_t fog_enable;
     uint8_t pad2[2];
     uint32_t fog_color;
+    /* fog_lut_id and fog_lut are not part of the state comparison: the LUT
+     * goes to the GPU only when it changed. A nonzero id names the LUT's
+     * contents (the same id always means the same LUT), so the back end
+     * compares ids; 0 means unknown, and the back end hashes the LUT. */
+    uint32_t fog_lut_id;
     float fog_lut[129];          /* PICA fog LUT input: f(z) for z = 0..128/128 (window depth) */
     uint16_t scissor_x0, scissor_y0, scissor_x1, scissor_y1; /* EFB pixels, end exclusive */
     float viewport_x, viewport_y, viewport_w, viewport_h;   /* EFB pixels */

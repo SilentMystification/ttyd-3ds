@@ -83,6 +83,7 @@ static u32 s_frame_counter;
 static PlatGpuState s_last_state;
 static int s_last_state_valid; /* s_last_state was recorded in the current record */
 static u32 s_last_fog_hash;
+static u32 s_last_fog_id; /* PlatGpuState.fog_lut_id of the last LUT sent (0: s_last_fog_hash is) */
 static PlatGpuStats s_stats, s_stats_frame;
 static int s_rot;              /* orientation mode, see efb_to_target */
 static u32 s_shots_every, s_shots_left;
@@ -182,6 +183,7 @@ static void submit(int present) {
     memset(&s_last_state, 0xFF, sizeof(s_last_state));
     s_last_state_valid = 0;
     s_last_fog_hash = 0;
+    s_last_fog_id = 0;
 }
 
 /* The record is full mid-frame: hand it to the render thread as a segment
@@ -230,17 +232,20 @@ static u32 fog_hash(const PlatGpuState* st) {
 
 void plat_gpu_set_state(const PlatGpuState* state) {
     if (state->fog_enable) {
-        u32 h = fog_hash(state);
-        if (h != s_last_fog_hash) {
+        /* the front end's LUT id when it gives one (no hashing), else a hash of the LUT */
+        u32 id = state->fog_lut_id;
+        u32 h = id != 0 ? 0 : fog_hash(state);
+        if (id != 0 ? id != s_last_fog_id : h != s_last_fog_hash) {
             float* lut = rec_put(CMD_FOG, sizeof(state->fog_lut) + 8);
             if (lut != NULL) {
                 memcpy(lut, state->fog_lut, sizeof(state->fog_lut));
                 s_last_fog_hash = h;
+                s_last_fog_id = id;
             }
         }
     }
-    /* compare everything except the LUT */
-    size_t cmp = offsetof(PlatGpuState, fog_lut);
+    /* compare everything except the LUT and its id */
+    size_t cmp = offsetof(PlatGpuState, fog_lut_id);
     if (memcmp(&s_last_state, state, cmp) == 0 &&
         memcmp((const u8*)&s_last_state + offsetof(PlatGpuState, scissor_x0),
                (const u8*)state + offsetof(PlatGpuState, scissor_x0),

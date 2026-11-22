@@ -67,6 +67,17 @@ static u8 logic_op(u8 lo) {
     return map[lo & 15];
 }
 
+static void fog_lut(f32* lut);
+
+/* switch gxfogcache: the LUT of the last fog parameters, and its id
+ * (PlatGpuState.fog_lut_id: a new id only when the LUT's contents change) */
+static struct {
+    u8 valid, type;
+    f32 s, e, n, f;
+    u32 id;
+    f32 lut[129];
+} s_fog;
+
 static void build_fog(PlatGpuState* st) {
     u8 type = gx.fog_type;
     if (type == GX_FOG_NONE || gx.fog_end == gx.fog_start || gx.fog_far == gx.fog_near) {
@@ -75,6 +86,34 @@ static void build_fog(PlatGpuState* st) {
     }
     st->fog_enable = 1;
     st->fog_color = (u32)gx.fog_color.r | (u32)gx.fog_color.g << 8 | (u32)gx.fog_color.b << 16;
+    if (!gx_opt_fogcache) {
+        fog_lut(st->fog_lut); /* fog_lut_id stays 0: the back end hashes the LUT */
+        return;
+    }
+    if (!s_fog.valid || s_fog.type != type || s_fog.s != gx.fog_start || s_fog.e != gx.fog_end ||
+        s_fog.n != gx.fog_near || s_fog.f != gx.fog_far) {
+        f32 lut[129];
+        fog_lut(lut);
+        if (!s_fog.valid || memcmp(lut, s_fog.lut, sizeof(lut)) != 0) {
+            memcpy(s_fog.lut, lut, sizeof(lut));
+            if (++s_fog.id == 0) {
+                s_fog.id = 1;
+            }
+        }
+        s_fog.valid = 1;
+        s_fog.type = type;
+        s_fog.s = gx.fog_start;
+        s_fog.e = gx.fog_end;
+        s_fog.n = gx.fog_near;
+        s_fog.f = gx.fog_far;
+    }
+    memcpy(st->fog_lut, s_fog.lut, sizeof(s_fog.lut));
+    st->fog_lut_id = s_fog.id;
+}
+
+/* The PICA fog LUT for the current GX fog parameters (type not NONE). */
+static void fog_lut(f32* lut) {
+    u8 type = gx.fog_type;
     int ortho = type >= GX_FOG_ORTHO_LIN;
     u8 fn = type & 7;
     f32 n = gx.fog_near, f = gx.fog_far, s = gx.fog_start, e = gx.fog_end;
@@ -101,7 +140,7 @@ static void build_fog(PlatGpuState* st) {
         case 7: fog = powf(2.0f, -8.0f * (1.0f - x) * (1.0f - x)); break; /* REVEXP2 */
         default: fog = x; break;                                     /* LIN */
         }
-        st->fog_lut[i] = 1.0f - fog; /* PICA: 1 keeps the fragment */
+        lut[i] = 1.0f - fog; /* PICA: 1 keeps the fragment */
     }
 }
 

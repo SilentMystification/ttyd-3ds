@@ -24,6 +24,7 @@ Exit status: 0 pass, 1 fail, 2 usage or setup error.
 """
 
 import argparse
+import fcntl
 import os
 import re
 import shutil
@@ -91,6 +92,37 @@ pauseWhenInBackground\\default=false
 check_for_update_on_start=false
 check_for_update_on_start\\default=false
 """
+
+
+_slot_fd = None
+
+
+def acquire_slot():
+    """Machine-wide limit on Azahar instances: one flock'd slot file per instance, held until this
+    process ends (the OS drops the lock if it dies). AZAHAR_MAX (default 3) is the number of slots."""
+    global _slot_fd
+    n = int(os.environ.get("AZAHAR_MAX", "3"))
+    run = os.environ.get("XDG_RUNTIME_DIR")
+    d = Path(run) / "ttyd-azahar" if run and os.access(run, os.W_OK) else Path(f"/tmp/ttyd-azahar-{os.getuid()}")
+    d.mkdir(parents=True, exist_ok=True)
+    told = False
+    while True:
+        used = 0
+        for i in range(n):
+            fd = os.open(d / f"azahar-slot-{i}", os.O_RDWR | os.O_CREAT, 0o666)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                os.ftruncate(fd, 0)
+                os.write(fd, f"{os.getpid()}\n".encode())
+                _slot_fd = fd
+                return
+            except OSError:
+                os.close(fd)
+                used += 1
+        if not told:
+            print(f"run_azahar: waiting for a free Azahar slot ({used} in use)", flush=True)
+            told = True
+        time.sleep(5)
 
 
 def fail(msg, code=1):
@@ -226,6 +258,7 @@ def main():
         LAST = args.last.resolve()
 
     build = args.build.resolve()
+    acquire_slot()
     if not build.is_file():
         fail(f"{build} not found", 2)
     if not str(build).startswith(str(Path.home())):

@@ -36,7 +36,8 @@ from pathlib import Path
 
 APP_ID = "org.azahar_emu.Azahar"
 REPO = Path(__file__).resolve().parents[2]
-PROFILE = REPO / "build" / "azahar-profile"
+DEFAULT_PROFILE = REPO / "build" / "azahar-profile"
+PROFILE = DEFAULT_PROFILE
 LAST = REPO / "build" / "azahar-last"
 
 # Azahar log lines that mean the guest did something real hardware punishes.
@@ -127,13 +128,35 @@ def flatpak_cmd(args):
     ] + args
 
 
+def session_pids(sid):
+    """Processes in the session this run started (Azahar is launched with start_new_session)."""
+    pids = []
+    for d in Path("/proc").iterdir():
+        if d.name.isdigit():
+            try:
+                stat = (d / "stat").read_text()
+                if int(stat[stat.rindex(")") + 2:].split()[3]) == sid:
+                    pids.append(int(d.name))
+            except (OSError, ValueError):
+                pass
+    return pids
+
+
 def stop_azahar(proc):
-    subprocess.run(["flatpak", "kill", APP_ID], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+    """Stops only the Azahar this run started (its session), never other instances: no `flatpak kill`."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        pids = session_pids(proc.pid)
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=5)
+            if not session_pids(proc.pid):
+                return
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def cia_title_id(cia):
@@ -191,8 +214,16 @@ def main():
                     help="run the real DSP firmware (sdmc:/3ds/dspfirm.cdc in the profile) instead of Azahar's HLE DSP")
     ap.add_argument("--expect-crash", action="store_true",
                     help="a [CRASH] line does not end the run (crash tests: wait for --until)")
+    ap.add_argument("--profile", type=Path, help="Azahar profile folder (config, NAND, SD card); default build/azahar-profile. "
+                    "A different folder lets a second instance run beside another; only that profile's Azahar is stopped")
+    ap.add_argument("--last", type=Path, help="folder for this run's logs; default build/azahar-last")
     ap.add_argument("--allow-hw-faults", action="store_true", help="do not fail on Azahar fault lines")
     args = ap.parse_args()
+    global PROFILE, LAST
+    if args.profile:
+        PROFILE = args.profile.resolve()
+    if args.last:
+        LAST = args.last.resolve()
 
     build = args.build.resolve()
     if not build.is_file():
@@ -200,7 +231,6 @@ def main():
     if not str(build).startswith(str(Path.home())):
         fail("the build must be under the home directory (Azahar's Flatpak cannot see /tmp)", 2)
 
-    subprocess.run(["flatpak", "kill", APP_ID], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     sdmc = write_profile(args.gdb, args.gdb_port, args.lle_audio, args.realtime,
                          {"software": 0, "opengl": 1, "vulkan": 2}[args.renderer])
 

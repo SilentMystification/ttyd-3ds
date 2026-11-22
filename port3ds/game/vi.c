@@ -249,6 +249,7 @@ static void warp_switch(void) {
 #define SWEEP_MAX 512
 static char (*s_sweep_maps)[16];
 static u8* s_sweep_story;
+static const char* s_sweep_warp; /* the map the warp goes to (a stg stage's host map) */
 static int s_sweep_n, s_sweep_i, s_sweep_frames, s_sweep_wait, s_sweep_state = -1;
 
 static void sweep_read(void) {
@@ -298,11 +299,17 @@ static void sweep_frame(void) {
             s_sweep_state = 0;
             return;
         }
-        if (mapDataPtr(s_sweep_maps[s_sweep_i]) == NULL) {
-            /* seq_mapchange would read through the NULL (the storybook's stg maps) */
-            PLOG_I("sweep: %s not in the map table", s_sweep_maps[s_sweep_i]);
-            s_sweep_i++;
-            return;
+        s_sweep_warp = s_sweep_maps[s_sweep_i];
+        if (mapDataPtr(s_sweep_warp) == NULL) {
+            /* the stg battle stages are no map-change targets: enter them through a battle on a host map */
+            int story = s_sweep_story[s_sweep_i];
+            s_sweep_warp = tst_stage_host(s_sweep_maps[s_sweep_i], &story);
+            if (s_sweep_warp == NULL) {
+                PLOG_I("sweep: %s not in the map table", s_sweep_maps[s_sweep_i]);
+                s_sweep_i++;
+                return;
+            }
+            s_sweep_story[s_sweep_i] = (u8)story;
         }
         if (seq == SEQ_TITLE || (s_sweep_i == 0 && seq == SEQ_GAME)) {
             warp_new_game(s_sweep_story[s_sweep_i], plat_switch_int("party", 1));
@@ -318,13 +325,30 @@ static void sweep_frame(void) {
             PLOG_I("sweep: reset system level %d -> 0", (int)_mariostSystemLevel);
             marioStSystemLevel(0);
         }
-        seqSetSeq(SEQ_MAP_CHANGE, s_sweep_maps[s_sweep_i], NULL);
+        seqSetSeq(SEQ_MAP_CHANGE, s_sweep_warp, NULL);
         s_sweep_state = 2;
         s_sweep_wait = 0;
         return;
     }
     s_sweep_wait++;
-    const char* map = s_sweep_maps[s_sweep_i];
+    const char* map = s_sweep_warp;
+    if (s_sweep_state == 6) { /* a stg stage's battle (test_gallery.c) */
+        int r = tst_stage_poll(s_sweep_frames);
+        if (r == 1) {
+            char path[48];
+            snprintf(path, sizeof(path), "sweep/%s.ppm", s_sweep_maps[s_sweep_i]);
+            plat_gpu_shot(path);
+            PLOG_I("sweep: %s ok (battle stage)", s_sweep_maps[s_sweep_i]);
+        } else if (r == 2) {
+            s_sweep_i++;
+            s_sweep_state = 1;
+        } else if (r < 0) {
+            PLOG_W("sweep: %s timeout (battle stage, sequence %d)", s_sweep_maps[s_sweep_i], seq);
+            s_sweep_state = 4;
+            s_sweep_wait = 0;
+        }
+        return;
+    }
     if (seq == SEQ_BATTLE && (s_sweep_state == 2 || s_sweep_state == 3 || s_sweep_state == 4)) {
         PLOG_I("sweep: %s ok (battle on entry)", map);
         s_sweep_state = 5;
@@ -351,6 +375,11 @@ static void sweep_frame(void) {
             PLOG_W("sweep: %s timeout (sequence %d, map %s)", map, seq, gp->currentMapName);
             s_sweep_state = 4;
         }
+        return;
+    }
+    if (s_sweep_state == 3 && s_sweep_wait == s_sweep_frames && s_sweep_warp != s_sweep_maps[s_sweep_i]) {
+        s_sweep_state = tst_stage_start(s_sweep_maps[s_sweep_i]) ? 6 : 4;
+        s_sweep_wait = 0;
         return;
     }
     if (s_sweep_state == 3 && s_sweep_wait == s_sweep_frames) {

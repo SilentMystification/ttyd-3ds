@@ -82,15 +82,22 @@ The game sees one GameCube controller. The 3DS maps to it like this:
 - The files use the same container as the GameCube memory card "GCI" format that Dolphin uses.
 - **Back up** by copying the whole `sdmc:/3ds/ttyd/card/` folder to your computer. To restore, copy it back
   while the game is closed.
-- **Dolphin saves: moving them between Dolphin and the port does not work yet.**
-  - The folder, file name and file header match what Dolphin uses.
-  - The save data inside does not. The port keeps it in the 3DS's byte order. The GameCube and Dolphin use the opposite order.
-  - A save copied from Dolphin is seen by the game as **corrupted** (all four slots). A save from the port is not a valid Dolphin save.
-  - Nothing is damaged by trying. Keep a backup anyway.
-  - This is tracked as a known gap. When it is fixed, the steps will be: in Dolphin, export with Tools,
-    Memory Card Manager (or copy the `.gci` from Dolphin's folder `User/GC/USA/Card A/`)
-    (unverified: Dolphin paths), then copy the file to `sdmc:/3ds/ttyd/card/`. The file name does not matter.
-    The port finds the save by the name written inside the file.
+- **Moving saves between Dolphin and the port.** The port stores the save exactly as the GameCube does, so one
+  file works in both. No conversion tool is needed.
+  - To bring a save **into** the port: find the `.gci` file of the game in Dolphin and copy it to
+    `sdmc:/3ds/ttyd/card/`. Dolphin keeps them in its user folder, `GC/USA/Card A/` for the US release
+    (unverified: Dolphin paths). You can also export one with Tools, Memory Card Manager.
+    The file name does not matter. The port finds the save by the name written inside the file.
+    Close the game first, and start it again.
+  - To take a save **out**: copy `01-G8ME-mariost_save_file.gci` from the card folder into Dolphin's `Card A`
+    folder, or import it in the Memory Card Manager (unverified: Dolphin steps).
+  - The save must be from the same region as the port. A save from another region is ignored (see below).
+  - Saves made by earlier port builds are read and converted on load. They are rewritten in the GameCube format
+    the next time you save. The log says "card: converted a save from the old little-endian layout".
+  - Back up before you try. Copy over a save you want to keep only after a backup.
+  - Tested: saves from the paper-cut PC port (a different program) load, and the game's own checks accept the
+    port's saves in the GameCube byte order. A save from a real GameCube or Dolphin has not been tried
+    (none was available).
 - A save from another region is ignored. The log says, for example, "a JP save (G8MJ), this build reads G8ME saves".
   The game then shows no such save.
 - A file that is shorter than it should be is ignored. The log says so.
@@ -124,7 +131,8 @@ The port shows these and waits for START. Press START to leave.
 - A slot that says **File corrupted. This file must be erased.** failed the game's own check.
   The game keeps two copies of each slot. It shows the slot as corrupted only when both copies fail.
   Use Erase Data on that slot, then start a new game in it. Restore a backup if you have one.
-- A save you copied from Dolphin shows as corrupted in all four slots. See Saves.
+- A save that does not match its checksums shows as corrupted. If a Dolphin save does this, copy it again
+  and check that it is the same region.
 
 ### Making a bug report
 

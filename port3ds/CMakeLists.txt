@@ -155,7 +155,7 @@ add_custom_target(ttyd_rels DEPENDS ${TTYD_REL_OBJECTS})
 # Byte-swap tables for the disc formats (port3ds/game/formats/), from the
 # port's own debug info: a probe object names each format's structs, and
 # tools/port3ds/gen_swap.py reads their layouts from its DWARF.
-execute_process(COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/gen_swap.py" probe
+execute_process(COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/gen_swap.py" probe --game
     --out "${TTYD_GEN_DIR}/swap_probe.c.tmp" RESULT_VARIABLE _gen_rc)
 if(NOT _gen_rc EQUAL 0)
     message(FATAL_ERROR "gen_swap.py probe failed")

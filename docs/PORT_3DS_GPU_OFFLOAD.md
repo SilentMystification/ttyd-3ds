@@ -1,6 +1,6 @@
 # Plan: moving GX vertex work from the CPU to the PICA200
 
-Status: planned 2026-11-22. Measurements and options are in `PORT_3DS_GX_PERF.md` (the GX agent's design note); Star3D ideas in `STAR3D_NOTES.md`. This file sets the order and the **acceptance rules**.
+Status: planned 2026-11-22. Steps 1 and 2 done. Step 3 built 2026-11-22 behind `gxvsh` (default **0**): the acceptance tools exist (`tools/port3ds/vsh_accept.py`), the results per scene are in `PORT_3DS_GX_PERF.md`, "Results: the vertex-shader path"; it stays off because the decal rule keeps the busiest scene on the CPU in every frame (reported there) and its routing then costs time. Measurements and options are in `PORT_3DS_GX_PERF.md` (the GX agent's design note); Star3D ideas in `STAR3D_NOTES.md`. This file sets the order and the **acceptance rules**.
 
 ## Order
 

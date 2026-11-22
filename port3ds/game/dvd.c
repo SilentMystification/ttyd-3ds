@@ -19,6 +19,7 @@
 
 #include "plat/disc.h"
 #include "plat/plat.h"
+#include "port3ds/fst.h"
 #include "port3ds/os_internal.h"
 #include "port3ds/rel_static.h"
 #include "version.h"
@@ -38,13 +39,9 @@ void port_disc_data_fill(void);
 /* Marks a DVDFileInfo that reads a static REL's module header. */
 #define REL_FILE_MARK 0x52454C00u /* 'REL\0' */
 
-typedef struct {
-    u8 is_dir;
-    u32 name;   /* offset in the string table */
-    u32 offset; /* file: disc offset; dir: parent index */
-    u32 size;   /* file: size; dir: index after the last child */
-} FstEntry;
+typedef PortFstEntry FstEntry;
 
+static PortFst s_tab; /* the parsed FST (port3ds/fst.h) */
 static FstEntry* s_fst;
 static const char* s_names;
 static u32 s_count;
@@ -100,82 +97,23 @@ void DVDInit(void) {
     if (raw == NULL || plat_disc_read(fst_offset, raw, fst_size) != (s32)fst_size) {
         plat_user_error("  The disc image's file table cannot be read.");
     }
-    s_count = be32(raw + 8);
-    if (s_count == 0 || (u64)s_count * 12 > fst_size) {
+    if (port_fst_load(&s_tab, raw, fst_size) != 0) {
         plat_user_error("  The disc image's file table is damaged.");
     }
-    s_fst = malloc(sizeof(FstEntry) * s_count);
-    for (u32 i = 0; i < s_count; i++) {
-        const u8* e = raw + i * 12;
-        u32 w0 = be32(e);
-        s_fst[i].is_dir = (u8)(w0 >> 24);
-        s_fst[i].name = w0 & 0xFFFFFF;
-        s_fst[i].offset = be32(e + 4);
-        s_fst[i].size = be32(e + 8);
-    }
-    /* The string table stays in the FST buffer. */
-    s_names = (const char*)raw + s_count * 12;
+    s_fst = s_tab.entries;
+    s_names = s_tab.names; /* the string table stays in the FST buffer */
+    s_count = s_tab.count;
     s_ready = 1;
     PLOG_I("DVD: " EXPECTED_ID " image, %lu FST entries, main.dol at %08lx", (unsigned long)s_count,
            (unsigned long)s_dol_offset);
     port_disc_data_fill();
 }
 
-static int name_eq(const char* fst_name, const char* path, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        if (fst_name[i] == '\0' || tolower((unsigned char)fst_name[i]) != tolower((unsigned char)path[i])) {
-            return 0;
-        }
-    }
-    return fst_name[len] == '\0';
-}
-
 s32 DVDConvertPathToEntrynum(const char* path) {
     if (!s_ready || path == NULL) {
         return -1;
     }
-    u32 dir = 0;
-    const char* p = path;
-    while (*p == '/') {
-        p++;
-    }
-    for (;;) {
-        if (*p == '\0') {
-            return (s32)dir;
-        }
-        const char* end = p;
-        while (*end != '\0' && *end != '/') {
-            end++;
-        }
-        size_t len = (size_t)(end - p);
-        if (len == 1 && p[0] == '.') {
-            /* stays in dir */
-        } else if (len == 2 && p[0] == '.' && p[1] == '.') {
-            dir = s_fst[dir].offset;
-        } else {
-            u32 i = dir + 1;
-            u32 last = s_fst[dir].size;
-            u32 found = 0;
-            while (i < last) {
-                if (name_eq(s_names + s_fst[i].name, p, len)) {
-                    found = i;
-                    break;
-                }
-                i = s_fst[i].is_dir ? s_fst[i].size : i + 1;
-            }
-            if (found == 0) {
-                return -1;
-            }
-            if (!s_fst[found].is_dir) {
-                return *end == '\0' ? (s32)found : -1;
-            }
-            dir = found;
-        }
-        p = end;
-        while (*p == '/') {
-            p++;
-        }
-    }
+    return port_fst_find(&s_tab, path);
 }
 
 /* "rel/<area>.rel" (with any root prefix) -> static REL index, else -1. */

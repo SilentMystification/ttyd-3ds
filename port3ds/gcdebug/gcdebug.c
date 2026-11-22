@@ -142,8 +142,13 @@ void tst_log(const char* fmt, ...) {
 static u32 s_rand_next = 1;
 
 int gcdbg_rand(void) {
+    register u32 lr;
+    u32 v;
+    asm { mflr lr } /* the caller's address: nothing before this has changed LR */
     s_rand_next = s_rand_next * 1103515245u + 12345u;
-    return (int)((s_rand_next >> 16) & 0x7FFF);
+    v = (s_rand_next >> 16) & 0x7FFF;
+    tst_rngtrace(lr, v);
+    return (int)v;
 }
 
 void gcdbg_srand(unsigned int seed) { s_rand_next = seed; }

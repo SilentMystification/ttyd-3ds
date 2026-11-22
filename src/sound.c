@@ -19,15 +19,13 @@
 void SoundIntOff(void);
 void SoundIntOn(void);
 #endif
-#if VERSION >= VERSION_US
 
 // The AI DMA source as a cached address: the GameCube ORs in 0x80000000 (physical to cached);
-// ports get a usable pointer from AIGetDMAStartAddr already.
+// ports get a usable pointer from AIGetDMAStartAddr already. Every version uses it.
 #ifdef TARGET_PORT
 #define PORT_AI_DMA_ADDR(a) (a)
 #else
 #define PORT_AI_DMA_ADDR(a) ((a) | 0x80000000)
-#endif
 #endif
 
 //.bss

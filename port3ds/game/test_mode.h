@@ -47,6 +47,12 @@ u32 tst_warp_frames(void);
 
 /* ---- test_gallery.c: fx= and battle= ---- */
 void tst_gallery_frame(u32 frame);
+/* Map sweep of the stg_* battle stage maps: the host map (and story) that has an enemy, or
+ * NULL if name is no stage; start a battle there on that stage; poll it each frame (0 waiting,
+ * 1 stage up after settle frames, 2 back in the field, -1 failed). */
+const char* tst_stage_host(const char* name, int* story);
+int tst_stage_start(const char* name);
+int tst_stage_poll(int settle);
 /* ---- test_battle.c: btlauto= ---- */
 void tst_battle_frame(u32 frame);
 

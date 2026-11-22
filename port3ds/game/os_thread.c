@@ -20,6 +20,8 @@
  */
 #include <dolphin/os.h>
 #include <setjmp.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -54,6 +56,27 @@ static unsigned s_switches;
 unsigned port_thread_switch_count(void) { return s_switches; }
 
 static ThreadInfo* info_of(OSThread* t) { return (ThreadInfo*)t->context.gpr[0]; }
+
+/* yieldstats=N: how long each OS thread holds the baton, and how much of that
+ * the idle yields slept (switch yieldsleep). Counters are touched under s_lock
+ * (set_running) or by the baton holder (yield). */
+static int s_stats_secs = -1; /* -1 unread, 0 off */
+static uint64_t s_run_since;
+static uint64_t s_run_ticks[MAX_THREADS];
+static uint64_t s_yield_sleep_ticks, s_empty_yields, s_report_at, s_report_start;
+static uint64_t s_report_run[MAX_THREADS], s_report_sleep, s_report_yields;
+
+/* Caller holds s_lock. */
+static void set_running(OSThread* next) {
+    if (s_stats_secs > 0) {
+        uint64_t now = plat_ticks();
+        if (s_running != NULL) {
+            s_run_ticks[info_of(s_running) - s_info] += now - s_run_since;
+        }
+        s_run_since = now;
+    }
+    s_running = next;
+}
 
 static void queue_push(OSThreadQueue* q, OSThread* t) {
     t->link.next = NULL;
@@ -113,7 +136,7 @@ static OSThread* take_ready(int limit) {
 static void switch_away(OSThread* self, OSThread* next) {
     ThreadInfo* me = info_of(self);
     int irq = port_irq_release_all();
-    s_running = next;
+    set_running(next);
     if (next != NULL) {
         next->state = OS_THREAD_STATE_RUNNING;
         s_switches++;
@@ -141,7 +164,7 @@ static void host_entry(void* arg) {
     ti->os->state = OS_THREAD_STATE_MORIBUND;
     if (s_running == ti->os) {
         OSThread* next = take_ready(31);
-        s_running = next;
+        set_running(next);
         if (next != NULL) {
             next->state = OS_THREAD_STATE_RUNNING;
             s_switches++;
@@ -221,7 +244,7 @@ s32 OSResumeThread(OSThread* thread) {
         }
         if (s_running == NULL) {
             OSThread* next = take_ready(31);
-            s_running = next;
+            set_running(next);
             next->state = OS_THREAD_STATE_RUNNING;
             plat_event_signal(info_of(next)->baton);
         }
@@ -245,15 +268,67 @@ s32 OSSuspendThread(OSThread* thread) {
     return prev;
 }
 
+static int s_ys_us = -1; /* idle-yield sleep in microseconds, 0 = return at once; -1 unread */
+
+/* Every yieldstats=N seconds: share of wall time each OS thread held the
+ * baton (the idle yields' sleep is part of the holder's time and listed apart). */
+static void yield_report(void) {
+    uint64_t now = plat_ticks();
+    if (now - s_report_at < (uint64_t)s_stats_secs * PLAT_TICKS_PER_SEC) {
+        return;
+    }
+    uint64_t wall = now - s_report_start;
+    char buf[160];
+    int n = 0;
+    for (int i = 0; i < MAX_THREADS; i++) {
+        uint64_t d = s_run_ticks[i] - s_report_run[i];
+        if (d != 0 && n < (int)sizeof(buf) - 24) {
+            n += snprintf(buf + n, sizeof(buf) - n, " t%d %lu.%lu%%", i, (unsigned long)(d * 1000 / wall / 10),
+                          (unsigned long)(d * 1000 / wall % 10));
+        }
+        s_report_run[i] = s_run_ticks[i];
+    }
+    uint64_t sl = s_yield_sleep_ticks - s_report_sleep;
+    PLOG_I("[THREADS] %lu ms: baton held:%s; idle yields %lu, slept %lu.%lu%% (yieldsleep %d us)",
+           (unsigned long)(wall / (PLAT_TICKS_PER_SEC / 1000)), buf, (unsigned long)(s_empty_yields - s_report_yields),
+           (unsigned long)(sl * 1000 / wall / 10), (unsigned long)(sl * 1000 / wall % 10), s_ys_us);
+    s_report_sleep = s_yield_sleep_ticks;
+    s_report_yields = s_empty_yields;
+    s_report_start = now;
+    s_report_at = now;
+}
+
 void OSYieldThread(void) {
     OSThread* self = s_self;
     if (self == NULL) {
         return;
     }
+    if (s_ys_us < 0) {
+        /* yieldsleep[=us]: sleep when no other thread is ready (default off; 100 us when on) */
+        s_ys_us = plat_switch_has("yieldsleep") ? plat_switch_int("yieldsleep", 100) : 0;
+        if (s_ys_us == 1) {
+            s_ys_us = 100;
+        }
+        s_stats_secs = plat_switch_int("yieldstats", 0);
+        s_report_at = plat_ticks();
+        s_report_start = s_report_at;
+        s_run_since = s_report_at;
+    }
     plat_mutex_lock(s_lock);
     OSThread* next = take_ready(self->priority);
     if (next == NULL) {
         plat_mutex_unlock(s_lock);
+        if (s_ys_us > 0) {
+            uint64_t t0 = s_stats_secs > 0 ? plat_ticks() : 0;
+            plat_thread_sleep_ns((int64_t)s_ys_us * 1000);
+            if (s_stats_secs > 0) {
+                s_yield_sleep_ticks += plat_ticks() - t0;
+            }
+        }
+        if (s_stats_secs > 0) {
+            s_empty_yields++;
+            yield_report();
+        }
         return;
     }
     make_ready(self);
@@ -294,7 +369,7 @@ void OSWakeupThread(OSThreadQueue* queue) {
     if (s_running == NULL) {
         OSThread* next = take_ready(31);
         if (next != NULL) {
-            s_running = next;
+            set_running(next);
             next->state = OS_THREAD_STATE_RUNNING;
             s_switches++;
             plat_event_signal(info_of(next)->baton);
@@ -308,7 +383,7 @@ void port_thread_dispatch_if_idle(void) {
     if (s_running == NULL) {
         OSThread* next = take_ready(31);
         if (next != NULL) {
-            s_running = next;
+            set_running(next);
             next->state = OS_THREAD_STATE_RUNNING;
             s_switches++;
             plat_event_signal(info_of(next)->baton);

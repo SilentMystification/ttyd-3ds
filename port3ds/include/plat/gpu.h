@@ -146,6 +146,7 @@ typedef struct {
     uint32_t record_bytes;
     uint32_t segments; /* extra submits in a frame (record or vertex arena full) */
     uint32_t render_us, gpu_us;
+    uint32_t calls; /* plat_gpu_draw calls; `draws` is the draw commands after merging */
 } PlatGpuStats;
 void plat_gpu_stats(PlatGpuStats* out);
 uint32_t plat_gpu_present_count(void); /* frames presented so far (the shot number) */

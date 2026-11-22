@@ -866,8 +866,8 @@ dumped:
         }
         break;
     }
+    plat_gpu_draw(s_tri_out, s_tri_n); /* with 0 (all culled) it only gives the vertices back */
     if (s_tri_n > 0) {
-        plat_gpu_draw(s_tri_out, s_tri_n);
         gx_stat_draws++;
         gx_stat_vertices += s_tri_n;
     }

@@ -87,6 +87,11 @@ static u32 s_last_fog_id; /* PlatGpuState.fog_lut_id of the last LUT sent (0: s_
 static PlatGpuStats s_stats, s_stats_frame;
 static int s_rot;              /* orientation mode, see efb_to_target */
 static u32 s_shots_every, s_shots_left;
+/* switch gxmerge (default 1): a draw that continues the previous one in the
+ * vertex arena, with no command between them, extends its CMD_DRAW */
+static int s_merge = 1;
+static u32* s_last_draw;              /* body of the last command when it is a CMD_DRAW */
+static PlatGpuVertex* s_last_alloc;   /* the last plat_gpu_alloc_vertices block, until its draw */
 
 /* ---- Orientation ----
  * EFB pixel (x, y) -> target pixel. Mode 0 is the layout citro3d uses for
@@ -153,6 +158,7 @@ static void* rec_put(u16 type, u32 size) {
     h->type = type;
     h->size = (u16)(need - sizeof(CmdHead));
     r->used += need;
+    s_last_draw = NULL; /* plat_gpu_draw sets it again for a draw */
     return h + 1;
 }
 
@@ -180,6 +186,8 @@ static void submit(int present) {
     s_cur ^= 1;
     s_rec[s_cur].used = 0;
     s_rec[s_cur].nverts = 0;
+    s_last_draw = NULL;
+    s_last_alloc = NULL;
     memset(&s_last_state, 0xFF, sizeof(s_last_state));
     s_last_state_valid = 0;
     s_last_fog_hash = 0;
@@ -212,12 +220,15 @@ PlatGpuVertex* plat_gpu_alloc_vertices(uint32_t count) {
         PLOG_E("gpu: a draw of %lu vertices is larger than the vertex arena", (unsigned long)count);
         return NULL;
     }
-    if (r->nverts + count > ARENA_VERTICES) {
+    /* the draw command these vertices get must go into the same record:
+     * room for it is made here, so plat_gpu_draw never starts a segment */
+    if (r->nverts + count > ARENA_VERTICES || r->used + sizeof(CmdHead) + 8 + 64 > RECORD_BYTES) {
         flush_segment();
         r = &s_rec[s_cur];
     }
     PlatGpuVertex* v = r->verts + r->nverts;
     r->nverts += count;
+    s_last_alloc = v;
     return v;
 }
 
@@ -262,13 +273,30 @@ void plat_gpu_set_state(const PlatGpuState* state) {
 }
 
 void plat_gpu_draw(const PlatGpuVertex* vertices, uint32_t count) {
+    Record* r = &s_rec[s_cur];
+    if (s_merge && vertices != NULL && vertices == s_last_alloc &&
+        (u32)(vertices - r->verts) + count <= r->nverts) {
+        /* the last block allocated: give back what the draw did not use
+         * (culled triangles), so the next block follows this draw directly */
+        r->nverts = (u32)(vertices - r->verts) + count;
+    }
+    s_last_alloc = NULL;
     if (vertices == NULL || count == 0) {
+        return;
+    }
+    u32 first = (u32)(vertices - r->verts);
+    s_stats_frame.calls++;
+    if (s_merge && s_last_draw != NULL && s_last_draw[0] + s_last_draw[1] == first && s_last_draw[1] % 3 == 0) {
+        /* same state, no command since, contiguous triangles: one draw */
+        s_last_draw[1] += count;
+        s_stats_frame.vertices += count;
         return;
     }
     u32* d = rec_put(CMD_DRAW, 8);
     if (d != NULL) {
-        d[0] = (u32)(vertices - s_rec[s_cur].verts);
+        d[0] = first;
         d[1] = count;
+        s_last_draw = d;
         s_stats_frame.draws++;
         s_stats_frame.vertices += count;
     }
@@ -314,6 +342,7 @@ void plat_gpu_frame_end(uint16_t efb_w, uint16_t efb_h) {
     s_stats.state_changes = s_stats_frame.state_changes;
     s_stats.record_bytes = s_stats_frame.record_bytes;
     s_stats.segments = s_stats_frame.segments;
+    s_stats.calls = s_stats_frame.calls;
     memset(&s_stats_frame, 0, sizeof(s_stats_frame));
     s_frame_counter++;
 }
@@ -1071,6 +1100,7 @@ void plat_gpu_init(void) {
     plat_set_gpu_shutdown(gpu_shutdown);
     plat_set_gpu_abort(gpu_abort);
     s_rot = plat_switch_int("rot", 0) & 3;
+    s_merge = plat_switch_int("gxmerge", 1) != 0;
     s_efb = C3D_RenderTargetCreate(TARGET_W, TARGET_H, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     if (s_efb == NULL) {
         plat_fatal("gpu: no VRAM for the %dx%d EFB", TARGET_W, TARGET_H);
@@ -1134,8 +1164,8 @@ void plat_gpu_init(void) {
             s_threaded = 0;
         }
     }
-    PLOG_I("gpu: EFB %dx%d (rotated), render thread %s, rot %d", TARGET_W, TARGET_H, s_threaded ? "on core 2" : "off",
-           s_rot);
+    PLOG_I("gpu: EFB %dx%d (rotated), render thread %s, rot %d, draw merge %d", TARGET_W, TARGET_H,
+           s_threaded ? "on core 2" : "off", s_rot, s_merge);
     if (plat_switch_has("gputest")) {
         gpu_selftest();
     }

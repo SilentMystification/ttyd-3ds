@@ -42,6 +42,7 @@ Then the measurement items from `PORT_3DS_BACKLOG.md` lane D, all through `devup
 10. **Sleep and HOME.** Expect the `gpu: suspend|sleep ... / gpu: resume` log lines and `cpu limit: 30% (HOME pressed, early ...)`.
 11. **Copy targets:** open the START pause menu in `gor_01`. The background must show the captured field. Also run `vramfail=1` once, to check the strip fallback's `GX_TextureCopy` ordering on hardware.
 12. **Shader path (`gxvsh=1`, default):** compare frame times and the render thread's time with `gxvsh=0`.
+13. **NDSP audio:** `ndspvoices=1 ndspstreams=1 ndspstats=10` on the title screen, `gor_01` and a battle. Listen for a tick every 17.5 ms in the music (ADPCM history not carried across wave buffers on firmware). Note the `[NDSPV] flush ticks` line, with `audiobatch=1` and `audiobatch=2`.
 
 What Azahar can't show, so these are the real tests:
 - the APT jump or relaunch: Azahar aborts on it;

@@ -29,7 +29,7 @@ Updated 2026-11-22. Owner goals: original GameCube frame rates, stereo 3D, all t
 
 ## Lane B: correctness (Azahar, after the A items they need)
 
-1. Storybook `stg` maps reachable and swept (55 maps).
+1. ~~Storybook `stg` maps~~: these are the 52 battle-background maps. **Done:** swept through a battle, 52/52 ok. To do: move the `hei_01` host into a registered sweep-entry hook (portability).
 2. Story playthrough by replay, chapter by chapter, including the Peach and Bowser interludes and Bowser's side-scrolling stages, through the ending and credits.
 3. Battles: every action command, partner and special move, boss, hazard and audience event, through `battle=` plus a test hook that picks moves and forces action-command results.
 4. Effects: all of `src/effect/` and `src/effect/n64/`, plus the screen-copy, indirect-texture and z-texture scenes, with per-game GX overrides where the PICA can't. This includes the curtain fix and closing out the prologue-cabin black frames.

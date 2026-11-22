@@ -9,7 +9,7 @@ Updated 2026-11-22. The plan is in [PORT_3DS_PLAN.md](PORT_3DS_PLAN.md) and the 
   - **Phase 6 mostly done.**
   - **Phase 7 under way:**
     - test infrastructure is in;
-    - the map sweep passes all reachable maps except the storybook `stg` maps (in progress);
+    - the map sweep passes all maps, including the 52 `stg` battle-background maps (through a battle on `hei_01`);
     - galleries and the effect and battle sweeps are running.
   - **Phase 8 started on hardware:** the game boots and plays on the New 3DS as a 3dsx, and the CIA boots with QTM.
 - **GameCube matching build:** 100% (Game Code, SDK, Modules, MusyX 31/31 since the `hardware.c` case fix).

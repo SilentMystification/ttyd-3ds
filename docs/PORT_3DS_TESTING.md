@@ -122,6 +122,8 @@ Switches the game reads (space-separated words in `--switches`):
 | `ndspvoices=1` | Plays MusyX's dry DSP-ADPCM voices on NDSP channels 1–23, timed to the software mix on channel 0. Streams, PCM, voices with an aux send, and starts beyond the free channels stay in software, and a voice that later gets an aux send moves back. Loops that start inside an ADPCM frame are re-aligned at load. Default off. See [PORT_3DS_AUDIO.md](PORT_3DS_AUDIO.md) |
 | `ndspstats=N` | Every N seconds, `[NDSPV]` lines: voice-frames in software, on NDSP and with aux, overflows, starts, cache hits, re-aligned loops, late events, and the share of time in the mixer |
 | `ndspcachekb=N` | Size of the NDSP voices' sample cache in linear memory, in KB (default 4096) |
+| `yieldsleep[=us]` | When `OSYieldThread` finds no other ready OS thread, sleeps `us` µs (default 100) instead of returning at once. This stops the DVD manager's `proc_main` spinning on core 0. Default off until measured on hardware |
+| `yieldstats=N` | Every N seconds, a `[THREADS]` line: each OS thread's share of baton-holding time, idle yields, and time slept by `yieldsleep` |
 | `devmenu` | Enables the developer menu, opened with ZL+SELECT. SELECT alone opens the player Options menu, so a `padscript` that pressed `select` for the old developer menu now opens Options. While the Options menu is open, `padscript` steps advance once per ~16 ms menu poll, not per game frame. Example: `wait*900,select*3,wait*5,right*2,wait*5,select*3` |
 | `devupdate` | Development only: starts the ctr-devkit updater at boot (TCP 5050, `devupdateport=N`, `devupdatetoken=TEXT`), and a crash then goes to recovery mode instead of waiting for START. See "ctr-devkit: crash and devupdate" below |
 
@@ -358,4 +360,11 @@ The US disc has no THP files, so the tests make their own.
 2. Build `thp_dump` with gcc from `port3ds/third_party/aurora_thp/*.c`. Add `-DTHP_SDK_QUARTER_IDCT_BUG=0` for an exact decode.
 3. Compare against ffmpeg: `tools/port3ds/thp_test/compare.py OUT.thp --dump ./thp_dump`.
 4. On-device timing: the `tools/port3ds/thp_test/arm_bench` CIA (`--until "BENCH DONE"`).
+
+### Battle-background (`stg`) maps in the sweep
+
+- **What they are:** the `stg_*` maps are battle backgrounds (`bmapLoad`'s `specificStageDataDir`). Only `stg_01_0` to `stg_01_4` are in the map table.
+- **How the sweep reaches the others:** through a battle on `hei_01` at story 30. It waits `--frames` frames after the battle is set up, then logs `sweep: <map> ok (battle stage)`.
+- **What counts as a pass:** both battle maps load, shown as `stage: <map> up: 2 maps, stage map joints N`.
+- **Result:** all 52 pass (2026-11-22).
 

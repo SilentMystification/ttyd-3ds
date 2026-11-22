@@ -777,6 +777,113 @@ static void render_record(Record* r) {
     }
 }
 
+/* ---- APT suspend, sleep and exit ----
+ *
+ * The hook runs on the thread that calls aptMainLoop: the game thread, at a
+ * frame boundary, so the game thread is never mid-record and never touches
+ * citro3d. libctru calls the hooks newest first, before it releases the GPU
+ * (suspend, sleep) or after the app asked to leave (exit). citro3d's own hook
+ * (C3Di_AptEventHook) on suspend waits for its GX queue to drain and stops
+ * the vblank callbacks; on restore it marks all of its cached state dirty and
+ * restarts the vblank callbacks. It does not know about this render thread.
+ *
+ * What the render thread can be doing when the hook runs:
+ *  1. waiting for a record (s_submit): nothing to close, nothing pending.
+ *  2. a record submitted (s_busy) but not started: it must not start, or
+ *     C3D_FrameBegin would queue GPU work after the right is released and the
+ *     next C3D_FrameBegin would wait forever for a queue that never finishes.
+ *     It parks in render_gate() with the record kept.
+ *  3. in render_record before C3D_FrameBegin, or in C3D_FrameBegin's
+ *     C3D_FrameSync/queue wait: the vblank callbacks still run (citro3d stops
+ *     them only after this hook), so it gets through and renders the record.
+ *  4. between C3D_FrameBegin and C3D_FrameEnd: a frame is open, so it must
+ *     finish. A frame is never open across records: every record, a
+ *     mid-frame segment included, is a whole FrameBegin..FrameEnd.
+ *  5. after C3D_FrameEnd: the command list and the screen transfer are queued
+ *     and run asynchronously. Waiting for the record does not wait for the
+ *     GPU; citro3d's hook that runs right after ours does (gxCmdQueueWait),
+ *     and the render thread can queue nothing more in between.
+ * So the hook sets the hold first, waits until the render thread is idle or
+ * parked (never waits for the game thread), and the render thread's gate keeps
+ * it parked until the hold clears. Restore and wake are handled by a second
+ * hook registered before C3D_Init, so it runs after citro3d's restore and the
+ * render thread never races citro3d's dirty-flag update. */
+#define APT_HOLD_SUSPEND 1u
+#define APT_HOLD_SLEEP 2u
+#define APT_HOLD_EXIT 4u
+static aptHookCookie s_apt_first, s_apt_last;
+static volatile u32 s_apt_hold;
+static volatile int s_apt_parked, s_apt_discard, s_apt_off;
+
+/* Render thread, before a record: 1 = replay it, 0 = drop it (exiting). */
+static int render_gate(void) {
+    if (!__atomic_load_n(&s_apt_hold, __ATOMIC_ACQUIRE)) {
+        return 1;
+    }
+    __atomic_store_n(&s_apt_parked, 1, __ATOMIC_RELEASE);
+    while (__atomic_load_n(&s_apt_hold, __ATOMIC_ACQUIRE) && !__atomic_load_n(&s_apt_discard, __ATOMIC_ACQUIRE)) {
+        svcSleepThread(5000000LL);
+    }
+    __atomic_store_n(&s_apt_parked, 0, __ATOMIC_RELEASE);
+    return !__atomic_load_n(&s_apt_discard, __ATOMIC_ACQUIRE);
+}
+
+/* Runs first (registered after C3D_Init). */
+static void apt_hook_first(APT_HookType type, void* param) {
+    (void)param;
+    u32 bit;
+    const char* what;
+    switch (type) {
+    case APTHOOK_ONSUSPEND: bit = APT_HOLD_SUSPEND; what = "suspend"; break;
+    case APTHOOK_ONSLEEP: bit = APT_HOLD_SLEEP; what = "sleep"; break;
+    case APTHOOK_ONEXIT: bit = APT_HOLD_EXIT; what = "exit"; break;
+    default: return;
+    }
+    if (__atomic_load_n(&s_apt_off, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+    if (type == APTHOOK_ONEXIT) {
+        __atomic_store_n(&s_apt_discard, 1, __ATOMIC_RELEASE); /* a parked record is dropped */
+    }
+    __atomic_fetch_or(&s_apt_hold, bit, __ATOMIC_ACQ_REL);
+    int ok = 1;
+    if (s_threaded) {
+        /* Idle (not busy) or parked with its record unstarted. Bounded: a wedged render
+         * thread must not turn into a hang of the whole console. */
+        u64 t0 = svcGetSystemTick();
+        while (__atomic_load_n(&s_busy, __ATOMIC_ACQUIRE) && !__atomic_load_n(&s_apt_parked, __ATOMIC_ACQUIRE)) {
+            if (svcGetSystemTick() - t0 > 4ull * SYSCLOCK_ARM11) {
+                ok = 0;
+                break;
+            }
+            svcSleepThread(200000LL);
+        }
+    }
+    if (ok) {
+        PLOG_I("gpu: %s: render idle, frame closed", what);
+    } else {
+        PLOG_W("gpu: %s: the render thread did not go idle in 4 s, going on", what);
+    }
+}
+
+/* Runs last (registered before C3D_Init), after citro3d's restore. */
+static void apt_hook_last(APT_HookType type, void* param) {
+    (void)param;
+    u32 bit;
+    switch (type) {
+    case APTHOOK_ONRESTORE: bit = APT_HOLD_SUSPEND; break;
+    case APTHOOK_ONWAKEUP: bit = APT_HOLD_SLEEP; break;
+    default: return;
+    }
+    if (__atomic_load_n(&s_apt_off, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+    u32 left = __atomic_and_fetch(&s_apt_hold, ~bit, __ATOMIC_ACQ_REL);
+    if (left == 0) {
+        PLOG_I("gpu: resume");
+    }
+}
+
 static volatile int s_dead;
 static void render_thread(void* arg) {
     (void)arg;
@@ -787,7 +894,9 @@ static void render_thread(void* arg) {
         while (s_dead) {
             svcSleepThread(1000000000LL);
         }
-        render_record(&s_rec[__atomic_load_n(&s_render_idx, __ATOMIC_ACQUIRE)]);
+        if (render_gate()) {
+            render_record(&s_rec[__atomic_load_n(&s_render_idx, __ATOMIC_ACQUIRE)]);
+        }
         __atomic_store_n(&s_busy, 0, __ATOMIC_RELEASE);
         LightEvent_Signal(&s_done);
     }
@@ -926,13 +1035,16 @@ static void gpu_selftest(void) {
 /* Crash screen: no wait_idle (the render thread may be what crashed); the
  * render thread parks instead of touching citro3d again. */
 static void gpu_abort(void) {
+    s_apt_off = 1; /* the hooks stay in libctru's list, inert */
     s_dead = 1;
     C3D_Fini();
     gfxExit();
 }
 
 static void gpu_shutdown(void) {
+    s_apt_discard = 1; /* a record parked by suspend or exit is dropped, not waited for */
     wait_idle();
+    s_apt_off = 1;
     C3D_Fini();
     gfxExit();
 }
@@ -941,12 +1053,16 @@ void plat_gpu_init(void) {
     LightLock_Init(&s_tex_lock);
     LightEvent_Init(&s_submit, RESET_ONESHOT);
     LightEvent_Init(&s_done, RESET_STICKY);
+    /* before C3D_Init: libctru calls the newest hook first, so this one runs
+     * after citro3d's on restore and wake (see the APT section) */
+    aptHook(&s_apt_last, apt_hook_last, NULL);
     gfxInitDefault();
     gfxSet3D(false);
     plat_console_init();
     if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 8)) {
         plat_fatal("gpu: citro3d init failed");
     }
+    aptHook(&s_apt_first, apt_hook_first, NULL); /* after C3D_Init: runs before citro3d's on suspend, sleep, exit */
     plat_set_gpu_shutdown(gpu_shutdown);
     plat_set_gpu_abort(gpu_abort);
     s_rot = plat_switch_int("rot", 0) & 3;

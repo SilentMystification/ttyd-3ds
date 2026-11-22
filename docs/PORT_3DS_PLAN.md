@@ -14,6 +14,12 @@ This repository is a 100% matching C decompilation. The 3DS port compiles that s
 - Azahar is used for functional tests. Performance numbers are measured on hardware; Azahar numbers only show the direction of a change.
 - Hot loops must fit the 16 KiB L1 caches (instruction and data, per core). The N3DS L2 (2 MiB) and QTM RAM are used deliberately, not by accident.
 - The Linux build and the Windows build (Docker) are the same CMake project, and both must work from the first commit.
+- **Portability (decision 2026-11-22).** The platform and SDK layers should be reusable for other GameCube decomps. See [GC3DS_LIBRARY_NOTE.md](GC3DS_LIBRARY_NOTE.md) for the later split into `libgc3ds`. Rules from now on:
+  - `port3ds/plat/` and the SDK implementations (`port3ds/game/os*.c`, `dvd.c`, `card.c`, `pad.c`, `vi.c`, `ar.c`, `ai.c`, `gx/`) contain no TTYD symbol, file name, map name or story knowledge. Anything game-specific is passed in through a hook, as the warp list is through `plat_set_map_list`.
+  - Game-specific port code lives in clearly separate files (`port3ds/game/formats/`, `*_swap.c`, `disc_data.c`, `debug_dump.c`), or under `#ifdef TARGET_PORT` in `src/`.
+  - GX effects the PICA can't do are handled by per-game overrides registered with the GX layer. The GX core itself only has generic paths and logged fallbacks.
+  - Tools take game-specific details (title ID, menu paths, map lists) as arguments or config, not hard-coded values.
+  - Each new hook gets a one-line entry in GC3DS_LIBRARY_NOTE.md, so the extension API is recorded as it grows.
 
 ## 2. What we start from
 

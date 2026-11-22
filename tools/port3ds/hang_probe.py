@@ -40,6 +40,9 @@ def main():
     ap.add_argument("--port", type=int, default=24689)
     ap.add_argument("--peek", action="append", default=[], help="ADDR:SIZE (hex address) read at each sample")
     ap.add_argument("--samples", type=int, default=1, help="stops, 0.5 s apart; threads in a system call are left out after the first")
+    ap.add_argument("--interval", type=float, default=0.5, help="seconds the game runs between two samples")
+    ap.add_argument("--stack-all", action="store_true", help="scan every thread's stack, not only the first thread's")
+    ap.add_argument("--stack-words", type=int, default=24, help="code addresses kept from the stack scan")
     args = ap.parse_args()
 
     if LOG.exists():
@@ -83,11 +86,11 @@ def main():
                     continue
                 print(f"thread {t:x}: pc {pc:08x} lr {lr:08x} sp {sp:08x}")
                 print("    r0-r12 " + " ".join(f"{w:08x}" for w in words[:13]))
-                if t == threads[0]:
-                    # the first thread's stack: words that point into the code, innermost first
+                if t == threads[0] or args.stack_all:
+                    # the thread's stack: words that point into the code, innermost first
                     stack = rsp.read(sp, 1024)
                     code = [int.from_bytes(stack[i:i + 4], "little") for i in range(0, len(stack), 4)]
-                    code = [w for w in code if 0x100000 <= w < 0x500000][:24]
+                    code = [w for w in code if 0x100000 <= w < 0x500000][:args.stack_words]
                     if code:
                         names = subprocess.run(["addr2line", "-f", "-s", "-e", str(args.elf)] +
                                                [f"0x{w:x}" for w in code], capture_output=True, text=True).stdout.split()
@@ -96,7 +99,7 @@ def main():
                     print(f"    {line}")
             if sample + 1 < args.samples:
                 rsp.send("c")
-                time.sleep(0.5)
+                time.sleep(args.interval)
         rsp.close()
         return 0
     finally:

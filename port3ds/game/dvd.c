@@ -28,10 +28,13 @@ void port_disc_data_fill(void);
 
 #if VERSION == VERSION_US
 #define EXPECTED_ID "G8ME01"
+#define EXPECTED_REGION "US"
 #elif VERSION == VERSION_JP
 #define EXPECTED_ID "G8MJ01"
+#define EXPECTED_REGION "Japanese"
 #elif VERSION == VERSION_EU
 #define EXPECTED_ID "G8MP01"
+#define EXPECTED_REGION "PAL"
 #else
 #error "the 3DS port supports the G8MJ01, G8ME01 and G8MP01 releases"
 #endif
@@ -78,6 +81,8 @@ void DVDInit(void) {
     if (size < sizeof(header) || plat_disc_read(0, header, sizeof(header)) != (s32)sizeof(header)) {
         plat_user_error("  sdmc:/3ds/ttyd/game.iso cannot be read.");
     }
+    /* Before anything this version parses: the FST, main.dol and the RELs
+     * differ per region, so another region's disc is refused here. */
     if (memcmp(header, EXPECTED_ID, 6) != 0 || be32(header + 0x1C) != 0xC2339F3Du) {
         char id[7];
         memcpy(id, header, 6);
@@ -85,6 +90,13 @@ void DVDInit(void) {
             id[i] = isprint((unsigned char)id[i]) ? id[i] : '?';
         }
         id[6] = '\0';
+        if (memcmp(header, "G8M", 3) == 0 && memcmp(header + 4, "01", 2) == 0 && be32(header + 0x1C) == 0xC2339F3Du) {
+            /* The same game for another region (G8MJ01, G8ME01, G8MP01). */
+            PLOG_E("DVD: this build is for " EXPECTED_ID ", the disc is %s", id);
+            plat_user_error("  This build is for the " EXPECTED_REGION " version\n  (" EXPECTED_ID "); the disc is %s.\n\n"
+                            "  Use the build for the disc's region,\n  or copy the " EXPECTED_ID " disc to\n"
+                            "  sdmc:/3ds/ttyd/game.iso.", id);
+        }
         plat_user_error("  sdmc:/3ds/ttyd/game.iso is not the right\n  game: found %s, this build needs\n  " EXPECTED_ID ".", id);
     }
     if (header[7] != 0) {

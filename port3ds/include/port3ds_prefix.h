@@ -47,6 +47,10 @@ static inline unsigned int __cntlzw(unsigned int x) { return x == 0 ? 32u : (uns
 #define srand ttyd_srand
 int ttyd_rand(void);
 void ttyd_srand(unsigned int seed);
+
+/* PAL's system.c defines the game's __assert (tst.rel calls it), which newlib's
+ * assert.o (pulled in for __assert_func) also defines. */
+#define __assert ttyd___assert
 #endif
 
 #endif

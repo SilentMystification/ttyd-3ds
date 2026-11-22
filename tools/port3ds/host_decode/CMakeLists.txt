@@ -9,7 +9,16 @@
 cmake_minimum_required(VERSION 3.20)
 project(host_decode C)
 
-set(TTYD_VERSION G8ME01 CACHE STRING "Game version (picks the disc-data table)")
+set(TTYD_VERSION G8ME01 CACHE STRING "Game version: G8ME01, G8MJ01 or G8MP01 (picks the layouts and the disc-data table)")
+set_property(CACHE TTYD_VERSION PROPERTY STRINGS G8ME01 G8MJ01 G8MP01)
+# BUILD_VERSION is the index in configure.py's VERSIONS list (as port3ds/CMakeLists.txt).
+set(_build_version_G8MJ01 0)
+set(_build_version_G8ME01 1)
+set(_build_version_G8MP01 2)
+if(NOT DEFINED _build_version_${TTYD_VERSION})
+    message(FATAL_ERROR "TTYD_VERSION must be G8ME01, G8MJ01 or G8MP01 (got ${TTYD_VERSION})")
+endif()
+set(BUILD_VERSION ${_build_version_${TTYD_VERSION}})
 set(HOST_DECODE_FORMATS "${CMAKE_CURRENT_LIST_DIR}/formats_ttyd.c" CACHE FILEPATH "The game's converter table")
 
 get_filename_component(REPO "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
@@ -25,7 +34,7 @@ find_program(HOST_READELF readelf REQUIRED)
 set(PROBE_FLAGS -m32 -malign-double -ffreestanding -DHOST_PROBE -std=gnu99 -O0 -g -gdwarf-4
     -fno-eliminate-unused-debug-types -fno-short-enums -fcommon -w
     -include "${CMAKE_CURRENT_LIST_DIR}/host_prefix.h"
-    -DVERSION_${TTYD_VERSION} -DBUILD_VERSION=1 -DSDK_REVISION=1 -DNDEBUG
+    -DVERSION_${TTYD_VERSION} -DBUILD_VERSION=${BUILD_VERSION} -DSDK_REVISION=1 -DNDEBUG
     -I "${CMAKE_CURRENT_LIST_DIR}" -I "${REPO}/port3ds/include" -I "${REPO}/include"
     -I "${REPO}/libs/dolsdk2004/include" -I "${REPO}/libs/musyx/include" -iquote "${REPO}/include/sdk")
 add_custom_command(
@@ -70,7 +79,7 @@ set_source_files_properties("${GEN}/port_swap_gen.c" "${GEN}/port_swap_gen.h" PR
 target_compile_options(host_decode PRIVATE -std=gnu11 -O2 -g -Wall -Wextra -Wno-unused-parameter
     -Wno-unknown-pragmas -fno-strict-aliasing -fwrapv -ffp-contract=off
     -include "${CMAKE_CURRENT_LIST_DIR}/host_prefix.h")
-target_compile_definitions(host_decode PRIVATE VERSION_${TTYD_VERSION} BUILD_VERSION=1 SDK_REVISION=1 NDEBUG PORT3DS_GAME_SIDE=1
+target_compile_definitions(host_decode PRIVATE VERSION_${TTYD_VERSION} BUILD_VERSION=${BUILD_VERSION} SDK_REVISION=1 NDEBUG PORT3DS_GAME_SIDE=1
     MUSY_VERSION_MAJOR=2 MUSY_VERSION_MINOR=0 MUSY_VERSION_PATCH=3 MUSY_TARGET=0)
 target_include_directories(host_decode PRIVATE "${GEN}" "${CMAKE_CURRENT_LIST_DIR}" "${REPO}/port3ds/include"
     "${REPO}/include" "${REPO}/libs/dolsdk2004/include" "${REPO}/libs/musyx/include")

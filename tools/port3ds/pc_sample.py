@@ -41,10 +41,13 @@ import collections
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
+import armdata
+import datasample
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -156,13 +159,66 @@ def addr2line(elf, addrs):
     return out
 
 
-def sample(args, tgt, deadline, samples):
-    """Appends (t, tid, pc, lr) to samples (so Ctrl-C keeps them); returns the stats."""
+class Ctx:
+    """Everything one profiling run collects (it survives reconnects with --follow)."""
+
+    def __init__(self, args, image, syms):
+        self.args = args
+        self.syms = syms
+        self.idle = re.compile(args.idle_re)
+        self.image = image
+        self.samples = []   # (t, tid, pc, lr, sp, tag)
+        self.accesses = []  # (tid, pc, addr, size, is_write, tag)
+        self.cov = collections.Counter()
+        self.stops = self.slow = 0
+        self.slowest = 0.0
+        self.interval = args.interval / 1000.0
+        self.busy_time = 0.0
+        self.start = time.monotonic()
+        self.tag = ""
+        self.tag_pos = 0
+        self.tag_re = re.compile(args.tag_re) if args.tag_log else None
+
+    def poll_tag(self):
+        if self.tag_re is None:
+            return
+        try:
+            with open(self.args.tag_log, "rb") as f:
+                size = os.fstat(f.fileno()).st_size
+                if size < self.tag_pos:
+                    self.tag_pos = 0
+                f.seek(self.tag_pos)
+                new = f.read()
+                self.tag_pos = size
+        except OSError:
+            return
+        for m in self.tag_re.finditer(new.decode("latin-1")):
+            self.tag = m.group(1)
+
+    def record(self, tid, r):
+        pc = r[15]
+        self.samples.append((time.monotonic() - self.start, tid, pc, r[14], r[13], self.tag))
+        if not self.args.data:
+            return
+        if self.idle.search(self.syms.name(pc)):
+            self.cov["blocked-in-svc"] += 1  # a thread parked in a wait: its stack pops are not work
+            return
+        insn = self.image.word(pc & ~3)
+        if insn is None or pc & 1:
+            self.cov["unreadable-or-thumb"] += 1
+            return
+        acc = armdata.decode(insn, r, pc)
+        if acc is None:
+            self.cov["neon" if armdata.is_neon_mem(insn) else "non-memory"] += 1
+            return
+        self.cov["memory"] += 1
+        for addr, size, wr in acc:
+            self.accesses.append((tid, pc, addr, size, wr, self.tag))
+
+
+def sample(ctx, tgt, deadline):
+    """One attached session: appends to ctx; returns when the deadline passes."""
     rsp = tgt.rsp
-    interval = args.interval / 1000.0
-    n_stops = n_slow = 0
-    slowest = 0.0
-    start = time.monotonic()
     first = True
     while time.monotonic() < deadline:
         t0 = time.monotonic()
@@ -170,26 +226,21 @@ def sample(args, tgt, deadline, samples):
             tgt.interrupt()
         first = False
         try:
-            tids = rsp.thread_ids()
-            for tid, r in rsp.core_registers_many(tids).items():
-                samples.append((t0 - start, tid, r[15], r[14]))
+            ctx.poll_tag()
+            for tid, r in rsp.core_registers_many(rsp.thread_ids()).items():
+                ctx.record(tid, r)
         finally:
             tgt.cont()
-        n_stops += 1
+        ctx.stops += 1
         took = time.monotonic() - t0
-        slowest = max(slowest, took)
+        ctx.slowest = max(ctx.slowest, took)
         if took > SLOW:
-            n_slow += 1
-            if interval < 1.0:
-                interval = min(1.0, max(interval * 2, took))
+            ctx.slow += 1
+            if ctx.interval < 1.0 and not ctx.args.fixed_interval:
+                ctx.interval = min(1.0, max(ctx.interval * 2, took))
                 print(f"pc_sample: warning: one sample took {took * 1000:.0f} ms; interval backed off to "
-                      f"{interval * 1000:.0f} ms", file=sys.stderr)
-        time.sleep(interval)
-    elapsed = time.monotonic() - start
-    return {"stops": n_stops, "elapsed_s": round(elapsed, 3),
-                     "rate_hz": round(n_stops / elapsed, 2) if elapsed else 0,
-                     "slow_samples": n_slow, "slowest_ms": round(slowest * 1000, 1),
-                     "final_interval_ms": round(interval * 1000, 1)}
+                      f"{ctx.interval * 1000:.0f} ms", file=sys.stderr)
+        time.sleep(ctx.interval)
 
 
 def pct(n, d):
@@ -198,11 +249,11 @@ def pct(n, d):
 
 def analyse(samples, syms, top, idle_re, names):
     by_thread = collections.defaultdict(list)
-    for _, tid, pc, lr in samples:
+    for _, tid, pc, lr, _sp, _tag in samples:
         by_thread[tid].append((pc, lr))
     idle = re.compile(idle_re)
     threads = []
-    busy_total = sum(1 for _, _, pc, _ in samples if not idle.search(syms.name(pc)))
+    busy_total = sum(1 for _, _, pc, _, _, _ in samples if not idle.search(syms.name(pc)))
     overall_self = collections.Counter()
     overall_pc = collections.defaultdict(collections.Counter)
     for tid, obs in sorted(by_thread.items()):
@@ -264,12 +315,27 @@ def main():
     ap.add_argument("--title", help="Rosalina: hex title id; looks the pid up in the process list (untested)")
     ap.add_argument("--duration", type=float, default=30.0, help="seconds of sampling")
     ap.add_argument("--interval", type=float, default=20.0, help="milliseconds between samples")
+    ap.add_argument("--fixed-interval", action="store_true", help="never back the interval off")
     ap.add_argument("--threads", default="", help="names for threads: name=tid,name=tid (tid hex, as shown)")
+    ap.add_argument("--cores", default="", help="core of a thread: tid=core,... (default: game 0, render 2, audio/dvd 1 by name)")
     ap.add_argument("--top", type=int, default=10, help="entries per thread list")
     ap.add_argument("--idle-re", default=IDLE_RE,
                     help="functions that count as blocked (not busy) for the busy shares")
     ap.add_argument("--json", type=Path, help="also write the result as JSON")
     ap.add_argument("--no-lines", action="store_true", help="skip addr2line file:line lookups")
+    ap.add_argument("--follow", action="store_true",
+                    help="reconnect when the stub goes away (Azahar restarted by map_sweep.py); wait up to --connect-timeout each time")
+    ap.add_argument("--connect-timeout", type=float, default=10.0)
+    ap.add_argument("--data", action="store_true",
+                    help="also sample the data addresses of load/store instructions (ARM mode), named with --memmap and the ELF")
+    ap.add_argument("--memmap", type=Path, help="game log with [MEMMAP] lines (port3ds/game/memmap_dump.c, switch memmap)")
+    ap.add_argument("--tag-log", type=Path, help="game log tailed during sampling; the last --tag-re match tags each sample")
+    ap.add_argument("--tag-re", default=r"sweep: (\S+) \(story", help="regex whose group 1 is the tag (default: the map sweep's current map)")
+    ap.add_argument("--tag-prefix", type=int, default=3, help="characters of the tag that make its area (default 3: gor_01 -> gor)")
+    ap.add_argument("--start-after", help="regex in --tag-log: let the target run (no sampling) until it matches; --duration counts from then")
+    ap.add_argument("--start-timeout", type=float, default=300.0)
+    ap.add_argument("--qtm-mb", type=float, default=1.6, help="QTM budget the candidate table is judged against")
+    ap.add_argument("--min-shared", type=int, default=5)
     args = ap.parse_args()
 
     elf = resolve_elf(args)
@@ -280,48 +346,85 @@ def main():
     for part in filter(None, args.threads.split(",")):
         n, _, t = part.partition("=")
         names[int(t, 16)] = n
+    cores = {}
+    for part in filter(None, args.cores.split(",")):
+        t, _, c = part.partition("=")
+        cores[int(t, 16)] = int(c)
 
     t0 = time.monotonic()
     syms = Symbols(elf)
+    image = datasample.ElfImage(elf) if args.data else None
     print(f"pc_sample: {len(syms.funcs)} function symbols from {elf} ({time.monotonic() - t0:.1f} s)",
           file=sys.stderr)
 
+    ctx = Ctx(args, image, syms)
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))  # report what was sampled
+    deadline = ctx.start + args.duration
+    attached_once = False
     try:
-        rsp = RSP(host, port, connect_timeout=10, timeout=10)
-    except RSPError as e:
-        print(f"pc_sample: {e}", file=sys.stderr)
-        return 2
-    tgt = Target(rsp)
-    samples, stats = [], {}
-    try:
-        try:
-            rsp.command("qSupported:multiprocess-;swbreak-;hwbreak-")
-        except RSPError:
-            pass
-        if hw:
-            pid = args.pid if args.pid is not None else rosalina_pid_for_title(rsp, args.title)
-            rsp.attach(pid)
-            tgt.attached = True
-            print(f"pc_sample: attached to pid {pid:#x} on {host}:{port}", file=sys.stderr)
-        # attached (Rosalina) or waiting for a debugger (Azahar): the target is stopped now
-        tgt.stopped = True
-        rsp.stop_reason()
-        print(f"pc_sample: sampling {args.duration:g} s every {args.interval:g} ms (Ctrl-C to stop early)",
-              file=sys.stderr)
-        try:
-            stats = sample(args, tgt, time.monotonic() + args.duration, samples)
-        except KeyboardInterrupt:
-            print("pc_sample: interrupted, releasing the target", file=sys.stderr)
-    except (RSPError, OSError) as e:
-        print(f"pc_sample: {e}", file=sys.stderr)
-    finally:
-        tgt.release()
+        while time.monotonic() < deadline:
+            try:
+                rsp = RSP(host, port, connect_timeout=args.connect_timeout if (args.follow or not attached_once) else 1,
+                          timeout=10)
+            except RSPError as e:
+                print(f"pc_sample: {e}", file=sys.stderr)
+                if not args.follow:
+                    return 2
+                continue
+            tgt = Target(rsp)
+            try:
+                try:
+                    rsp.command("qSupported:multiprocess-;swbreak-;hwbreak-")
+                except RSPError:
+                    pass
+                if hw:
+                    pid = args.pid if args.pid is not None else rosalina_pid_for_title(rsp, args.title)
+                    rsp.attach(pid)
+                    print(f"pc_sample: attached to pid {pid:#x} on {host}:{port}", file=sys.stderr)
+                # attached (Rosalina) or waiting for a debugger (Azahar): the target is stopped now
+                tgt.stopped = True
+                rsp.stop_reason()
+                if not attached_once:
+                    print(f"pc_sample: sampling {args.duration:g} s every {args.interval:g} ms (Ctrl-C to stop early)",
+                          file=sys.stderr)
+                if args.start_after and not attached_once:
+                    pat = re.compile(args.start_after)
+                    tgt.cont()
+                    wait_end = time.monotonic() + args.start_timeout
+                    while time.monotonic() < wait_end:
+                        try:
+                            if pat.search(Path(args.tag_log).read_text(errors="replace")):
+                                break
+                        except OSError:
+                            pass
+                        time.sleep(0.5)
+                    else:
+                        print("pc_sample: --start-after never matched", file=sys.stderr)
+                        return 1
+                    tgt.interrupt()
+                    ctx.start = time.monotonic()
+                    deadline = ctx.start + args.duration
+                    print("pc_sample: --start-after matched, sampling", file=sys.stderr)
+                attached_once = True
+                sample(ctx, tgt, deadline)
+            except (RSPError, OSError) as e:
+                print(f"pc_sample: {e}", file=sys.stderr)
+                if not args.follow:
+                    break
+            finally:
+                tgt.release()
+    except KeyboardInterrupt:
+        print("pc_sample: interrupted, releasing the target", file=sys.stderr)
 
+    samples = ctx.samples
     if not samples:
         print("pc_sample: no samples", file=sys.stderr)
         return 1
-    if not stats:  # Ctrl-C inside sample(): rate unknown
-        stats = {"stops": len({x[0] for x in samples})}
+    elapsed = time.monotonic() - ctx.start
+    stats = {"stops": ctx.stops, "elapsed_s": round(elapsed, 3),
+             "rate_hz": round(ctx.stops / elapsed, 2) if elapsed else 0,
+             "slow_samples": ctx.slow, "slowest_ms": round(ctx.slowest * 1000, 1),
+             "final_interval_ms": round(ctx.interval * 1000, 1)}
     threads, overall = analyse(samples, syms, args.top, args.idle_re, names)
 
     if not args.no_lines:
@@ -333,9 +436,9 @@ def main():
         for e in overall + [e for t in threads for e in t["self"]]:
             e["where"] = lines.get(e["top_pc"], "")
 
-    print(f"\nsamples: {len(samples)} over {stats.get('stops', '?')} stops; "
-          f"rate {stats.get('rate_hz', '?')} Hz; elapsed {stats.get('elapsed_s', '?')} s; "
-          f"slow (>200 ms) {stats.get('slow_samples', '?')}, slowest {stats.get('slowest_ms', '?')} ms")
+    print(f"\nsamples: {len(samples)} over {stats['stops']} stops; "
+          f"rate {stats['rate_hz']} Hz; elapsed {stats['elapsed_s']} s; "
+          f"slow (>200 ms) {stats['slow_samples']}, slowest {stats['slowest_ms']} ms")
     print(f"\n{'thread':<28}{'samples':>8}{'busy%':>8}{'share of busy%':>16}")
     for t in threads:
         print(f"{t['name'][:22] + ' ' + format(t['tid'], 'x'):<28}{t['samples']:>8}{t['busy_pct']:>8.1f}"
@@ -354,10 +457,39 @@ def main():
     for e in overall:
         print(f"  {e['pct']:5.1f} {e['n']:5d}  {e['func']}" + (f"   [{e['where']}]" if e.get("where") else ""))
 
+    data = None
+    if args.data:
+        total = sum(ctx.cov.values())
+        cov = {k: v for k, v in ctx.cov.items()}
+        print(f"\n== data sampling coverage: {total} thread samples; "
+              + ", ".join(f"{k} {v} ({100 * v / total:.1f}%)" for k, v in sorted(cov.items(), key=lambda kv: -kv[1])))
+        memmap = datasample.read_memmap(args.memmap) if args.memmap else []
+        stacks = datasample.infer_stacks(samples, names)
+        dm = datasample.DataMap(elf, image, memmap, stacks)
+        corem = {t: (cores.get(t) if t in cores else datasample.core_of(names.get(t, ""))) for t in {s[1] for s in samples}}
+        fname = lambda pc: syms.name(pc)
+        tnames = names
+
+        def run(accs, title, brief=False):
+            ent = datasample.aggregate([a[:5] for a in accs], dm, tnames, corem, fname)
+            res = datasample.build(ent, len(accs), 25, args.qtm_mb, args.min_shared)
+            print("\n" + datasample.format_text(res, title, args.qtm_mb, brief))
+            return res
+
+        data = {"coverage": cov, "overall": run(ctx.accesses, "overall")}
+        areas = collections.defaultdict(list)
+        for a in ctx.accesses:
+            if a[5]:
+                areas[a[5][:args.tag_prefix]].append(a)
+        data["areas"] = {}
+        for area, accs in sorted(areas.items()):
+            data["areas"][area] = run(accs, f"area {area}", True)
+        data["maps_seen"] = sorted({s[5] for s in samples if s[5]})
+
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps({"elf": str(elf), "stats": stats, "threads": threads,
-                                         "overall": overall}, indent=1))
+                                         "overall": overall, "data": data}, indent=1, default=str))
     return 0
 
 

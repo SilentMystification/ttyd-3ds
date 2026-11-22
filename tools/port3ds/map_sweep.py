@@ -56,6 +56,7 @@ def disc_maps(iso):
 
 
 LAST = ROOT / "build/azahar-last"
+EXTRA_SWITCHES = ""  # more game switches, e.g. " memmap"
 EXTRA = []  # more run_azahar.py arguments (--profile, --last, --gdb ...)
 
 
@@ -64,7 +65,7 @@ def run(build, todo, story, frames, party, timeout, fastboot=True):
     GAME_DIR.mkdir(parents=True, exist_ok=True)
     (GAME_DIR / "sweep.txt").write_text("".join(f"{m} {story}\n" for m in todo))
     shutil.rmtree(GAME_DIR / "sweep", ignore_errors=True)
-    switches = f"sweep={frames} party={party} " + ("fastboot" if fastboot else "nofastboot")
+    switches = f"sweep={frames} party={party} " + ("fastboot" if fastboot else "nofastboot") + EXTRA_SWITCHES
     cmd = [sys.executable, str(ROOT / "tools/port3ds/run_azahar.py"), "--build", str(build),
            "--switches", switches, "--log", "3ds/ttyd/log.txt", "--until", r"sweep: (done|stopped)",
            "--timeout", str(timeout), "--stall", "60"] + EXTRA
@@ -123,9 +124,12 @@ def main():
     ap.add_argument("--profile", type=Path, help="Azahar profile folder for a second instance (see run_azahar.py)")
     ap.add_argument("--last", type=Path, help="run_azahar's log folder (default build/azahar-last)")
     ap.add_argument("--out", type=Path, help="results folder (default build/map-sweep)")
+    ap.add_argument("--switches", default="", help="more game switches for every map (e.g. memmap)")
     ap.add_argument("--gdb-port", type=int, help="enable Azahar's GDB stub on this port (for pc_sample.py)")
     args = ap.parse_args()
-    global SDMC, GAME_DIR, OUT, LAST
+    global SDMC, GAME_DIR, OUT, LAST, EXTRA_SWITCHES
+    if args.switches:
+        EXTRA_SWITCHES = " " + args.switches
     if args.profile:
         SDMC = args.profile.resolve() / "data/azahar-emu/sdmc"
         GAME_DIR = SDMC / "3ds/ttyd"

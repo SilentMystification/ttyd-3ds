@@ -812,6 +812,9 @@ HitEntry* npcHitCheckSide(NpcEntry* npc, f32* outX, f32* outZ, f32* angle, f32 d
         }                                                            \
     } while (0)
 void npcKoopaModeMain(void);
+#ifdef TARGET_PORT
+void port_npctrace_move(NpcEntry* npc, f32 mx, f32 mz, const Vec* before);
+#endif
 #if VERSION >= VERSION_US
 
 /** US: probe the wall from a copy of the position first, then slide along it */
@@ -934,6 +937,9 @@ void npcMain(void) {
                             if (entry->flags & NPC_FLAG_KOOPA_MODE) {
                                 mz = 0.0f;
                             }
+#ifdef TARGET_PORT
+                            Vec traceBefore = entry->position;
+#endif
                             if (entry->flags & NPC_FLAG_NO_WALL_HIT) {
                                 entry->position.x += mx;
                                 entry->position.z += mz;
@@ -945,6 +951,9 @@ void npcMain(void) {
                                                                  &entry->moveDir, mx, mz);
 #endif
                             }
+#ifdef TARGET_PORT
+                            port_npctrace_move(entry, mx, mz, &traceBefore);
+#endif
                             entry->moveOffset.x = 0.0f;
                             entry->moveOffset.z = 0.0f;
                             npcMoveG(entry);

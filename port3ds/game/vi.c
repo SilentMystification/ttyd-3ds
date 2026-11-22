@@ -258,6 +258,10 @@ static void sweep_frame(void) {
     }
 }
 
+u32 port_game_frame(void) {
+    return s_frames;
+}
+
 void port_debug_frame(u32 frame);
 void plat_memory_log(const char* when);
 

@@ -22,6 +22,9 @@
 #include <math.h>
 #include "version.h"
 
+#ifdef TARGET_PORT
+void port_npctrace_evt(NpcEntry* npc, const char* name, const Vec* before, f32 tx, f32 tz, f32 dist, f32 step);
+#endif
 static f32 _intplGetFloat(s32 mode, f32 t);
 
 #pragma optimize_for_size on
@@ -553,6 +556,9 @@ USER_FUNC(evt_npc_move_position) {
         temp = (f32)cos(npc->moveDir * 6.2831855f / 360.0f);
         npc->moveOffset.z += npc->moveDt * (npc->moveSpeed * -temp);
     }
+#ifdef TARGET_PORT
+    port_npctrace_evt(npc, npcName, &npc->position, npc->jumpTargetPos.x, npc->jumpTargetPos.z, dist, step);
+#endif
 
     // Footstep SFX
     sfxFlag = 0;

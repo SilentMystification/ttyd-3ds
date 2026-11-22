@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "plat/job.h"
 #include "plat/plat.h"
 #include "port3ds/port_swap.h"
 
@@ -17,7 +18,17 @@ void port_swap_begin(PortSwap* s, void* base, u32 size, const char* what) {
     }
 }
 
+static u32 s_check_runs, s_check_bad; /* jobcheck: split runs compared, and those that differed */
+static u32 s_check_runs_logged, s_check_bad_logged;
+
 void port_swap_end(PortSwap* s) {
+    if (s_check_runs != s_check_runs_logged) {
+        PLOG_I("[JOBCHECK] %s: %lu split runs, %lu identical to inline", s->what,
+               (unsigned long)(s_check_runs - s_check_runs_logged),
+               (unsigned long)((s_check_runs - s_check_runs_logged) - (s_check_bad - s_check_bad_logged)));
+        s_check_runs_logged = s_check_runs;
+        s_check_bad_logged = s_check_bad;
+    }
     free(s->done);
     free(s->visited);
     s->done = NULL;
@@ -71,6 +82,106 @@ static void swap_unit(PortSwap* s, u32 off, u32 width) {
     }
 }
 
+/* ---- Long runs on the job worker ----
+ *
+ * A run of units or structs splits cleanly: each item's swap depends only
+ * on its own bytes and their bits in the done bitmap. Chunk edges fall on
+ * 8-byte file offsets, so two chunks never share a bitmap byte, and the
+ * result is the same in any order. Switch jobcheck=1 runs each split run
+ * twice (jobs, then inline on the original bytes) and compares. */
+
+#define SPLIT_MIN_BYTES (16u * 1024u) /* per chunk; shorter runs stay inline */
+
+typedef struct {
+    PortSwap* s;
+    u32 off;    /* file offset of item 0 */
+    u32 stride; /* bytes per item */
+    u32 width;  /* units: unit width */
+    const PortSwapType* t; /* structs: the type */
+} SplitRun;
+
+typedef void (*SplitFn)(void* arg, uint32_t begin, uint32_t end);
+
+static void units_range(void* arg, uint32_t b, uint32_t e) {
+    const SplitRun* r = arg;
+    for (u32 i = b; i < e; i++) {
+        swap_unit(r->s, r->off + i * r->stride, r->width);
+    }
+}
+
+static void structs_range(void* arg, uint32_t b, uint32_t e) {
+    const SplitRun* r = arg;
+    for (u32 i = b; i < e; i++) {
+        port_swap_struct(r->s, r->off + i * r->stride, r->t);
+    }
+}
+
+static int s_jobcheck = -1;
+
+static void split_run(SplitFn fn, SplitRun* r, u32 n, int jobs) {
+    if (jobs) {
+        u32 align = 8u >> __builtin_ctz(r->stride | 8u); /* items per 8 bytes */
+        u32 min_items = SPLIT_MIN_BYTES / r->stride;
+        plat_job_parallel_for(fn, r, n, min_items ? min_items : 1, align);
+    } else {
+        fn(r, 0, n);
+    }
+}
+
+static void split(PortSwap* s, SplitFn fn, u32 off, u32 n, u32 stride, u32 width, const PortSwapType* t) {
+    SplitRun r = {s, off, stride, width, t};
+    if ((u64)n * stride < 2u * SPLIT_MIN_BYTES || !plat_job_enabled()) {
+        fn(&r, 0, n);
+        return;
+    }
+    /* The first item that starts on an 8-byte offset; the ones before run here. */
+    u32 first = 0;
+    while (first < 8 && first < n && ((off + first * stride) & 7u) != 0) {
+        first++;
+    }
+    if (first == 8 || first == n) {
+        fn(&r, 0, n); /* no item on an 8-byte edge (an odd 2-byte phase): stays inline */
+        return;
+    }
+    fn(&r, 0, first);
+    r.off = off + first * stride;
+    n -= first;
+    if (s_jobcheck < 0) {
+        s_jobcheck = plat_switch_int("jobcheck", 0) != 0;
+    }
+    if (!s_jobcheck) {
+        split_run(fn, &r, n, 1);
+        return;
+    }
+    /* Check mode: the same run with jobs and inline, from the same start. */
+    u32 len = n * stride, b0 = r.off >> 3, b1 = (r.off + len + 7) >> 3;
+    u8* data0 = malloc(len);
+    u8* done0 = malloc(b1 - b0);
+    u8* data1 = malloc(len);
+    u8* done1 = malloc(b1 - b0);
+    if (data0 == NULL || done0 == NULL || data1 == NULL || done1 == NULL) {
+        plat_fatal("jobcheck: no memory for %lu bytes", (unsigned long)len);
+    }
+    memcpy(data0, s->base + r.off, len);
+    memcpy(done0, s->done + b0, b1 - b0);
+    split_run(fn, &r, n, 1);
+    memcpy(data1, s->base + r.off, len);
+    memcpy(done1, s->done + b0, b1 - b0);
+    memcpy(s->base + r.off, data0, len);
+    memcpy(s->done + b0, done0, b1 - b0);
+    split_run(fn, &r, n, 0);
+    s_check_runs++;
+    if (memcmp(data1, s->base + r.off, len) != 0 || memcmp(done1, s->done + b0, b1 - b0) != 0) {
+        s_check_bad++;
+        PLOG_E("[JOBCHECK] %s: run at %#lx (%lu items of %lu bytes) differs between jobs and inline", s->what,
+               (unsigned long)r.off, (unsigned long)n, (unsigned long)stride);
+    }
+    free(data0);
+    free(done0);
+    free(data1);
+    free(done1);
+}
+
 void port_swap_word_any(PortSwap* s, u32 off) {
     if (!port_swap_in(s, off, 4)) {
         port_swap_bad(s, "word", off, 4);
@@ -85,9 +196,7 @@ void port_swap_units(PortSwap* s, u32 off, u32 n, u32 width) {
     if (n > s->size / width || !port_swap_in(s, off, n * width)) {
         port_swap_bad(s, "data", off, n * width);
     }
-    for (u32 i = 0; i < n; i++) {
-        swap_unit(s, off + i * width, width);
-    }
+    split(s, units_range, off, n, width, width, NULL);
 }
 
 void port_swap_struct(PortSwap* s, u32 off, const PortSwapType* t) {
@@ -106,9 +215,7 @@ void port_swap_array(PortSwap* s, u32 off, u32 n, const PortSwapType* t) {
     if (n != 0 && (n > s->size / t->size || !port_swap_in(s, off, n * t->size))) {
         port_swap_bad(s, t->name, off, n * t->size);
     }
-    for (u32 i = 0; i < n; i++) {
-        port_swap_struct(s, off + i * t->size, t);
-    }
+    split(s, structs_range, off, n, t->size, 0, t);
 }
 
 u16 port_swap_get16(const PortSwap* s, u32 off) {

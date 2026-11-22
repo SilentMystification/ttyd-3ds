@@ -79,6 +79,22 @@ SCENES = {
         # (an input script ends the run at its "end", not at TTYD_EXIT_FRAMES)
         "pc_input": "wait 60\nstick 127 0 90\npress a\nwait 60\npress a\nwait 60\nstick -128 0 90\npress a\nwait 600\nend\n",
     },
+    "win_00": {
+        "desc": "Boggly Woods entrance, story 30: an ambient loop that starts inside an ADPCM frame (re-aligned)",
+        "port_switches": "map=win_00 story=30",
+        "port_seconds": 60,
+        "pc_frames": 2400,
+        "pc_env": {"TTYD_MAP": "win_00", "TTYD_STORY": "30"},
+        "pc_input": None,
+    },
+    "tou_03": {
+        "desc": "Glitzville, story 30: sound effects with reverb sends set just after they start",
+        "port_switches": "map=tou_03 story=30",
+        "port_seconds": 60,
+        "pc_frames": 2400,
+        "pc_env": {"TTYD_MAP": "tou_03", "TTYD_STORY": "30"},
+        "pc_input": None,
+    },
     "battle": {
         "desc": "gon_02 at story 30, which starts a battle on entry: the battle music",
         "port_switches": "map=gon_02 story=30",

@@ -59,3 +59,21 @@ Each runs per scene, CPU path vs shader path, in Azahar first and then on hardwa
 - `gxvsh_check=1` renders both paths into offscreen targets and diffs them on the device, debug only.
 
 A shader-path change that fails any test is fixed or kept off; it never ships "mostly right".
+
+## Stereo 3D: render once, reproject the second view (owner decision 2026-11-22)
+
+Rendering the scene twice is out. Stereo is done the efficient way: **one render, plus depth-based reprojection**.
+
+1. **Render the 3D scene once** from the centre camera into the EFB, as today, without the 2D layers.
+2. **Read a coarse depth grid:** a GPU copy of the depth buffer to linear memory, then the CPU samples about 40×24 cells (min-depth per cell, to keep foreground edges sharp). That's a few hundred reads, a fraction of a millisecond.
+3. **Build two warp meshes:** grid vertices shifted horizontally by **± disparity/2**, where disparity = slider × f(depth). Splitting the shift symmetrically between the eyes halves the disocclusion artifacts in each eye. Objects at the convergence depth don't move.
+4. **Draw each eye** as one textured grid draw from the EFB colour into that eye's screen target: two cheap full-screen draws instead of a second scene render.
+5. **Draw the 2D layers** (HUD, windows, text, orthographic draws; the record already marks projection type) on top of each eye **without** disparity, or at a fixed screen-plane parallax. The record replays only those 2D commands per eye.
+6. **Slider at 0:** skip steps 2–4 completely (normal mono present).
+
+**Why this is fine for the 3DS:** the 3DS's maximum parallax is only a few pixels, so disocclusion gaps are small. The grid's own stretching fills them (as Star3D's screen-warp grid does for heat effects).
+
+**Quality knob:** grid resolution (`stereogrid=WxH`). A full second render of the 3D pass stays possible as a later "high quality" option only if the reprojection shows visible artifacts in real scenes, and only after measuring both on hardware.
+
+**Effect on the record/replay design:** the per-eye clip-space shear from the shader-path stereo note is **not** used for the 3D pass. Keep the projection-type flag on draws, so 2D layers can be replayed per eye. The CPU and shader paths need no stereo changes.
+

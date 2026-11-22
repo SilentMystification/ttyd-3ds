@@ -147,3 +147,9 @@ The CPU budget is about 2 full cores (0 and 2) plus about 0.7 of core 1 for back
 - **Memory:** 124 MB of application memory, of which the game's arena, heap and linear memory each take a share. Larger games may not fit without streaming.
 - **Audio:** not every game uses MusyX (some use the AX/DSP libraries directly). The audio module needs a second back end then.
 - **Decomp quality:** a game must be decompiled far enough to build. Matching decomps are best; partial ones mean mixed code, which this layer can't run.
+
+## Extension API entries
+
+- `plat_job_init` / `plat_job_submit` / `plat_job_join` / `plat_job_join_all` / `plat_job_parallel_for` (`port3ds/plat/job.c`): a fork-join job queue on core 2 with work stealing. It is for pure computation only: no GPU or service calls inside a job.
+- `plat_input_set_extra_keys` (`port3ds/plat/input.c`): lets the game inject keys, as `fastboot` does.
+- `plat_place_register` / `plat_place_set_manifest` (`port3ds/plat/memplace.c`): memory placement tiers, plus a game manifest hook.

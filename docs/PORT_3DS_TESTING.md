@@ -97,6 +97,13 @@ Switches the game reads (space-separated words in `--switches`):
 | `place=<name>:<tier>[,<name>:<tier>...]` | Forces a memory placement's tier (`qtm`, `linear` or `heap`) for A/B runs. Write spaces in names as `_` (`gx_record:linear`). Unknown names or tiers are logged as `[MEM] place=... ignored` and skipped; the GPU/DSP rules still apply |
 | `qtmgpu` | Allows `GPU_READ`/`GPU_WRITE` placements in QTM. Off by default: GPU access to QTM is unverified on hardware. `DSP` placements never go in QTM |
 | `texstats=N` | Every N frames, logs texture hashes, bytes hashed, lookups, hash mismatches and uploads per frame. The first change of each texture is logged with its address, size, format, memory region and the caller of the last `GXInitTexObj*` for that address |
+| `jobs=0` | Every `plat_job` runs inline: the A/B baseline for the core-2 job queue |
+| `jobstats=N` | A `[JOBS]` counter line every N frames while the counters change |
+| `jobcore=C`, `jobprio=P` | Job worker core and priority (defaults 2 and 0x30, below the render thread) |
+| `jobcheck=1` | Each split conversion runs with jobs and again inline from the same bytes, and the two are compared (`[JOBCHECK]` lines) |
+| `loadstats` | A `[LOADCONV]` line per load-time conversion, and a summary per load: per-kind time, DVD reads and wait |
+| `convhash` | Adds an FNV-1a hash of each converted file to the `loadstats` lines |
+| `arqspin` | ARQ waits poll with a yield (the old behaviour) instead of sleeping until the next ARQ callback |
 | `devupdate` | Development only: starts the ctr-devkit updater at boot (TCP 5050, `devupdateport=N`, `devupdatetoken=TEXT`), and a crash then goes to recovery mode instead of waiting for START. See "ctr-devkit: crash and devupdate" below |
 
 Sound needs `sdmc:/3ds/dspfirm.cdc` (dumped from a console with DSP1), in the profile's SD card as on the console. Without it the game runs silently with the same sound timing. `--lle-audio` makes Azahar run that firmware itself (its LLE DSP) instead of its own model of it, which is slower but closer to the console. `wavdump=N` saves the first N seconds of the game's mix as `sdmc:/3ds/ttyd/audio.wav`, and the log has the output's peak level every 10 s.

@@ -438,6 +438,8 @@ Planner's round-2 brief: put immediate-mode draws on the shader path too, so cha
 - **Switches:** after a map's first K frames, 0 down-switches in every scene; the only ups are records seen for the first time (a new effect or window). hei_01 (round 1: 478, 0, 0, 478, 956, 0, 0, 478 per window) now 572 at the map load, then 1, 1, 0, 0, 3, 0, 0, 0, all up.
 - **Render thread** (Azahar, ms): gor_01 11.4 -> 23.4, gon_02 9.6 -> 20.5, aaa_00 9.4 -> 22.5, tik_01 12.0 -> 7.7, hei_01 11.5 -> 20.7, jin_00 3.7 -> 7.4, effects battle 9.9 -> 21.3. It stays well under the game thread in every scene here; on hardware each citro3d draw costs 36-66 µs, and gor_01 now issues about 570 shader draw commands per frame (of 5560 calls), so the render thread is the first thing to measure on the console.
 
+- **PC sampling** (gor_01, `gxvsh=1`, 170 stops, direction only): the uniform-block `memcmp` is gone (9.1% in round 1). The game thread's largest GX entries now are `gx_dlcache_call` (9.4%, with the inlined routing), `GSPGPU_FlushDataCache` from the per-record stream flush (8.2%; the next thing to cut: flush only ranges written since the last submit, which it does, so this is the syscall's own cost in Azahar), `rec_for` (4.7%), `memcpy` of indices (3.5%) and `gx_vsh_frame` (3.5%).
+
 **Default: `gxvsh=1`.** Every test passes in every scene above, with no oscillation, and no frame is slower than the CPU path (Azahar). Not verified on hardware: the stream attribute layout, fixed attributes, index offsets, the cull mapping (set empirically in Azahar), the bool uniform, and the render-thread cost. `gxvsh=0` is the fallback for A/B and for any hardware problem.
 
 ## Risks of the cache

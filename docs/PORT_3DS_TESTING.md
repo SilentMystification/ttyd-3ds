@@ -113,6 +113,12 @@ Switches the game reads (space-separated words in `--switches`):
 | `gxfogcache=0/1` | 1 (default): the fog table is recomputed only when the fog parameters change, and sent with an id instead of a hash |
 | `gxunlit=0/1` | 1 (default): unlit colour channels skip `channel_color` and the eye-space normal |
 | `gxmerge=0/1` | 1 (default): consecutive draws with nothing recorded between them share one draw command. `gxstats` shows `gpu draws N (of M calls)` |
+| `determ` | Deterministic test mode: game time advances exactly one retrace per frame (1/60 s, or 1/50 s on PAL) from a fixed date. The retrace callbacks run once per frame on the game thread, each frame waits for queued DVD reads, sound interrupts follow the frame, and the output is silent. Two runs with the same switches and padscript give identical `gwdump` streams. Details in [PORT_3DS_TEST_INFRA.md](PORT_3DS_TEST_INFRA.md) |
+| `gwdump=N` | A `gwdump` record every N frames: sequence, map, story flags (GSW), event values, Mario's position, the RNG state, battle state, clocks, pad, and a `GlobalWork` hash. Limit the range with `gwdumpfrom=`/`gwdumpto=`. Compare runs, or the port against Dolphin, with `tools/port3ds/gw_diff.py` |
+| `fx=<name\|index>[,...]` | Spawns effects through `evt_eff` (`n64:` through `evt_eff64`) after the map is up. Options: `fxwait`, `fxgap`, `fxargs` |
+| `battle=<id\|name>` | Starts the given entry of the current area's battle setup table after the map is up (`battlewait=N`) |
+| `btlauto=perfect\|fail` | Runs battles unattended. `btlmoves=` gives the menu keys per turn and `btlstep=` the frames between presses. `perfect` forces every action command to succeed and `fail` presses nothing during them |
+| `stopframe=N` | GameCube debug DOL only: stops at game frame N, for `run_dolphin.py --break gcdbg_stop` |
 | `devmenu` | Enables the developer menu, opened with ZL+SELECT. SELECT alone opens the player Options menu, so a `padscript` that pressed `select` for the old developer menu now opens Options. While the Options menu is open, `padscript` steps advance once per ~16 ms menu poll, not per game frame. Example: `wait*900,select*3,wait*5,right*2,wait*5,select*3` |
 | `devupdate` | Development only: starts the ctr-devkit updater at boot (TCP 5050, `devupdateport=N`, `devupdatetoken=TEXT`), and a crash then goes to recovery mode instead of waiting for START. See "ctr-devkit: crash and devupdate" below |
 
@@ -333,4 +339,11 @@ Player settings live in `sdmc:/3ds/ttyd/options.txt` as `key=value` lines ending
   - The discs go in `iso/G8MJ01.iso` and `iso/G8MP01.iso`, or are given with `-DTTYD_DISC=`.
 - **Wrong-disc check:** a build refuses a disc from another region. With the US disc, `run_azahar.py --build build/3ds/game_pal/ttyd.cia --switches "" --until "This build is for"` should pass.
 - **JP and PAL in-game testing needs the JP and PAL discs.** The steps are in PORT_3DS_PLAN.md section 9.1.
+
+### GameCube debug DOL and Dolphin comparison
+
+- **Build:** `python3 configure.py --version G8ME01 --gcdebug && ninja -f build_gcdebug.ninja` builds a non-matching DOL with the same test switches.
+- **Run:** `run_dolphin.py --gcdebug` boots it headless.
+- **Compare:** `tools/port3ds/gw_diff.py` runs the same switches and padscript in Azahar (with `determ`) and in Dolphin, and reports the first frame and the fields that differ.
+- Details are in [PORT_3DS_TEST_INFRA.md](PORT_3DS_TEST_INFRA.md).
 

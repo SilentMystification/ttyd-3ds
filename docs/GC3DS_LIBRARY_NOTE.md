@@ -156,3 +156,4 @@ The CPU budget is about 2 full cores (0 and 2) plus about 0.7 of core 1 for back
 - `plat_options_register(PlatOptMenu*)`, `plat_opt_get` / `plat_opt_set` / `plat_options_save`, and `opt_get_*` getters (`port3ds/plat/options.c`, `options_menu.c`): the game supplies the option pages, items and an `on_change` callback, and the platform provides storage and the bottom-screen menu.
 - The `plat_input_*` edge, modal-poll and key-hiding hooks (`port3ds/plat/input.c`).
 - `plat/memstable.h` (`port3ds/plat/memstable.c`): the content-stable memory registry. The SDK layer reports fills, writes and releases, and caches get a trust generation from it. The game's allocator reports releases through one-line `TARGET_PORT` hooks.
+- `port_os_set_time_source` / `port_os_real_time`, `port_ai_set_frame_paced` / `port_ai_pump`, and the `determ` `VIWaitForRetrace` path: the hooks behind the deterministic test mode (PORT_3DS_TEST_INFRA.md).

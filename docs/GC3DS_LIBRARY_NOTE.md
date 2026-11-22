@@ -80,7 +80,13 @@ The optimisation *mechanisms* belong to the library. Each game only supplies *da
    - **Placing:** the library packs registrations by priority into each tier's budget and checks that every chosen tier fits the flags (for example, no `GPU_*` buffer in QTM unless the GPU check passed). It falls back down the list, and reports the result in the boot log and on the HUD.
    - **A/B testing:** a generic switch, `place=<name>:<tier>`, moves one buffer at a time.
    - **Game:** a manifest listing its hot regions (TTYD: map collision `hitdrv`, animation tables, MusyX voice state), each with a priority and flags. It also registers its own buffers through the same API.
-   - Today's fixed `PLAT_PLACE_*` enum in `plat/memplace.c` becomes this API.
+   - **Done 2026-11-22:**
+     - `plat_place_register(name, bytes, align, PLAT_PREFS(...), flags)` and `plat_place_priority`;
+     - a game manifest hook, `plat_place_set_manifest`, called before packing;
+     - `[MEM] placed <name> <bytes> bytes in <tier>` lines;
+     - `place=` A/B and `qtmgpu`;
+     - VRAM is not a tier, because the CPU can't map it;
+     - the old `PLAT_PLACE_*` ids remain as handles of the four built-in placements.
 2. **GPU/CPU shared memory policy.**
    - **Library:** one set of rules plus helpers:
      - GPU-read-only data goes to VRAM or linear memory;

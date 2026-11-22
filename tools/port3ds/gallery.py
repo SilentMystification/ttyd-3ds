@@ -543,6 +543,15 @@ def score_items(out, results, args):
         ex = [p["excess"] for p in pairs if "excess" in p]
         means = [p["mean"] for p in pairs if "mean" in p]
         r["score"] = max(ex) if ex else (max(means) if means else None)
+    # a batch whose scene drifted from the others (an NPC elsewhere) raises all its items alike: take its median off
+    batches = {}
+    for r in results["items"].values():
+        if r.get("score") is not None and any("excess" in p for p in r.get("pairs", [])):
+            batches.setdefault(r.get("batch"), []).append(r["score"])
+    for r in results["items"].values():
+        group = batches.get(r.get("batch"))
+        if group and len(group) >= 5 and r.get("score") is not None:
+            r["score"] = round(r["score"] - float(np.median(group)), 2)
 
 
 def report(out, results, args):
@@ -594,7 +603,7 @@ def main():
         p.add_argument("--port-timeout-base", type=float, default=120)
         p.add_argument("--gc-timeout", type=float, default=1800)
         p.add_argument("--pixel-threshold", type=int, default=32)
-        p.add_argument("--review-threshold", type=float, default=8.0)
+        p.add_argument("--review-threshold", type=float, default=0.5)
         p.add_argument("--redo", action="store_true", help="run items already in results.json again")
         p.add_argument("--reuse-gc", action="store_true",
                        help="skip a Dolphin run whose log (logs/gc_<batch>/) has exactly these switches")
@@ -647,7 +656,7 @@ def main():
     p = sub.add_parser("report")
     p.add_argument("--name", required=True)
     p.add_argument("--pixel-threshold", type=int, default=32)
-    p.add_argument("--review-threshold", type=float, default=8.0)
+    p.add_argument("--review-threshold", type=float, default=0.5)
     p.set_defaults(func=lambda a: report(OUT_ROOT / a.name, load_results(OUT_ROOT / a.name), a) or 0)
 
     args = ap.parse_args()

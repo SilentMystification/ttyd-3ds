@@ -14,6 +14,7 @@
 #include <malloc.h>
 #include <string.h>
 
+#include "plat/memstable.h"
 #include "plat/plat.h"
 #include "plat/thread.h"
 #include "port3ds/os_internal.h"
@@ -143,6 +144,7 @@ void ARQPostRequest(ARQRequest* request, u32 owner, u32 type, u32 priority, u32 
             plat_fatal("ARQ: read of %lu bytes at ARAM %08lx", (unsigned long)length, (unsigned long)source);
         }
         memcpy((void*)dest, s_aram + source, length);
+        plat_memstable_fill((const void*)dest, length); /* DMA-filled memory (include/plat/memstable.h) */
     }
     if (callback == NULL) {
         return;

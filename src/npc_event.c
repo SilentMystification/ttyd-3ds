@@ -242,8 +242,17 @@ static USER_FUNC(chain_main);
 extern EvtWord _2d_dead_rotate_event[];
 extern EvtWord nokonoko_shell_return_event[];
 extern EvtWord togenoko_shell_return_event[];
+#ifdef TARGET_PORT
+// met_init_event_common has no RETURN: it falls through into met_set_anim_wait_event (met_init_event_common is 21
+// words). The port's compiler does not keep the two arrays adjacent, so they are one array (defined below) and
+// met_set_anim_wait_event is the address of its second part.
+extern EvtWord met_init_event_common[];
+#define MET_INIT_EVENT_COMMON_WORDS 21
+#define met_set_anim_wait_event (met_init_event_common + MET_INIT_EVENT_COMMON_WORDS)
+#else
 EvtWord met_init_event_common[21];
 extern EvtWord met_set_anim_wait_event[];
+#endif
 extern EvtWord met_set_anim_walk_event[];
 extern EvtWord killer_move_event[];
 extern EvtWord pakkun_attack_event[];
@@ -1153,13 +1162,20 @@ EvtWord met_init_event_common[] = {
     CALL(evt_npc_flag_onoff, 1, STRING("me"), NPC_FLAG_NO_AUTO_UPDATE | NPC_FLAG_LAND_ON_FLOOR)
     CALL(evt_npc_status_onoff, 1, STRING("me"), 2)
     CALL(evt_npc_set_rotate, STRING("me"), 0, 0, 0)
+#ifndef TARGET_PORT
 };
+#endif
 
 /**
  * Sets the standing pose of a Buzzy Beetle (MET) or Spike Top (TMT),
  * or the upside-down ceiling pose (SMT/STM) when it clings to the ceiling (battle setup work 0 is 1).
  */
+#ifdef TARGET_PORT
+// Same array as above: execution runs on from met_init_event_common into this script, as on the GameCube.
+#undef met_set_anim_wait_event
+#else
 EVT_BEGIN(met_set_anim_wait_event)
+#endif
     CALL(evt_npc_get_btlsetup_work, STRING("me"), 0, LW(15))
     IF_INT_EQUAL(LW(15), 0)
         CALL(evt_npc_get_unitwork, STRING("me"), 0, LW(15))
@@ -1178,6 +1194,11 @@ EVT_BEGIN(met_set_anim_wait_event)
     END_IF
     RETURN
 EVT_END()
+#ifdef TARGET_PORT
+#define met_set_anim_wait_event (met_init_event_common + MET_INIT_EVENT_COMMON_WORDS)
+// the first part is exactly MET_INIT_EVENT_COMMON_WORDS words and the whole is 21 + 48 words
+_Static_assert(sizeof(met_init_event_common) == (MET_INIT_EVENT_COMMON_WORDS + 48) * sizeof(EvtWord), "met_init_event_common layout");
+#endif
 
 /** Sets the walking pose of a Buzzy Beetle or Spike Top, normal or on the ceiling (see met_set_anim_wait_event). */
 EVT_BEGIN(met_set_anim_walk_event)

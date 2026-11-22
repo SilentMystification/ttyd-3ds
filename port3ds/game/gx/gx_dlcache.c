@@ -432,6 +432,13 @@ int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
     }
     if (same_list_changed != NULL) {
         s_st.changed++;
+        if (s_scribbled != NULL) {
+            static int told;
+            if (!told) {
+                told = 1;
+                PLOG_I("gxscribble: the full check saw list %p change (decoded again)", list);
+            }
+        }
         if (same_list_changed->changes + 1 >= DLC_DYNAMIC_AFTER) {
             /* keeps changing: decode it every time from now on */
             DlcEntry* e = same_list_changed;

@@ -151,6 +151,10 @@ A 3dsx gets the memory of the title the Homebrew Launcher runs in, and it does n
 Put `livelog` in `sdmc:/3ds/ttyd/debug3ds.txt`, start the CIA, then run `run_hw.py --no-send --until ...` to attach (`run_hw.py` adds `livelog` itself when it sends a 3dsx).
 `--connect-timeout N` (default 60) is how long it retries the connection.
 
+Installing the CIA without an SD card reader: open FBI > Remote Install > Receive URLs over the network, then run `N3DS_IP=<ip> tools/port3ds/fbi_install.py` (`--cia`, `--port 8080`).
+It serves a copy of the CIA over HTTP from this PC's address toward the console and sends FBI the URL on TCP 5000.
+It ends when FBI closes the connection (a reset counts) and prints whether the file was fully requested.
+
 The probe (`build/3ds/probe/ttyd_probe.3dsx`) shows its results on the top screen and writes `sdmc:/3ds/ttyd/probe.txt`.
 
 ## Running the GameCube game in Dolphin

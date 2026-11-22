@@ -120,3 +120,77 @@ int32_t plat_disc_read(uint64_t offset, void* buf, uint32_t size) {
 }
 
 int32_t host_disc_read(uint64_t offset, void* buf, uint32_t n) { return plat_disc_read(offset, buf, n); }
+
+/* ---- jobs, switches, time, DVD statistics (what port_swap.c's job splitting and load statistics call) ----
+ * The host has no worker thread: jobs run inline on the calling thread, which is what jobs=0 does on the 3DS. */
+#include <time.h>
+
+#include "plat/job.h"
+
+int plat_job_enabled(void) { return 0; }
+
+void plat_job_parallel_for(PlatJobRangeFn fn, void* arg, uint32_t count, uint32_t min_chunk, uint32_t align) {
+    (void)min_chunk, (void)align;
+    fn(arg, 0, count);
+}
+
+/* Switches come from $HOST_DECODE_SWITCHES, space separated words and key=value pairs, as the 3DS reads them
+ * from debug3ds.txt (for example "loadstats jobcheck=1"). Unset: none. */
+static const char* switch_find(const char* key, size_t* len_out, int* has_eq) {
+    const char* p = getenv("HOST_DECODE_SWITCHES");
+    size_t n = strlen(key);
+    while (p && *p) {
+        while (*p == ' ') {
+            p++;
+        }
+        const char* end = strchr(p, ' ');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len >= n && strncmp(p, key, n) == 0 && (len == n || p[n] == '=')) {
+            *len_out = len;
+            *has_eq = len > n;
+            return p + n + (len > n);
+        }
+        p += len;
+    }
+    return NULL;
+}
+
+int plat_switch_has(const char* word) {
+    size_t len;
+    int eq;
+    return switch_find(word, &len, &eq) != NULL;
+}
+
+int plat_switch_value(const char* key, char* out, size_t n) {
+    size_t len;
+    int eq;
+    const char* v = switch_find(key, &len, &eq);
+    if (v == NULL || !eq || n == 0) {
+        return 0;
+    }
+    size_t vl = len - strlen(key) - 1;
+    if (vl >= n) {
+        vl = n - 1;
+    }
+    memcpy(out, v, vl);
+    out[vl] = '\0';
+    return 1;
+}
+
+int plat_switch_int(const char* key, int fallback) {
+    char buf[32];
+    return plat_switch_value(key, buf, sizeof(buf)) ? atoi(buf) : fallback;
+}
+
+uint64_t plat_ticks(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * PLAT_TICKS_PER_SEC + (uint64_t)t.tv_nsec * PLAT_TICKS_PER_SEC / 1000000000u;
+}
+
+/* dvd.c's read counters: the host reads the disc directly, so there is nothing to report */
+void port_dvd_read_stats(uint32_t* reads, uint64_t* bytes, uint64_t* ticks) {
+    *reads = 0;
+    *bytes = 0;
+    *ticks = 0;
+}

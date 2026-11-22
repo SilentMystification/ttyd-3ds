@@ -580,6 +580,9 @@ void salPcProcessPb(_PB* pb, s32 (*bus)[FRAME_LEN]) {
 
 static s32 sBus[NUM_BUS][FRAME_LEN];
 static s32 sCompGain = 32768; /* compressor gain, 1.15 */
+#ifdef TARGET_PORT
+int (*salPcPbOffload)(_PB* pb, int phase);
+#endif
 
 static void cmdSetup(const u16* spb) {
   u32 b, i;
@@ -708,6 +711,12 @@ void salPcRunCommandList(const u16* cmd) {
       }
       u32 n = 0;
       while (pb != NULL && n++ < 256) {
+#ifdef TARGET_PORT
+        if (salPcPbOffload != NULL && salPcPbOffload(pb, 0)) {
+          processPbNull(pb);
+          salPcPbOffload(pb, 1);
+        } else
+#endif
         salPcProcessPb(pb, sBus);
         pb = resolve2(pb->nextHi, pb->nextLo);
       }

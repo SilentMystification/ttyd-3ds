@@ -64,6 +64,15 @@ extern u8 salPcStreamCat[64];  /* by stream slot */
 /* Port hook, before each quantum: sets the categories' gains (salPcSetCategoryGain). */
 void portAudioMixUpdate(void);
 
+#ifdef TARGET_PORT
+/* Offload (the 3DS port's NDSP voices): when set, PROCESS asks it about each
+ * parameter block, phase 0 before the frame. A non-zero answer means the
+ * voice is played elsewhere: the block is then stepped as the null mix steps
+ * it (addresses, loops, ramps, updates; nothing reaches the buses) and the
+ * hook is called again with phase 1 after. */
+extern int (*salPcPbOffload)(struct _PB* pb, int phase);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

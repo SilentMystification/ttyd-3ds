@@ -36,17 +36,29 @@ static PlatGpuState s_state;
  * it was (a setter called again with the same values, a matrix load) needs
  * no rebuild. Cleared every frame (textures are checked again then) and by
  * a texture copy (a texture's handle can change). */
-#define SNAP_FROM offsetof(GxState, num_texgens)
-#define SNAP_TO offsetof(GxState, copy_src)
-static u8 s_snap[SNAP_TO - SNAP_FROM];
+#define SNAP_FROM (offsetof(GxState, num_texgens) & ~(size_t)3)
+#define SNAP_TO ((offsetof(GxState, copy_src) + 3) & ~(size_t)3)
+#define SNAP_WORDS ((SNAP_TO - SNAP_FROM) / 4)
+static u32 s_snap[SNAP_WORDS]; /* word-aligned: the compare runs a word at a time (memcmp on an unaligned
+                                  buffer goes byte by byte) */
 static f32 s_snap_vp[6];
 static int s_snap_valid;
 
 void gx_draw_state_lost(void) { s_snap_valid = 0; }
 
 static int state_unchanged(void) {
-    return s_snap_valid && memcmp(s_snap, (const u8*)&gx + SNAP_FROM, sizeof(s_snap)) == 0 &&
-           memcmp(s_snap_vp, gx.vp, sizeof(s_snap_vp)) == 0;
+    if (!s_snap_valid) {
+        return 0;
+    }
+    typedef u32 __attribute__((may_alias)) u32a;
+    const u32a* cur = (const u32a*)((const u8*)&gx + SNAP_FROM);
+    /* backwards: the textures, blending and TEV (what changes between objects) sit at the end */
+    for (u32 i = SNAP_WORDS; i-- > 0;) {
+        if (cur[i] != s_snap[i]) {
+            return 0;
+        }
+    }
+    return gx_mem_equal(s_snap_vp, gx.vp, sizeof(s_snap_vp));
 }
 
 static void state_snapshot(void) {

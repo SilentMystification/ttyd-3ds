@@ -269,6 +269,28 @@ u32 gx_perf_frame_no(void);
 u32 gx_hash32(const void* data, u32 n, u32 seed);
 #define GX_PERF_T() (gx_perf_on > 0 ? plat_ticks() : 0)
 
+/* Equality of n bytes a word at a time (ARMv6 loads unaligned words), for the
+ * small compares on hot paths: newlib's memcmp goes byte by byte unless both
+ * pointers are word-aligned. */
+static inline int gx_mem_equal(const void* a, const void* b, u32 n) {
+    const u8* p = (const u8*)a;
+    const u8* q = (const u8*)b;
+    for (; n >= 4; n -= 4, p += 4, q += 4) {
+        u32 x, y;
+        __builtin_memcpy(&x, p, 4);
+        __builtin_memcpy(&y, q, 4);
+        if (x != y) {
+            return 0;
+        }
+    }
+    while (n-- != 0) {
+        if (*p++ != *q++) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* ---- gx_dlcache.c: decoded display-list cache (switch gxcache) ----
  * State is owned by the thread that translates GX (today the game thread);
  * the decode inputs come in through `st`. */

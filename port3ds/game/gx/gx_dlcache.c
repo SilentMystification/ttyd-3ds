@@ -285,8 +285,8 @@ static u32 gather_hash(const DlcRange* r, u32 nr, const u16* idx, u32 nverts) {
 
 /* The decode's inputs other than memory contents: the same as when the entry was made? */
 static int same_state(const GxState* st, const DlcEntry* e) {
-    if (memcmp(e->vtx_desc, st->vtx_desc, sizeof(e->vtx_desc)) != 0 || e->cur_pnmtx != (u8)st->cur_pnmtx ||
-        memcmp(e->cur_texmtx, st->cur_texmtx, sizeof(e->cur_texmtx)) != 0) {
+    if (!gx_mem_equal(e->vtx_desc, st->vtx_desc, sizeof(e->vtx_desc)) || e->cur_pnmtx != (u8)st->cur_pnmtx ||
+        !gx_mem_equal(e->cur_texmtx, st->cur_texmtx, sizeof(e->cur_texmtx))) {
         return 0;
     }
     if (e->state != E_BUILT) {
@@ -295,7 +295,7 @@ static int same_state(const GxState* st, const DlcEntry* e) {
     const GxAttrFmt* v = e_vat(e);
     for (u32 f = 0; f < GX_MAX_VTXFMT; f++) {
         if (e->fmt_mask & (1u << f)) {
-            if (memcmp(v, st->vat[f], sizeof(st->vat[f])) != 0) {
+            if (!gx_mem_equal(v, st->vat[f], sizeof(st->vat[f]))) {
                 return 0;
             }
             v += GX_VA_MAX_ATTR;

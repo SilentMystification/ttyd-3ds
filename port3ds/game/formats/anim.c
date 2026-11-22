@@ -133,6 +133,17 @@ void portAnimSwap(void* data, u32 size, const char* name) {
                (unsigned long)size);
         return;
     }
+    /* Retail shapes are 0xA8 bytes. a/OFF_hei_01b (never loaded by the game) is a pre-release model with unnamed
+     * 0x68-byte shapes: read with the retail layout its shapes overlap the draw-call table and every field of
+     * its shapes and groups would be swapped wrongly. Refuse it, as paper-cut's decoder does. */
+    u32 shapes = port_be32(p + P_SHAPES), drawcalls = port_be32(p + P_DRAWCALLS), nshapes = port_be32(p + P_SHAPE_COUNT);
+    if (nshapes > 0 && drawcalls > shapes && drawcalls - shapes < nshapes * port_swap_type_AnimPoseShape.size) {
+        PLOG_E("anim %s: pre-release model format (%lu shapes in %#lx bytes, %#lx each in the retail layout)", name,
+               (unsigned long)nshapes, (unsigned long)(drawcalls - shapes),
+               (unsigned long)port_swap_type_AnimPoseShape.size);
+        OSPanic("anim.c", __LINE__, "%s: pre-release model format, not supported", name);
+        return;
+    }
     u64 t0 = port_conv_begin();
     PortSwap s;
     port_swap_begin(&s, data, size, name);

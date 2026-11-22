@@ -56,6 +56,7 @@ set(CONVERTERS
     "${REPO}/port3ds/game/port_swap.c"
     "${REPO}/port3ds/game/musyx_swap.c"
     "${REPO}/port3ds/game/disc_data.c"
+    "${REPO}/port3ds/game/fst.c"
     "${REPO}/port3ds/game/formats/tpl.c"
     "${REPO}/port3ds/game/formats/anim.c"
     "${REPO}/port3ds/game/formats/map.c"

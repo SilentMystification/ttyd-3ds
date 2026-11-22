@@ -20,11 +20,11 @@ import tempfile
 import time
 import zlib
 
-# Files paper-cut's C decoders reject that the port's converter accepts, understood: the retail game never loads them.
-KNOWN_PAPERCUT_REJECTS = {
-    "a/OFF_hei_01b": "pre-release model format with 0x68-byte shapes; hei_01 loads OFF_hei_01c. The port's converter "
-                     "swaps it with the retail layout, so the result is wrong but never read",
-}
+# Files the port's converters must refuse (the retail game never loads them), as paper-cut's decoders do:
+# path -> text of the error. a/OFF_hei_01b is a pre-release model with 0x68-byte shapes; hei_01 loads OFF_hei_01c.
+EXPECTED_REJECTIONS = {"a/OFF_hei_01b": "pre-release model format"}
+# Files paper-cut rejects and the port accepts: none now.
+KNOWN_PAPERCUT_REJECTS = {}
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -426,8 +426,12 @@ def run_disc_checks(args, res, exe, disc, pc, scratch, t_start):
     t_all = time.time() - t0
     table = [l for l in r.stdout.splitlines() if l and not l.startswith("FAIL")]
     fails = [l for l in r.stdout.splitlines() if l.startswith("FAIL")]
+    unexpected = [l for l in fails if l.split()[2].rstrip(":") not in EXPECTED_REJECTIONS]
     res.add("host_decode all: every file the port converts converts, and converting again changes nothing",
-            "ok" if r.returncode == 0 else "FAIL", f"{len(fails)} failures, {t_all:.1f} s")
+            "ok" if not unexpected else "FAIL", f"{len(unexpected)} unexpected failures, {t_all:.1f} s")
+    for path, why in EXPECTED_REJECTIONS.items():
+        hit = [l for l in fails if l.split()[2].rstrip(":") == path and why in l]
+        res.add(f"{path} is rejected with a logged error ({why})", "ok" if hit else "FAIL", hit[0][5:] if hit else "not rejected")
     for l in fails:
         print("      " + l)
     print("\n".join("      " + l for l in table))

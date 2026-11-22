@@ -3176,7 +3176,7 @@ musyx/runtime/snd_service.c:
 	.sdata      start:0x8041E3F0 end:0x8041E3F8
 	.sdata2     start:0x804292A0 end:0x804292A8
 
-musyx/runtime/HARDWARE.C:
+musyx/runtime/hardware.c:
 	.text       start:0x802905B0 end:0x8029163C
 	.rodata     start:0x803040C8 end:0x803041C8
 	.bss        start:0x80410348 end:0x80410358

@@ -262,11 +262,27 @@ u32 port_game_frame(void) {
     return s_frames;
 }
 
+/* Game-time budget per game frame: the retrace callback (vblank thread) takes
+ * game time from it, the game thread refills it once per frame. Below 30 fps
+ * a frame then advances the game clocks by at most 2 retraces (33 ms). */
+#define GAME_TIME_BUDGET_MS 33
+static u32 s_time_budget = 0;
+
+OSTime port_game_time_take(OSTime want) {
+    u32 left = __atomic_load_n(&s_time_budget, __ATOMIC_RELAXED);
+    u32 take;
+    do {
+        take = want < (OSTime)left ? (u32)want : left;
+    } while (!__atomic_compare_exchange_n(&s_time_budget, &left, left - take, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    return take;
+}
+
 void port_debug_frame(u32 frame);
 void plat_memory_log(const char* when);
 
 static void frame_hooks(void) {
     s_frames++;
+    __atomic_store_n(&s_time_budget, (u32)OSMillisecondsToTicks(GAME_TIME_BUDGET_MS), __ATOMIC_RELAXED);
     port_debug_frame(s_frames);
     plat_input_frame();
     plat_set_phase("frame hooks");

@@ -513,6 +513,9 @@ u32 marioStGetSystemLevel(void) {
     return gp->systemLevelFlags;
 }
 
+#ifdef TARGET_PORT
+OSTime port_game_time_take(OSTime want);
+#endif
 /**
  * Runs after every vertical retrace: advances the play-time clocks (each stops while its system level is
  * paused), records the retrace count, watches the console's Reset button
@@ -529,45 +532,55 @@ static void viPostCallback(u32 retraceCount) {
     if (gp->playTime > (OS_TIMER_CLOCK * (OSTime)359999999)) {
         gp->playTime = (OS_TIMER_CLOCK * (OSTime)359999999);
     }
+#ifdef TARGET_PORT
+    // Below about 30 fps a game frame spans many retraces: the game clocks get at most 2 retraces of time per
+    // game frame (the game slows down instead of overshooting its moves). playTime stays real time.
+    OSTime gameDelta = port_game_time_take(gp->retraceDeltaTime);
+#else
+#define gameDelta gp->retraceDeltaTime // the GameCube build is unchanged
+#endif
     // US and PAL also stop the system-level clocks during a disc error or while a window is open
 #if VERSION >= VERSION_US
     if (!gp->dvdError && !winCheck()) {
         if (!(gp->systemLevelFlags & 8)) {
-            gp->systemLv3Time += gp->retraceDeltaTime;
+            gp->systemLv3Time += gameDelta;
         }
         if (!(gp->systemLevelFlags & 4)) {
-            gp->systemLv2Time += gp->retraceDeltaTime;
+            gp->systemLv2Time += gameDelta;
         }
         if (!(gp->systemLevelFlags & 2)) {
-            gp->systemLv1Time += gp->retraceDeltaTime;
+            gp->systemLv1Time += gameDelta;
         }
         if (!(gp->systemLevelFlags & 1)) {
-            gp->systemLv0Time += gp->retraceDeltaTime;
+            gp->systemLv0Time += gameDelta;
         }
-        gp->renderTime += gp->retraceDeltaTime;
+        gp->renderTime += gameDelta;
         if (!gp->inBattle) {
-            gp->renderFieldTime += gp->retraceDeltaTime;
+            gp->renderFieldTime += gameDelta;
         }
     }
 #else
     if (!(gp->systemLevelFlags & 8)) {
-        gp->systemLv3Time += gp->retraceDeltaTime;
+        gp->systemLv3Time += gameDelta;
     }
     if (!(gp->systemLevelFlags & 4)) {
-        gp->systemLv2Time += gp->retraceDeltaTime;
+        gp->systemLv2Time += gameDelta;
     }
     if (!(gp->systemLevelFlags & 2)) {
-        gp->systemLv1Time += gp->retraceDeltaTime;
+        gp->systemLv1Time += gameDelta;
     }
     if (!(gp->systemLevelFlags & 1)) {
-        gp->systemLv0Time += gp->retraceDeltaTime;
+        gp->systemLv0Time += gameDelta;
     }
     if (!gp->dvdError && !winCheck()) {
-        gp->renderTime += gp->retraceDeltaTime;
+        gp->renderTime += gameDelta;
         if (!gp->inBattle) {
-            gp->renderFieldTime += gp->retraceDeltaTime;
+            gp->renderFieldTime += gameDelta;
         }
     }
+#endif
+    #ifndef TARGET_PORT
+#undef gameDelta
 #endif
     gp->retraceTime = time;
     gp->retraceCount = retraceCount;

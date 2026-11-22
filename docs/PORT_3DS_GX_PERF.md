@@ -124,7 +124,7 @@ Move `transform` and `texgen` into the vertex shader for the draws that fit, and
 ## Recommended order
 
 1. **(a) The decoded display-list cache.** It is self-contained (one new file and hooks in `gx_pipe.c`), it removes the decode (a fifth of the frame) at the price of a full check per call, which nets 13-15% of the game thread's GX time in every measured scene, its results are bit-identical by construction (the transform gets the same input), and it is the base for the PICA-ready vertex streams that (b) needs. Done on this branch, see "Results" below.
-2. **(c), the cheap parts:** the separate state version for matrix loads, the fog LUT cache and the unlit fast path (game thread, `gx_draw.c` and `gx_state.c`), and the draw merge in `plat/gpu.c` (render thread). Each is small and can be A/B-tested alone. Coordinate the texture lookup with the texture-hash work in `gx_tex.c`, since fewer rebuilds mean fewer lookups.
+2. **(c), the cheap parts:** the separate state version for matrix loads, the fog LUT cache and the unlit fast path (game thread, `gx_draw.c` and `gx_state.c`), and the draw merge in `plat/gpu.c` (render thread). Each is small and can be A/B-tested alone. Coordinate the texture lookup with the texture-hash work in `gx_tex.c`, since fewer rebuilds mean fewer lookups. Done, with trusted memory for the cache's validation: see "Results: the cheap state fixes" below (the state version is off by default until it saves time).
 3. **(b) The vertex shader transform**, first for cached lists with one matrix, no lighting and `MTX2x4` texgen (every vertex measured here), fed by PICA-ready streams in the cache entries (linear memory, budgeted) and `u16` index lists, with the CPU path as the fallback. Then the immediate-mode draws, then the matrix palette and lighting with their own test scenes.
 
 ## Results: the display-list cache (step 1)
@@ -212,6 +212,126 @@ For (b), an entry gets a second, optional part built from the first, in linear m
 - **`u16` triangle indices** for the entry's strips and fans, so one entry is one GPU draw, and the same index order as the CPU path's triangle assembly, so every pass of a multi-pass draw gets the same triangles.
 - The per-draw matrices (model x view pre-multiplied in 32-bit on the CPU, camera-relative) are not part of the entry: they come with the call, so every draw that shares a matrix uses bit-identical uniforms.
 
+## Results: the cheap state fixes (step 2) and trusted memory
+
+Each change is behind its own switch and was A/B'd on one build. Azahar, `gxstats=60`, frames 1200-1260, game-thread ms per frame. "Old" is the build before this work (`89eb121c`); "off" is every new switch off on the new build.
+
+**Final default (`gxstatever=0`, everything else on) against the old build:**
+
+| | gor_01 | gon_02 (battle) | aaa_00 |
+|---|---|---|---|
+| Game frame | 217.4 -> **183.9** (13 -> 11 vblanks) | 117.6 -> **85.3** (7 -> 5) | 117.6 -> **85.6** (7 -> 5) |
+| Display lists, inclusive | 164.4 -> 126.9 | 80.1 -> 61.1 | 84.6 -> 64.7 |
+| Cache lookup and validation | 43.5 -> **19.1** (-56%) | 22.7 -> **9.8** (-57%) | 22.3 -> **9.2** (-59%) |
+| Transform | 57.2 -> **42.5** (-26%) | 26.8 -> 19.9 | 28.1 -> 20.6 |
+| State (`build_state`) | 17.2 -> 17.4 | 7.8 -> 7.9 | 7.7 -> 7.8 |
+| Assembly and recording | 22.3 -> 23.3 | 10.8 -> 11.3 | 10.8 -> 11.3 |
+| Draw commands (of draws) | 3752 -> **422** | 1903 -> 177 | 2129 -> 232 |
+| Record bytes | 362 K -> 324 K | 158 K -> 138 K | 198 K -> 176 K |
+| Render thread | 43 -> **20** ms | 34 -> 6 ms | 34 -> 6 ms |
+
+The frame time moves in whole vblanks (the game waits for the next one), so the stage times are the measure. The render thread's time varies a lot between runs (38-48 ms for the same gor_01 configuration).
+
+**Per change, gor_01, cumulative** (on the build before the word-compare fix in item 5, so every column is comparable; the last column adds that fix):
+
+| | off | + statever | + fogcache | + unlit | + merge | + trust | + word compares |
+|---|---|---|---|---|---|---|---|
+| Game frame | 217.3 | 234.1 | 234.1 | 217.4 | 217.4 | 200.6 | **183.9** |
+| Display lists, inclusive | 167.3 | 170.4 | 170.4 | 155.0 | 154.9 | 138.2 | 127.6 |
+| Cache lookup and validation | 44.3 | 44.2 | 44.3 | 44.3 | 44.3 | 27.5 | 19.0 |
+| State | 17.5 | 24.2 | 24.2 | 24.2 | 24.2 | 24.2 | 19.6 |
+| Transform | 58.7 | 58.7 | 58.7 | 42.4 | 42.4 | 42.4 | 42.5 |
+| Rebuilds | 583 | 439 | 439 | 439 | 439 | 439 | 439 |
+| Draw commands | 3752 | 3752 | 3752 | 3752 | 420 | 422 | 422 |
+| Render thread | 38.7 | 50.2 | 49.7 | 49.8 | 22.5 | 23.2 | 19.5 |
+
+gon_02 and aaa_00 give the same picture (unlit -28%, merge 1903 -> 177 and 2129 -> 232 commands, trust -57% and -60%).
+
+**Screenshots** (`shots=100 shotmax=13`, frames 800-1200, `shotdiff.py`), with two runs of the old build as the noise floor:
+
+| Scene | old vs old (noise) | off vs old | old vs final |
+|---|---|---|---|
+| gor_01 | max 254, mean 0.40, worst shot 1.1% of pixels > 8 | worst mean 2.46, 5.1% | max 239, mean 0.65, worst mean 0.93, 1.7% |
+| gon_02 | (old vs off: worst mean 21.1, 67%: the battle's attack timing shakes the camera) | | worst mean 6.2, 23% |
+| aaa_00 | identical | identical | **identical (5 of 5)** |
+
+Every differing pixel in gor_01 and gon_02 is on animated content (the walking NPC, the rope, Goombella's idle, the battle's attacks), as in the noise runs; the static scene is identical. Each switch was also compared with the configuration before it, always within the same noise.
+
+What each change did:
+
+1. **State version without matrix loads, and a state snapshot (`gxstatever`, off by default).** The matrix change alone changed nothing: 583 rebuilds stayed 583, because the map objects call `GXLoadTexObj`, the TEV and blend setters again before each draw, mostly with the values in force. A snapshot of the state `build_state` reads (texgen to pixel engine without the lights, plus the viewport) then skips rebuilds that would produce the same state: **583 -> 439** (gor_01), 268 -> 188 (gon_02), 272 -> 239 (aaa_00). But the state stage got slower: 17.4 -> 19.2 ms (gor_01) and 7.9 -> 8.7 ms (gon_02) even with word compares and the lights skipped. The skipped rebuilds were the cheap ones (same textures, and a record the back end drops as identical), and comparing and copying about 1.3 KB per version change cost more. Next try: dirty bits that the setters set only when a value really changes. The floor is the 436 different states the render thread sees.
+2. **Fog LUT (`gxfogcache`).** No measurable change in these scenes: they rebuild with fog seldom enough that the LUT's 129 `powf` and its hash did not show. Kept on; it costs one 5-value compare per rebuild with fog.
+3. **Unlit fast path (`gxunlit`).** Transform -26 to -29% in all scenes. Every measured vertex is unlit; besides `channel_color`, the eye-space normal (a 3x3 product and a square root per vertex) is skipped when no lit channel reads it, and the "does a texgen read a colour" loop moved out of the per-vertex path.
+4. **Draw merge (`gxmerge`).** 3752 draw commands -> 420 (gor_01). The map's strips under one state are contiguous once the GX layer gives back the vertices it reserved for culled triangles. The render thread's time halves or better; the game thread is unchanged.
+5. **Word compares.** The display-list cache's per-call state check (`memcmp` of the vertex description and the attribute formats) and the state snapshot ran byte by byte, because the copies are not word-aligned. With `gx_mem_equal` (word loads, unaligned allowed on ARMv6) the cache stage went 44.3 -> 35.9 ms with trust off and 27.5 -> 19.0 ms with it on.
+
+**PC sampling** (`pc_sample.py --interval 200`, gor_01, no counters; Azahar's stub ran at 1-3 Hz beside other instances, 176 and 89 game-thread samples, direction only): all switches off vs the final build: `memcmp` 4.0% -> 0 (it was 16% on the build before item 5), `gather_hash` 5.1% -> 1.1%, `hash_span` (texture check) 4.0% -> 0, `channel_color` 2.3% -> 0. `gx_draw_vertices` stays the largest (22%), then the wait for the render thread (13.6% -> 14.6%), then game code (`hitCheckVecFilter`, `strcmp` from `mapGetMapObj`).
+
+### Trusted memory: cheaper display-list validation (`gxtrust`)
+
+Generic registry: [`port3ds/include/plat/memstable.h`](../port3ds/include/plat/memstable.h), `port3ds/plat/memstable.c`. No game knowledge.
+
+- **Covered memory** is a sorted table of ranges (adjacent fills merge) with three kinds of report:
+  - `fill`, content now stable: `DVDReadPrio` (the bytes read), an ARQ transfer into main memory, `OSLink` restoring a REL's data;
+  - `write`, coverage kept but trust revoked: `DCFlushRange`, `DCStoreRange` and their NoSync forms. The GameCube needs one of them after the CPU writes memory the GPU reads, so a correct GameCube program reports every GPU-visible CPU write (`smartGarbage`'s compaction ends with one over the whole heap);
+  - `release`, coverage dropped: `__memAlloc`, `_mapAlloc`, `_mapAllocTail` (a block changes owner), `_mapFree`, `smartFree`, the free space after `smartGarbage`, `OSUnlink`, and `GXBeginDisplayList` (the CPU builds a list there).
+- **Trust.** After a full check of an entry (the hash of the list and of every array element read) passes, the cache asks the registry about the list and each array's span (lowest to highest index read). If all of it is covered and no covered memory changed since the check began (an epoch counter read before hashing), the entry gets the current trust generation and the ranges become *relied on*. A trusted entry whose generation is still current is a hit without hashing. The state inputs (vertex description, formats, matrix indices, array addresses and strides) are still compared on every call.
+- **Revocation.** A report that touches a relied range bumps the generation: every trusted entry is checked in full once more, then asks again. Reports on memory nobody relies on (staging buffers, the 60-500 flushes per frame of CPU-built data) only bump the epoch. A trust request that raced with a report fails and is repeated after the next epoch change.
+- **Contract.** Covered memory changes only through the reported paths. A CPU store into a disc-loaded list or array with no flush or store after it is not seen. The GameCube's GPU would not see such a store either (unless the line left the cache by chance), so correct GameCube code does not depend on it. The verify mode is how a game is checked.
+
+Measured: 95% of hits unhashed in gor_01, 98% in gon_02, 99% in aaa_00 (the rest are lists in uncovered memory, hashed as before); 71, 62 and 49 ranges covering 9-12 MB; no revocation while a scene runs. Validation now costs about 3.7 µs per list call in gor_01 (Azahar ticks, counters included), from 8.0 µs.
+
+**Proof:**
+
+- `gxcache=2` (every hit, trusted or not, is hashed, decoded again and compared) over `map_sweep.py --maps gor_01,tik_01,gor_01,hei_01,gon_02 --story 30 --frames 300 --switches "gxcache=2 gxstats=60"`: four REL relinks (`OSLink tik`, `gor`, `hei`, `gon`), the map changes, and the battle gon_02 starts on entry. **4,893,718 hits verified, 0 mismatched, 0 stale.** Each relink revoked trust once, as it must. A separate gor_01 run: 310,140 verified, 0 mismatched.
+- `gxscribble=900`, which xors one byte of a trusted entry's position array with no flush and no report:
+  - with `gxcache=2`: `stale 180, mismatched 180` per 60 frames (three lists read that element) and the warning "cached list ... decodes differently now". **Verify mode catches it.**
+  - with `gxcache=1`: the scribbled entry stays trusted (60 trusted hits per 60 frames, nothing counted). **Normal mode draws the old vertices**, which is the documented contract.
+  - with `gxcache=1 gxtrust=0`: "the full check saw list ... change (decoded again)". The hash catches it.
+
+**Risks of trust:**
+
+- A game that writes GPU data without a flush (or through an uncached mirror) draws stale lists until the next revocation. Run a new game's scenes once with `gxcache=2`; any `stale` count shows it.
+- Port code that changes disc-loaded data after the read (the `*_swap.c` byte swaps) does so before the data is first drawn, so trust is only granted afterwards. Port code that patches loaded data later must report a write.
+- REL data is covered from `OSLink`. Game variables in the same `.data` change without a report; that is safe because trust is per byte span (the lists' and arrays' own bytes). A REL that animated a static array in place without a flush would show as `stale` in verify mode; none did in the sweep.
+- One LightLock; reports come from the game, DVD and ARQ threads. A full table (8192 ranges) drops a fill (counted), which only costs speed.
+- Moving GX translation to another thread: trust is checked at translation time, like the hashes it replaces, so the late-read rule in the risks below applies unchanged.
+
+## Design: the vertex-shader path against the offload rules (for review before (b) is built)
+
+How option (b) meets each rule in [PORT_3DS_GPU_OFFLOAD.md](PORT_3DS_GPU_OFFLOAD.md). Nothing here is implemented yet.
+
+**What goes through the shader.** A draw from a display list (cached or not) whose vertex pipeline is: one position matrix (no `PNMTXIDX`), the projection, colour channels unlit (material from the vertex or the register, as the `gxunlit` fast path selects them), up to 3 texgens that are `MTX2x4` from a `TEXn` coordinate (`MTX3x4` only on unit 0, where the PICA divides by q), no post-transform matrix, no bounding box armed, triangles, quads, strips or fans. That is every list vertex measured in gor_01, gon_02, aaa_00 and dou_05. Everything else stays on the CPU path, which stays the reference.
+
+**The stream** (built from the cache entry once, in linear memory, inside the cache budget, freed only after the render thread's fence for the frame that last drew it):
+
+| Attribute | Format | Exactness |
+|---|---|---|
+| position | `s16` x3, the entry's power-of-two scale folded into the matrix uniform | only when exact (99.5% of gor_01's vertices); otherwise `float` x3 |
+| colour | `u8` x4 | the decoded `GXColor` bytes |
+| texture coordinate n | `s16` x2 with a power-of-two scale, or `float` x2 | the same exactness check as positions (TEX0 exact in every gor_01 entry) |
+| indices | `u16` triangle list | in the CPU path's assembly order (strip parity, fan order, quad split), so every pass of a multi-pass draw gets the same triangles |
+
+Attributes the draw does not read become fixed attributes (no per-vertex cost, Star3D's measurement). The normal is not streamed until lighting moves (no measured draw reads it).
+
+**Rule 2: matrices on the CPU in 32-bit, camera-relative.** GX's position matrix is already model x view (eye space), so its translation is the object's offset from the camera. Per draw the CPU multiplies, in 32-bit float, the projection (GX's 7-value form, as the CPU path applies it) by that matrix and by the stream's position scale, and uploads 4 rows (`c0`-`c3`); the shader does one `dp4` per clip component and nothing else to the position. Texture matrices: 2 rows per unit (`c4`-`c9`), the coordinate's scale folded in the same way. Every draw that shares a matrix gets bit-identical uniforms (the same 32-bit product, the same rounding to the PICA's 24-bit floats), which is what rules 1 and 4 need. The upload is skipped when the rows equal the last ones sent (the render thread already applies state that way).
+
+**Rule 1: the fallback is per pass group, never per draw.** A *pass group* is keyed by the bits of the position matrix, the projection and the viewport's depth range (everything that decides where a vertex lands in depth). Every draw of a group in a frame takes the same path:
+
+- The decision for a group in frame N is the one learned in frame N-1: a small table (group key -> "all draws were shader-eligible") filled while drawing. A group seen for the first time, or one with any CPU-only draw last frame (an immediate-mode decal, a lit draw, a line, a bounding-box draw), draws entirely on the CPU. A group switches to the shader only after a whole frame in which every draw of it was eligible, and switches back the first frame one is not; that switch frame draws the whole group on the CPU (a draw found ineligible mid-frame forces the group's remaining draws to the CPU, and the group is marked for the next frame).
+- So a floor and the shadow or decal drawn on it with the same matrix and `LEQUAL` or `EQUAL`, the passes of one mesh, and map parts that share a matrix are never split between the paths. Immediate-mode draws stay on the CPU in the first version, so anything drawn with `GXBegin` under a list's matrix keeps that matrix's lists on the CPU too.
+- Draws under different matrices already differ in their last bits on the GameCube and on the CPU path; the shader's error is the 24-bit quantum, about 1.5x10^-5 of the distance from the camera (camera-relative matrices keep it small near the player). The depth diff in the acceptance tests measures it per scene.
+
+**Rule 3: depth.** The shader writes the same clip z and w as the CPU path (`cz = p5*z + p6`, `cw = -z` or 1), and the back end keeps today's `C3D_DepthMap(true, far - near, far)` with the same viewport near and far for both paths. W-buffering is a separate hardware experiment. Orthographic and 2D layers keep their exact order because a group's path never changes inside a frame and the census must show which path each layer took; layers drawn with `GXBegin` stay on the CPU in the first version anyway.
+
+**Rule 4: seams.** The same vertex in two lists comes out the same when it has the same source bits, the same matrix and the same instructions: guaranteed by the lossless stream (a power-of-two scale only moves the exponent; an entry whose values are not exact keeps floats), the shared uniforms of a pass group, and a single straight-line position path in the shader (no branch before the position is written). Per-entry scales that are not powers of two are never used.
+
+**Rule 5: output registers.** One shader program; the variants (texgen count, `MTX3x4` on unit 0, colour from vertex or constant) are chosen by boolean uniforms `b0`-`b7` (never `b15`), branches only compute temporaries, and after the join each output (`o0` position, `o1` colour, `o2`-`o4` the three texture coordinates, `o5` texcoord0 w when used) is written exactly once, from a temporary, with the full `.xyzw` mask. A build-time check parses the shader's assembly and fails when an output is written twice, partially, or inside a branch.
+
+**Culling and the rest.** The shader path cannot cull on the CPU: it sets `C3D_CullFace` from `GXSetCullMode`, with the front face flipped once for the EFB rotation (a fixed rule, tested with gputest). The bounding box, lines and points stay on the CPU. The render thread gets a new record command (stream, index range, uniform rows); the draw merge does not apply to it.
+
+**Acceptance** is the list in PORT_3DS_GPU_OFFLOAD.md (image, depth, seam and flicker diffs, coverage census), with `gxvsh=0/1` and the per-scene noise floor from two CPU-path runs.
+
 ## Risks of the cache
 
 - **Hash collisions.** A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.
@@ -231,3 +351,9 @@ Rows for the switch table:
 | `gxstats=N` | Every N game frames, logs `gxstats` lines with per-frame averages: display lists (calls, bytes, vertices, how many repeat unchanged from an earlier frame), immediate-mode primitives, draws, triangles and culled triangles, PICA state rebuilds, the render thread's draws and record bytes, the game thread's time per GX stage (list decode, state rebuild, transform, triangle assembly), the GX features the vertices use (lighting, texgen kinds, matrix indices, primitive types), and with `gxcache` the cache's hits and memory. Off by default; costs a few percent when on |
 | `gxcache=0/1/2` | The decoded display-list cache (`port3ds/game/gx/gx_dlcache.c`): 1 (default) draws repeated lists from their decoded vertices after checking every input; 0 decodes every list every time (A/B); 2 decodes every hit again and compares it with the cache (`mismatched` in the `gxstats` cache line, and one warning line) |
 | `gxcachekb=N` | The cache's memory budget in KB (default 8192) |
+| `gxtrust=0/1` | 1 (default): a cache entry whose list and array spans lie in covered memory of the content-stable registry (`port3ds/plat/memstable.c`), unchanged since its last full check, is a hit without hashing; 0 hashes every hit (A/B). `gxcache=2` still hashes and decodes trusted hits and counts what trust skipped (`stale`, `mismatched`) |
+| `gxscribble=N` | Test of the verify mode, not for play: at game frame N, xors one byte of an array a cached (preferably trusted) list reads, with no flush and no report. With `gxcache=2` it must show as `mismatched` and `stale`; with trust on it keeps drawing the old vertices, and the `gxstats scribble` line counts those hits (the contract) |
+| `gxstatever=0/1` | 0 (default): every state version change rebuilds the PICA state. 1: matrix and projection loads do not bump the version, and a version change whose state (texgen to pixel engine without the lights, viewport) equals the last build skips `build_state` (`builds N (unchanged M)` in `gxstats`). Fewer rebuilds, but no time saved yet (see Results) |
+| `gxfogcache=0/1` | 1 (default): the fog LUT is recomputed only when the fog parameters change and goes to the back end with an id instead of being hashed; 0 recomputes and hashes it on every rebuild (A/B) |
+| `gxunlit=0/1` | 1 (default): unlit colour channels skip `channel_color` and the eye-space normal; 0 the general path (A/B) |
+| `gxmerge=0/1` | 1 (default): consecutive draws with nothing recorded between them extend one draw command (`plat/gpu.c`); 0 one command per draw (A/B). `gxstats` shows `gpu draws N (of M calls)` |

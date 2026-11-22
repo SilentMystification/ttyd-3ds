@@ -26,6 +26,11 @@ static int s_units;
 static int s_color_chan;     /* 0: COLOR0A0, 1: COLOR1A1 feeds the raster color */
 static u32 s_built_version = 0xFFFFFFFFu;
 static PlatGpuState s_state;
+/* switch gxunlit, set by build_state: the draw needs both colour channels
+ * (a texgen reads a colour), and per channel pair whether lighting is off for
+ * colour and alpha, and which of them take the vertex colour as material */
+static int s_need_both, s_need_nrm;
+static u8 s_unlit[2], s_mat_vtx_rgb[2], s_mat_vtx_a[2];
 u32 gx_stat_draws, gx_stat_vertices, gx_stat_copies;
 int gx_bbox_active;
 int gx_opt_statever = 1, gx_opt_fogcache = 1, gx_opt_unlit = 1;
@@ -206,6 +211,21 @@ static void build_state(void) {
         tu->lod_bias = (f32)t->lod_bias_q / 32.0f;
     }
     gx_tev_compile(st);
+
+    /* what the transform needs per vertex (gxunlit) */
+    s_need_both = 0;
+    for (int u = 0; u < s_units; u++) {
+        u8 src = gx.texgen[s_unit_coord[u]].src;
+        if (gx.texgen[s_unit_coord[u]].func == GX_TG_SRTG || src == GX_TG_COLOR0 || src == GX_TG_COLOR1) {
+            s_need_both = 1;
+        }
+    }
+    for (int ch = 0; ch < 2; ch++) {
+        s_unlit[ch] = !gx.chan[ch].enable && !gx.chan[ch + 2].enable;
+        s_mat_vtx_rgb[ch] = gx.chan[ch].mat_src == GX_SRC_VTX;
+        s_mat_vtx_a[ch] = gx.chan[ch + 2].mat_src == GX_SRC_VTX;
+    }
+    s_need_nrm = !s_unlit[s_color_chan] || (s_need_both && !s_unlit[1 - s_color_chan]);
 
     /* alpha compare */
     u8 c0 = gx.alpha_comp0, c1 = gx.alpha_comp1, op = gx.alpha_op;
@@ -477,7 +497,8 @@ static void transform(const GxVertex* v, Out* o) {
         p[r] = m[r][0] * v->pos[0] + m[r][1] * v->pos[1] + m[r][2] * v->pos[2] + m[r][3];
     }
     f32 n[3] = {0, 0, 1};
-    if (v->has_nrm) {
+    /* the eye-space normal feeds only the lighting (texgen reads the vertex's own normal) */
+    if (v->has_nrm && (!gx_opt_unlit || s_need_nrm)) {
         const f32(*nm)[3] = gx.nrm_mtx[v->pnmtx % GX_POS_MTX_COUNT];
         for (int r = 0; r < 3; r++) {
             n[r] = nm[r][0] * v->nrm[0] + nm[r][1] * v->nrm[1] + nm[r][2] * v->nrm[2];
@@ -516,15 +537,34 @@ static void transform(const GxVertex* v, Out* o) {
     }
     GXColor chan_out[2];
     int need_both = 0;
-    for (int u = 0; u < s_units; u++) {
-        u8 src = gx.texgen[s_unit_coord[u]].src;
-        if (gx.texgen[s_unit_coord[u]].func == GX_TG_SRTG || src == GX_TG_COLOR0 || src == GX_TG_COLOR1) {
-            need_both = 1;
+    if (gx_opt_unlit) {
+        /* what channel_color gives with lighting off: the material colour,
+         * from the vertex or the register, for colour and alpha apart */
+        need_both = s_need_both;
+        for (int k = 0; k < 1 + need_both; k++) {
+            int ch = k == 0 ? s_color_chan : 1 - s_color_chan;
+            if (k == 0 && !need_both && gx.num_chans == 0) {
+                break; /* the colour is not used */
+            }
+            if (s_unlit[ch]) {
+                GXColor rgb = s_mat_vtx_rgb[ch] ? v->clr[ch] : gx.mat[ch];
+                rgb.a = s_mat_vtx_a[ch] ? v->clr[ch].a : gx.mat[ch].a;
+                chan_out[ch] = rgb;
+            } else {
+                chan_out[ch] = channel_color(ch, v, p, n);
+            }
         }
-    }
-    chan_out[s_color_chan] = channel_color(s_color_chan, v, p, n);
-    if (need_both) {
-        chan_out[1 - s_color_chan] = channel_color(1 - s_color_chan, v, p, n);
+    } else {
+        for (int u = 0; u < s_units; u++) {
+            u8 src = gx.texgen[s_unit_coord[u]].src;
+            if (gx.texgen[s_unit_coord[u]].func == GX_TG_SRTG || src == GX_TG_COLOR0 || src == GX_TG_COLOR1) {
+                need_both = 1;
+            }
+        }
+        chan_out[s_color_chan] = channel_color(s_color_chan, v, p, n);
+        if (need_both) {
+            chan_out[1 - s_color_chan] = channel_color(1 - s_color_chan, v, p, n);
+        }
     }
     const GXColor* c = &chan_out[s_color_chan];
     if (gx.num_chans == 0) {

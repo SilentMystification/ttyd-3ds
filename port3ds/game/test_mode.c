@@ -234,8 +234,40 @@ static void gwdump(u32 frame) {
             (unsigned long)gp->button[0], (int)gp->stickX[0], (int)gp->stickY[0], (unsigned long)h_gw);
 }
 
+/* switch rngtrace=<from>,<to>: every rand() call in that game frame window, and each sequence change */
+static u32 s_cur_frame, s_rt_from, s_rt_to;
+static int s_rt_state = -1; /* -1 unread, 0 off, 1 on */
+
+static int rngtrace_on(void) {
+    if (s_rt_state < 0) {
+        char v[40];
+        s_rt_state = 0;
+        if (tst_sw_value("rngtrace", v, sizeof(v)) && v[0] != '\0') {
+            char* c = v;
+            s_rt_from = s_rt_to = 0;
+            while (*c >= '0' && *c <= '9') s_rt_from = s_rt_from * 10 + (u32)(*c++ - '0');
+            if (*c == ',') c++;
+            while (*c >= '0' && *c <= '9') s_rt_to = s_rt_to * 10 + (u32)(*c++ - '0');
+            s_rt_state = 1;
+        }
+    }
+    return s_rt_state == 1 && s_cur_frame >= s_rt_from && s_cur_frame <= s_rt_to;
+}
+
+void tst_rngtrace(unsigned long caller, u32 val) {
+    if (rngtrace_on()) {
+        tst_log("[RNG] f=%lu caller=%08lx val=%lu", (unsigned long)s_cur_frame, caller, (unsigned long)val);
+    }
+}
+
 void tst_frame(u32 frame) {
+    static int last_seq = -99;
     tst_init();
+    s_cur_frame = frame;
+    if (rngtrace_on() && gp != NULL && (int)seqGetSeq() != last_seq) {
+        last_seq = (int)seqGetSeq();
+        tst_log("[SEQ] f=%lu seq=%d", (unsigned long)frame, last_seq);
+    }
     if (s_warp_frame == 0 && gp != NULL && seqGetSeq() == SEQ_MAP_CHANGE) {
         s_warp_frame = 1;
         tst_log("tst: first map change at frame %lu", (unsigned long)frame);

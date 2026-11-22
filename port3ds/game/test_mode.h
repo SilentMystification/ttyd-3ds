@@ -42,6 +42,8 @@ u32 tst_vretrace(void);
 int tst_dvd_busy(void);
 /* Once per game frame, at the start of VIWaitForRetrace. */
 void tst_frame(u32 frame);
+/* rngtrace= hook, called by rand() with its caller address and result */
+void tst_rngtrace(unsigned long caller, u32 val);
 /* Game frames since the first map change (the switch warp), 0 before. */
 u32 tst_warp_frames(void);
 

@@ -8,11 +8,15 @@
  */
 #include <dolphin/types.h>
 
+#include "test_mode.h"
+
 static u32 s_next = 1;
 
 int ttyd_rand(void) {
     s_next = s_next * 1103515245u + 12345u;
-    return (int)((s_next >> 16) & 0x7FFF);
+    u32 v = (s_next >> 16) & 0x7FFF;
+    tst_rngtrace((unsigned long)__builtin_return_address(0), v);
+    return (int)v;
 }
 
 void ttyd_srand(unsigned int seed) { s_next = seed; }

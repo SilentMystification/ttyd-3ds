@@ -245,6 +245,9 @@ static void read_vertex(Reader* r, u8 fmt, GxVertex* v) {
             }
         } else if (d != GX_NONE) {
             u32 idx = rd_index(r, d);
+            if (gx_dlc_capturing) {
+                gx_dlc_track(GX_VA_POS, idx);
+            }
             const u8* p = gx.array_base[GX_VA_POS] + idx * gx.array_stride[GX_VA_POS];
             for (int i = 0; i < n; i++) {
                 v->pos[i] = mem_comp(p, f->type, sc, (u32)i);
@@ -272,6 +275,9 @@ static void read_vertex(Reader* r, u8 fmt, GxVertex* v) {
             } else {
                 int per_vec_index = f->cnt == GX_NRM_NBT3;
                 u32 idx = rd_index(r, d);
+                if (gx_dlc_capturing) {
+                    gx_dlc_track(GX_VA_NRM, idx); /* only the first vector is read from the array */
+                }
                 for (int k = 0; k < vecs; k++) {
                     if (k > 0 && per_vec_index) {
                         idx = rd_index(r, d);
@@ -294,6 +300,9 @@ static void read_vertex(Reader* r, u8 fmt, GxVertex* v) {
             v->clr[c] = rd_color(r, f->type);
         } else if (d != GX_NONE) {
             u32 idx = rd_index(r, d);
+            if (gx_dlc_capturing) {
+                gx_dlc_track(GX_VA_CLR0 + c, idx);
+            }
             v->clr[c] = mem_color(gx.array_base[GX_VA_CLR0 + c] + idx * gx.array_stride[GX_VA_CLR0 + c], f->type);
         }
         if (f->cnt == GX_CLR_RGB) {
@@ -317,6 +326,9 @@ static void read_vertex(Reader* r, u8 fmt, GxVertex* v) {
             }
         } else {
             u32 idx = rd_index(r, d);
+            if (gx_dlc_capturing) {
+                gx_dlc_track(GX_VA_TEX0 + t, idx);
+            }
             const u8* p = gx.array_base[GX_VA_TEX0 + t] + idx * gx.array_stride[GX_VA_TEX0 + t];
             for (int i = 0; i < n; i++) {
                 v->tex[t][i] = mem_comp(p, f->type, sc, (u32)i);
@@ -505,9 +517,17 @@ static void draw_from_reader(Reader* r, u8 prim, u8 fmt, u32 n) {
             default: plat_fatal("GX: strip or fan of %lu vertices", (unsigned long)n);
             }
         }
+        /* a display list being cached decodes straight into the capture */
+        GxVertex* dst = s_verts;
+        if (gx_dlc_capturing) {
+            GxVertex* c = gx_dlc_cap_reserve(fmt, chunk);
+            if (c != NULL) {
+                dst = c;
+            }
+        }
         u64 t0 = GX_PERF_T();
         for (u32 i = 0; i < chunk; i++) {
-            read_vertex(r, fmt, &s_verts[i]);
+            read_vertex(r, fmt, &dst[i]);
         }
         if (gx_perf_on > 0) {
             u64 dt = plat_ticks() - t0;
@@ -517,7 +537,10 @@ static void draw_from_reader(Reader* r, u8 prim, u8 fmt, u32 n) {
                 gx_perf.t_imm_decode += dt;
             }
         }
-        gx_draw_vertices(prim, s_verts, chunk);
+        gx_draw_vertices(prim, dst, chunk);
+        if (gx_dlc_capturing) {
+            gx_dlc_cap_draw(prim, dst, chunk);
+        }
         done += chunk;
     }
 }
@@ -698,7 +721,12 @@ void GXCallDisplayList(void* list, u32 nbytes) {
     u64 t0 = GX_PERF_T();
     s_in_list = 1;
     s_list_kind = 0;
-    run_commands(&r, 1);
+    if (gx_dlcache_enabled() && gx_dlcache_call(&gx, list, nbytes)) {
+        s_list_kind = 1; /* drawn from the cache: only lists of primitives are cached */
+    } else {
+        run_commands(&r, 1);
+        gx_dlc_cap_finish(&gx, s_list_kind);
+    }
     s_in_list = 0;
     s_list_caller = NULL;
     if (gx_perf_on > 0) {

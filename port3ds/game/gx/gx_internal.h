@@ -261,4 +261,29 @@ u32 gx_perf_frame_no(void);
 u32 gx_hash32(const void* data, u32 n, u32 seed);
 #define GX_PERF_T() (gx_perf_on > 0 ? plat_ticks() : 0)
 
+/* ---- gx_dlcache.c: decoded display-list cache (switch gxcache) ----
+ * State is owned by the thread that translates GX (today the game thread);
+ * the decode inputs come in through `st`. */
+int gx_dlcache_enabled(void);
+/* 1: the list was drawn from the cache. 0: run it (with capture, if set up). */
+int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes);
+void gx_dlc_cap_finish(const GxState* st, u32 kind);
+GxVertex* gx_dlc_cap_reserve(u8 fmt, u32 n);
+void gx_dlc_cap_draw(u8 prim, const GxVertex* v, u32 n);
+extern int gx_dlc_capturing;
+/* the array indices the list's vertices read, in decode order (a list
+ * that reads more than the capture holds is not cached) */
+#define GX_DLC_IDX_CAP (8192 * 12)
+extern u16 gx_dlc_idx[GX_DLC_IDX_CAP];
+extern u32 gx_dlc_nidx;
+static inline void gx_dlc_track(int attr, u32 idx) {
+    (void)attr;
+    if (gx_dlc_nidx < GX_DLC_IDX_CAP) {
+        gx_dlc_idx[gx_dlc_nidx] = (u16)idx;
+    }
+    gx_dlc_nidx++;
+}
+void gx_dlcache_frame(void);
+void gx_dlcache_log(u32 frames);
+
 #endif

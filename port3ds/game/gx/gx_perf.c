@@ -159,10 +159,11 @@ void gx_perf_frame(void) {
            (unsigned long)(a->dl_mixed / f), (unsigned long)(a->dl_raw / f), (unsigned long)(a->dl_bytes / f),
            (unsigned long)(a->dl_repeat_bytes / f), (unsigned long)(a->dl_verts / f), (unsigned long)(a->imm_prims / f),
            (unsigned long)(a->imm_verts / f));
-    PLOG_I("gxstats   xf draws %lu verts %lu tris %lu culled %lu lines %lu | builds %lu | last frame: gpu draws %lu "
-           "(of %lu calls) states %lu rec %lu B render %lu us gpu %lu us",
+    PLOG_I("gxstats   xf draws %lu verts %lu tris %lu culled %lu lines %lu | builds %lu (unchanged %lu) | last frame: "
+           "gpu draws %lu (of %lu calls) states %lu rec %lu B render %lu us gpu %lu us",
            (unsigned long)(a->xf_draws / f), (unsigned long)(a->xf_verts / f), (unsigned long)(a->tris_out / f),
            (unsigned long)(a->tris_culled / f), (unsigned long)(a->lines / f), (unsigned long)(a->builds / f),
+           (unsigned long)(a->builds_same / f),
            (unsigned long)gs.draws, (unsigned long)gs.calls, (unsigned long)gs.state_changes, (unsigned long)gs.record_bytes,
            (unsigned long)gs.render_us, (unsigned long)gs.gpu_us);
     PLOG_I("gxstats   us: dl %lu (decode %lu) imm %lu (decode %lu) state %lu xform %lu emit %lu cache %lu",

@@ -13,6 +13,7 @@
  * rebuilt when the GX state changed since the last draw.
  */
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -26,6 +27,33 @@ static int s_units;
 static int s_color_chan;     /* 0: COLOR0A0, 1: COLOR1A1 feeds the raster color */
 static u32 s_built_version = 0xFFFFFFFFu;
 static PlatGpuState s_state;
+
+/* switch gxstatever: the GX state build_state reads (and the transform's
+ * precomputed flags), as it was at the last build. Every field from the
+ * texgens to the pixel engine (texgen, channels, lights, TEV, indirect,
+ * textures, TLUTs, blending, depth, fog, scissor) is one contiguous block
+ * of GxState, plus the viewport. A version change that leaves all of it as
+ * it was (a setter called again with the same values, a matrix load) needs
+ * no rebuild. Cleared every frame (textures are checked again then) and by
+ * a texture copy (a texture's handle can change). */
+#define SNAP_FROM offsetof(GxState, num_texgens)
+#define SNAP_TO offsetof(GxState, copy_src)
+static u8 s_snap[SNAP_TO - SNAP_FROM];
+static f32 s_snap_vp[6];
+static int s_snap_valid;
+
+void gx_draw_state_lost(void) { s_snap_valid = 0; }
+
+static int state_unchanged(void) {
+    return s_snap_valid && memcmp(s_snap, (const u8*)&gx + SNAP_FROM, sizeof(s_snap)) == 0 &&
+           memcmp(s_snap_vp, gx.vp, sizeof(s_snap_vp)) == 0;
+}
+
+static void state_snapshot(void) {
+    memcpy(s_snap, (const u8*)&gx + SNAP_FROM, sizeof(s_snap));
+    memcpy(s_snap_vp, gx.vp, sizeof(s_snap_vp));
+    s_snap_valid = 1;
+}
 /* switch gxunlit, set by build_state: the draw needs both colour channels
  * (a texgen reads a colour), and per channel pair whether lighting is off for
  * colour and alpha, and which of them take the vertex colour as material */
@@ -747,10 +775,21 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
     }
     u64 t0 = GX_PERF_T();
     if (gx.version != s_built_version) {
-        build_state();
-        if (gx_perf_on > 0) {
-            gx_perf.builds++;
-            gx_perf.t_state += plat_ticks() - t0;
+        if (gx_opt_statever && state_unchanged()) {
+            s_built_version = gx.version; /* the PICA state would come out the same */
+            if (gx_perf_on > 0) {
+                gx_perf.builds_same++;
+                gx_perf.t_state += plat_ticks() - t0;
+            }
+        } else {
+            build_state();
+            if (gx_opt_statever) {
+                state_snapshot();
+            }
+            if (gx_perf_on > 0) {
+                gx_perf.builds++;
+                gx_perf.t_state += plat_ticks() - t0;
+            }
         }
     }
     if (s_state.scissor_x1 <= s_state.scissor_x0 || s_state.scissor_y1 <= s_state.scissor_y0 ||
@@ -915,4 +954,5 @@ void gx_draw_frame_begin(void) {
     gx_perf_frame();
     gx_stat_draws = gx_stat_vertices = gx_stat_copies = 0;
     s_built_version = 0xFFFFFFFFu; /* every frame starts with a full state */
+    s_snap_valid = 0;
 }

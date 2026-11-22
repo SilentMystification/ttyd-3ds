@@ -199,6 +199,8 @@ enum {
 void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n);
 void gx_draw_frame_begin(void);
 void gx_draw_frame_end(void);
+/* Something build_state reads changed outside GxState (a texture copy): the next draw rebuilds. */
+void gx_draw_state_lost(void);
 extern u32 gx_stat_draws, gx_stat_vertices, gx_stat_copies;
 /* A/B switches of the state work (read once by gx_opts_init, all default 1):
  *   gxstatever: matrix and projection loads do not rebuild the PICA state;
@@ -254,7 +256,7 @@ typedef struct {
     u32 v_unlit, v_lit, v_light_evals, v_spot, v_spec, v_distattn, v_second_chan, v_vtx_src;
     u32 v_tg_2x4, v_tg_3x4, v_tg_other, v_tg_pos, v_tg_nrm, v_tg_tex, v_tg_color, v_tg_post, v_tg_normalize;
     u32 max_pnmtx_in_draw;
-    u32 pad_;
+    u32 builds_same; /* version changes with the state build_state reads unchanged (no rebuild) */
     /* u64 times in system ticks */
     u64 t_frame, t_dl, t_dl_decode, t_imm, t_imm_decode, t_state, t_xform, t_emit, t_cache;
 } GxPerf;

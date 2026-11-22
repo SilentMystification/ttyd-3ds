@@ -283,6 +283,7 @@ void GXCopyTex(void* dest, GXBool clear) {
     u32 handle = gx_tex_copy_target(dest, w, h, gx.copy_tex_fmt);
     /* a texture at `dest` now samples the copy: the next draw looks its textures up again */
     gx.version++;
+    gx_draw_state_lost();
     int half = gx.copy_tex_mip; /* mipmap flag: box-filter by 2 */
     plat_gpu_copy_tex(gx.copy_src[0], gx.copy_src[1], gx.copy_src[2], gx.copy_src[3], half, handle, w, h);
     if (clear) {

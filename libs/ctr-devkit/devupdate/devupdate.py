@@ -305,9 +305,10 @@ def az_paths(profile):
 def az_cmd(profile, args, x11=False):
     profile, config, data, _, _ = az_paths(profile)
     # x11: a headless Xvfb. Under a Wayland session Flatpak does not grant the
-    # app's fallback X11 socket, so ask for it.
+    # app's fallback X11 socket, so ask for it. No --die-with-parent: the
+    # session outlives the "start" command; "stop" ends it.
     extra = ["--socket=x11", "--nosocket=wayland"] if x11 else []
-    return ["flatpak", "run", "--die-with-parent", *extra, f"--filesystem={profile}", "--command=sh", AZAHAR_APP, "-c",
+    return ["flatpak", "run", *extra, f"--filesystem={profile}", "--command=sh", AZAHAR_APP, "-c",
             'export XDG_CONFIG_HOME="$1" XDG_DATA_HOME="$2"; shift 2; exec azahar "$@"', "sh", str(config),
             str(data)] + args
 

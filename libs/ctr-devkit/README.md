@@ -114,10 +114,12 @@ devupdate.py azahar-session stop --profile ~/azahar-dev                         
 What Azahar can and cannot show, as checked here (`tools/port3ds/devupdate_azahar.py`):
 - **Works in Azahar:**
   - the sockets and the protocol;
-  - the CRC refusal, with the old install left in place;
-  - the AM streaming install, also over the running title;
-  - recovery mode: report and push after a crash.
-- **Does not work in Azahar:** any APT application jump (relaunch, `restart`, the bootstrap's jump). The Flatpak Azahar's Qt frontend aborts (`std::out_of_range`) and the instance ends. So the deliver arguments of a relaunch can only be checked on hardware.
+  - the CRC refusal (the install is cancelled);
+  - the AM streaming install, also over the running title (3 pushes in a row to one instance);
+  - recovery mode: ping, report, a refused and a good push after a crash.
+- **Does not work in Azahar:**
+  - Any APT application jump (relaunch, `restart`, the bootstrap's jump). The Flatpak Azahar's Qt frontend aborts (`std::out_of_range`) or never starts the new title. So the deliver arguments of a relaunch can only be checked on hardware.
+  - Keeping the old install after a cancelled push. Azahar's AM writes the CIA straight into the installed title's content folder and deletes it on cancel, so a refused push over an installed title removes that install there. The console's AM imports to a temporary area, but this has to be checked on hardware.
 
 ## TTYD integration notes
 

@@ -202,8 +202,8 @@ void gx_draw_frame_end(void);
 /* Something build_state reads changed outside GxState (a texture copy): the next draw rebuilds. */
 void gx_draw_state_lost(void);
 extern u32 gx_stat_draws, gx_stat_vertices, gx_stat_copies;
-/* A/B switches of the state work (read once by gx_opts_init, all default 1):
- *   gxstatever: matrix and projection loads do not rebuild the PICA state;
+/* A/B switches of the state work (read once by gx_opts_init; default 1 unless noted):
+ *   gxstatever (default 0): skip rebuilds whose state is unchanged;
  *   gxfogcache: the fog LUT is recomputed only when the fog parameters change;
  *   gxunlit:    unlit colour channels skip channel_color. */
 extern int gx_opt_statever, gx_opt_fogcache, gx_opt_unlit;

@@ -103,6 +103,11 @@ typedef struct {
     uint8_t fog_enable;
     uint8_t pad2[2];
     uint32_t fog_color;
+    /* fog_lut_id and fog_lut are not part of the state comparison: the LUT
+     * goes to the GPU only when it changed. A nonzero id names the LUT's
+     * contents (the same id always means the same LUT), so the back end
+     * compares ids; 0 means unknown, and the back end hashes the LUT. */
+    uint32_t fog_lut_id;
     float fog_lut[129];          /* PICA fog LUT input: f(z) for z = 0..128/128 (window depth) */
     uint16_t scissor_x0, scissor_y0, scissor_x1, scissor_y1; /* EFB pixels, end exclusive */
     float viewport_x, viewport_y, viewport_w, viewport_h;   /* EFB pixels */
@@ -141,6 +146,7 @@ typedef struct {
     uint32_t record_bytes;
     uint32_t segments; /* extra submits in a frame (record or vertex arena full) */
     uint32_t render_us, gpu_us;
+    uint32_t calls; /* plat_gpu_draw calls; `draws` is the draw commands after merging */
 } PlatGpuStats;
 void plat_gpu_stats(PlatGpuStats* out);
 uint32_t plat_gpu_present_count(void); /* frames presented so far (the shot number) */

@@ -199,7 +199,15 @@ enum {
 void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n);
 void gx_draw_frame_begin(void);
 void gx_draw_frame_end(void);
+/* Something build_state reads changed outside GxState (a texture copy): the next draw rebuilds. */
+void gx_draw_state_lost(void);
 extern u32 gx_stat_draws, gx_stat_vertices, gx_stat_copies;
+/* A/B switches of the state work (read once by gx_opts_init; default 1 unless noted):
+ *   gxstatever (default 0): skip rebuilds whose state is unchanged;
+ *   gxfogcache: the fog LUT is recomputed only when the fog parameters change;
+ *   gxunlit:    unlit colour channels skip channel_color. */
+extern int gx_opt_statever, gx_opt_fogcache, gx_opt_unlit;
+void gx_opts_init(void);
 
 /* ---- gx_tex.c ---- */
 /* Converted texture for texture map slot `map` (handle 0 if none). */
@@ -248,7 +256,7 @@ typedef struct {
     u32 v_unlit, v_lit, v_light_evals, v_spot, v_spec, v_distattn, v_second_chan, v_vtx_src;
     u32 v_tg_2x4, v_tg_3x4, v_tg_other, v_tg_pos, v_tg_nrm, v_tg_tex, v_tg_color, v_tg_post, v_tg_normalize;
     u32 max_pnmtx_in_draw;
-    u32 pad_;
+    u32 builds_same; /* version changes with the state build_state reads unchanged (no rebuild) */
     /* u64 times in system ticks */
     u64 t_frame, t_dl, t_dl_decode, t_imm, t_imm_decode, t_state, t_xform, t_emit, t_cache;
 } GxPerf;
@@ -260,6 +268,28 @@ u32 gx_perf_frame_no(void);
 /* Fast content hash (word at a time). */
 u32 gx_hash32(const void* data, u32 n, u32 seed);
 #define GX_PERF_T() (gx_perf_on > 0 ? plat_ticks() : 0)
+
+/* Equality of n bytes a word at a time (ARMv6 loads unaligned words), for the
+ * small compares on hot paths: newlib's memcmp goes byte by byte unless both
+ * pointers are word-aligned. */
+static inline int gx_mem_equal(const void* a, const void* b, u32 n) {
+    const u8* p = (const u8*)a;
+    const u8* q = (const u8*)b;
+    for (; n >= 4; n -= 4, p += 4, q += 4) {
+        u32 x, y;
+        __builtin_memcpy(&x, p, 4);
+        __builtin_memcpy(&y, q, 4);
+        if (x != y) {
+            return 0;
+        }
+    }
+    while (n-- != 0) {
+        if (*p++ != *q++) {
+            return 0;
+        }
+    }
+    return 1;
+}
 
 /* ---- gx_dlcache.c: decoded display-list cache (switch gxcache) ----
  * State is owned by the thread that translates GX (today the game thread);

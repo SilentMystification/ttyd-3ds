@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "plat/disc.h"
+#include "plat/memstable.h"
 #include "plat/plat.h"
 #include "port3ds/fst.h"
 #include "port3ds/os_internal.h"
@@ -267,6 +268,7 @@ s32 DVDReadPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, s32 p
     (void)prio;
     fileInfo->cb.state = DVD_STATE_BUSY;
     s32 result = read_file(fileInfo, addr, length, offset);
+    plat_memstable_fill(addr, result > 0 ? (u32)result : 0); /* disc content (include/plat/memstable.h) */
     fileInfo->cb.state = result < 0 ? DVD_STATE_FATAL_ERROR : DVD_STATE_END;
     if (result < 0) {
         plat_fatal("DVD: read of %ld bytes at +%ld from %08lx failed (%ld)", (long)length, (long)offset,

@@ -20,7 +20,11 @@
  *     of every array element the list's vertices read, at the indices they
  *     read (kept in the entry), so CPU-animated arrays or other data loaded
  *     at the address are seen, at a cost proportional to what the list uses.
- * Everything is checked on every call; nothing is trusted across frames.
+ * Everything is checked on every call, except (switch gxtrust, default on)
+ * when the content-stable memory registry (include/plat/memstable.h) vouches
+ * that the list and every array span it reads lie in covered memory that no
+ * reported path changed since the entry's last full check: then the hashes
+ * are skipped. The state inputs above are still compared every call.
  * A list whose bytes or arrays changed is decoded again; after
  * DLC_DYNAMIC_AFTER such changes it is marked dynamic and always decoded.
  * A list called with another vertex state gets a second entry (up to
@@ -39,6 +43,7 @@
 #include <string.h>
 
 #include "gx_internal.h"
+#include "plat/memstable.h"
 #include "plat/plat.h"
 
 #define DLC_ENTRIES 16384
@@ -66,6 +71,7 @@ typedef struct {
     u8 stride;
     u8 elem;
     u8 pad;
+    u16 imin, imax; /* the lowest and highest index the list reads */
 } DlcRange;
 
 typedef struct {
@@ -82,6 +88,8 @@ typedef struct {
     u16 ndraws;
     u32 nverts;
     u32 last_frame;
+    u32 trust_gen;   /* gxtrust: the registry's generation the contents are trusted at (0: not trusted) */
+    u32 trust_epoch; /* the registry epoch of the last trust request that failed */
     u8 vtx_desc[GX_VA_MAX_ATTR];
     u8 cur_pnmtx;
     u8 cur_texmtx[8];
@@ -95,6 +103,9 @@ static u16 s_bucket[DLC_BUCKETS];
 static u16 s_free_head; /* free list through .next */
 static u16 s_lru_head, s_lru_tail; /* head = most recently used */
 static int s_enabled = -1;
+static int s_trust;         /* switch gxtrust (default 1): skip the hashes of entries in unchanged covered memory */
+static u32 s_scribble_at;   /* switch gxscribble=N: at frame N, change a byte of a trusted array without telling the registry */
+static const DlcEntry* s_scribbled;
 static u32 s_budget;
 static u32 s_used_bytes, s_live;
 
@@ -111,12 +122,14 @@ static const void* s_cap_list;
 static u32 s_cap_bytes, s_cap_hash;
 static DlcEntry* s_cap_replace; /* entry of the same list and state whose content changed */
 static DlcEntry* s_cap_verify;  /* gxcache=2: a hit decoded again, to compare with the entry */
+static u32 s_cap_epoch;         /* the registry's epoch when the decode began */
 
 /* counters (per frame, summed into the gxstats line) */
 static struct {
     u32 calls, hits, built, changed, variant, nocache, dynamic_calls, too_big, sparse, evicted, alloc_fail;
     u32 hit_verts;
     u32 verified, mismatched, full;
+    u32 trusted, grants, stale, scribble_hits;
 } s_st, s_sum;
 
 static inline DlcEntry* E(u16 i) { return i ? &s_e[i - 1] : NULL; }
@@ -133,12 +146,14 @@ static void init(void) {
         s_enabled = 1;
     }
     s_budget = (u32)plat_switch_int("gxcachekb", 8192) * 1024u;
+    s_trust = plat_switch_int("gxtrust", 1) != 0;
+    s_scribble_at = (u32)plat_switch_int("gxscribble", 0);
     for (int i = 0; i < DLC_ENTRIES; i++) {
         s_e[i].next = (u16)(i + 2 <= DLC_ENTRIES ? i + 2 : 0);
     }
     s_free_head = 1;
-    PLOG_I("gxcache: %s, budget %lu KB, %d entries", s_enabled == 2 ? "verify" : s_enabled ? "on" : "off", (unsigned long)(s_budget / 1024),
-           DLC_ENTRIES);
+    PLOG_I("gxcache: %s, budget %lu KB, %d entries, trust %d", s_enabled == 2 ? "verify" : s_enabled ? "on" : "off",
+           (unsigned long)(s_budget / 1024), DLC_ENTRIES, s_trust);
 }
 
 int gx_dlcache_enabled(void) {
@@ -274,8 +289,8 @@ static u32 gather_hash(const DlcRange* r, u32 nr, const u16* idx, u32 nverts) {
 
 /* The decode's inputs other than memory contents: the same as when the entry was made? */
 static int same_state(const GxState* st, const DlcEntry* e) {
-    if (memcmp(e->vtx_desc, st->vtx_desc, sizeof(e->vtx_desc)) != 0 || e->cur_pnmtx != (u8)st->cur_pnmtx ||
-        memcmp(e->cur_texmtx, st->cur_texmtx, sizeof(e->cur_texmtx)) != 0) {
+    if (!gx_mem_equal(e->vtx_desc, st->vtx_desc, sizeof(e->vtx_desc)) || e->cur_pnmtx != (u8)st->cur_pnmtx ||
+        !gx_mem_equal(e->cur_texmtx, st->cur_texmtx, sizeof(e->cur_texmtx))) {
         return 0;
     }
     if (e->state != E_BUILT) {
@@ -284,7 +299,7 @@ static int same_state(const GxState* st, const DlcEntry* e) {
     const GxAttrFmt* v = e_vat(e);
     for (u32 f = 0; f < GX_MAX_VTXFMT; f++) {
         if (e->fmt_mask & (1u << f)) {
-            if (memcmp(v, st->vat[f], sizeof(st->vat[f])) != 0) {
+            if (!gx_mem_equal(v, st->vat[f], sizeof(st->vat[f]))) {
                 return 0;
             }
             v += GX_VA_MAX_ATTR;
@@ -301,6 +316,26 @@ static int same_state(const GxState* st, const DlcEntry* e) {
 
 static int same_arrays(const DlcEntry* e) {
     return e->nranges == 0 || gather_hash(e_ranges(e), e->nranges, e_idx(e), e->nverts) == e->arr_hash;
+}
+
+/* gxtrust: after a full check that began at `epoch`, asks the registry
+ * whether the list and every array span the list reads lie in covered memory
+ * unchanged since then. Returns the trust generation, or 0. */
+static u32 trust(DlcEntry* e, u32 epoch) {
+    PlatMemSpan sp[1 + DLC_MAX_RANGES];
+    sp[0] = (PlatMemSpan){e->list, e->nbytes};
+    const DlcRange* r = e_ranges(e);
+    for (u32 i = 0; i < e->nranges; i++) {
+        sp[1 + i] = (PlatMemSpan){r[i].base + (u32)r[i].imin * r[i].stride,
+                                  (u32)(r[i].imax - r[i].imin) * r[i].stride + r[i].elem};
+    }
+    u32 g = plat_memstable_trust(sp, 1 + e->nranges, epoch);
+    if (g != 0) {
+        s_st.grants++;
+    } else {
+        e->trust_epoch = epoch; /* asked again only once covered memory changed */
+    }
+    return g;
 }
 
 static void replay(DlcEntry* e) {
@@ -350,7 +385,28 @@ int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
         if (!same_state(st, e)) {
             continue;
         }
-        if (e->state == E_BUILT && e->dl_hash == LIST_HASH() && same_arrays(e)) {
+        int ok = 0;
+        if (e->state == E_BUILT) {
+            if (s_trust && e->trust_gen != 0 && e->trust_gen == plat_memstable_gen()) {
+                /* the registry vouches for the list and its arrays: no hashing */
+                ok = 1;
+                s_st.trusted++;
+                if (e == s_scribbled) {
+                    s_st.scribble_hits++;
+                }
+                if (s_enabled == 2 && (e->dl_hash != LIST_HASH() || !same_arrays(e))) {
+                    s_st.stale++; /* verify: trust skipped a change (the decode below compares too) */
+                }
+            } else {
+                u32 epoch = plat_memstable_epoch();
+                ok = e->dl_hash == LIST_HASH() && same_arrays(e);
+                e->trust_gen = 0;
+                if (ok && s_trust && e->trust_epoch != epoch) {
+                    e->trust_gen = trust(e, epoch);
+                }
+            }
+        }
+        if (ok) {
             s_st.hits++;
             s_st.hit_verts += e->nverts;
             e->last_frame = frame;
@@ -380,6 +436,13 @@ int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
     }
     if (same_list_changed != NULL) {
         s_st.changed++;
+        if (s_scribbled != NULL) {
+            static int told;
+            if (!told) {
+                told = 1;
+                PLOG_I("gxscribble: the full check saw list %p change (decoded again)", list);
+            }
+        }
         if (same_list_changed->changes + 1 >= DLC_DYNAMIC_AFTER) {
             /* keeps changing: decode it every time from now on */
             DlcEntry* e = same_list_changed;
@@ -401,6 +464,7 @@ int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
         s_st.variant++;
     }
     /* decode it, capturing the vertices */
+    s_cap_epoch = plat_memstable_epoch();
     gx_dlc_capturing = 1;
     s_cap_list = list;
     s_cap_bytes = nbytes;
@@ -612,12 +676,19 @@ void gx_dlc_cap_finish(const GxState* st, u32 kind) {
             cacheable = 0;
             break;
         }
-        ranges[nr++] = (DlcRange){st->array_base[attr], (u8)attr, st->array_stride[attr], (u8)eb, 0};
+        ranges[nr++] = (DlcRange){st->array_base[attr], (u8)attr, st->array_stride[attr], (u8)eb, 0, 0xFFFF, 0};
     }
     /* every vertex read one index per indexed attribute, in attribute order */
     if (cacheable && (gx_dlc_nidx > GX_DLC_IDX_CAP || gx_dlc_nidx != s_cap_nv * nr)) {
         s_st.sparse++; /* counted with the odd cases */
         cacheable = 0;
+    }
+    for (u32 v = 0; cacheable && v < s_cap_nv; v++) {
+        for (u32 a = 0; a < nr; a++) {
+            u16 i = gx_dlc_idx[v * nr + a];
+            ranges[a].imin = i < ranges[a].imin ? i : ranges[a].imin;
+            ranges[a].imax = i > ranges[a].imax ? i : ranges[a].imax;
+        }
     }
     DlcEntry* e = old;
     if (e != NULL) {
@@ -714,6 +785,11 @@ void gx_dlc_cap_finish(const GxState* st, u32 kind) {
     lru_unlink(e);
     lru_front(e);
     s_st.built++;
+    e->trust_gen = 0;
+    e->trust_epoch = 0;
+    if (s_trust) {
+        e->trust_gen = trust(e, s_cap_epoch);
+    }
     if (gx_perf_on > 0 && sizeof(GxVertex) % sizeof(f32) == 0) {
         exactness(e_verts(e), e->nverts, st->vtx_desc[GX_VA_TEX0] != GX_NONE);
     }
@@ -725,6 +801,41 @@ out:
 
 /* ---- Counters ---- */
 
+/* switch gxscribble=N (a test of the verify mode, not for play): at frame N,
+ * one array byte that a cached list reads is changed with a plain CPU store,
+ * without a cache flush or any report to the registry. The lowest byte of
+ * the first element is xored with 1 (a position's lowest mantissa bit).
+ * gxcache=2 must count the entry as mismatched (and stale, when it was
+ * trusted); gxcache=1 with trust keeps drawing the old vertices (the
+ * contract: covered memory changes only through reported paths), and the log
+ * counts those hits. Without trust the hash sees the change. */
+static void scribble(void) {
+    DlcEntry* pick = NULL;
+    for (DlcEntry* e = E(s_lru_head); e != NULL; e = E(e->lru_next)) {
+        if (e->state != E_BUILT || e->nranges == 0) {
+            continue;
+        }
+        if (e->trust_gen != 0 && e->trust_gen == plat_memstable_gen()) {
+            pick = e;
+            break;
+        }
+        if (pick == NULL) {
+            pick = e;
+        }
+    }
+    if (pick == NULL) {
+        PLOG_W("gxscribble: no cached list with arrays");
+        return;
+    }
+    const DlcRange* r = e_ranges(pick);
+    u8* p = (u8*)r[0].base + (u32)e_idx(pick)[0] * r[0].stride;
+    *p ^= 1;
+    s_scribbled = pick;
+    PLOG_I("gxscribble: frame %lu: byte %p (attr %u of list %p, %lu bytes) xored with 1, entry %s", (unsigned long)gx_perf_frame_no(),
+           (void*)p, r[0].attr, pick->list, (unsigned long)pick->nbytes,
+           pick->trust_gen != 0 && pick->trust_gen == plat_memstable_gen() ? "trusted" : "not trusted");
+}
+
 void gx_dlcache_frame(void) {
     u32* d = (u32*)&s_sum;
     const u32* s = (const u32*)&s_st;
@@ -732,6 +843,9 @@ void gx_dlcache_frame(void) {
         d[i] += s[i];
     }
     memset(&s_st, 0, sizeof(s_st));
+    if (s_scribble_at != 0 && s_enabled > 0 && gx_perf_frame_no() == s_scribble_at) {
+        scribble();
+    }
 }
 
 void gx_dlcache_log(u32 frames) {
@@ -752,6 +866,19 @@ void gx_dlcache_log(u32 frames) {
            (unsigned long)a->alloc_fail, (unsigned long)a->verified, (unsigned long)a->mismatched,
            (unsigned long)s_live, (unsigned long)(s_used_bytes / 1024),
            (unsigned long)(s_budget / 1024));
+    PlatMemStableStats ms;
+    plat_memstable_stats(&ms);
+    PLOG_I("gxstats   trust: %lu hits unhashed (%lu%%), grants %lu, stale %lu | registry: %lu ranges %lu KB, per frame "
+           "fills %lu writes %lu releases %lu; trust revoked %lu times in %lu frames, fills dropped %lu",
+           (unsigned long)(a->trusted / f), (unsigned long)(a->hits ? (u64)a->trusted * 100u / a->hits : 0),
+           (unsigned long)(a->grants / f), (unsigned long)a->stale,
+           (unsigned long)ms.ranges,
+           (unsigned long)ms.covered_kb, (unsigned long)(ms.fills / f), (unsigned long)(ms.writes / f),
+           (unsigned long)(ms.releases / f), (unsigned long)ms.revokes, (unsigned long)f, (unsigned long)ms.dropped);
+    if (s_scribbled) {
+        PLOG_I("gxstats   scribble: %lu trusted hits on the scribbled entry, %lu mismatched, %lu stale in these frames",
+               (unsigned long)a->scribble_hits, (unsigned long)a->mismatched, (unsigned long)a->stale);
+    }
     if (s_tot_entries) {
         PLOG_I("gxstats   cache entries built so far: %lu (%lu verts); positions exact as s16 x 2^-k: %lu entries "
                "(%lu verts); with TEX0: %lu (%lu verts), TEX0 exact: %lu (%lu verts)",

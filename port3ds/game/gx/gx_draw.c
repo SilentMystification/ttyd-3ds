@@ -13,6 +13,7 @@
  * rebuilt when the GX state changed since the last draw.
  */
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -26,8 +27,69 @@ static int s_units;
 static int s_color_chan;     /* 0: COLOR0A0, 1: COLOR1A1 feeds the raster color */
 static u32 s_built_version = 0xFFFFFFFFu;
 static PlatGpuState s_state;
+
+/* switch gxstatever: the GX state build_state reads (and the transform's
+ * precomputed flags), as it was at the last build. Every field from the
+ * texgens to the pixel engine (texgen, channels, lights, TEV, indirect,
+ * textures, TLUTs, blending, depth, fog, scissor) is one contiguous block
+ * of GxState, plus the viewport. A version change that leaves all of it as
+ * it was (a setter called again with the same values, a matrix load) needs
+ * no rebuild. Cleared every frame (textures are checked again then) and by
+ * a texture copy (a texture's handle can change). */
+#define SNAP_FROM (offsetof(GxState, num_texgens) & ~(size_t)3)
+#define SNAP_TO ((offsetof(GxState, copy_src) + 3) & ~(size_t)3)
+#define SNAP_WORDS ((SNAP_TO - SNAP_FROM) / 4)
+#define SNAP_LIGHT_START ((offsetof(GxState, light) - SNAP_FROM) / 4)
+#define SNAP_LIGHT_END ((offsetof(GxState, num_tev) - SNAP_FROM) / 4)
+_Static_assert(offsetof(GxState, light) % 4 == 0 && offsetof(GxState, num_tev) % 4 == 0, "snapshot word layout");
+static u32 s_snap[SNAP_WORDS]; /* word-aligned: the compare runs a word at a time (memcmp on an unaligned
+                                  buffer goes byte by byte) */
+static f32 s_snap_vp[6];
+static int s_snap_valid;
+
+void gx_draw_state_lost(void) { s_snap_valid = 0; }
+
+static int state_unchanged(void) {
+    if (!s_snap_valid) {
+        return 0;
+    }
+    typedef u32 __attribute__((may_alias)) u32a;
+    const u32a* cur = (const u32a*)((const u8*)&gx + SNAP_FROM);
+    /* backwards: the textures, blending and TEV (what changes between objects) sit at the end; the
+     * lights are skipped (the transform reads them per vertex, build_state does not) */
+    for (u32 i = SNAP_WORDS; i-- > SNAP_LIGHT_END;) {
+        if (cur[i] != s_snap[i]) {
+            return 0;
+        }
+    }
+    for (u32 i = SNAP_LIGHT_START; i-- > 0;) {
+        if (cur[i] != s_snap[i]) {
+            return 0;
+        }
+    }
+    return gx_mem_equal(s_snap_vp, gx.vp, sizeof(s_snap_vp));
+}
+
+static void state_snapshot(void) {
+    memcpy(s_snap, (const u8*)&gx + SNAP_FROM, sizeof(s_snap));
+    memcpy(s_snap_vp, gx.vp, sizeof(s_snap_vp));
+    s_snap_valid = 1;
+}
+/* switch gxunlit, set by build_state: the draw needs both colour channels
+ * (a texgen reads a colour), and per channel pair whether lighting is off for
+ * colour and alpha, and which of them take the vertex colour as material */
+static int s_need_both, s_need_nrm;
+static u8 s_unlit[2], s_mat_vtx_rgb[2], s_mat_vtx_a[2];
 u32 gx_stat_draws, gx_stat_vertices, gx_stat_copies;
 int gx_bbox_active;
+int gx_opt_statever = 0, gx_opt_fogcache = 1, gx_opt_unlit = 1;
+
+void gx_opts_init(void) {
+    gx_opt_statever = plat_switch_int("gxstatever", 0) != 0; /* off by default: fewer rebuilds, but no time saved (PORT_3DS_GX_PERF.md) */
+    gx_opt_fogcache = plat_switch_int("gxfogcache", 1) != 0;
+    gx_opt_unlit = plat_switch_int("gxunlit", 1) != 0;
+    PLOG_I("gx: statever %d fogcache %d unlit %d", gx_opt_statever, gx_opt_fogcache, gx_opt_unlit);
+}
 
 /* ---- State ---- */
 
@@ -59,6 +121,17 @@ static u8 logic_op(u8 lo) {
     return map[lo & 15];
 }
 
+static void fog_lut(f32* lut);
+
+/* switch gxfogcache: the LUT of the last fog parameters, and its id
+ * (PlatGpuState.fog_lut_id: a new id only when the LUT's contents change) */
+static struct {
+    u8 valid, type;
+    f32 s, e, n, f;
+    u32 id;
+    f32 lut[129];
+} s_fog;
+
 static void build_fog(PlatGpuState* st) {
     u8 type = gx.fog_type;
     if (type == GX_FOG_NONE || gx.fog_end == gx.fog_start || gx.fog_far == gx.fog_near) {
@@ -67,6 +140,34 @@ static void build_fog(PlatGpuState* st) {
     }
     st->fog_enable = 1;
     st->fog_color = (u32)gx.fog_color.r | (u32)gx.fog_color.g << 8 | (u32)gx.fog_color.b << 16;
+    if (!gx_opt_fogcache) {
+        fog_lut(st->fog_lut); /* fog_lut_id stays 0: the back end hashes the LUT */
+        return;
+    }
+    if (!s_fog.valid || s_fog.type != type || s_fog.s != gx.fog_start || s_fog.e != gx.fog_end ||
+        s_fog.n != gx.fog_near || s_fog.f != gx.fog_far) {
+        f32 lut[129];
+        fog_lut(lut);
+        if (!s_fog.valid || memcmp(lut, s_fog.lut, sizeof(lut)) != 0) {
+            memcpy(s_fog.lut, lut, sizeof(lut));
+            if (++s_fog.id == 0) {
+                s_fog.id = 1;
+            }
+        }
+        s_fog.valid = 1;
+        s_fog.type = type;
+        s_fog.s = gx.fog_start;
+        s_fog.e = gx.fog_end;
+        s_fog.n = gx.fog_near;
+        s_fog.f = gx.fog_far;
+    }
+    memcpy(st->fog_lut, s_fog.lut, sizeof(s_fog.lut));
+    st->fog_lut_id = s_fog.id;
+}
+
+/* The PICA fog LUT for the current GX fog parameters (type not NONE). */
+static void fog_lut(f32* lut) {
+    u8 type = gx.fog_type;
     int ortho = type >= GX_FOG_ORTHO_LIN;
     u8 fn = type & 7;
     f32 n = gx.fog_near, f = gx.fog_far, s = gx.fog_start, e = gx.fog_end;
@@ -93,7 +194,7 @@ static void build_fog(PlatGpuState* st) {
         case 7: fog = powf(2.0f, -8.0f * (1.0f - x) * (1.0f - x)); break; /* REVEXP2 */
         default: fog = x; break;                                     /* LIN */
         }
-        st->fog_lut[i] = 1.0f - fog; /* PICA: 1 keeps the fragment */
+        lut[i] = 1.0f - fog; /* PICA: 1 keeps the fragment */
     }
 }
 
@@ -159,6 +260,21 @@ static void build_state(void) {
         tu->lod_bias = (f32)t->lod_bias_q / 32.0f;
     }
     gx_tev_compile(st);
+
+    /* what the transform needs per vertex (gxunlit) */
+    s_need_both = 0;
+    for (int u = 0; u < s_units; u++) {
+        u8 src = gx.texgen[s_unit_coord[u]].src;
+        if (gx.texgen[s_unit_coord[u]].func == GX_TG_SRTG || src == GX_TG_COLOR0 || src == GX_TG_COLOR1) {
+            s_need_both = 1;
+        }
+    }
+    for (int ch = 0; ch < 2; ch++) {
+        s_unlit[ch] = !gx.chan[ch].enable && !gx.chan[ch + 2].enable;
+        s_mat_vtx_rgb[ch] = gx.chan[ch].mat_src == GX_SRC_VTX;
+        s_mat_vtx_a[ch] = gx.chan[ch + 2].mat_src == GX_SRC_VTX;
+    }
+    s_need_nrm = !s_unlit[s_color_chan] || (s_need_both && !s_unlit[1 - s_color_chan]);
 
     /* alpha compare */
     u8 c0 = gx.alpha_comp0, c1 = gx.alpha_comp1, op = gx.alpha_op;
@@ -430,7 +546,8 @@ static void transform(const GxVertex* v, Out* o) {
         p[r] = m[r][0] * v->pos[0] + m[r][1] * v->pos[1] + m[r][2] * v->pos[2] + m[r][3];
     }
     f32 n[3] = {0, 0, 1};
-    if (v->has_nrm) {
+    /* the eye-space normal feeds only the lighting (texgen reads the vertex's own normal) */
+    if (v->has_nrm && (!gx_opt_unlit || s_need_nrm)) {
         const f32(*nm)[3] = gx.nrm_mtx[v->pnmtx % GX_POS_MTX_COUNT];
         for (int r = 0; r < 3; r++) {
             n[r] = nm[r][0] * v->nrm[0] + nm[r][1] * v->nrm[1] + nm[r][2] * v->nrm[2];
@@ -469,15 +586,34 @@ static void transform(const GxVertex* v, Out* o) {
     }
     GXColor chan_out[2];
     int need_both = 0;
-    for (int u = 0; u < s_units; u++) {
-        u8 src = gx.texgen[s_unit_coord[u]].src;
-        if (gx.texgen[s_unit_coord[u]].func == GX_TG_SRTG || src == GX_TG_COLOR0 || src == GX_TG_COLOR1) {
-            need_both = 1;
+    if (gx_opt_unlit) {
+        /* what channel_color gives with lighting off: the material colour,
+         * from the vertex or the register, for colour and alpha apart */
+        need_both = s_need_both;
+        for (int k = 0; k < 1 + need_both; k++) {
+            int ch = k == 0 ? s_color_chan : 1 - s_color_chan;
+            if (k == 0 && !need_both && gx.num_chans == 0) {
+                break; /* the colour is not used */
+            }
+            if (s_unlit[ch]) {
+                GXColor rgb = s_mat_vtx_rgb[ch] ? v->clr[ch] : gx.mat[ch];
+                rgb.a = s_mat_vtx_a[ch] ? v->clr[ch].a : gx.mat[ch].a;
+                chan_out[ch] = rgb;
+            } else {
+                chan_out[ch] = channel_color(ch, v, p, n);
+            }
         }
-    }
-    chan_out[s_color_chan] = channel_color(s_color_chan, v, p, n);
-    if (need_both) {
-        chan_out[1 - s_color_chan] = channel_color(1 - s_color_chan, v, p, n);
+    } else {
+        for (int u = 0; u < s_units; u++) {
+            u8 src = gx.texgen[s_unit_coord[u]].src;
+            if (gx.texgen[s_unit_coord[u]].func == GX_TG_SRTG || src == GX_TG_COLOR0 || src == GX_TG_COLOR1) {
+                need_both = 1;
+            }
+        }
+        chan_out[s_color_chan] = channel_color(s_color_chan, v, p, n);
+        if (need_both) {
+            chan_out[1 - s_color_chan] = channel_color(1 - s_color_chan, v, p, n);
+        }
     }
     const GXColor* c = &chan_out[s_color_chan];
     if (gx.num_chans == 0) {
@@ -660,10 +796,21 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
     }
     u64 t0 = GX_PERF_T();
     if (gx.version != s_built_version) {
-        build_state();
-        if (gx_perf_on > 0) {
-            gx_perf.builds++;
-            gx_perf.t_state += plat_ticks() - t0;
+        if (gx_opt_statever && state_unchanged()) {
+            s_built_version = gx.version; /* the PICA state would come out the same */
+            if (gx_perf_on > 0) {
+                gx_perf.builds_same++;
+                gx_perf.t_state += plat_ticks() - t0;
+            }
+        } else {
+            build_state();
+            if (gx_opt_statever) {
+                state_snapshot();
+            }
+            if (gx_perf_on > 0) {
+                gx_perf.builds++;
+                gx_perf.t_state += plat_ticks() - t0;
+            }
         }
     }
     if (s_state.scissor_x1 <= s_state.scissor_x0 || s_state.scissor_y1 <= s_state.scissor_y0 ||
@@ -779,8 +926,8 @@ dumped:
         }
         break;
     }
+    plat_gpu_draw(s_tri_out, s_tri_n); /* with 0 (all culled) it only gives the vertices back */
     if (s_tri_n > 0) {
-        plat_gpu_draw(s_tri_out, s_tri_n);
         gx_stat_draws++;
         gx_stat_vertices += s_tri_n;
     }
@@ -828,4 +975,5 @@ void gx_draw_frame_begin(void) {
     gx_perf_frame();
     gx_stat_draws = gx_stat_vertices = gx_stat_copies = 0;
     s_built_version = 0xFFFFFFFFu; /* every frame starts with a full state */
+    s_snap_valid = 0;
 }

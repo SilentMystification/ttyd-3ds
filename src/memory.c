@@ -5,6 +5,9 @@
 #include <dolphin/os.h>
 #include <string.h>
 #include "manager/dvdmgr.h"
+#ifdef TARGET_PORT
+#include "plat/memstable.h" // ports: allocations and frees are reported to the content-stable memory registry
+#endif
 
 // HEAP_MALLOC block is a series of these nodes
 typedef struct MapAllocEntry MapAllocEntry;
@@ -217,6 +220,9 @@ void* __memAlloc(HEAP_TYPE heap, u32 size) {
 
     ptr = OSAllocFromHeap(heapHandle[heap], size);
     if (ptr) {
+#ifdef TARGET_PORT
+        plat_memstable_release(ptr, size);
+#endif
         memset(ptr, 0, size);
         DCFlushRange(ptr, size);
     }
@@ -310,6 +316,9 @@ void*(_mapAlloc)(u32 size) {
         nextptr->currId = 0;
 #endif
 
+#ifdef TARGET_PORT
+        plat_memstable_release(usableData, usableSize);
+#endif
         memset(usableData, 0, usableSize);
         DCFlushRange(usableData, usableSize);
         return usableData;
@@ -376,6 +385,9 @@ void*(_mapAllocTail)(u32 size) {
         nextptr->currId = count++;
 #endif
 
+#ifdef TARGET_PORT
+        plat_memstable_release(tailEntry, usableSize);
+#endif
         memset(tailEntry, 0, usableSize);
         DCFlushRange(tailEntry, usableSize);
         return tailEntry;
@@ -403,6 +415,9 @@ void(_mapFree)(void* alloc) {
     entry = (MapAllocEntry*)alloc - 1;
     if (!entry->inuse)
         return;
+#ifdef TARGET_PORT
+    plat_memstable_release(alloc, entry->size);
+#endif
     nextEntry = entry->next;
     newSize = entry->size;
     if (nextEntry && !nextEntry->inuse) {
@@ -538,6 +553,9 @@ void smartFree(smartEntry* entry) {
         entry->type = 3;
         return;
     }
+#ifdef TARGET_PORT
+    plat_memstable_release(entry->address, entry->size);
+#endif
     if (!entry->prev) {
         wp->allocHead = entry->next;
         if (wp->allocHead) {
@@ -738,6 +756,9 @@ void smartGarbage(void) {
     if (entry) {
         entry->spaceAfter = smartHeapSize() + (u8*)wp->ptr - (u8*)entry->address - entry->size;
     }
+#ifdef TARGET_PORT
+    plat_memstable_release(ptr, smartHeapSize() - (u32)(ptr - (u8*)wp->ptr)); // the free space after the moved blocks
+#endif
     DCFlushRange(wp->ptr, smartHeapSize());
 }
 

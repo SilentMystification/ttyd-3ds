@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include "gx_internal.h"
+#include "plat/memstable.h"
 #include "plat/plat.h"
 
 #define PIPE_SLOTS (64 * 1024)
@@ -750,6 +751,7 @@ void GXBeginDisplayList(void* list, u32 size) {
     if (gx_dl_recording()) {
         plat_fatal("GXBeginDisplayList twice");
     }
+    plat_memstable_release(list, size); /* the CPU builds a list here: no longer disc content */
     s_dl_buf = list;
     s_dl_size = size;
     s_dl_used = 0;

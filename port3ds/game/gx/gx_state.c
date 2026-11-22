@@ -113,6 +113,18 @@ static inline void touch(void) {
     gx.version++;
 }
 
+/* A matrix or the projection changed. build_state reads neither (the
+ * transform reads them per vertex), so the PICA state is not rebuilt for them
+ * (switch gxstatever=0: they bump the state version as every setter does). */
+static inline void touch_xf(void) {
+    if (gx_prim_open) {
+        gx_end_open_primitive(__builtin_return_address(0));
+    }
+    if (!gx_opt_statever) {
+        gx.version++;
+    }
+}
+
 static GXColor u2c(u32 v) { return (GXColor){(u8)(v >> 24), (u8)(v >> 16), (u8)(v >> 8), (u8)v}; }
 static u32 c2u(GXColor c) { return (u32)c.r << 24 | (u32)c.g << 16 | (u32)c.b << 8 | c.a; }
 
@@ -221,7 +233,7 @@ void GXLoadPosMtxImm(const f32 mtx[3][4], u32 id) {
     u32 i = id / 3;
     if (i < GX_POS_MTX_COUNT) {
         memcpy(gx.pos_mtx[i], mtx, sizeof(gx.pos_mtx[i]));
-        touch();
+        touch_xf();
     }
 }
 
@@ -235,7 +247,7 @@ void GXLoadNrmMtxImm(const f32 mtx[3][4], u32 id) {
                 gx.nrm_mtx[i][r][c] = mtx[r][c];
             }
         }
-        touch();
+        touch_xf();
     }
 }
 
@@ -267,7 +279,7 @@ void GXLoadTexMtxImm(const f32 mtx[][4], u32 id, GXTexMtxType type) {
         dst[2][0] = dst[2][1] = dst[2][3] = 0.0f;
         dst[2][2] = 1.0f;
     }
-    touch();
+    touch_xf();
 }
 
 void GXSetCurrentMtx(u32 id) {
@@ -292,13 +304,13 @@ void GXSetProjection(const f32 mtx[4][4], GXProjectionType type) {
     }
     REC(SetProjection, F2U(gx.proj[0]), F2U(gx.proj[1]), F2U(gx.proj[2]), F2U(gx.proj[3]), F2U(gx.proj[4]),
         F2U(gx.proj[5]), F2U(gx.proj[6]));
-    touch();
+    touch_xf();
 }
 
 void GXSetProjectionv(const f32* ptr) {
     GX_CLOSE_PRIMITIVE();
     memcpy(gx.proj, ptr, sizeof(gx.proj));
-    touch();
+    touch_xf();
 }
 
 void GXGetProjectionv(f32* ptr) { memcpy(ptr, gx.proj, sizeof(gx.proj)); }
@@ -328,7 +340,7 @@ void GXSetZScaleOffset(f32 scale, f32 offset) {
     GX_CLOSE_PRIMITIVE();
     gx.zscale = scale;
     gx.zoffset = offset;
-    touch();
+    touch_xf();
 }
 
 void GXSetScissor(u32 left, u32 top, u32 wd, u32 ht) {
@@ -1097,6 +1109,7 @@ void gx_dl_replay_port_op(const u8** pp, const u8* end) {
 /* ---- Defaults (the SDK's GXInit state) ---- */
 
 void gx_state_init(u16 efb_w, u16 efb_h) {
+    gx_opts_init();
     memset(&gx, 0, sizeof(gx));
     gx.efb_w = efb_w;
     gx.efb_h = efb_h;

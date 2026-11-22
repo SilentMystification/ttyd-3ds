@@ -28,6 +28,14 @@ static u32 s_built_version = 0xFFFFFFFFu;
 static PlatGpuState s_state;
 u32 gx_stat_draws, gx_stat_vertices, gx_stat_copies;
 int gx_bbox_active;
+int gx_opt_statever = 1, gx_opt_fogcache = 1, gx_opt_unlit = 1;
+
+void gx_opts_init(void) {
+    gx_opt_statever = plat_switch_int("gxstatever", 1) != 0;
+    gx_opt_fogcache = plat_switch_int("gxfogcache", 1) != 0;
+    gx_opt_unlit = plat_switch_int("gxunlit", 1) != 0;
+    PLOG_I("gx: statever %d fogcache %d unlit %d", gx_opt_statever, gx_opt_fogcache, gx_opt_unlit);
+}
 
 /* ---- State ---- */
 

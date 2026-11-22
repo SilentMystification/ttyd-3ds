@@ -200,6 +200,12 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n);
 void gx_draw_frame_begin(void);
 void gx_draw_frame_end(void);
 extern u32 gx_stat_draws, gx_stat_vertices, gx_stat_copies;
+/* A/B switches of the state work (read once by gx_opts_init, all default 1):
+ *   gxstatever: matrix and projection loads do not rebuild the PICA state;
+ *   gxfogcache: the fog LUT is recomputed only when the fog parameters change;
+ *   gxunlit:    unlit colour channels skip channel_color. */
+extern int gx_opt_statever, gx_opt_fogcache, gx_opt_unlit;
+void gx_opts_init(void);
 
 /* ---- gx_tex.c ---- */
 /* Converted texture for texture map slot `map` (handle 0 if none). */

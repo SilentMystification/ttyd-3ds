@@ -2964,13 +2964,31 @@ EvtWord* evtSearchEndSwitch(EventEntry* entry) {
 
     depth = 1;
     cmd = entry->nextCommand;
+#ifdef TARGET_PORT
+    EvtWord* start = cmd;
+    s32 iterations = 0;
+#endif
 
     while (1) {
+#ifdef TARGET_PORT
+        // No-progress guard: an iteration that leaves cmd where it was, or a walk past 200000 commands.
+        EvtWord* before = cmd;
+#endif
         opcode = *cmd & 0xFFFF;
         ret = cmd;
         argCount = *cmd++ >> 16;
         cmd += argCount;
 #ifdef TARGET_PORT
+        if (cmd == before || ++iterations > 200000) {
+            PLOG_E("event: evtSearchEndSwitch words %p-8..+8: %08x %08x %08x %08x %08x %08x %08x %08x | %08x | %08x %08x %08x %08x %08x %08x %08x %08x",
+                   before, before[-8], before[-7], before[-6], before[-5], before[-4], before[-3], before[-2],
+                   before[-1], before[0], before[1], before[2], before[3], before[4], before[5], before[6], before[7],
+                   before[8]);
+            plat_fatal("event: evtSearchEndSwitch stuck (%s): script start %p, search start %p, cmd %p, opcode 0x%x"
+                       " (*cmd & 0xFFFF), length %d (*cmd >> 16), depth %d, iterations %d, map %s",
+                       cmd == before ? "no progress" : "too long", entry->restartFrom, start, before, opcode, argCount,
+                       depth, iterations, gp != NULL ? gp->currentMapName : "-");
+        }
         // The GameCube walks on through memory when the switch has no END_SWITCH before the script ends; the
         // port stops at a bound no script reaches and names the script.
         if (cmd - (EvtWord*)entry->nextCommand > 0x40000 || !PORT_IS_ADDR(cmd)) {

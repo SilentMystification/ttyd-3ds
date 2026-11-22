@@ -283,6 +283,7 @@ void plat_job_parallel_for(PlatJobRangeFn fn, void* arg, uint32_t count, uint32_
 }
 
 void plat_job_stats(PlatJobStats* out) {
+    memset(out, 0, sizeof(*out)); /* the padding too: maybe_log compares with memcmp */
     out->queued = __atomic_load_n(&s_stats.queued, __ATOMIC_RELAXED);
     out->inline_ = __atomic_load_n(&s_stats.inline_, __ATOMIC_RELAXED);
     out->worker = __atomic_load_n(&s_stats.worker, __ATOMIC_RELAXED);

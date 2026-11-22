@@ -1862,15 +1862,17 @@ void plat_gpu_init(void) {
         mkdir("shots", 0777);
     }
     s_threaded = !plat_switch_has("gxsync");
+    /* Switch gpucore=N: the render thread's core (default 2 on the New 3DS, 1 on the old one). */
+    int core = plat_switch_int("gpucore", plat_is_new3ds() ? 2 : 1);
     if (s_threaded) {
-        s_thread = threadCreate(render_thread, NULL, 64 * 1024, 0x2E, plat_is_new3ds() ? 2 : 1, false);
+        s_thread = threadCreate(render_thread, NULL, 64 * 1024, 0x2E, core, false);
         if (s_thread == NULL) {
-            PLOG_W("gpu: no render thread on core 2, rendering on the game thread");
+            PLOG_W("gpu: no render thread on core %d, rendering on the game thread", core);
             s_threaded = 0;
         }
     }
-    PLOG_I("gpu: EFB %dx%d (rotated), render thread %s, rot %d, draw merge %d", TARGET_W, TARGET_H,
-           s_threaded ? "on core 2" : "off", s_rot, s_merge);
+    PLOG_I("gpu: EFB %dx%d (rotated), render thread %s %d, rot %d, draw merge %d", TARGET_W, TARGET_H,
+           s_threaded ? "on core" : "off", core, s_rot, s_merge);
     if (plat_switch_has("gputest")) {
         gpu_selftest();
     }

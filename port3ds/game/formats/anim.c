@@ -133,6 +133,7 @@ void portAnimSwap(void* data, u32 size, const char* name) {
                (unsigned long)size);
         return;
     }
+    u64 t0 = port_conv_begin();
     PortSwap s;
     port_swap_begin(&s, data, size, name);
     port_swap_struct(&s, 0, &port_swap_type_AnimationPoseData);
@@ -174,4 +175,5 @@ void portAnimSwap(void* data, u32 size, const char* name) {
            (unsigned long)port_swap_get32(&s, P_SHAPE_COUNT), (unsigned long)port_swap_get32(&s, P_POS_NUM),
            (unsigned long)port_swap_get32(&s, P_NODE_NUM), (unsigned long)count);
     port_swap_end(&s);
+    port_conv_end(PORT_CONV_ANIM, t0, name, data, size);
 }

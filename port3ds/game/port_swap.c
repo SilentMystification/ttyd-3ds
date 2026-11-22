@@ -1,4 +1,5 @@
 /* In-place conversion of big-endian disc data: see port3ds/port_swap.h. */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -128,16 +129,121 @@ u32 port_swap_get32(const PortSwap* s, u32 off) {
     return is_done(s, off) ? v : port_be32(s->base + off);
 }
 
+/* ---- Load-time conversion profile (switch loadstats) ---- */
+
+void port_dvd_read_stats(u32* reads, u64* bytes, u64* ticks);
+
+static const char* const k_conv_kind[PORT_CONV_KINDS] = {"map", "tpl", "anim", "font", "camroad", "musyx", "words"};
+#define BURST_GAP_TICKS ((u64)PLAT_TICKS_PER_SEC) /* a second without conversions ends a load */
+
+typedef struct {
+    u32 count;
+    u32 bytes;
+    u64 ticks;
+} ConvKind;
+
+static int s_conv_on = -1; /* -1 not read yet */
+static int s_conv_hash;
+static u32 s_conv_depth; /* nested conversions (a .slib's songs) count once */
+static ConvKind s_burst[PORT_CONV_KINDS];
+static u64 s_burst_start, s_burst_last;
+static u32 s_burst_n;
+static u32 s_burst_dvd_reads;
+static u64 s_burst_dvd_bytes, s_burst_dvd_ticks;
+
+static u32 ticks_us(u64 t) { return (u32)(t / (PLAT_TICKS_PER_SEC / 1000000u)); }
+
+static void burst_flush(void) {
+    if (s_burst_n == 0) {
+        return;
+    }
+    u32 reads;
+    u64 bytes, ticks;
+    port_dvd_read_stats(&reads, &bytes, &ticks);
+    u64 conv = 0;
+    u32 conv_bytes = 0;
+    char line[320];
+    int n = 0;
+    for (int k = 0; k < PORT_CONV_KINDS; k++) {
+        conv += s_burst[k].ticks;
+        conv_bytes += s_burst[k].bytes;
+        if (s_burst[k].count != 0 && n < (int)sizeof(line)) {
+            n += snprintf(line + n, sizeof(line) - n, " %s %lu/%luB/%luus", k_conv_kind[k],
+                          (unsigned long)s_burst[k].count, (unsigned long)s_burst[k].bytes,
+                          (unsigned long)ticks_us(s_burst[k].ticks));
+        }
+    }
+    PLOG_I("[LOADCONV] load: %lu files, %lu bytes, convert %lu us of %lu us; dvd %lu reads %llu bytes %lu us;%s",
+           (unsigned long)s_burst_n, (unsigned long)conv_bytes, (unsigned long)ticks_us(conv),
+           (unsigned long)ticks_us(s_burst_last - s_burst_start), (unsigned long)(reads - s_burst_dvd_reads),
+           (unsigned long long)(bytes - s_burst_dvd_bytes), (unsigned long)ticks_us(ticks - s_burst_dvd_ticks), line);
+    memset(s_burst, 0, sizeof(s_burst));
+    s_burst_n = 0;
+}
+
+u64 port_conv_begin(void) {
+    if (s_conv_on < 0) {
+        s_conv_on = plat_switch_has("loadstats");
+        s_conv_hash = plat_switch_has("convhash");
+    }
+    if (!s_conv_on || s_conv_depth++ != 0) {
+        return 0;
+    }
+    u64 now = plat_ticks();
+    if (s_burst_n != 0 && now - s_burst_last > BURST_GAP_TICKS) {
+        burst_flush();
+    }
+    if (s_burst_n == 0) {
+        s_burst_start = now;
+        port_dvd_read_stats(&s_burst_dvd_reads, &s_burst_dvd_bytes, &s_burst_dvd_ticks);
+    }
+    return now;
+}
+
+/* FNV-1a over the converted bytes. */
+static u32 conv_hash(const void* data, u32 bytes) {
+    const u8* p = data;
+    u32 h = 2166136261u;
+    for (u32 i = 0; i < bytes; i++) {
+        h = (h ^ p[i]) * 16777619u;
+    }
+    return h;
+}
+
+void port_conv_end(int kind, u64 start, const char* name, const void* data, u32 bytes) {
+    if (!s_conv_on || --s_conv_depth != 0) {
+        return;
+    }
+    u64 now = plat_ticks();
+    ConvKind* k = &s_burst[kind];
+    k->count++;
+    k->bytes += bytes;
+    k->ticks += now - start;
+    s_burst_n++;
+    s_burst_last = now;
+    if (s_conv_hash && data != NULL) {
+        PLOG_I("[LOADCONV] %s %s: %lu bytes, %lu us, hash %08lx", k_conv_kind[kind], name ? name : "?",
+               (unsigned long)bytes, (unsigned long)ticks_us(now - start), (unsigned long)conv_hash(data, bytes));
+        s_burst_last = plat_ticks(); /* the hash is not part of the load */
+    } else {
+        PLOG_I("[LOADCONV] %s %s: %lu bytes, %lu us", k_conv_kind[kind], name ? name : "?", (unsigned long)bytes,
+               (unsigned long)ticks_us(now - start));
+    }
+}
+
 void portSwapU16Run(void* data, u32 count) {
+    u64 t0 = port_conv_begin();
     u8* p = data;
     for (u32 i = 0; i < count; i++, p += 2) {
         u8 t = p[0];
         p[0] = p[1];
         p[1] = t;
     }
+    port_conv_end(PORT_CONV_WORDS, t0, "u16 run", data, count * 2);
 }
 
 void portSwapU32Run(void* data, u32 count) {
+    u64 t0 = port_conv_begin();
     u8* p = data;
     for (u32 i = 0; i < count; i++, p += 4) {
         u8 t = p[0];
@@ -147,4 +253,5 @@ void portSwapU32Run(void* data, u32 count) {
         p[1] = p[2];
         p[2] = t;
     }
+    port_conv_end(PORT_CONV_WORDS, t0, "u32 run", data, count * 4);
 }

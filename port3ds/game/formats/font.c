@@ -17,6 +17,7 @@ void portFontSwap(void* data, u32 size, const char* name) {
     if (p == NULL || size < port_swap_type_BinaryFontHeader.size || port_be32(p) != FOURCC('F', 'O', 'N', 'T')) {
         return;
     }
+    u64 t0 = port_conv_begin();
     PortSwap s;
     port_swap_begin(&s, data, size, name);
     port_swap_struct(&s, 0, &port_swap_type_BinaryFontHeader);
@@ -50,4 +51,5 @@ void portFontSwap(void* data, u32 size, const char* name) {
     }
     PLOG_D("font %s: %lu blocks", name, (unsigned long)count);
     port_swap_end(&s);
+    port_conv_end(PORT_CONV_FONT, t0, name, data, size);
 }

@@ -19,14 +19,17 @@
 
 #include "port_musyx_swap.h"
 #include "plat/plat.h"
+#include "port3ds/port_swap.h"
 
 typedef struct Swapper {
     u8* p;
     u32 len;
     u8* done; /* one bit per 2-byte unit */
+    u64 t0;   /* port_conv_begin */
 } Swapper;
 
 static BOOL swInit(Swapper* sw, void* data, u32 len) {
+    sw->t0 = port_conv_begin();
     sw->p = (u8*)data;
     sw->len = len;
     sw->done = (u8*)calloc(len / 16 + 1, 1);
@@ -38,6 +41,7 @@ static BOOL swInit(Swapper* sw, void* data, u32 len) {
 
 static void swFree(Swapper* sw) {
     free(sw->done);
+    port_conv_end(PORT_CONV_MUSYX, sw->t0, "musyx", sw->p, sw->len);
 }
 
 static BOOL inRange(const Swapper* sw, u32 off, u32 size) {
@@ -417,6 +421,7 @@ void portMusyxSwapArr(void* arr, u32 len) {
 void portMusyxSwapSlib(void* data, u32 len) {
     u8* p = (u8*)data;
     u32 off = 0;
+    u64 t0 = port_conv_begin(); /* the songs inside count as this one file */
     /* Chunks: u32 size (including the 0x20-byte header), song at +0x20;
      * a size of 0xFFFFFFFF ends the library. */
     while (off + 4 <= len) {
@@ -428,6 +433,7 @@ void portMusyxSwapSlib(void* data, u32 len) {
         portMusyxSwapArr(p + off + 0x20, size - 0x20);
         off += size;
     }
+    port_conv_end(PORT_CONV_MUSYX, t0, "musyx slib", data, len);
 }
 
 /* ---- .stm stream header ---- */

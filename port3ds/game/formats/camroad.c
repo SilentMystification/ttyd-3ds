@@ -44,6 +44,7 @@ void portCamRoadSwap(void* data, u32 size, const char* name) {
     if (memcmp(b, k_marker, sizeof(k_marker)) == 0) {
         return; /* converted already */
     }
+    u64 t0 = port_conv_begin();
     PortSwap s;
     port_swap_begin(&s, data, size, name);
     u32 off[T_COUNT], end[T_COUNT];
@@ -82,4 +83,5 @@ void portCamRoadSwap(void* data, u32 size, const char* name) {
     memcpy(b, k_marker, sizeof(k_marker));
     PLOG_D("camroad %s: %lu curves", name, (unsigned long)curves);
     port_swap_end(&s);
+    port_conv_end(PORT_CONV_CAMROAD, t0, name, data, size);
 }

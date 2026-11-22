@@ -55,6 +55,63 @@ What is worth borrowing from Aurora (MIT licence):
 3. Effect overrides are registered by the game: "when this TEV/indirect configuration is seen, call this function". The GX core falls back to a logged approximation, never a silent skip.
 4. Hardware rules stay as they are: bounds checks, explicit cache flushes, Azahar `UnmappedAccess` treated as failure, and both QTM and FCRAM paths tested.
 
+## Portable performance layer (decision 2026-11-22)
+
+The optimisation *mechanisms* belong to the library. Each game only supplies *data*: what is hot, which threads do what, and which code is hot. Moving the tuning to a new game should mean writing a manifest, not changing library code.
+
+### Hardware facts the layer is built around
+
+| Resource | Size | Who can reach it | Notes |
+|---|---|---|---|
+| L1 I and D cache | 16 KB each, per core | that core | 32-byte lines |
+| L2 cache | 2 MB, shared | all cores | New 3DS only; shared with every core's traffic |
+| QTM RAM (application part) | 2 MB at `0x1E800000` | CPU (all cores); GPU (documented for the first 2 MB; **check on hardware**) | Offsets 0x200000+ belong to the system `qtm` service and the kernel. Retail ExHeader maps exactly these 2 MB |
+| VRAM | 6 MB | GPU (CPU only through transfers) | Render targets, EFB, and hot textures |
+| Linear FCRAM | 32 MB in our layout | CPU + GPU + DSP | Cache maintenance needed both ways |
+| Heap FCRAM | rest of the 124 MB | CPU | Ordinary cached memory |
+| Cores | 0 and 2 full; 1 at most 80% (multi mode, ExHeader MaxCpu `0xD0`); 3 system | | Core 1 is shared with networking, file system and input services |
+
+### Mechanisms (library) and inputs (game)
+
+1. **Memory tiers and placement.**
+   - **Library:** a registration API, roughly `gc3ds_place(name, bytes, align, prefs, flags)`. `prefs` is an ordered list of tiers (QTM, VRAM, LINEAR, HEAP). The flags say who touches the buffer: `CPU_SHARED` (several cores), `GPU_READ`, `GPU_WRITE`, `DSP`.
+   - **Placing:** the library packs registrations by priority into each tier's budget and checks that every chosen tier fits the flags (for example, no `GPU_*` buffer in QTM unless the GPU check passed). It falls back down the list, and reports the result in the boot log and on the HUD.
+   - **A/B testing:** a generic switch, `place=<name>:<tier>`, moves one buffer at a time.
+   - **Game:** a manifest listing its hot regions (TTYD: map collision `hitdrv`, animation tables, MusyX voice state), each with a priority and flags. It also registers its own buffers through the same API.
+   - Today's fixed `PLAT_PLACE_*` enum in `plat/memplace.c` becomes this API.
+2. **GPU/CPU shared memory policy.**
+   - **Library:** one set of rules plus helpers:
+     - GPU-read-only data goes to VRAM or linear memory;
+     - per-frame CPU-write/GPU-read data (vertex arenas, uniform blocks) goes to linear memory, or to QTM once the GPU access check is proven;
+     - cache flush and invalidate helpers that batch by range, so a game never calls `GSPGPU_FlushDataCache` ad hoc.
+   - **Game:** nothing, unless it has its own GPU-visible buffers. Those go through the placement API with `GPU_*` flags.
+3. **Threads and cores.**
+   - **Library:** threads are created by *role* (game, render, audio, streaming, dma, log, watchdog). A role table maps roles to cores and priorities, with switches to override it. The library also handles the core-1 time budget (the CPU-limit clamp and restore we already have), and the ExHeader template carries the right `MaxCpu`.
+   - **Game:** which of its own threads map to which roles. TTYD: the DVD manager is `streaming`, ARQ is `dma`.
+4. **Cache hierarchy.**
+   - **Library:**
+     - linker-script support for a hot-code section (`.text.hot`), so hot functions sit together for I-cache and L2 locality;
+     - per-file ARM/Thumb selection driven by a list;
+     - 32-byte alignment and prefetch macros;
+     - guidance for splitting hot loops to fit L1.
+   - **Game:** a hot-function list and an ARM/Thumb list, both generated from the profiler's output, never hand-edited guesses.
+5. **Measurement.**
+   - **Library:**
+     - the profiler (per-scope tick counters in QTM, per core, shown on the HUD);
+     - the hardware probe (bandwidth per tier, per-core speed, GPU reach);
+     - A/B harnesses in `tools/` that toggle `place=` or roles and compare frame times.
+     - Possibly ARM11 performance-monitor counters for cache misses. These need privileged access, through the Backdoor SVC our ExHeader allows. **Unverified; probe it first.**
+   - **Game:** benchmark scenes, with save states or test paths, to run the harness on.
+
+### Manifest
+
+Each game gets one file, for example `port3ds/game/perf_manifest.c` (data only, no logic). It holds:
+- the placement registrations;
+- the thread-role assignments;
+- the hot-function list and the ARM/Thumb list (or paths to the generated files).
+
+A second game copies the structure and fills in its own data.
+
 ## Performance outlook
 
 | Game | Outlook | Why |

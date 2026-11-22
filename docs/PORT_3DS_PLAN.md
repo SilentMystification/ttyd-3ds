@@ -20,6 +20,7 @@ This repository is a 100% matching C decompilation. The 3DS port compiles that s
   - GX effects the PICA can't do are handled by per-game overrides registered with the GX layer. The GX core itself only has generic paths and logged fallbacks.
   - Tools take game-specific details (title ID, menu paths, map lists) as arguments or config, not hard-coded values.
   - Each new hook gets a one-line entry in GC3DS_LIBRARY_NOTE.md, so the extension API is recorded as it grows.
+  - Optimisation work follows the same split. The library owns the mechanisms: memory tiers and placement (QTM, VRAM, linear, heap), GPU/CPU sharing and cache-flush policy, thread roles and core budgets, hot-code layout, the profiler and the A/B harnesses. The game supplies only data, in a per-game manifest: hot regions with priorities, thread roles, and hot-function and ARM/Thumb lists generated from profiles. Details are in GC3DS_LIBRARY_NOTE.md, "Portable performance layer". The fixed placement enum in `plat/memplace.c` turns into the registration API described there.
 
 ## 2. What we start from
 
@@ -293,7 +294,7 @@ How the port uses it:
 **How placement is managed.**
 
 - A `qtm_alloc` arena owns the region.
-- Every placement is listed in one table, `port3ds/sys/memplace.c`, with a size budget. This gives one place to see what lives in QTM and to move it, and a boot-time check that the total fits.
+- Every placement is listed in one table, `port3ds/plat/memplace.c` (becoming the registration API in GC3DS_LIBRARY_NOTE.md), with a size budget. This gives one place to see what lives in QTM and to move it, and a boot-time check that the total fits.
 - Azahar does not model memory timing, so it shows that the placement works but not whether it helps. The final list is tuned in phase 8 from hardware profiles, using debug-switch A/B toggles that move one buffer to FCRAM for comparison. Those toggles are a measurement tool, not a shipping fallback.
 
 ## 6. Game data: read from the disc image, decoded at load

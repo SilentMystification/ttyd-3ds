@@ -85,6 +85,12 @@ void plat_cpu_limit_restore(void) {
         return;
     }
     s_cpu_restored = 1;
+    if (s_cpu_limit_orig == 0) {
+        /* Setting 0 is refused (e0e01bf4); the process started with it, so
+         * there is nothing to put back. */
+        PLOG_I("cpu limit: original 0%%, nothing to restore");
+        return;
+    }
     Result r = APT_SetAppCpuTimeLimit(s_cpu_limit_orig);
     PLOG_I("cpu limit: restored to %lu%% result %08lx", (unsigned long)s_cpu_limit_orig, (unsigned long)r);
 }

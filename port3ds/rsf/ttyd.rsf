@@ -48,7 +48,9 @@ AccessControlInfo:
   IdealProcessor               : 0
   AffinityMask                 : 1
   Priority                     : 16
-  MaxCpu                       : 0
+  # The retail value (Xenoblade has 158). 0 forbids threads on core 1, so
+  # the system's ARQ DMA thread was refused and the port could not start.
+  MaxCpu                       : 0x9E
   HandleTableSize              : 0x200
   DisableDebug                 : false
   EnableForceDebug             : false

@@ -83,6 +83,27 @@ void plat_voice_stop(int ch);
 /* A counter line for the log (switch ndspstats=N: every N seconds). */
 void plat_voice_note(uint32_t software, uint32_t ndsp, uint32_t aux, uint32_t overflow, uint32_t aux_late);
 
+/* ---- NDSP streams (switch ndspstreams=1, with ndspvoices=1) ----
+ *
+ * A MusyX stream is a ring of ADPCM frames (or PCM16 samples) the game refills
+ * behind the voice's position. The ring is mirrored in linear memory and played
+ * as a chain of short wave buffers (the decoder's history carries from one to
+ * the next, and around the ring's end). */
+typedef struct PlatStream {
+    const uint8_t* ring;   /* the ring in ARAM */
+    uint32_t bytes;        /* its size in bytes (ADPCM: 8 per 14 samples) */
+    uint32_t samples;      /* its size in samples */
+    uint8_t pcm16;         /* PCM16 (native order) instead of DSP-ADPCM */
+    uint16_t coefs[16];
+    uint16_t ps;           /* ADPCM: the first frame's predictor/scale */
+} PlatStream;
+/* Starts a stream on a channel from ring sample 0 (copies the ring now).
+ * Returns 0 when it has to stay in software. */
+int plat_stream_start(int ch, const PlatStream* st, const PlatVoiceMix* mix);
+/* The game refilled bytes [off, off + len) of the channel's ring (in ARAM now):
+ * the mirror takes them when the output reaches that point. */
+void plat_stream_refill(int ch, uint32_t off, uint32_t len);
+
 #ifdef __cplusplus
 }
 #endif

@@ -3,6 +3,9 @@
 #include "musyx/hardware.h"
 #include "musyx/platform.h"
 #include "musyx/sal.h"
+#ifdef TARGET_PORT
+#include "musyx/hw_pcmixer.h"
+#endif
 
 typedef struct STREAM_BUFFER {
   // total size: 0x10
@@ -503,6 +506,11 @@ void aramUploadData(void* mram, u32 aram, u32 len, u32 highPrio, void (*callback
   if (dst != NULL && mram != NULL) {
     memcpy(dst, mram, len);
   }
+#ifdef TARGET_PORT
+  if (highPrio != 0 && salPcStreamUploadHook != NULL) {
+    salPcStreamUploadHook(aram, len); /* a stream refill (hwFlushStream) */
+  }
+#endif
   if (callback != NULL) {
     callback(user);
   }

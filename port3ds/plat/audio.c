@@ -198,7 +198,43 @@ typedef struct VoiceChannel {
     uint8_t lpf_on;
     int16_t lpf_a0, lpf_b0;
     uint8_t interp;
+    int8_t stream;           /* stream slot playing, -1 none */
+    int8_t str_latest;       /* the newest stream slot started on it (refills are for that one) */
 } VoiceChannel;
+
+/* A stream on a channel: the ring mirrored in linear memory, played as a chain
+ * of short wave buffers (STREAM_SEG samples, STREAM_DEPTH queued). The ring is
+ * refilled by the game behind MusyX's position, which runs ahead of what is
+ * heard by the lead, so the mirror takes each refill later, when the output
+ * has passed it (EV_SDATA, its own queue so it holds nothing else back); a
+ * segment is queued only while it ends within the part of the ring the mirror
+ * still holds for certain. */
+#define STREAM_SLOTS 8
+#define STREAM_SEGS 4
+#define STREAM_DEPTH 3
+#define STREAM_SEG 560 /* samples; a multiple of 14 */
+#define STREAM_EVENTS 256
+
+typedef struct StreamSlot {
+    uint8_t used, pcm16, first;
+    uint8_t ch;
+    uint16_t gen, users;
+    const uint8_t* ring;
+    uint8_t* mirror;
+    uint32_t bytes, samples;
+    uint32_t abs_next;    /* absolute sample index of the next segment */
+    uint32_t free_wake;   /* closing: freed at this wake */
+    ndspWaveBuf wb[STREAM_SEGS];
+    uint32_t wb_abs[STREAM_SEGS];
+    ndspAdpcmData ctx;
+    uint16_t ps;
+} StreamSlot;
+
+typedef struct StreamEvent {
+    uint32_t at, off, len;
+    uint8_t slot;
+    uint16_t gen;
+} StreamEvent;
 
 static int s_voices_on;
 static uint32_t s_voice_lead;
@@ -214,6 +250,9 @@ static struct {
     uint32_t sw, ndsp, aux, overflow, aux_late;
 } s_vstat;
 static int s_vstats_every;
+static int s_batch = 1;
+static uint32_t s_flushes, s_flush_bytes, s_blocks;
+static uint64_t s_flush_ticks;
 
 int plat_voice_channels(void) { return s_voices_on ? VOICE_CHANNELS : 0; }
 void plat_voice_set_lead(uint32_t frames) { s_voice_lead = frames; }
@@ -556,6 +595,195 @@ void plat_voice_note(uint32_t software, uint32_t ndsp, uint32_t aux, uint32_t ov
     s_vstat.aux_late = aux_late;
 }
 
+/* --- NDSP streams --- */
+
+static int s_streams_on;
+static StreamSlot s_str[STREAM_SLOTS];
+static StreamEvent s_sev[STREAM_EVENTS];
+static uint32_t s_sev_head, s_sev_tail;
+static uint16_t s_str_gen;
+static uint32_t s_wake; /* DSP frames seen by the audio thread */
+static Thread s_audio_thread_id;
+static struct {
+    uint32_t starts, refills, refill_bytes, underruns, waits, dropped;
+} s_sstat;
+
+static void stream_free(StreamSlot* st) {
+    if (st->mirror != NULL) {
+        linearFree(st->mirror);
+    }
+    memset(st, 0, sizeof(*st));
+}
+
+int plat_stream_start(int ch, const PlatStream* ps, const PlatVoiceMix* mix) {
+    if (!s_streams_on || ch < 1 || ch > VOICE_CHANNELS || ps->samples < 28 || ps->bytes == 0 ||
+        (!ps->pcm16 && ps->samples % 14 != 0)) {
+        return 0;
+    }
+    int i;
+    for (i = 0; i < STREAM_SLOTS && s_str[i].used; i++) {
+    }
+    if (i == STREAM_SLOTS) {
+        return 0;
+    }
+    StreamSlot* st = &s_str[i];
+    memset(st, 0, sizeof(*st));
+    st->mirror = linearAlloc((ps->bytes + 31) & ~31u);
+    if (st->mirror == NULL) {
+        return 0;
+    }
+    VoiceEvent* e = ev_push(EV_START, ch);
+    if (e == NULL) {
+        linearFree(st->mirror);
+        st->mirror = NULL;
+        return 0;
+    }
+    memcpy(st->mirror, ps->ring, ps->bytes);
+    DSP_FlushDataCache(st->mirror, ps->bytes);
+    st->used = 1;
+    st->users = 1; /* the start event's reference */
+    st->pcm16 = ps->pcm16;
+    st->first = 1;
+    st->ch = (uint8_t)ch;
+    st->gen = ++s_str_gen;
+    st->ring = ps->ring;
+    st->bytes = ps->bytes;
+    st->samples = ps->samples;
+    st->ps = ps->ps;
+    e->cache = -2 - i; /* a stream start: the slot */
+    e->mix = *mix;
+    memcpy(e->coefs, ps->coefs, sizeof(e->coefs));
+    s_vch[ch].str_latest = (int8_t)i;
+    s_sstat.starts++;
+    return 1;
+}
+
+void plat_stream_refill(int ch, uint32_t off, uint32_t len) {
+    if (!s_streams_on || ch < 1 || ch > VOICE_CHANNELS || s_vch[ch].str_latest < 0 || threadGetCurrent() != s_audio_thread_id) {
+        return;
+    }
+    StreamSlot* st = &s_str[s_vch[ch].str_latest];
+    if (!st->used || off >= st->bytes) {
+        return;
+    }
+    if (len > st->bytes - off) {
+        len = st->bytes - off;
+    }
+    if (s_sev_head - s_sev_tail >= STREAM_EVENTS) {
+        s_sstat.dropped++;
+        return;
+    }
+    StreamEvent* e = &s_sev[s_sev_head % STREAM_EVENTS];
+    /* the refill ends where MusyX's position is at the end of this quantum's block (one quantum after
+     * its output time); the DSP is allowed a frame of slack, and the apply test is one quantum early */
+    e->at = s_fill_pos + s_voice_lead + 4 * s_quantum;
+    e->slot = (uint8_t)(st - s_str);
+    e->gen = st->gen;
+    e->off = off;
+    e->len = len;
+    s_sev_head++;
+}
+
+/* The channel's stream, closing: the DSP may still read its mirror for a frame or two. */
+static void stream_release(int ch) {
+    VoiceChannel* vc = &s_vch[ch];
+    if (vc->stream >= 0) {
+        StreamSlot* st = &s_str[vc->stream];
+        st->free_wake = s_wake + 4;
+        st->used = 2; /* closing */
+        vc->stream = -1;
+    }
+}
+
+static void stream_reap(void) {
+    for (int i = 0; i < STREAM_SLOTS; i++) {
+        if (s_str[i].used == 2 && (int32_t)(s_wake - s_str[i].free_wake) >= 0) {
+            stream_free(&s_str[i]);
+        }
+    }
+}
+
+/* Queues segments of a channel's stream as the DSP finishes them. */
+static void stream_pump(int ch) {
+    VoiceChannel* vc = &s_vch[ch];
+    if (vc->stream < 0) {
+        return;
+    }
+    StreamSlot* st = &s_str[vc->stream];
+    int pending = 0, any_done = 0;
+    uint32_t q = st->abs_next;
+    int have_q = 0;
+    for (int i = 0; i < STREAM_SEGS; i++) {
+        int s = st->wb[i].status;
+        if (s == NDSP_WBUF_PLAYING) {
+            q = st->wb_abs[i] + ndspChnGetSamplePos(ch);
+            have_q = 1;
+            pending++;
+        } else if (s == NDSP_WBUF_QUEUED) {
+            if (!have_q || (int32_t)(st->wb_abs[i] - q) < 0) {
+                q = st->wb_abs[i];
+            }
+            pending++;
+        } else if (s == NDSP_WBUF_DONE) {
+            any_done = 1;
+        }
+    }
+    if (pending == 0 && !st->first && any_done) {
+        s_sstat.underruns++;
+    }
+    uint32_t guard = st->samples * 2 / 5;
+    while (pending < STREAM_DEPTH) {
+        int i;
+        for (i = 0; i < STREAM_SEGS && (st->wb[i].status == NDSP_WBUF_QUEUED || st->wb[i].status == NDSP_WBUF_PLAYING); i++) {
+        }
+        if (i == STREAM_SEGS) {
+            break;
+        }
+        uint32_t rp = st->abs_next % st->samples, len = st->samples - rp;
+        if (len > STREAM_SEG) {
+            len = STREAM_SEG;
+        }
+        if (!st->first && st->abs_next + len - q > st->samples - guard) {
+            s_sstat.waits++;
+            break;
+        }
+        ndspWaveBuf* wb = &st->wb[i];
+        memset(wb, 0, sizeof(*wb));
+        if (st->pcm16) {
+            wb->data_pcm16 = (int16_t*)(st->mirror + rp * 2);
+        } else {
+            wb->data_adpcm = st->mirror + (rp / 14) * 8;
+            if (st->first) {
+                st->ctx.index = st->ps;
+                st->ctx.history0 = 0;
+                st->ctx.history1 = 0;
+                wb->adpcm_data = &st->ctx;
+            } /* later buffers: the decoder carries its history on */
+        }
+        wb->nsamples = len;
+        wb->looping = false;
+        st->wb_abs[i] = st->abs_next;
+        if (st->first) {
+            q = st->abs_next;
+            st->first = 0;
+        }
+        ndspChnWaveBufAdd(ch, wb);
+        st->abs_next += len;
+        pending++;
+    }
+}
+
+static void apply_sdata(const StreamEvent* e) {
+    StreamSlot* st = &s_str[e->slot];
+    if (st->used != 1 || st->gen != e->gen) {
+        return;
+    }
+    memcpy(st->mirror + e->off, st->ring + e->off, e->len);
+    DSP_FlushDataCache(st->mirror + e->off, e->len);
+    s_sstat.refills++;
+    s_sstat.refill_bytes += e->len;
+}
+
 static void apply_mix(int ch, const PlatVoiceMix* m) {
     VoiceChannel* vc = &s_vch[ch];
     set_mix(ch, m->l, m->r);
@@ -582,6 +810,7 @@ static void channel_release(int ch) {
         s_cache[vc->cache].users--;
         vc->cache = -1;
     }
+    stream_release(ch);
 }
 
 static void apply_event(const VoiceEvent* e) {
@@ -593,11 +822,25 @@ static void apply_event(const VoiceEvent* e) {
         channel_release(ch);
         break;
     case EV_MIX:
-        if (vc->cache >= 0) {
+        if (vc->cache >= 0 || vc->stream >= 0) {
             apply_mix(ch, &e->mix);
         }
         break;
     case EV_START: {
+        if (e->cache <= -2) {
+            int slot = -2 - e->cache;
+            StreamSlot* st = &s_str[slot];
+            ndspChnWaveBufClear(ch);
+            channel_release(ch);
+            vc->stream = (int8_t)slot; /* the start event's reference moves to the channel */
+            ndspChnSetFormat(ch, st->pcm16 ? NDSP_FORMAT_MONO_PCM16 : NDSP_FORMAT_MONO_ADPCM);
+            if (!st->pcm16) {
+                ndspChnSetAdpcmCoefs(ch, (u16*)e->coefs);
+            }
+            apply_mix(ch, &e->mix);
+            stream_pump(ch);
+            break;
+        }
         CacheEntry* c = &s_cache[e->cache];
         ndspChnWaveBufClear(ch);
         channel_release(ch);
@@ -650,10 +893,19 @@ static uint32_t play_position(void) {
 }
 
 static void apply_due_events(void) {
-    if (s_ev_head == s_ev_tail) {
+    if (s_ev_head == s_ev_tail && s_sev_head == s_sev_tail) {
         return;
     }
     uint32_t now = play_position();
+    while (s_sev_tail != s_sev_head) {
+        const StreamEvent* se = &s_sev[s_sev_tail % STREAM_EVENTS];
+        int32_t sahead = (int32_t)(se->at - now);
+        if (sahead > (int32_t)s_quantum && s_sev_head - s_sev_tail < STREAM_EVENTS / 2 && sahead < (int32_t)(s_rate / 2)) {
+            break;
+        }
+        apply_sdata(se);
+        s_sev_tail++;
+    }
     /* due: at or before the next DSP frame (changes take effect a frame later) */
     while (s_ev_tail != s_ev_head) {
         const VoiceEvent* e = &s_ev[s_ev_tail % VOICE_EVENTS];
@@ -678,7 +930,7 @@ static void voices_log(void) {
     since = s_frames;
     int playing = 0;
     for (int ch = 1; s_voices_on && ch <= VOICE_CHANNELS; ch++) {
-        playing += s_vch[ch].cache >= 0;
+        playing += s_vch[ch].cache >= 0 || s_vch[ch].stream >= 0;
     }
     PLOG_I("[NDSPV] voices sw %lu ndsp %lu aux %lu overflow %lu norebuild %lu | channels playing %d | starts %lu "
            "refused %lu cache hit %lu miss %lu realigned %lu evicted %lu %lu KB | events late %lu dropped %lu",
@@ -687,6 +939,14 @@ static void voices_log(void) {
            (unsigned long)s_vstat.refused, (unsigned long)s_vstat.hits, (unsigned long)s_vstat.misses,
            (unsigned long)s_vstat.realigned, (unsigned long)s_vstat.evicted, (unsigned long)(s_cache_bytes / 1024),
            (unsigned long)s_vstat.late, (unsigned long)s_vstat.dropped_events);
+    PLOG_I("[NDSPV] flush ticks %lu (us %lu)", (unsigned long)(s_flush_ticks / 1000),
+           (unsigned long)(s_flush_ticks * 1000 / (SYSCLOCK_ARM11 / 1000)));
+    PLOG_I("[NDSPV] channel 0: %lu blocks, %lu flushes (%lu KB) | streams %s: starts %lu refills %lu (%lu B) "
+           "underruns %lu waits %lu dropped %lu",
+           (unsigned long)s_blocks, (unsigned long)s_flushes, (unsigned long)(s_flush_bytes / 1024),
+           s_streams_on ? "on" : "off", (unsigned long)s_sstat.starts, (unsigned long)s_sstat.refills,
+           (unsigned long)s_sstat.refill_bytes, (unsigned long)s_sstat.underruns, (unsigned long)s_sstat.waits,
+           (unsigned long)s_sstat.dropped);
 }
 
 static void voices_init(void) {
@@ -694,6 +954,8 @@ static void voices_init(void) {
     s_vstats_every = plat_switch_int("ndspstats", on ? 10 : 0);
     for (int ch = 0; ch <= VOICE_CHANNELS; ch++) {
         s_vch[ch].cache = -1;
+        s_vch[ch].stream = -1;
+        s_vch[ch].str_latest = -1;
     }
     if (!on) {
         return;
@@ -708,32 +970,44 @@ static void voices_init(void) {
         ndspChnSetInterp(ch, NDSP_INTERP_POLYPHASE);
         ndspChnSetFormat(ch, NDSP_FORMAT_MONO_ADPCM);
         s_vch[ch].cache = -1;
+        s_vch[ch].stream = -1;
+        s_vch[ch].str_latest = -1;
         s_vch[ch].interp = 0;
     }
+    s_streams_on = plat_switch_int("ndspstreams", 0) != 0;
     s_voices_on = 1;
-    PLOG_I("audio: NDSP voices on, channels 1..%d, sample cache %lu KB (linear free %lu KB)", VOICE_CHANNELS,
-           (unsigned long)(s_cache_budget / 1024), (unsigned long)(free_lin / 1024));
+    PLOG_I("audio: NDSP voices on, channels 1..%d, sample cache %lu KB (linear free %lu KB), streams %s", VOICE_CHANNELS,
+           (unsigned long)(s_cache_budget / 1024), (unsigned long)(free_lin / 1024), s_streams_on ? "on" : "off");
 }
 
-static void queue_block(int i) {
-    s_wbuf_pos[i] = s_frames;
-    fill_block(s_wbuf[i].data_pcm16);
-    DSP_FlushDataCache(s_wbuf[i].data_pcm16, s_buf_frames * 4);
-    ndspChnWaveBufAdd(0, &s_wbuf[i]);
-}
-
+/* Switch audiobatch=N: channel 0's buffers are refilled once N are free (N=1: each as it frees), and the
+ * refilled ones are flushed in one call over the whole ring: the cache flush is a call per call whatever
+ * its size, and the ring is one 16 KB block. The flush comes before the buffers are queued. */
 static void ndsp_thread(void* arg) {
     (void)arg;
     plat_crash_install_thread();
     plat_thread_register("audio", 32 * 1024);
+    s_audio_thread_id = threadGetCurrent();
     /* Prime the ring: every buffer queued before the first wait. */
     for (int i = 0; i < WAVEBUFS; i++) {
-        queue_block(i);
+        s_wbuf_pos[i] = s_frames;
+        fill_block(s_wbuf[i].data_pcm16);
+    }
+    DSP_FlushDataCache(s_samples, WAVEBUFS * s_buf_frames * 4);
+    for (int i = 0; i < WAVEBUFS; i++) {
+        ndspChnWaveBufAdd(0, &s_wbuf[i]);
     }
     for (;;) {
         LightEvent_Wait(&s_frame_event);
         uint64_t t0 = svcGetSystemTick();
+        s_wake++;
         apply_due_events();
+        if (s_streams_on) {
+            stream_reap();
+            for (int ch = 1; ch <= VOICE_CHANNELS; ch++) {
+                stream_pump(ch);
+            }
+        }
         s_busy_ticks += svcGetSystemTick() - t0;
         voices_log();
         int done = 0;
@@ -746,11 +1020,19 @@ static void ndsp_thread(void* arg) {
             /* Every buffer played out before it was refilled: a gap. */
             s_underruns++;
         }
+        if (done == 0 || (done < s_batch && done < WAVEBUFS - 1)) {
+            continue; /* a batch is waited for (the others still play) */
+        }
         /* Refill in the order the DSP played them (sequence ids). */
-        while (done-- > 0) {
+        int order[WAVEBUFS], n = 0;
+        for (int k = 0; k < done; k++) {
             int oldest = -1;
             for (int i = 0; i < WAVEBUFS; i++) {
-                if (s_wbuf[i].status == NDSP_WBUF_DONE &&
+                int used = 0;
+                for (int j = 0; j < n; j++) {
+                    used |= order[j] == i;
+                }
+                if (!used && s_wbuf[i].status == NDSP_WBUF_DONE &&
                     (oldest < 0 || (int16_t)(s_wbuf[i].sequence_id - s_wbuf[oldest].sequence_id) < 0)) {
                     oldest = i;
                 }
@@ -758,7 +1040,29 @@ static void ndsp_thread(void* arg) {
             if (oldest < 0) {
                 break;
             }
-            queue_block(oldest);
+            order[n++] = oldest;
+        }
+        for (int k = 0; k < n; k++) {
+            s_wbuf_pos[order[k]] = s_frames;
+            fill_block(s_wbuf[order[k]].data_pcm16);
+            if (s_batch <= 1) {
+                uint64_t f0 = svcGetSystemTick();
+                DSP_FlushDataCache(s_wbuf[order[k]].data_pcm16, s_buf_frames * 4);
+                s_flush_ticks += svcGetSystemTick() - f0;
+                s_flushes++;
+                s_flush_bytes += s_buf_frames * 4;
+            }
+        }
+        if (s_batch > 1) {
+            uint64_t f0 = svcGetSystemTick();
+            DSP_FlushDataCache(s_samples, WAVEBUFS * s_buf_frames * 4);
+            s_flush_ticks += svcGetSystemTick() - f0;
+            s_flushes++;
+            s_flush_bytes += WAVEBUFS * s_buf_frames * 4;
+        }
+        s_blocks += n;
+        for (int k = 0; k < n; k++) {
+            ndspChnWaveBufAdd(0, &s_wbuf[order[k]]);
         }
     }
 }
@@ -854,6 +1158,10 @@ int plat_audio_start(uint32_t rate, uint32_t quantum_frames, PlatAudioFill fill)
     if (wav_seconds > 0 && wav_seconds <= 120) {
         s_wav_max = (uint32_t)wav_seconds * rate;
         s_wav = malloc(s_wav_max * 4);
+    }
+    s_batch = plat_switch_int("audiobatch", 1);
+    if (s_batch < 1) {
+        s_batch = 1;
     }
     s_output = start_ndsp();
     if (s_output) {

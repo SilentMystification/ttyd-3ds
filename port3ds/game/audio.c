@@ -167,6 +167,20 @@ static u32 s_nv_keep[NV_KEEP_N], s_nv_starts_seen;
 /* ndspstats: where MusyX's frame goes (system ticks): the command list, the mixer */
 static u64 s_t_build, s_t_mix;
 static int s_nv_hint;
+/* NDSP streams (ndspstreams=1): a stream voice's ring in ARAM, by channel (0 bytes: not a stream) */
+static u32 s_nv_sbase[24], s_nv_sbytes[24];
+static u32 s_nv_streams, s_nv_stream_keep;
+static int s_nv_stream_on;
+
+/* A stream refill's copy into ARAM (hw_aramdma.c aramUploadData): the channel whose ring it lands in */
+static void nv_stream_upload(u32 aram, u32 len) {
+    int ch;
+    for (ch = 1; ch <= s_nv_channels; ch++) {
+        if (s_nv_sbytes[ch] != 0 && aram >= s_nv_sbase[ch] && aram < s_nv_sbase[ch] + s_nv_sbytes[ch]) {
+            plat_stream_refill(ch, aram - s_nv_sbase[ch], len);
+        }
+    }
+}
 
 static int nv_voice_of(const _PB* pb) {
     int v;
@@ -218,6 +232,43 @@ static void nv_mix(int v, const _PB* pb, PlatVoiceMix* m, int start_only) {
     m->lpf_b0 = (s16)pb->lpf.b0;
 }
 
+/* A stream voice (a ring at the top of ARAM, looping whole): its ring is mirrored and played by the channel. */
+static int nv_start_stream(int v, int ch, const _PB* pb) {
+    const SAMPLE_INFO* si = &dspVoice[v].smp_info;
+    const SNDADPCMinfo* info = si->extraData;
+    PlatStream st;
+    PlatVoiceMix mix;
+    u32 base = (u32)si->addr, i;
+    int pcm16 = si->compType == 2;
+    memset(&st, 0, sizeof(st));
+    if ((!pcm16 && (info == NULL || pb->addr.format != 0)) || (pcm16 && pb->addr.format != 0xA) || si->loopLength == 0 ||
+        si->loop != 0 || si->offset != 0) {
+        return 0;
+    }
+    st.samples = si->loopLength;
+    st.bytes = pcm16 ? st.samples * 2 : (st.samples + 13) / 14 * 8;
+    if (base < aramPcStreamBase() || base + st.bytes > ARGetSize()) {
+        return 0;
+    }
+    st.ring = port_aram_ptr(base);
+    st.pcm16 = (u8)pcm16;
+    if (!pcm16) {
+        for (i = 0; i < 8; i++) {
+            st.coefs[i * 2] = (u16)info->coefTab[i][0];
+            st.coefs[i * 2 + 1] = (u16)info->coefTab[i][1];
+        }
+        st.ps = pb->adpcm.pred_scale;
+    }
+    nv_mix(v, pb, &mix, 1);
+    if (!plat_stream_start(ch, &st, &mix)) {
+        return 0;
+    }
+    s_nv_sbase[ch] = base;
+    s_nv_sbytes[ch] = st.bytes;
+    s_nv_streams++;
+    return 1;
+}
+
 /* Starts voice v on channel ch; 0 when it has to stay in software. */
 static int nv_start(int v, int ch, const _PB* pb) {
     const DSPvoice* dv = &dspVoice[v];
@@ -226,6 +277,13 @@ static int nv_start(int v, int ch, const _PB* pb) {
     PlatVoiceSample smp;
     PlatVoiceMix mix;
     u32 base = (u32)si->addr, end, bytes, i;
+    if (s_nv_stream_on && (si->compType == 4 || si->compType == 2) && base >= aramPcStreamBase()) {
+        if (nv_start_stream(v, ch, pb)) {
+            return 1;
+        }
+        s_nv_stream_keep++;
+        return 0;
+    }
     if (info == NULL || (si->compType != 0 && si->compType != 1) || pb->addr.format != 0 || pb->loopType != 0) {
         s_nv_keep[NV_KEEP_FORMAT]++;
         return 0;
@@ -323,6 +381,7 @@ static void nv_release(int ch) {
         s_nv_ch[v] = -1;
     }
     s_nv_voice[ch] = -1;
+    s_nv_sbytes[ch] = 0;
     plat_voice_stop(ch);
 }
 
@@ -368,6 +427,9 @@ static int nv_hook(_PB* pb, int phase) {
             s_nv_sw += pb->state != 0;
             return 0;
         }
+        if (aux && s_nv_sbytes[ch] != 0) {
+            aux = 0; /* a stream: its (rare) send is dropped; its decoder history cannot be rebuilt */
+        }
         if (aux) {
             /* an aux send after the start (TTYD sets most effect reverb just after
              * the start): the voice goes back to the software mix, which has the aux buses */
@@ -410,6 +472,10 @@ static void nv_frame_begin(void) {
             s_nv_channels = 23;
         }
         s_nv_stats = plat_switch_int("ndspstats", 0) > 0;
+        s_nv_stream_on = s_nv_channels > 0 && plat_switch_int("ndspstreams", 0) != 0;
+        if (s_nv_stream_on) {
+            salPcStreamUploadHook = nv_stream_upload;
+        }
         for (v = 0; v < SYNTH_MAX_VOICES; v++) {
             s_nv_ch[v] = -1;
         }
@@ -452,12 +518,13 @@ static void nv_frame_end(void) {
             u64 now = plat_ticks();
             u32 wall = last ? (u32)((now - last) / 1000) : 0;
             PLOG_I("[NDSPV] voice starts %lu; kept in software: aux %lu, studio %lu, format %lu, range %lu, "
-                   "refused %lu, no channel %lu; moved to software for a late aux send %lu (history not rebuilt %lu); "
+                   "refused %lu, no channel %lu; streams on NDSP %lu (kept %lu); moved to software for a late aux send %lu (history not rebuilt %lu); "
                    "MusyX frame: list %lu.%lu%%, mixer %lu.%lu%% of the time",
                    (unsigned long)s_nv_starts_seen, (unsigned long)s_nv_keep[NV_KEEP_AUX],
                    (unsigned long)s_nv_keep[NV_KEEP_STUDIO], (unsigned long)s_nv_keep[NV_KEEP_FORMAT],
                    (unsigned long)s_nv_keep[NV_KEEP_RANGE], (unsigned long)s_nv_keep[NV_KEEP_PLAT],
-                   (unsigned long)s_nv_overflow, (unsigned long)s_nv_moved, (unsigned long)s_nv_aux_late,
+                   (unsigned long)s_nv_overflow, (unsigned long)s_nv_streams, (unsigned long)s_nv_stream_keep,
+                   (unsigned long)s_nv_moved, (unsigned long)s_nv_aux_late,
                    (unsigned long)(wall ? s_t_build / wall / 10 : 0),
                    (unsigned long)(wall ? s_t_build / wall % 10 : 0), (unsigned long)(wall ? s_t_mix / wall / 10 : 0),
                    (unsigned long)(wall ? s_t_mix / wall % 10 : 0));

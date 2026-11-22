@@ -71,6 +71,9 @@ void portAudioMixUpdate(void);
  * it (addresses, loops, ramps, updates; nothing reaches the buses) and the
  * hook is called again with phase 1 after. */
 extern int (*salPcPbOffload)(struct _PB* pb, int phase);
+/* Called after a stream refill's copy into ARAM (aramUploadData, high priority):
+ * the ARAM address and byte count. The port mirrors the stream rings for NDSP. */
+extern void (*salPcStreamUploadHook)(u32 aram, u32 len);
 #endif
 
 #ifdef __cplusplus

@@ -252,7 +252,32 @@ static void sync_done(void* ctx, int32_t result) {
     port_irq_leave();
 }
 
+/* Reads that reached the disc image, and the time their callers waited. */
+static u32 s_stat_reads;
+static u64 s_stat_bytes, s_stat_ticks;
+
+void port_dvd_read_stats(u32* reads, u64* bytes, u64* ticks) {
+    *reads = s_stat_reads;
+    *bytes = s_stat_bytes;
+    *ticks = s_stat_ticks;
+}
+
+static s32 read_image(DVDFileInfo* fi, void* addr, s32 length, s32 offset);
+
 static s32 read_file(DVDFileInfo* fi, void* addr, s32 length, s32 offset) {
+    u64 t0 = plat_ticks();
+    s32 r = read_image(fi, addr, length, offset);
+    if (r > 0 && (fi->startAddr & 0xFFFFFF00u) != REL_FILE_MARK) {
+        BOOL level = OSDisableInterrupts();
+        s_stat_reads++;
+        s_stat_bytes += (u32)r;
+        s_stat_ticks += plat_ticks() - t0;
+        OSRestoreInterrupts(level);
+    }
+    return r;
+}
+
+static s32 read_image(DVDFileInfo* fi, void* addr, s32 length, s32 offset) {
     if (offset < 0 || length < 0 || (u32)offset > fi->length) {
         return DVD_RESULT_FATAL_ERROR;
     }

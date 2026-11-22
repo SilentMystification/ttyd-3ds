@@ -44,6 +44,7 @@ void portTplSwap(void* data, u32 size, const char* name) {
     if (size == PORT_SWAP_SIZE_UNKNOWN) {
         size = tpl_extent(p);
     }
+    u64 t0 = port_conv_begin();
     PortSwap s;
     port_swap_begin(&s, data, size, name);
     port_swap_struct(&s, 0, &port_swap_type_TEXPalette);
@@ -60,4 +61,5 @@ void portTplSwap(void* data, u32 size, const char* name) {
     }
     PLOG_D("tpl %s: %lu textures", name, (unsigned long)n);
     port_swap_end(&s);
+    port_conv_end(PORT_CONV_TPL, t0, name, data, size == PORT_SWAP_SIZE_UNKNOWN ? 0 : size);
 }

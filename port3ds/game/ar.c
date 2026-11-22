@@ -53,6 +53,7 @@ static volatile u32 s_head, s_tail;
 static PlatMutex* s_lock;
 static PlatEvent* s_wake;
 static PlatThread* s_thread;
+static PlatEvent* s_done; /* an ARQ callback ran (port_spin) */
 
 u8* port_aram_ptr(u32 addr) { return s_aram + addr; }
 
@@ -104,6 +105,7 @@ static void dma_thread(void* arg) {
             p.callback((u32)p.request);
             port_irq_leave();
             port_thread_dispatch_if_idle();
+            plat_event_signal(s_done);
         }
     }
 }
@@ -115,6 +117,7 @@ void ARQInit(void) {
     s_arq_ready = 1;
     s_lock = plat_mutex_create();
     s_wake = plat_event_create();
+    s_done = plat_event_create();
     s_thread = plat_thread_create(dma_thread, NULL, 16 * 1024, 0x28, 1, "arq");
     if (s_thread == NULL) {
         plat_fatal("ARQInit: no DMA thread");
@@ -163,8 +166,24 @@ void ARQPostRequest(ARQRequest* request, u32 owner, u32 type, u32 priority, u32 
     plat_event_signal(s_wake);
 }
 
-/* Interrupts that the game waits for in an empty loop (port_spin.h). */
+/* Interrupts that the game waits for in an empty loop (port_spin.h).
+ *
+ * The flag is set by an interrupt-time callback, in practice an ARQ
+ * completion: the DMA thread signals s_done after each one. So the loop
+ * sleeps until the next callback instead of polling on the game's core,
+ * where a yield finds no other thread and returns at once; the timeout
+ * bounds the wait when the flag comes from another interrupt. Switch
+ * arqspin restores the polling loop (for A/B). */
+static int s_spin_mode = -1; /* 1 poll, 0 sleep until a callback */
+
 void port_spin(void) {
     __asm__ volatile("" ::: "memory");
-    plat_thread_yield();
+    if (s_spin_mode < 0) {
+        s_spin_mode = plat_switch_has("arqspin");
+    }
+    if (s_spin_mode || s_done == NULL) {
+        plat_thread_yield();
+        return;
+    }
+    plat_event_wait_timeout(s_done, 500000); /* 0.5 ms */
 }

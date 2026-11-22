@@ -61,6 +61,25 @@ int port_swap_visit(PortSwap* s, u32 off);
 u16 port_swap_get16(const PortSwap* s, u32 off);
 u32 port_swap_get32(const PortSwap* s, u32 off);
 
+/* Load-time conversion profile (switch loadstats). Each converter brackets
+ * its work with port_conv_begin/port_conv_end; with the switch, every
+ * conversion logs a [LOADCONV] line (kind, file, bytes, time) and every load
+ * (a burst of conversions; a gap of a second ends one) logs a summary per
+ * kind with the DVD reads in between. Switch convhash adds a hash of each
+ * converted file, to compare runs (jobs=0 against jobs). */
+enum {
+    PORT_CONV_MAP,
+    PORT_CONV_TPL,
+    PORT_CONV_ANIM,
+    PORT_CONV_FONT,
+    PORT_CONV_CAMROAD,
+    PORT_CONV_MUSYX,
+    PORT_CONV_WORDS, /* portSwapU16Run / portSwapU32Run */
+    PORT_CONV_KINDS
+};
+u64 port_conv_begin(void);
+void port_conv_end(int kind, u64 start, const char* name, const void* data, u32 bytes);
+
 /* Big-endian reads of raw bytes. */
 static inline u16 port_be16(const void* p) {
     const u8* b = (const u8*)p;

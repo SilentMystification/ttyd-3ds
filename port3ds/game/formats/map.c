@@ -221,6 +221,7 @@ void portMapSwap(void* data, u32 size, const char* name) {
         OSPanic("map.c", __LINE__, "%s: header says %lu bytes, the file has %lu", name, (unsigned long)port_be32(p),
                 (unsigned long)size);
     }
+    u64 t0 = port_conv_begin();
     MapSwap m;
     memset(&m, 0, sizeof(m));
     port_swap_begin(&m.s, data, size, name);
@@ -308,4 +309,5 @@ void portMapSwap(void* data, u32 size, const char* name) {
            (unsigned long)chunk_count, m.ver102 ? ", ver1.02" : "");
     free(m.reloc);
     port_swap_end(&m.s);
+    port_conv_end(PORT_CONV_MAP, t0, name, data, size);
 }

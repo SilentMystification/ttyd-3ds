@@ -9,8 +9,37 @@
 cmake_minimum_required(VERSION 3.20)
 project(ttyd3ds C ASM)
 
-set(TTYD_VERSION G8ME01 CACHE STRING "Game version (G8ME01; G8MJ01 and G8MP01 in phase 7)")
-set_property(CACHE TTYD_VERSION PROPERTY STRINGS G8ME01)
+# One build per region (docs/PORT_3DS_PLAN.md, "Regions"): -DREGION=US|JP|PAL,
+# or the disc's game ID as -DTTYD_VERSION. Each region has its own sources
+# (sources_<version>.cmake), swap tables, disc-data table, REL set and CIA.
+set(TTYD_VERSION G8ME01 CACHE STRING "Game version: G8ME01 (US), G8MJ01 (JP) or G8MP01 (PAL)")
+set_property(CACHE TTYD_VERSION PROPERTY STRINGS G8ME01 G8MJ01 G8MP01)
+set(REGION "" CACHE STRING "Region (US, JP or PAL); sets TTYD_VERSION")
+set_property(CACHE REGION PROPERTY STRINGS US JP PAL)
+set(TTYD_REGION_VERSION_US G8ME01)
+set(TTYD_REGION_VERSION_JP G8MJ01)
+set(TTYD_REGION_VERSION_PAL G8MP01)
+if(REGION)
+    string(TOUPPER "${REGION}" _region)
+    if(NOT DEFINED TTYD_REGION_VERSION_${_region})
+        message(FATAL_ERROR "REGION must be US, JP or PAL (got ${REGION})")
+    endif()
+    set(TTYD_VERSION ${TTYD_REGION_VERSION_${_region}} CACHE STRING "" FORCE)
+    # applied once: TTYD_VERSION keeps it, so a later -DTTYD_VERSION is not overridden
+    set(REGION "" CACHE STRING "Region (US, JP or PAL); sets TTYD_VERSION" FORCE)
+endif()
+if(NOT TTYD_VERSION MATCHES "^(G8ME01|G8MJ01|G8MP01)$")
+    message(FATAL_ERROR "TTYD_VERSION must be G8ME01, G8MJ01 or G8MP01 (got ${TTYD_VERSION})")
+endif()
+# The CIA identity of each region. The probe is 0xFD887 (KTR-N-TTYP) and the
+# ctr-devkit examples 0xFD888 and 0xFD889, so PAL takes KTR-N-TTYE.
+set(TTYD_CIA_G8ME01 0xFD886 KTR-N-TTYD US)
+set(TTYD_CIA_G8MJ01 0xFD88A KTR-N-TTYJ JP)
+set(TTYD_CIA_G8MP01 0xFD88B KTR-N-TTYE PAL)
+list(GET TTYD_CIA_${TTYD_VERSION} 0 TTYD_UNIQUE_ID)
+list(GET TTYD_CIA_${TTYD_VERSION} 1 TTYD_PRODUCT_CODE)
+list(GET TTYD_CIA_${TTYD_VERSION} 2 TTYD_REGION_NAME)
+message(STATUS "TTYD 3DS: ${TTYD_REGION_NAME} (${TTYD_VERSION}), CIA ${TTYD_UNIQUE_ID} ${TTYD_PRODUCT_CODE}")
 
 get_filename_component(TTYD_REPO_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 include("${CMAKE_CURRENT_LIST_DIR}/sources_${TTYD_VERSION}.cmake")
@@ -135,9 +164,27 @@ file(WRITE "${TTYD_GEN_DIR}/rel_table.c.tmp"
     "const PortRelStatic port_rel_table[] = {\n${_rel_rows}};\n"
     "const int port_rel_count = sizeof(port_rel_table) / sizeof(port_rel_table[0]);\n")
 configure_file("${TTYD_GEN_DIR}/rel_table.c.tmp" "${TTYD_GEN_DIR}/rel_table.c" COPYONLY)
-# Where this version keeps the data ports read from the disc (port_disc_data.h).
+# Where this version keeps the data ports read from the disc (port_disc_data.h),
+# and its GameCube arena. The arena's high end comes from the disc itself:
+# TTYD_DISC names the image, else iso/<version>.iso or iso/game.iso is used
+# when it is this version's disc. Without it the generator uses the G8ME01
+# value (exact for G8ME01, a stand-in for the others; see gen_disc_data.py).
+set(TTYD_DISC "" CACHE FILEPATH "This version's disc image, for the generators that read the disc (optional)")
+set(_disc_args)
+if(TTYD_DISC)
+    set(_disc_args --disc "${TTYD_DISC}")
+else()
+    foreach(_cand "${TTYD_REPO_DIR}/iso/${TTYD_VERSION}.iso" "${TTYD_REPO_DIR}/iso/game.iso")
+        if(EXISTS "${_cand}" AND NOT _disc_args)
+            file(READ "${_cand}" _id LIMIT 6)
+            if(_id STREQUAL TTYD_VERSION)
+                set(_disc_args --disc "${_cand}")
+            endif()
+        endif()
+    endforeach()
+endif()
 execute_process(COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/gen_disc_data.py"
-    --version ${TTYD_VERSION} "${TTYD_GEN_DIR}/port_disc_data_gen.h.tmp" RESULT_VARIABLE _gen_rc)
+    --version ${TTYD_VERSION} ${_disc_args} "${TTYD_GEN_DIR}/port_disc_data_gen.h.tmp" RESULT_VARIABLE _gen_rc)
 if(NOT _gen_rc EQUAL 0)
     message(FATAL_ERROR "gen_disc_data.py failed")
 endif()
@@ -255,10 +302,17 @@ target_link_options(ttyd PRIVATE -Wl,--gc-sections -Wl,--wrap=svcBreak -Wl,--no-
     -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/ttyd.map)
 target_link_libraries(ttyd PRIVATE ttyd_gx_shader_bin ctrdk_devupdate ctrdk_crash citro3d ctru m)
 
+if(TTYD_VERSION STREQUAL G8ME01)
+    set(_subtitle "PORT")
+    set(_desc "Paper Mario: The Thousand Year Door (3DS port)")
+else()
+    set(_subtitle "PORT ${TTYD_REGION_NAME}")
+    set(_desc "Paper Mario: The Thousand Year Door (3DS port, ${TTYD_REGION_NAME})")
+endif()
 ttyd_add_cia(ttyd
     TITLE "TTYD 3DS"
     NAME "Paper Mario: The Thousand Year Door"
-    SUBTITLE "PORT"
-    SHORT_DESC "Paper Mario: The Thousand Year Door (3DS port)"
-    UNIQUE_ID 0xFD886
-    PRODUCT_CODE KTR-N-TTYD)
+    SUBTITLE "${_subtitle}"
+    SHORT_DESC "${_desc}"
+    UNIQUE_ID ${TTYD_UNIQUE_ID}
+    PRODUCT_CODE ${TTYD_PRODUCT_CODE})

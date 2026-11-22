@@ -2,6 +2,7 @@
 # Build a 3DS CMake project inside the pinned build container.
 #
 #   tools/port3ds/build.sh [project] [cmake -D options...]
+#   tools/port3ds/build.sh . -DREGION=PAL     (the game for one region; US by default)
 #
 # project is a directory under port3ds/ ("probe" builds port3ds/probe; the
 # default "." builds the game in port3ds/), or a path from the repository
@@ -24,7 +25,18 @@ else
     src="port3ds/$project"
 fi
 name=$(basename "$(cd "$repo/$src" && pwd)")
-[ "$project" = "." ] && name=game
+if [ "$project" = "." ]; then
+    # The game builds once per region (-DREGION=US|JP|PAL or -DTTYD_VERSION=<id>):
+    # US in build/3ds/game, JP in build/3ds/game_jp, PAL in build/3ds/game_pal.
+    name=game
+    for a in "$@"; do
+        case "$a" in
+            -DREGION=JP|-DREGION=jp|-DTTYD_VERSION=G8MJ01) name=game_jp ;;
+            -DREGION=PAL|-DREGION=pal|-DTTYD_VERSION=G8MP01) name=game_pal ;;
+            -DREGION=US|-DREGION=us|-DTTYD_VERSION=G8ME01) name=game ;;
+        esac
+    done
+fi
 out="build/3ds/$name"
 
 [ -f "$repo/$src/CMakeLists.txt" ] || { echo "build.sh: no CMakeLists.txt in $src" >&2; exit 2; }
@@ -57,8 +69,10 @@ docker run --rm $gitmount \
 
 # Archive the game's ELF by build string, so tools/port3ds/crash_report.py can
 # resolve the addresses of a crash report from any earlier build.
-if [ "$name" = game ] && [ -f "$repo/$out/ttyd.elf" ] && [ -f "$repo/$out/generated/port3ds_build.h" ]; then
+if [ "${name%%_*}" = game ] && [ -f "$repo/$out/ttyd.elf" ] && [ -f "$repo/$out/generated/port3ds_build.h" ]; then
     id=$(sed -n 's/.*PORT3DS_BUILD_STRING "#\([0-9]*\) \([0-9a-f]*\).*/\1_\2/p' "$repo/$out/generated/port3ds_build.h")
+    # JP and PAL builds of the same commit get a region suffix (<build>_jp.elf).
+    [ "$name" != game ] && id="${id}_${name#game_}"
     if [ -n "$id" ]; then
         mkdir -p "$repo/build/elfs"
         cp "$repo/$out/ttyd.elf" "$repo/build/elfs/$id.elf"

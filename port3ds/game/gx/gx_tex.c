@@ -743,7 +743,9 @@ u32 gx_tex_copy_target(const void* addr, u16 w, u16 h, u8 fmt) {
         slot->handle = 0;
     }
     if (slot->handle == 0) {
-        slot->handle = plat_gpu_tex_create_target(pw, ph, PLAT_TEXFMT_RGBA8);
+        /* RGB565 copies stay RGB565 (the GameCube drops the alpha too, and the target is half the size);
+         * every other copy format is kept as RGBA8 (RGB5A3's 3-bit alpha has no PICA equivalent) */
+        slot->handle = plat_gpu_tex_create_target(pw, ph, fmt == GX_TF_RGB565 ? PLAT_TEXFMT_RGB565 : PLAT_TEXFMT_RGBA8);
         if (slot->handle == 0) {
             plat_fatal("GX: no memory for a %ux%u copy texture", w, h);
         }

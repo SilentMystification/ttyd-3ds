@@ -23,6 +23,8 @@
 
 #define DIR "sdmc:/3ds/ctrdk-crash"
 
+extern u32 __stacksize__; /* libctru: the main thread's stack size (default 32 KiB) */
+
 static FILE* s_log;
 
 static void line_sink(const char* line, int len, void* user) {
@@ -86,7 +88,7 @@ int main(int argc, char** argv) {
     cfg.test_frame = 30;
     cfg.test_addr = 4;
     crash_init(&cfg);
-    crash_thread_register("main", 0x20000);
+    crash_thread_register("main", __stacksize__); /* libctru allocates the main stack: __stacksize__ bytes */
 
     gfxInitDefault();
     consoleInit(GFX_TOP, NULL);

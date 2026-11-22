@@ -19,6 +19,10 @@ add_library(ctrdk_crash STATIC "${CMAKE_CURRENT_LIST_DIR}/crash/crash.c")
 target_include_directories(ctrdk_crash PUBLIC "${CMAKE_CURRENT_LIST_DIR}/include")
 target_compile_options(ctrdk_crash PRIVATE ${CTRDK_FLAGS})
 
+add_library(ctrdk_devupdate STATIC "${CMAKE_CURRENT_LIST_DIR}/devupdate/devupdate.c")
+target_include_directories(ctrdk_devupdate PUBLIC "${CMAKE_CURRENT_LIST_DIR}/include")
+target_compile_options(ctrdk_devupdate PRIVATE ${CTRDK_FLAGS})
+
 # svcBreak (libctru and citro3d panics) goes to the crash handler.
 function(ctrdk_wrap_svcbreak target)
     target_link_options(${target} PRIVATE -Wl,--wrap=svcBreak)
@@ -26,4 +30,5 @@ endfunction()
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     add_subdirectory(examples/crash)
+    add_subdirectory(examples/devupdate)
 endif()

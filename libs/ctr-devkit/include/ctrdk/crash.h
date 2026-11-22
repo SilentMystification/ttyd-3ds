@@ -27,7 +27,8 @@
  *     cfg.report_path = "sdmc:/3ds/myapp/crash.txt";
  *     cfg.watchdog_seconds = 10;
  *     crash_init(&cfg);                     // in main, first thing
- *     crash_thread_register("main", 0x40000);
+ *     extern u32 __stacksize__;            // libctru's main thread stack size
+ *     crash_thread_register("main", __stacksize__);
  *     for (;;) { crash_wd_progress(); ... } // once per frame
  */
 #ifndef CTRDK_CRASH_H

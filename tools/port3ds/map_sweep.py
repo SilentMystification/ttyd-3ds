@@ -55,6 +55,10 @@ def disc_maps(iso):
     return sorted(maps)
 
 
+LAST = ROOT / "build/azahar-last"
+EXTRA = []  # more run_azahar.py arguments (--profile, --last, --gdb ...)
+
+
 def run(build, todo, story, frames, party, timeout, fastboot=True):
     """One Azahar run over todo; returns {map: result} for the maps it reached."""
     GAME_DIR.mkdir(parents=True, exist_ok=True)
@@ -63,9 +67,9 @@ def run(build, todo, story, frames, party, timeout, fastboot=True):
     switches = f"sweep={frames} party={party} " + ("fastboot" if fastboot else "nofastboot")
     cmd = [sys.executable, str(ROOT / "tools/port3ds/run_azahar.py"), "--build", str(build),
            "--switches", switches, "--log", "3ds/ttyd/log.txt", "--until", r"sweep: (done|stopped)",
-           "--timeout", str(timeout), "--stall", "60"]
+           "--timeout", str(timeout), "--stall", "60"] + EXTRA
     proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
-    log = (ROOT / "build/azahar-last/game_log.txt").read_text(errors="replace")
+    log = (LAST / "game_log.txt").read_text(errors="replace")
     results, current = {}, None
     for line in log.splitlines():
         m = re.search(r"sweep: (\S+) \(story", line)
@@ -116,7 +120,23 @@ def main():
     ap.add_argument("--frames", type=int, default=120, help="game frames on each map before its screenshot")
     ap.add_argument("--nofastboot", action="store_true", help="do not press A through the boot screens")
     ap.add_argument("--timeout", type=float, default=3600.0, help="seconds per Azahar run")
+    ap.add_argument("--profile", type=Path, help="Azahar profile folder for a second instance (see run_azahar.py)")
+    ap.add_argument("--last", type=Path, help="run_azahar's log folder (default build/azahar-last)")
+    ap.add_argument("--out", type=Path, help="results folder (default build/map-sweep)")
+    ap.add_argument("--gdb-port", type=int, help="enable Azahar's GDB stub on this port (for pc_sample.py)")
     args = ap.parse_args()
+    global SDMC, GAME_DIR, OUT, LAST
+    if args.profile:
+        SDMC = args.profile.resolve() / "data/azahar-emu/sdmc"
+        GAME_DIR = SDMC / "3ds/ttyd"
+        EXTRA.extend(["--profile", str(args.profile.resolve())])
+    if args.last:
+        LAST = args.last.resolve()
+        EXTRA.extend(["--last", str(LAST)])
+    if args.out:
+        OUT = args.out.resolve()
+    if args.gdb_port:
+        EXTRA.extend(["--gdb", "--gdb-port", str(args.gdb_port), "--allow-hw-faults"])
 
     maps = args.maps.split(",") if args.maps else disc_maps(args.iso)
     if args.area:

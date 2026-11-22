@@ -543,6 +543,39 @@ static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h) {
     return plat_gpu_tex_create(pw, ph, fmt, s_tiled, pw * ph * bpp);
 }
 
+typedef u32 __attribute__((may_alias)) u32_alias;
+
+/* Every byte of the span goes into the hash: the unaligned head and the tail
+ * byte by byte, the aligned middle a word at a time on two independent lanes
+ * (multiply, xor-shift), which the ARM11 pipelines. */
+static u32 hash_span(u32 h, const u8* p, u32 n) {
+    while (n != 0 && ((u32)p & 3) != 0) {
+        h = (h ^ *p++) * 16777619u;
+        n--;
+    }
+    const u32_alias* w = (const u32_alias*)p;
+    u32 h1 = h, h2 = h ^ 0x9E3779B9u;
+    for (; n >= 8; n -= 8, w += 2) {
+        h1 = (h1 ^ w[0]) * 0x85EBCA6Bu;
+        h2 = (h2 ^ w[1]) * 0xC2B2AE35u;
+        h1 ^= h1 >> 15;
+        h2 ^= h2 >> 13;
+    }
+    if (n >= 4) {
+        h1 = (h1 ^ w[0]) * 0x85EBCA6Bu;
+        h1 ^= h1 >> 15;
+        w++;
+        n -= 4;
+    }
+    h = (h1 ^ (h2 * 0x27D4EB2Fu)) * 0x165667B1u;
+    h ^= h >> 16;
+    p = (const u8*)w;
+    while (n-- != 0) {
+        h = (h ^ *p++) * 16777619u;
+    }
+    return h;
+}
+
 static u32 hash_bytes(const u8* p, u32 n) {
     u32 h = 2166136261u;
     if (s_stats_every) {
@@ -550,17 +583,11 @@ static u32 hash_bytes(const u8* p, u32 n) {
         s_st_bytes += n <= 32 * 1024 ? n : 64 * 64;
     }
     if (n <= 32 * 1024) {
-        for (u32 i = 0; i < n; i++) {
-            h = (h ^ p[i]) * 16777619u;
-        }
-        return h;
+        return hash_span(h, p, n);
     }
     /* large textures: 64 spread samples of 64 bytes */
     for (u32 s = 0; s < 64; s++) {
-        const u8* q = p + (size_t)(n - 64) * s / 63;
-        for (u32 i = 0; i < 64; i++) {
-            h = (h ^ q[i]) * 16777619u;
-        }
+        h = hash_span(h, p + (size_t)(n - 64) * s / 63, 64);
     }
     return h;
 }

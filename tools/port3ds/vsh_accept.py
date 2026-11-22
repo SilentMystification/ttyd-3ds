@@ -209,6 +209,36 @@ def flicker(d):
     return dict(triplets=n, total=tot, worst=worst)
 
 
+def flicker_static(dref, dtest):
+    """A-B-A flips in the test run at pixels the reference run keeps static
+    over all its shots (the game's animations drop out; what is left is
+    flicker the reference does not have)."""
+    sr, stt = shots(dref), shots(dtest)
+    if not sr or not stt:
+        return None
+    ir = np.stack([read_ppm(sr[k]).astype(np.int16) for k in sorted(sr)])
+    static = (ir.max(0) - ir.min(0)).max(-1) <= 2
+    ks = sorted(stt)
+    tot = worst = n = 0
+    px = np.zeros(static.shape, bool)
+    for i in range(len(ks) - 2):
+        a, b, c = ks[i], ks[i + 1], ks[i + 2]
+        if b != a + 1 or c != b + 1:
+            continue
+        x, y, z = (read_ppm(stt[k]).astype(np.int16) for k in (a, b, c))
+        f = ((np.abs(x - y).max(axis=2) > 32) & (np.abs(y - z).max(axis=2) > 32) & (np.abs(x - z).max(axis=2) <= 4)
+             & static)
+        deps = [dtest / f"{k:05d}.dep" for k in (a, b)]
+        if all(q.exists() for q in deps):
+            za, zb = (read_dep(q) for q in deps)
+            f &= np.abs(za - zb) <= 16  # another surface at nearly the same depth: z-fighting, not an animation
+        tot += int(f.sum())
+        worst = max(worst, int(f.sum()))
+        px |= f
+        n += 1
+    return dict(triplets=n, total=tot, worst=worst, pixels=int(px.sum()), static=int(static.sum()))
+
+
 def gxstats(d):
     log = d / "game_log.txt"
     if not log.exists():
@@ -233,6 +263,57 @@ def gxstats(d):
         if m:
             out.setdefault("decal", []).append(tuple(int(x) for x in m.groups()))
     return out
+
+
+def static_diff(da, db):
+    """Image and depth diff over the static pixels only: pixels whose colour
+    and depth stay the same over every shot of each run (so the game's
+    animations, which run at different phases in two runs, drop out)."""
+    sa, sb = shots(da), shots(db)
+    ka, kb = sorted(sa), sorted(sb)
+    if not ka or not kb:
+        return None
+
+    def stack(d, s, ks):
+        imgs = np.stack([read_ppm(s[k]).astype(np.int16) for k in ks])
+        deps = [d / f"{k:05d}.dep" for k in ks]
+        z = np.stack([read_dep(p) for p in deps]) if all(p.exists() for p in deps) else None
+        return imgs, z
+
+    ia, za = stack(da, sa, ka)
+    ib, zb = stack(db, sb, kb)
+    st = ((ia.max(0) - ia.min(0)).max(-1) <= 2) & ((ib.max(0) - ib.min(0)).max(-1) <= 2)
+    if za is not None and zb is not None:
+        st &= (za.max(0) == za.min(0)) & (zb.max(0) == zb.min(0))
+    ca, cb = ia[0], ib[0]
+    drawn = ~(np.all(ca == MAGENTA, axis=2) | np.all(cb == MAGENTA, axis=2))
+    m = st & drawn
+    dcf = np.abs(ca - cb).max(-1)
+    dc = dcf[m]
+    out = dict(static=int(m.sum()), of=int(m.size), cmax=int(dc.max()) if dc.size else 0,
+               c8=int((dc > 8).sum()), c32=int((dc > 32).sum()))
+    bigc = m & (dcf > 32)
+    out["c32_clusters"] = clusters(bigc)[:5] if bigc.sum() < 20000 else [int(bigc.sum())]
+    if za is not None and zb is not None:
+        dzf = np.abs(za[0] - zb[0])
+        dz = dzf[m]
+        out.update(zmax=int(dz.max()) if dz.size else 0, z0=int((dz == 0).sum()), z1_3=int(((dz >= 1) & (dz < 4)).sum()),
+                   z4_15=int(((dz >= 4) & (dz < 16)).sum()), z16=int((dz >= 16).sum()),
+                   flips=int(((dcf > 32) & (dzf <= 16) & m).sum()))
+        big = m & (dzf >= 16)
+        out["z16_clusters"] = clusters(big)[:5] if big.sum() < 20000 else [int(big.sum())]
+    return out
+
+
+def summarize_static(r):
+    if r is None:
+        return "no shots"
+    t = (f"{r['static']} static drawn pixels of {r['of']}: colour max {r['cmax']}, > 8: {r['c8']}, > 32: {r['c32']} "
+         f"(largest clusters {r.get('c32_clusters')})")
+    if "zmax" in r:
+        t += (f"; depth max |dz| {r['zmax']}, dz 0: {r['z0']}, 1-3: {r['z1_3']}, 4-15: {r['z4_15']}, >= 16: {r['z16']} "
+              f"(largest clusters {r['z16_clusters']}); order flips {r['flips']}")
+    return t
 
 
 def summarize_img(res):
@@ -288,9 +369,16 @@ def cmd_report(a):
         if st.get("decal"):
             lines.append(f"  - decal triggers: last window {st['decal'][-1]}")
     if a.noise:
+        lines.append(f"- static {a.ref} vs {a.noise} (noise floor): {summarize_static(static_diff(ref, base / a.noise))}")
         lines.append(f"- image {a.ref} vs {a.noise} (noise floor): {summarize_img(image_diff(ref, base / a.noise))}")
         lines.append(f"- depth {a.ref} vs {a.noise} (noise floor): {summarize_depth(depth_diff(ref, base / a.noise))}")
+    for t in ([a.noise] if a.noise else []) + a.test:
+        fs = flicker_static(ref, base / t)
+        if fs:
+            lines.append(f"- flicker of {t} at pixels static in {a.ref} ({fs['static']}): {fs['total']} A-B-A flips over "
+                         f"{fs['triplets']} triplets, {fs['pixels']} pixels, worst triplet {fs['worst']}")
     for t in a.test:
+        lines.append(f"- static {a.ref} vs {t}: {summarize_static(static_diff(ref, base / t))}")
         lines.append(f"- image {a.ref} vs {t}: {summarize_img(image_diff(ref, base / t))}")
         lines.append(f"- depth {a.ref} vs {t}: {summarize_depth(depth_diff(ref, base / t))}")
     text = "\n".join(lines)

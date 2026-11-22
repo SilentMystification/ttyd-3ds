@@ -945,13 +945,16 @@ static void vsh_apply_layout(const void* stream, u32 layout, C3D_AttrInfo* ai, C
 
 /* GX cull mode -> PICA. GX's front face is counter-clockwise in its clip
  * space (clockwise on the y-down screen); the screen rotation keeps the
- * winding when its determinant is positive (rot 1, 2) and flips it otherwise. */
+ * winding when its determinant is positive (rot 1, 2) and flips it otherwise.
+ * The PICA's viewport y runs the other way from the clip y the winding is
+ * judged in here, which flips it once more: checked in Azahar (gor_01: with
+ * one flip fewer, every map face that looks at the camera was culled). */
 static GPU_CULLMODE vsh_cull(u32 cull) {
     if (cull == 0) {
         return GPU_CULL_NONE;
     }
-    int flips = s_rot == 0 || s_rot == 3;
-    int cull_ccw = (cull == 1) != flips; /* the faces to drop are CCW on the target */
+    int flips = s_rot == 1 || s_rot == 2;
+    int cull_ccw = (cull == 1) != flips; /* the faces to drop are CCW for the PICA */
     return cull_ccw ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW;
 }
 

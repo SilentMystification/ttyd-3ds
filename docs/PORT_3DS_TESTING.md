@@ -297,3 +297,18 @@ Results in Azahar (2026-11-21, CIA):
 
 It takes about 1 to 3 minutes and exits 1 on any failure. Without the disc image or paper-cut, the checks that need them are skipped. Manual use: `host_decode --disc iso/game.iso list|decode PATH|all|discdata`. Details are in [PORT_3DS_HOST_DECODE.md](PORT_3DS_HOST_DECODE.md).
 
+### Saves
+
+- `tools/port3ds/test_gci.py selftest` needs only `gcc`, no emulator. Run it after any change to the save structs, `card.c` or `save_swap.c`. It builds the real `card.c` and `save_swap.c` for all three releases. It checks:
+  - the GCI header;
+  - that the data on disk is big-endian (the GameCube layout);
+  - the migration of old little-endian port saves;
+  - the game's own checksums;
+  - paper-cut's genuine saves.
+- `tools/port3ds/test_gci.py check FILE...` validates any GCI file.
+- If a save struct changes, the build regenerates the swap tables, and a `_Static_assert` fails the build if the layout drifts from the probe.
+- **Azahar save check:**
+  1. Put a `card1.gci` in the profile's `sdmc:/3ds/ttyd/card/`.
+  2. Reach file select with `wait*850` followed by repeated `a*3,wait*150`, with `shots=100` to see it.
+  3. Rogueport has a save block, so saving mid-game is a cheap test.
+

@@ -107,6 +107,12 @@ Switches the game reads (space-separated words in `--switches`):
 | `padlog` | Logs `padlog: 3ds=<held hex> gc=<GameCube button bits>` whenever the GameCube button state changes, to verify remaps |
 | `lang=<en\|de\|fr\|es\|it\|nl>` | PAL: the game language. The default comes from the 3DS system language; any other language falls back to English |
 | `hz=50` | PAL: preselects 50 Hz at the 50/60 Hz prompt (default 60 Hz) |
+| `gxtrust=0/1` | 1 (default): display-list cache entries in unchanged, covered memory hit without hashing; 0 hashes every hit. `gxcache=2` still hashes and decodes trusted hits and counts `stale` / `mismatched` |
+| `gxscribble=N` | Test only: at frame N, flips a byte of a cached list's array with no report. Verify mode must count it; normal mode keeps drawing the old vertices |
+| `gxstatever=0/1` | 0 (default). 1: matrix loads don't bump the state version, and unchanged state skips `build_state`. Fewer rebuilds, but no time saved yet |
+| `gxfogcache=0/1` | 1 (default): the fog table is recomputed only when the fog parameters change, and sent with an id instead of a hash |
+| `gxunlit=0/1` | 1 (default): unlit colour channels skip `channel_color` and the eye-space normal |
+| `gxmerge=0/1` | 1 (default): consecutive draws with nothing recorded between them share one draw command. `gxstats` shows `gpu draws N (of M calls)` |
 | `devmenu` | Enables the developer menu, opened with ZL+SELECT. SELECT alone opens the player Options menu, so a `padscript` that pressed `select` for the old developer menu now opens Options. While the Options menu is open, `padscript` steps advance once per ~16 ms menu poll, not per game frame. Example: `wait*900,select*3,wait*5,right*2,wait*5,select*3` |
 | `devupdate` | Development only: starts the ctr-devkit updater at boot (TCP 5050, `devupdateport=N`, `devupdatetoken=TEXT`), and a crash then goes to recovery mode instead of waiting for START. See "ctr-devkit: crash and devupdate" below |
 

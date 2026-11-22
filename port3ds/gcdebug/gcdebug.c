@@ -11,6 +11,10 @@
  *   fastboot   A every 6 frames (held 2) until the title or the warp
  *   padscript= the port's scripted input (port3ds/plat/input.c), as the
  *              port's pad.c turns it into a PADStatus
+ *   padfile=<disc path>  plays a TPAD file (port3ds/plat/input.c), one record
+ *              per game frame, neutral after the last; the file must be in
+ *              the extracted disc folder, e.g. padfile=/pad1.tpad for
+ *              build/<disc>/files/pad1.tpad (read once, through DVDOpen)
  *   determ, gwdump=N, fx=, battle=, btlauto=   test_mode.h
  *   stopframe=N  calls gcdbg_stop at game frame N (a breakpoint target)
  *
@@ -19,6 +23,7 @@
  * Log lines (tst_log) go to the gcdbg_log buffer, which the same tool reads.
  * C89, for MWCC.
  */
+#include <dolphin/dvd.h>
 #include <dolphin/os.h>
 #include <dolphin/pad.h>
 #include <dolphin/vi.h>
@@ -266,6 +271,45 @@ static void script_load(void) {
     tst_log("padscript: %d steps", s_steps);
 }
 
+/* padfile=: a TPAD file (16-byte header "TPAD", version 1, frame count, flags;
+ * then 8 bytes a frame: buttons u16, stickX/Y, substickX/Y s8, triggerL/R u8,
+ * little-endian) from the disc, at most PADFILE_MAX frames */
+#define PADFILE_MAX 8192
+static u8 s_pf_buf[(16 + 8 * PADFILE_MAX + 31) & ~31] ATTRIBUTE_ALIGN(32);
+static u32 s_pf_frames, s_pf_frame;
+static int s_pf_on, s_pf_loaded;
+
+static void padfile_load(void) {
+    char path[64];
+    DVDFileInfo fi;
+    s32 len, got;
+    s_pf_loaded = 1;
+    if (!tst_sw_value("padfile", path, sizeof(path))) {
+        return;
+    }
+    if (!DVDOpen(path, &fi)) {
+        tst_log("[PAD] padfile %s: not on the disc", path);
+        return;
+    }
+    len = (s32)((fi.length + 31) & ~31);
+    if (len > (s32)sizeof(s_pf_buf)) {
+        len = (s32)sizeof(s_pf_buf);
+    }
+    got = DVDReadPrio(&fi, s_pf_buf, len, 0, 2);
+    DVDClose(&fi);
+    if (got < 16 || s_pf_buf[0] != 'T' || s_pf_buf[1] != 'P' || s_pf_buf[2] != 'A' || s_pf_buf[3] != 'D' ||
+        s_pf_buf[4] != 1) {
+        tst_log("[PAD] padfile %s: not a TPAD v1 file", path);
+        return;
+    }
+    s_pf_frames = (u32)s_pf_buf[8] | (u32)s_pf_buf[9] << 8 | (u32)s_pf_buf[10] << 16 | (u32)s_pf_buf[11] << 24;
+    if (s_pf_frames > (u32)(got - 16) / 8) {
+        s_pf_frames = (u32)(got - 16) / 8;
+    }
+    s_pf_on = 1;
+    tst_log("[PAD] padfile %s: %lu frames", path, (unsigned long)s_pf_frames);
+}
+
 u32 gcdbg_PADRead(PADStatus* status) {
     u32 r = PADRead(status);
     u16 b = 0;
@@ -293,6 +337,24 @@ u32 gcdbg_PADRead(PADStatus* status) {
     status[0].triggerRight = (b & PAD_TRIGGER_R) ? 0xFF : 0;
     status[0].analogA = (b & PAD_BUTTON_A) ? 0xFF : 0;
     status[0].analogB = (b & PAD_BUTTON_B) ? 0xFF : 0;
+    if (!s_pf_loaded) {
+        padfile_load();
+    }
+    if (s_pf_on) {
+        /* replaces the script, fastboot and the test keys */
+        const u8* r = s_pf_buf + 16 + 8 * (s_pf_frame < s_pf_frames ? s_pf_frame : 0);
+        int live = s_pf_frame < s_pf_frames;
+        b = live ? (u16)(r[0] | r[1] << 8) : 0;
+        status[0].button = b;
+        status[0].stickX = live ? (s8)r[2] : 0;
+        status[0].stickY = live ? (s8)r[3] : 0;
+        status[0].substickX = live ? (s8)r[4] : 0;
+        status[0].substickY = live ? (s8)r[5] : 0;
+        status[0].triggerLeft = live ? r[6] : 0;
+        status[0].triggerRight = live ? r[7] : 0;
+        status[0].analogA = (b & PAD_BUTTON_A) ? 0xFF : 0;
+        status[0].analogB = (b & PAD_BUTTON_B) ? 0xFF : 0;
+    }
     status[0].err = PAD_ERR_NONE;
     for (i = 1; i < PAD_MAX_CONTROLLERS; i++) {
         status[i].err = PAD_ERR_NO_CONTROLLER;
@@ -303,6 +365,9 @@ u32 gcdbg_PADRead(PADStatus* status) {
 static void script_frame(void) {
     if (!s_script_loaded) {
         script_load();
+    }
+    if (s_pf_on && ++s_pf_frame == s_pf_frames) {
+        tst_log("[PAD] padfile end at frame %lu", (unsigned long)s_pf_frame);
     }
     if (s_step < s_steps && ++s_step_frames >= s_script[s_step].frames) {
         s_step_frames = 0;

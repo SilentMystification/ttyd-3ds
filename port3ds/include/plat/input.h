@@ -45,6 +45,21 @@ void plat_input_scan(PlatInput* out);
  * every scan, on top of scripted or real input. NULL removes it. */
 void plat_input_set_extra_keys(uint32_t (*fn)(void));
 
+/* The pad state the game reads, in GameCube PADStatus terms (stick values
+ * signed, 0 = centred). The game's pad read passes its state through
+ * plat_pad_state() once per read: with switch padfile=FILE the call replaces
+ * it with the file's record for the current game frame (neutral after the last
+ * one); with padrec=FILE it keeps it as the frame's record, written to FILE
+ * every 600 frames and at exit. See docs/PORT_3DS_TESTING.md, "Recorded inputs". */
+typedef struct {
+    uint16_t buttons;
+    int8_t stick_x, stick_y;
+    int8_t substick_x, substick_y;
+    uint8_t trigger_l, trigger_r;
+} PlatPadState;
+
+void plat_pad_state(PlatPadState* s);
+
 /* Called once per game frame: advances scripted input (switch padscript). */
 void plat_input_frame(void);
 

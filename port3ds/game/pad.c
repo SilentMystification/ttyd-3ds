@@ -100,11 +100,18 @@ u32 PADRead(PADStatus* status) {
         plat_log(PLAT_LOG_INFO, "padlog: 3ds=%05lx gc=%04x", (unsigned long)in.held, (unsigned)b);
         s_last_log = b;
     }
+    /* recorded inputs (padrec=, padfile=): what the game sees goes through here */
+    PlatPadState ps = {b, scale_stick(in.circle_x), scale_stick(in.circle_y), scale_stick(cx), scale_stick(cy),
+                       p->triggerLeft, p->triggerRight};
+    plat_pad_state(&ps);
+    b = ps.buttons;
     p->button = b;
-    p->stickX = scale_stick(in.circle_x);
-    p->stickY = scale_stick(in.circle_y);
-    p->substickX = scale_stick(cx);
-    p->substickY = scale_stick(cy);
+    p->stickX = ps.stick_x;
+    p->stickY = ps.stick_y;
+    p->substickX = ps.substick_x;
+    p->substickY = ps.substick_y;
+    p->triggerLeft = ps.trigger_l;
+    p->triggerRight = ps.trigger_r;
     p->analogA = (b & PAD_BUTTON_A) ? 0xFF : 0;
     p->analogB = (b & PAD_BUTTON_B) ? 0xFF : 0;
     p->err = PAD_ERR_NONE;

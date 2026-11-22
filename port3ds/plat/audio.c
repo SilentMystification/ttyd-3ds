@@ -680,7 +680,7 @@ static void voices_log(void) {
     for (int ch = 1; s_voices_on && ch <= VOICE_CHANNELS; ch++) {
         playing += s_vch[ch].cache >= 0;
     }
-    PLOG_I("[NDSPV] voices sw %lu ndsp %lu aux %lu overflow %lu auxlate %lu | channels playing %d | starts %lu "
+    PLOG_I("[NDSPV] voices sw %lu ndsp %lu aux %lu overflow %lu norebuild %lu | channels playing %d | starts %lu "
            "refused %lu cache hit %lu miss %lu realigned %lu evicted %lu %lu KB | events late %lu dropped %lu",
            (unsigned long)s_vstat.sw, (unsigned long)s_vstat.ndsp, (unsigned long)s_vstat.aux,
            (unsigned long)s_vstat.overflow, (unsigned long)s_vstat.aux_late, playing, (unsigned long)s_vstat.starts,

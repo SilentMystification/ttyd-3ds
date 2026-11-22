@@ -492,7 +492,7 @@ def load_run_azahar():
     return mod
 
 
-def capture_port(scene, out, build, extra_switches, lle_audio, timeout, seconds, speed=50):
+def capture_port(scene, out, build, extra_switches, lle_audio, timeout, seconds, speed=34, sink=True):
     ra = load_run_azahar()
     sc = SCENES[scene]
     seconds = seconds or sc["port_seconds"]
@@ -500,10 +500,47 @@ def capture_port(scene, out, build, extra_switches, lle_audio, timeout, seconds,
     raw = profile / "azahar_audio.raw"
     if raw.exists():
         raw.unlink()
-    # Azahar's SDL2 sink (output_type 4) on SDL's disk driver: the DSP's output to a file.
-    # The sink takes samples at a fixed pace, and Azahar pads (or drops) when emulation is off
-    # that pace, so emulation is held at `speed` percent (frame limiter) and the disk driver
-    # slowed to match (SDL_AUDIO_DISK_TIMESCALE): emulation slower than real time keeps up.
+    if sink:
+        hook_sink(ra, raw, speed)
+    switches = " ".join(s for s in (sc["port_switches"], f"wavdump={seconds}", extra_switches) if s)
+    last = out / "azahar-last"
+    argv = ["run_azahar.py", "--build", str(build), "--switches", switches, "--log", "3ds/ttyd/log.txt",
+            "--until", "audio: wrote audio.wav", "--timeout", str(timeout), "--last", str(last)]
+    if sink:
+        argv.append("--realtime")
+    if lle_audio:
+        argv.append("--lle-audio")
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "switches.txt").write_text(switches + "\n")
+    saved = sys.argv
+    sys.argv = argv
+    try:
+        code = ra.main()
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else 1
+    finally:
+        sys.argv = saved
+    _, _, sdmc = ra.profile_dirs()
+    for name, dest in (("audio.wav", "wavdump.wav"),):
+        wd = sdmc / "3ds" / "ttyd" / name
+        if wd.is_file():
+            shutil.copy(wd, out / dest)
+            wd.unlink()
+    if raw.is_file() and raw.stat().st_size > 0:
+        n = raw_to_wav(raw, out / "azahar.wav")
+        raw.unlink()
+        print(f"audio_compare: Azahar output {n / 44100:.1f} s -> {(out / 'azahar.wav').relative_to(REPO)}")
+    elif sink:
+        print("audio_compare: no Azahar output file (SDL disk driver not used?)")
+    return code or 0
+
+
+def hook_sink(ra, raw, speed):
+    """--sink: Azahar's sound output itself, recorded: its SDL2 sink (output_type 4) on SDL's disk
+    driver writes it to a file. The sink takes samples at a fixed pace, and Azahar pads (or drops)
+    when emulation is off that pace, so emulation is held at `speed` percent (frame limiter) and
+    the disk driver slowed to match (SDL_AUDIO_DISK_TIMESCALE), so that emulation slower than real time keeps up.
+    Even so Azahar falls behind at times: compare cuts the held runs (and counts them)."""
     ra.QT_CONFIG = ra.QT_CONFIG.replace("frame_limit={frame_limit}", f"frame_limit={speed}").replace(
         "audio_emulation={audio}\n",
         "audio_emulation={audio}\noutput_type=4\noutput_type\\default=false\n"
@@ -521,34 +558,41 @@ def capture_port(scene, out, build, extra_switches, lle_audio, timeout, seconds,
             envs.append("--env=SDL_LOGGING=*=debug")
         return cmd[:2] + envs + cmd[2:]
     ra.flatpak_cmd = flatpak_cmd
-    switches = " ".join(s for s in (sc["port_switches"], f"wavdump={seconds}", extra_switches) if s)
-    last = out / "azahar-last"
-    argv = ["run_azahar.py", "--build", str(build), "--switches", switches, "--log", "3ds/ttyd/log.txt",
-            "--until", "audio: wrote audio.wav", "--timeout", str(timeout), "--realtime", "--last", str(last)]
-    if lle_audio:
-        argv.append("--lle-audio")
+
+
+# ----------------------------------------------------------------------------- CPU
+
+def cpu_profile(scene, build, extra_switches, out, duration, start):
+    """The audio thread's busy share: the scene in Azahar under its GDB stub, sampled by
+    pc_sample.py --interval 200 once the game log matches `start`."""
+    import signal
+    import time
+    sc = SCENES[scene]
+    switches = " ".join(s for s in (sc["port_switches"], extra_switches) if s)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "switches.txt").write_text(switches + "\n")
-    saved = sys.argv
-    sys.argv = argv
+    ra = load_run_azahar()
+    log = ra.PROFILE / "data" / "azahar-emu" / "sdmc" / "3ds" / "ttyd" / "log.txt"
+    if log.exists():
+        log.unlink()
+    here = Path(__file__).resolve().parent
+    runner = subprocess.Popen([sys.executable, str(here / "run_azahar.py"), "--build", str(build), "--switches", switches,
+                               "--gdb", "--timeout", str(duration + 1800), "--allow-hw-faults",
+                               "--last", str(out / "azahar-last")])
     try:
-        code = ra.main()
-    except SystemExit as e:
-        code = e.code if isinstance(e.code, int) else 1
+        cmd = [sys.executable, str(here / "pc_sample.py"), "--elf", str(build.with_suffix(".elf")),
+               "--duration", str(duration), "--interval", "200", "--connect-timeout", "600",
+               "--tag-log", str(log), "--start-after", start, "--start-timeout", "900",
+               "--json", str(out / "pc_sample.json")]
+        with open(out / "pc_sample.txt", "w") as so:
+            r = subprocess.run(cmd, stdout=so, stderr=subprocess.STDOUT, timeout=duration + 2400)
+        print(f"audio_compare: pc_sample exit {r.returncode}; {(out / 'pc_sample.txt').relative_to(REPO)}")
+        return r.returncode
     finally:
-        sys.argv = saved
-    _, _, sdmc = ra.profile_dirs()
-    wd = sdmc / "3ds" / "ttyd" / "audio.wav"
-    if wd.is_file():
-        shutil.copy(wd, out / "wavdump.wav")
-        wd.unlink()
-    if raw.is_file() and raw.stat().st_size > 0:
-        n = raw_to_wav(raw, out / "azahar.wav")
-        raw.unlink()
-        print(f"audio_compare: Azahar output {n / 44100:.1f} s -> {(out / 'azahar.wav').relative_to(REPO)}")
-    else:
-        print("audio_compare: no Azahar output file (SDL disk driver not used?)")
-    return code or 0
+        runner.send_signal(signal.SIGTERM)
+        try:
+            runner.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            runner.kill()
 
 
 # ----------------------------------------------------------------------------- loop survey
@@ -682,9 +726,10 @@ def main():
     p.add_argument("--tag", default="", help="suffix of the output folder")
     p.add_argument("--lle-audio", action="store_true")
     p.add_argument("--seconds", type=int, default=0, help="wavdump length (default per scene)")
-    p.add_argument("--timeout", type=float, default=900)
-    p.add_argument("--speed", type=int, default=50,
-                   help="emulation speed in percent during the capture (default 50: Azahar keeps up)")
+    p.add_argument("--timeout", type=float, default=1800)
+    p.add_argument("--no-sink", action="store_true", help="only the game's software mix (wavdump), at full speed")
+    p.add_argument("--speed", type=int, default=34,
+                   help="emulation speed in percent while Azahar's output is recorded (default 34)")
     p.add_argument("--out", type=Path)
     p = sub.add_parser("compare")
     p.add_argument("a", type=Path)
@@ -696,11 +741,22 @@ def main():
                    help="B is an Azahar capture: its silent and held runs inside loud audio are the sink's "
                         "padding (cut, and not counted as gaps)")
     sub.add_parser("selftest")
+    p = sub.add_parser("cpu", help="pc_sample.py profile of a scene (audio thread busy share)")
+    p.add_argument("--scene", required=True, choices=sorted(SCENES))
+    p.add_argument("--build", type=Path, default=REPO / "build" / "3ds" / "game" / "ttyd.cia")
+    p.add_argument("--switches", default="")
+    p.add_argument("--tag", default="")
+    p.add_argument("--duration", type=float, default=60)
+    p.add_argument("--start", default="padscript: done|warp: ",
+                   help="regex in the game log that starts the sampling")
     p = sub.add_parser("loops", help="loop points of every MusyX sample on the disc")
     p.add_argument("--iso", type=Path, default=REPO / "iso" / "game.iso")
     a = ap.parse_args()
     if a.cmd == "loops":
         return loop_survey(a.iso)
+    if a.cmd == "cpu":
+        tag = ("_" + a.tag) if a.tag else ""
+        return cpu_profile(a.scene, a.build.resolve(), a.switches, OUT / f"cpu_{a.scene}{tag}", a.duration, a.start)
     if a.cmd == "scenes":
         for k, v in SCENES.items():
             print(f"{k:8} {v['desc']}\n         port: {v['port_switches'] or '(boot)'}\n         paper-cut: {v['pc_env'] or '(boot)'}")
@@ -710,7 +766,7 @@ def main():
     if a.cmd == "capture-port":
         tag = ("_" + a.tag) if a.tag else ""
         return capture_port(a.scene, a.out or OUT / f"port_{a.scene}{tag}", a.build.resolve(), a.switches,
-                            a.lle_audio, a.timeout, a.seconds, a.speed)
+                            a.lle_audio, a.timeout, a.seconds, a.speed, not a.no_sink)
     if a.cmd == "compare":
         r = compare(a.a, a.b, a.max_lag, cut=not a.no_cut, azahar_b=a.azahar or a.b.name == "azahar.wav")
         print_report(r)

@@ -34,6 +34,55 @@ int plat_audio_has_output(void);
 uint32_t plat_audio_frames(void);
 uint32_t plat_audio_underruns(void);
 
+/* ---- NDSP voices (switch ndspvoices=1) ----
+ *
+ * One sound voice per NDSP channel: the DSP decodes the DSP-ADPCM sample,
+ * resamples and mixes it. Channel 0 stays the software mix (fill), so voice
+ * channels are 1..plat_voice_channels(). Every call is made from inside
+ * fill (the audio thread) and takes effect when the output of the quantum
+ * being filled, delayed by the lead (plat_voice_set_lead), reaches the
+ * speakers, so voices stay in time with the software mix. */
+
+/* A sample to play, as DSP-ADPCM frames (8 bytes: a predictor/scale byte,
+ * then 14 samples of 4 bits). Sample numbers count from the frame at adpcm. */
+typedef struct PlatVoiceSample {
+    const uint8_t* adpcm;  /* the frame holding sample 0, as on the disc */
+    uint32_t key;          /* identity for the sample cache (its ARAM address) */
+    uint32_t start;        /* first sample played; a multiple of 14 */
+    uint32_t end;          /* one past the last sample: the sample's end, or the loop's */
+    uint32_t loop_start;   /* when looping: the loop's first sample (any value) */
+    uint8_t looping;
+    uint8_t loop_reload;   /* the loop restarts the decoder from loop_yn1/yn2 (MusyX loopType 0) */
+    uint16_t coefs[16];
+    uint16_t ps;           /* decoder state at start */
+    int16_t yn1, yn2;
+    uint16_t loop_ps;      /* decoder state at the loop start */
+    int16_t loop_yn1, loop_yn2;
+} PlatVoiceSample;
+
+typedef struct PlatVoiceMix {
+    float rate;      /* the sample's rate in Hz */
+    float l, r;      /* gains on the left and right outputs */
+    uint8_t interp;  /* 0 polyphase, 1 linear, 2 none */
+    uint8_t lpf;     /* one-pole low-pass: y = (a0 x + b0 y[-1]) / 32768 */
+    int16_t lpf_a0, lpf_b0;
+} PlatVoiceMix;
+
+/* Voice channels available (channels 1..n); 0 when NDSP voices are off. */
+int plat_voice_channels(void);
+/* Output frames between a fill call and the speakers' hearing what it made
+ * (the game's own buffering ahead of the output). */
+void plat_voice_set_lead(uint32_t frames);
+/* Starts a sample on a channel (replacing what it played). Returns 0 when the
+ * sample cannot be played there (no memory, bad data): the caller keeps the
+ * voice in software. */
+int plat_voice_start(int ch, const PlatVoiceSample* smp, const PlatVoiceMix* mix);
+/* New rate, gains or filter for a playing channel. */
+void plat_voice_mix(int ch, const PlatVoiceMix* mix);
+void plat_voice_stop(int ch);
+/* A counter line for the log (switch ndspstats=N: every N seconds). */
+void plat_voice_note(uint32_t software, uint32_t ndsp, uint32_t aux, uint32_t overflow, uint32_t aux_late);
+
 #ifdef __cplusplus
 }
 #endif

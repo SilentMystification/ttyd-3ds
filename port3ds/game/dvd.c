@@ -263,10 +263,27 @@ static s32 read_image(DVDFileInfo* fi, void* addr, s32 length, s32 offset) {
     return r.result;
 }
 
+/* DVDCancel callers wait here until the read they cancelled has finished. */
+static OSThreadQueue s_cancel_queue; /* zero: an initialised queue */
+
 s32 DVDReadPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, s32 prio) {
     (void)prio;
+    if (fileInfo->cb.state == DVD_STATE_CANCELED) {
+        /* cancelled before it began (DVDCancel): the drive's answer */
+        fileInfo->cb.state = DVD_STATE_END;
+        return DVD_RESULT_CANCELED;
+    }
     fileInfo->cb.state = DVD_STATE_BUSY;
     s32 result = read_file(fileInfo, addr, length, offset);
+    if (fileInfo->cb.state == DVD_STATE_CANCELED) {
+        /* cancelled while it ran (DVDCancel): the data is in the buffer, but the command ends as the
+         * drive's does after a cancel, so the caller's completion work does not run */
+        BOOL level = OSDisableInterrupts();
+        fileInfo->cb.state = DVD_STATE_END;
+        OSWakeupThread(&s_cancel_queue);
+        OSRestoreInterrupts(level);
+        return DVD_RESULT_CANCELED;
+    }
     fileInfo->cb.state = result < 0 ? DVD_STATE_FATAL_ERROR : DVD_STATE_END;
     if (result < 0) {
         plat_fatal("DVD: read of %ld bytes at +%ld from %08lx failed (%ld)", (long)length, (long)offset,
@@ -285,5 +302,31 @@ s32 DVDCancelStream(DVDCommandBlock* block) {
     if (block != NULL) {
         block->state = DVD_STATE_END;
     }
+    return 0;
+}
+
+/* Cancels a command (the THP player's frame prefetch through the DVD manager,
+ * seq_demo.c THPSimpleLoadStop). The image reads run on the platform file
+ * thread and cannot be aborted, so a read already running finishes into its
+ * buffer, as far as the caller can tell: DVDCancel sleeps until it has (the
+ * caller frees the buffer next, as after a drive's cancel) and the command
+ * then ends as DVD_RESULT_CANCELED, so the player's completion callback gets
+ * the cancel and does nothing. A read that has not begun is cancelled at
+ * once: DVDReadPrio sees the state and returns DVD_RESULT_CANCELED without
+ * touching the buffer. */
+s32 DVDCancel(volatile DVDCommandBlock* block) {
+    if (block == NULL) {
+        return -1;
+    }
+    BOOL level = OSDisableInterrupts();
+    if (block->state == DVD_STATE_BUSY) {
+        block->state = DVD_STATE_CANCELED;
+        while (block->state == DVD_STATE_CANCELED) {
+            OSSleepThread(&s_cancel_queue);
+        }
+    } else if (block->state != DVD_STATE_FATAL_ERROR) {
+        block->state = DVD_STATE_CANCELED;
+    }
+    OSRestoreInterrupts(level);
     return 0;
 }

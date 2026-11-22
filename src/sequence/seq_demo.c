@@ -18,6 +18,22 @@
 #include "dolphin/thp.h"
 #include "version.h"
 
+#ifdef TARGET_PORT
+/* A THP file is big-endian and its headers are read in place. The port is little-endian,
+ * so the header words are swapped once after they are read. */
+static void thpSwapWords(void* p, u32 count) {
+    u32* w = (u32*)p;
+    u32 i;
+
+    for (i = 0; i < count; i++) {
+        w[i] = __builtin_bswap32(w[i]);
+    }
+}
+#define THP_SWAP_WORDS(p, count) thpSwapWords((p), (count))
+#else
+#define THP_SWAP_WORDS(p, count) ((void)0)
+#endif
+
 typedef struct THPHeader {
     char magic[4];             // 0x0
     u32 version;               // 0x4
@@ -248,6 +264,7 @@ BOOL THPSimpleOpen(char* fileName) {
     }
 
     memcpy(&SimpleControl.header, WorkBuffer, sizeof(THPHeader));
+    THP_SWAP_WORDS(&SimpleControl.header.version, 11);
     if (strcmp(SimpleControl.header.magic, "THP") != 0) {
         DVDMgrClose(SimpleControl.fileInfo);
         return FALSE;
@@ -266,6 +283,7 @@ BOOL THPSimpleOpen(char* fileName) {
     }
 
     memcpy(&SimpleControl.compInfo, WorkBuffer, sizeof(THPFrameCompInfo));
+    THP_SWAP_WORDS(&SimpleControl.compInfo.numComponents, 1);
     offset += sizeof(THPFrameCompInfo);
     SimpleControl.audioExist = 0;
     for (i = 0; i < SimpleControl.compInfo.numComponents; i++) {
@@ -276,6 +294,7 @@ BOOL THPSimpleOpen(char* fileName) {
                     return FALSE;
                 }
                 memcpy(&SimpleControl.videoInfo, WorkBuffer, sizeof(THPVideoInfo));
+                THP_SWAP_WORDS(&SimpleControl.videoInfo, 3);
                 offset += sizeof(THPVideoInfo);
                 break;
             case 1:
@@ -284,6 +303,7 @@ BOOL THPSimpleOpen(char* fileName) {
                     return FALSE;
                 }
                 memcpy(&SimpleControl.audioInfo, WorkBuffer, sizeof(THPAudioInfo));
+                THP_SWAP_WORDS(&SimpleControl.audioInfo, 4);
                 SimpleControl.audioExist = 1;
                 offset += sizeof(THPAudioInfo);
                 break;
@@ -436,6 +456,7 @@ static void __THPSimpleDVDCallback(s32 result, DVDFileInfo* fileInfo) {
         SimpleControl.totalReadFrame++;
         SimpleControl.readBuffer[SimpleControl.readIndex].isValid = TRUE;
         SimpleControl.curOffset += SimpleControl.readSize;
+        THP_SWAP_WORDS(SimpleControl.readBuffer[SimpleControl.readIndex].ptr, 2 + SimpleControl.compInfo.numComponents);
         SimpleControl.readSize = (s32) * (u32*)(SimpleControl.readBuffer[SimpleControl.readIndex].ptr);
         SimpleControl.readIndex = SimpleControl.readIndex + 1 >= 10 ? 0 : SimpleControl.readIndex + 1;
         if (!SimpleControl.readBuffer[SimpleControl.readIndex].isValid) {
@@ -477,6 +498,8 @@ BOOL THPSimplePreLoad(s32 loop) {
             }
 
             SimpleControl.curOffset += SimpleControl.readSize;
+            THP_SWAP_WORDS(SimpleControl.readBuffer[SimpleControl.readIndex].ptr,
+                           2 + SimpleControl.compInfo.numComponents);
             SimpleControl.readSize = (s32) * (u32*)SimpleControl.readBuffer[SimpleControl.readIndex].ptr;
             SimpleControl.readBuffer[SimpleControl.readIndex].isValid = TRUE;
             SimpleControl.readBuffer[SimpleControl.readIndex].frameNumber = SimpleControl.totalReadFrame;

@@ -20,6 +20,13 @@ struct PlatMutex {
     RecursiveLock lock;
 };
 
+/* Only for the refusal's Result (see plat_thread_create). */
+static u8 probe_stack[512] __attribute__((aligned(8)));
+static void probe_entry(void* arg) {
+    (void)arg;
+    svcExitThread();
+}
+
 static void thread_trampoline(void* p) {
     PlatThread* t = p;
     plat_crash_install_thread();
@@ -42,7 +49,16 @@ PlatThread* plat_thread_create(void (*entry)(void* arg), void* arg, uint32_t sta
     }
     t->thread = threadCreate(thread_trampoline, t, (stack_bytes + 7u) & ~7u, priority, core < 0 ? -2 : core, false);
     if (t->thread == NULL) {
-        PLOG_E("thread %s: refused (core %d, priority %#x)", t->name, core, priority);
+        /* threadCreate does not return the Result: ask the kernel again with
+         * a thread that exits at once, to get the code for the log. */
+        Handle h = 0;
+        Result pr = svcCreateThread(&h, probe_entry, 0, (u32*)(probe_stack + sizeof(probe_stack)), priority,
+                                    core < 0 ? -2 : core);
+        if (R_SUCCEEDED(pr)) {
+            svcCloseHandle(h);
+        }
+        PLOG_E("thread %s: refused (core %d, priority %#x, result %08lx)", t->name, core, priority,
+               (unsigned long)pr);
         free(t);
         return NULL;
     }

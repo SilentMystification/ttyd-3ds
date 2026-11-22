@@ -48,9 +48,11 @@ AccessControlInfo:
   IdealProcessor               : 0
   AffinityMask                 : 1
   Priority                     : 16
-  # The retail value (Xenoblade has 158). 0 forbids threads on core 1, so
-  # the system's ARQ DMA thread was refused and the port could not start.
-  MaxCpu                       : 0x9E
+  # An encoded descriptor (Luma reslimit.c): bit 7 = multi scheduling, the
+  # low 7 bits = the core 1 maximum in percent. 0xD0 = multi, 80%. Retail
+  # 0x9E (Xenoblade) = multi, 30%. 0 = single mode, one app thread on core 1.
+  # Our 80 was above a 0x9E maximum and core 1 stayed at 0.
+  MaxCpu                       : 0xD0
   HandleTableSize              : 0x200
   DisableDebug                 : false
   EnableForceDebug             : false

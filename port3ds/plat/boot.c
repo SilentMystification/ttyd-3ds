@@ -103,15 +103,34 @@ void plat_cpu_limit_init(void) {
         s_cpu_limit_orig = 30;
     }
     PLOG_I("cpu limit: before this process %lu%%", (unsigned long)s_cpu_limit_orig);
+    /* The process maximum for core 1 comes from the ExHeader (MaxCpu); a
+     * limit above it is refused and core 1 stays at 0. */
+    s64 max = 0;
+    Handle rl = 0;
+    Result rr = svcGetResourceLimit(&rl, CUR_PROCESS_HANDLE);
+    if (R_SUCCEEDED(rr)) {
+        ResourceLimitType cat = RESLIMIT_CPUTIME;
+        s64 values[1] = {0};
+        rr = svcGetResourceLimitLimitValues(values, rl, &cat, 1);
+        if (R_SUCCEEDED(rr)) {
+            max = values[0];
+        }
+        svcCloseHandle(rl);
+    }
+    PLOG_I("cpu limit: process maximum %lld%% result %08lx", (long long)max, (unsigned long)rr);
+
     s_cpu_limit = (u32)plat_switch_int("cpulimit", 80);
     if (s_cpu_limit < 5 || s_cpu_limit > 80) {
         s_cpu_limit = 80;
     }
-    if (R_FAILED(APT_SetAppCpuTimeLimit(s_cpu_limit)) && s_cpu_limit == 80) {
-        s_cpu_limit = 79;
-        APT_SetAppCpuTimeLimit(s_cpu_limit);
+    if (max > 0 && (s64)s_cpu_limit > max) {
+        s_cpu_limit = (u32)max;
     }
-    PLOG_I("cpu limit: core 1 at %lu%%", (unsigned long)s_cpu_limit);
+    Result sr = APT_SetAppCpuTimeLimit(s_cpu_limit);
+    u32 now = 0;
+    APT_GetAppCpuTimeLimit(&now);
+    PLOG_I("cpu limit: core 1 set %lu%% result %08lx, now %lu%%", (unsigned long)s_cpu_limit, (unsigned long)sr,
+           (unsigned long)now);
     aptHook(&s_apt_cookie, apt_hook, NULL);
 }
 

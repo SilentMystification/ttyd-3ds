@@ -145,6 +145,11 @@ configure_file("${TTYD_GEN_DIR}/port_disc_data_gen.h.tmp" "${TTYD_GEN_DIR}/port_
 file(WRITE "${TTYD_GEN_DIR}/port3ds_build.h.tmp"
     "#define PORT3DS_BUILD_STRING \"#${TTYD_BUILD_COUNT} ${TTYD_BUILD_HASH}\"\n")
 configure_file("${TTYD_GEN_DIR}/port3ds_build.h.tmp" "${TTYD_GEN_DIR}/port3ds_build.h" COPYONLY)
+# Refreshes port3ds_build.h on every build (see cmake/BuildStamp.cmake).
+add_custom_target(ttyd_build_stamp
+    COMMAND "${CMAKE_COMMAND}" "-DTTYD_REPO_DIR=${TTYD_REPO_DIR}" "-DTTYD_GEN_DIR=${TTYD_GEN_DIR}"
+            "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}" -P "${CMAKE_CURRENT_LIST_DIR}/cmake/BuildStamp.cmake"
+    VERBATIM)
 add_custom_target(ttyd_rels DEPENDS ${TTYD_REL_OBJECTS})
 
 # Byte-swap tables for the disc formats (port3ds/game/formats/), from the
@@ -224,6 +229,9 @@ ctr_add_shader_library(ttyd_gx_shader OUTPUT gx.shbin "${CMAKE_CURRENT_LIST_DIR}
 dkp_add_embedded_binary_library(ttyd_gx_shader_bin ttyd_gx_shader)
 
 add_library(ttyd_port_plat OBJECT ${TTYD_PORT_PLAT_SOURCES})
+add_dependencies(ttyd_port_plat ttyd_build_stamp)
+add_dependencies(ttyd_port_game ttyd_build_stamp)
+add_dependencies(ttyd_dol ttyd_build_stamp)
 target_link_libraries(ttyd_port_plat PRIVATE ttyd_gx_shader_bin)
 target_compile_options(ttyd_port_plat PRIVATE -std=gnu11 -O2 -g ${TTYD_PORT_WARNINGS}
     -fno-strict-aliasing -ffunction-sections -fdata-sections)

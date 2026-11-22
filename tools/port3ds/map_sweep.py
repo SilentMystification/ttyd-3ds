@@ -8,6 +8,10 @@ list, runs tools/port3ds/run_azahar.py, and reads the log. When a run ends
 early (a crash, a stall, a battle the map starts), the next run resumes with
 the map after the one that was being visited, so one bad map costs one run.
 
+The stg_* battle-background maps are not map-change targets: the game runs a
+battle on hei_01 (story 30) that loads each one, and the result reads
+"ok (battle stage)" (see PORT_3DS_TESTING.md, "Map sweep").
+
 Results go to build/map-sweep/: results.json (map -> ok, timeout, stopped,
 crash, stall) and the screenshots as PNG when Pillow is installed.
 

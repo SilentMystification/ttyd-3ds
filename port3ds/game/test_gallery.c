@@ -20,7 +20,9 @@
 #include "battle/battle.h"
 #include "battle/battle_information.h"
 #include "data/mapdata.h"
+#include "battle/battle_stage.h"
 #include "driver/effdrv.h"
+#include "driver/mapdrv.h"
 #include "driver/npcdrv.h"
 #include "driver/seqdrv.h"
 #include "eff/eff_n64.h"
@@ -381,6 +383,109 @@ static void battle_frame(u32 frame) {
         }
         s_btl_state = 0;
     }
+}
+
+/* ---- battle stage maps (stg_*) for the map sweep ----
+ * The stg_* maps are the battle backgrounds: bmapLoad loads one next to the
+ * bti_0x stage as a battle's specificStageDataDir, so no map change can enter
+ * them. The sweep runs the game's own path instead: the host map's enemy starts
+ * a battle (as battle= does) whose stage data names the stg map, with no stage
+ * objects. */
+static BattleStageData s_stg_data;
+static char s_stg_name[16];
+static int s_stg_state; /* 0 idle, 1 battle starting, 2 shot taken, battle ending */
+static int s_stg_wait;
+static int s_stg_up; /* frames the battle has been set up */
+
+const char* tst_stage_host(const char* name, int* story) {
+    if (strncmp(name, "stg", 3) != 0) {
+        return NULL;
+    }
+    *story = 30;
+    return "hei_01";
+}
+
+int tst_stage_start(const char* name) {
+    NpcEntry* npc;
+    FieldBattleData* fbat;
+    PartyEntry* party;
+
+    npc = battle_npc();
+    if (npc == NULL || seqGetSeq() != SEQ_GAME) {
+        tst_log("stage: %s: no host enemy on %s", name, gp->currentMapName);
+        return 0;
+    }
+    npcSetBattleInfo(npc, 4);
+    if (npc->battleInfo.groupSetup == NULL || npc->battleInfo.stageData == NULL) {
+        tst_log("stage: %s: host setup 4 chose no group", name);
+        return 0;
+    }
+    memset(&s_stg_data, 0, sizeof(s_stg_data));
+    strncpy(s_stg_name, name, sizeof(s_stg_name) - 1);
+    s_stg_name[sizeof(s_stg_name) - 1] = '\0';
+    s_stg_data.globalStageDataDir = "bti_01";
+    s_stg_data.specificStageDataDir = s_stg_name;
+    npc->battleInfo.stageData = &s_stg_data;
+    fbat = fbatGetPointer();
+    fbat->target = npc;
+    marioFBattlePrepare();
+    marioCtrlOff();
+    party = partyGetPtr(marioGetPartyId());
+    if (party != NULL) {
+        partyCtrlOff();
+    }
+    BattleInformationSetResult(&fbat->info, 0);
+    psndSetFlag(PSND_FLAG_SFX_WITH_BGM);
+    seqSetSeq(SEQ_BATTLE, NULL, NULL);
+    s_stg_state = 1;
+    s_stg_wait = 0;
+    s_stg_up = 0;
+    tst_log("stage: %s battle started", name);
+    return 1;
+}
+
+/* Called every frame while a stage battle runs. 0 waiting; 1 the battle is up
+ * with the stage loaded for settle frames (take the picture now; the battle is
+ * then ended); 2 back in the field; -1 the stage never came up. */
+int tst_stage_poll(int settle) {
+    MapWork* mw;
+    int seq = seqGetSeq();
+
+    s_stg_wait++;
+    if (s_stg_state == 1) {
+        if (seq == SEQ_BATTLE && _battleWorkPointer != NULL && gp->inBattle) {
+            s_stg_up++;
+        }
+        if (s_stg_up > settle) {
+            mw = mapGetWork();
+            tst_log("stage: %s up: %ld maps, stage map joints %ld, frame %d", s_stg_name,
+                    (long)mw->entries[0].count, (long)mw->entries[1].numJoints, s_stg_wait);
+            s_stg_state = 2;
+            s_stg_wait = 0;
+            _battleWorkPointer->flags |= BATTLE_SEQ_END;
+            if (mw->entries[0].count != 2 || mw->entries[1].numJoints <= 0) {
+                tst_log("stage: %s did not load", s_stg_name);
+                return -1;
+            }
+            return 1;
+        }
+        if (s_stg_wait > 1800) {
+            tst_log("stage: %s timeout (sequence %d)", s_stg_name, seq);
+            return -1;
+        }
+        return 0;
+    }
+    if (s_stg_state == 2) {
+        if (seq == SEQ_GAME) {
+            s_stg_state = 0;
+            return 2;
+        }
+        if (s_stg_wait > 900) {
+            tst_log("stage: %s battle did not end (sequence %d)", s_stg_name, seq);
+            return -1;
+        }
+    }
+    return 0;
 }
 
 void tst_gallery_frame(u32 frame) {

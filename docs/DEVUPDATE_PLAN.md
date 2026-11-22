@@ -25,7 +25,6 @@ This replaces the copy → FBI install → launch cycle. It gives fast iteration
 typedef struct {
     u16 port;                  /* default 5050 */
     const char* token;         /* shared secret; NULL = none (LAN dev use only) */
-    const char* args_path;     /* the app's switch/args file, e.g. "sdmc:/3ds/app/args.txt"; NULL = no args command */
     int core;                  /* server thread core, default 1 */
     void (*on_begin)(void* user);           /* app quiesces: pause the game, stop audio, flush saves */
     void (*on_progress)(u32 done, u32 total, void* user);
@@ -47,10 +46,12 @@ bool   devupdate_pending(void);                        /* an update is installed
   - `on_ready` lets the app save state first. Then `devupdate_relaunch()` calls `aptSetChainloaderToSelf()` and exits through the app's normal shutdown, so the new version starts.
   - For a 3dsx (under the Homebrew Launcher), CIA installs are refused with a clear message. 3dslink already covers that case.
 - **Replies to the PC:** status lines (`receiving`, `installing`, `done`, `error <code> <text>`), so the PC tool shows progress and errors.
-- **Arguments for the next launch:**
-  - A CIA started from the HOME Menu or relaunched through APT gets no command line, so test switches travel through a file.
-  - An `args <text>` command writes `args_path` and syncs it; `restart` then relaunches.
-  - `args-once` marks the file for deletion after the next read, so a one-shot test (for example a crash test) does not repeat on a normal launch. The app deletes it, through a helper `devupdate_args_consume()`.
+- **Arguments for the next launch (APT deliver arguments; owner's decision 2026-11-22):**
+  - A CIA started from the HOME Menu gets no command line. Test switches go through APT's built-in deliver arguments instead of a file.
+  - `restart <switches>` calls `aptSetChainloaderArgs(switches, len, NULL)` before relaunching through `aptSetChainloaderToSelf`.
+  - At boot the app calls `devupdate_launch_args(buf, n)`, which reads them with `APT_ReceiveDeliverArg`. They belong to that one launch only, so one-shot tests clean up after themselves, with no SD-card I/O.
+  - A cold start from the HOME Menu receives nothing, which means normal play. The app's own config file (TTYD: `debug3ds.txt`) remains for settings the user wants on every launch.
+  - Step 1 below verifies on hardware that a self-relaunch keeps the deliver arguments under Luma.
 - **Extras, kept small:**
   - a `ping` command returning the title ID, the app's version string and free space;
   - a `restart` command that relaunches without installing.
@@ -78,7 +79,7 @@ bool   devupdate_pending(void);                        /* an update is installed
 
 ## Steps
 
-1. **Hardware check first:** a tiny test app that installs a CIA of *itself* from the SD card through AM while running, then relaunches with `aptSetChainloaderToSelf`. This proves the core assumption before anything else is built.
+1. **Hardware check first:** a tiny test app that installs a CIA of *itself* from the SD card through AM while running, then relaunches with `aptSetChainloaderToSelf` and deliver arguments. It shows the received arguments on screen. This proves the core assumptions (self-install, relaunch, arguments survive; a cold start receives none) before anything else is built.
 2. **Library and PC tool,** with a `README.md` (API, protocol, the "dev only" warning) and an MIT `LICENSE`.
 3. **Example app** in `libs/ctr-devkit/examples/devupdate/`: prints its build number, so a push visibly changes it.
 4. **TTYD integration** and tool support.
@@ -99,7 +100,7 @@ When the app crashes, the crash handler hands over to the updater instead of end
   - it restarts sockets on the reserved buffer if they are dead;
   - `report` (send the report text and log tail);
   - `push` (install a CIA, as normal);
-  - `args <text>` plus `restart` (write the app's switch file, then relaunch; APT's deliver-argument mechanism is a fallback only if the file proves unreliable).
+  - `restart <switches>` (relaunch with the switches as APT deliver arguments).
 - **Relaunch:** `aptSetChainloaderToSelf()` plus the minimal APT exit needed for the chainload to take effect.
 - **Its own deadline:** if recovery can't bring the network up in N seconds, it falls back to a plain process exit, as the crash handler does today.
 
@@ -107,7 +108,7 @@ When the app crashes, the crash handler hands over to the updater instead of end
 
 **Harness** (`tools/port3ds/hw_harness.py`, generic apart from a test-list file):
 - a test list (JSON) with entries of switches, a pass regex, a fail regex and a timeout. Examples: `map=hei_13`, `crashtest=hang wdog=5` (expects a crash), and later `battle=`/`fx=` gallery items;
-- loop: push the build once, then per test `args <switches>` (one-shot) and `restart`, follow the live log, record pass, fail, timeout or crash;
+- loop: push the build once, then per test `restart <switches>` (APT deliver arguments), follow the live log, record pass, fail, timeout or crash;
 - on a crash, pull the report, resolve it with `crash_report.py`, then restart into the next test;
 - output: `build/hw-harness/<build>/results.json` and a summary;
 - the Rosalina sampling profiler (`pc_sample.py`) can run inside the same loop for performance scenes.

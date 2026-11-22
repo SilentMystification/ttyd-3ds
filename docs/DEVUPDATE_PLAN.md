@@ -79,6 +79,41 @@ bool   devupdate_pending(void);                        /* an update is installed
 4. **TTYD integration** and tool support.
 5. **Done when:** a TTYD CIA build is pushed from the PC while the game runs, installs, relaunches into the new build (its log shows the new build string) and reattaches the live log, 10 times in a row with no console input. A deliberate corrupted push (bad CRC) is refused and leaves the old install working.
 
+## Recovery mode and hardware test harness (owner's idea, 2026-11-22)
+
+When the app crashes, the crash handler hands over to the updater instead of ending the process. The console stays reachable, so a PC can collect the report, push a fix and restart the next test with no one at the console.
+
+**Library part** (generic, in `ctr-devupdate`): `devupdate_enter_recovery(const char* report)`.
+- **Prepared at `devupdate_start` time,** while the app is healthy:
+  - a dormant recovery thread (core 1, waiting on an event);
+  - a static buffer for `socInit`, so recovery never allocates from a possibly corrupted heap;
+  - an open `am:net` handle;
+  - a copy of the app's title ID.
+- **Entering recovery:** the caller (the app's crash handler, after its report and crash screen) signals the recovery thread and parks itself.
+- **What recovery offers:**
+  - it restarts sockets on the reserved buffer if they are dead;
+  - `report` (send the report text and log tail);
+  - `push` (install a CIA, as normal);
+  - `restart [args]` (relaunch, optionally with new arguments for the app, through `aptSetChainloaderArgs` or an args file).
+- **Relaunch:** `aptSetChainloaderToSelf()` plus the minimal APT exit needed for the chainload to take effect.
+- **Its own deadline:** if recovery can't bring the network up in N seconds, it falls back to a plain process exit, as the crash handler does today.
+
+**App part** (TTYD, in `port3ds/plat/crash.c`): with `devupdate` active, the crash screen says "recovery: waiting for the PC" instead of waiting for START, and the handler calls `devupdate_enter_recovery`.
+
+**Harness** (`tools/port3ds/hw_harness.py`, generic apart from a test-list file):
+- a test list (JSON) with entries of switches, a pass regex, a fail regex and a timeout. Examples: `map=hei_13`, `crashtest=hang wdog=5` (expects a crash), and later `battle=`/`fx=` gallery items;
+- loop: push the build once, then per test `restart <switches>`, follow the live log, record pass, fail, timeout or crash;
+- on a crash, pull the report, resolve it with `crash_report.py`, then restart into the next test;
+- output: `build/hw-harness/<build>/results.json` and a summary;
+- the Rosalina sampling profiler (`pc_sample.py`) can run inside the same loop for performance scenes.
+
+**What stays manual:** faults that bring down the whole console rather than our process (kernel panics, a crash of a system service such as `qtm`, the sleep hang seen 2026-11-22), and anything needing the lid or HOME button. A power-cycling relay could cover some later; that is out of scope.
+
+Steps (after steps 1 to 5 above):
+6. Recovery mode in the library, plus the example app crashing on purpose and recovering.
+7. TTYD crash handler integration; check with `crashtest=segv|fatal|break|hang`, all on hardware.
+8. `hw_harness.py` with a first test list. **Done when** 20 tests, including 4 deliberate crashes, run unattended on the console twice in a row.
+
 ## Risks
 
 - **Installing the running title:** AM may refuse or need the title's content to be closed first. FBI's self-update shows it can work, but how matters; step 1 settles it.

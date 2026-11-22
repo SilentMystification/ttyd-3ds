@@ -425,8 +425,26 @@ Each phase ends with a commit, updated docs, and passing tests for everything ea
 | 4. GX (**done**: logo, title, file select, `gor_01`, field and battle scenes render) | State tracker, vertex paths, shaders, TEV compiler, textures, EFB copies, fog and blend, bbox, z-texture, indirect, multipass, bounds checks | Logo, title and file select match paper-cut shots; `gor_01` renders |
 | 5. Audio (**under way**: MusyX on paper-cut's mixer through one NDSP channel; not heard yet, as Azahar has no DSP firmware here) | MusyX `hw_3ds` software backend, streams, DTK; then NDSP voices | Title music and `gor_01` sound effects play; matches paper-cut's audio golden hashes within tolerance |
 | 6. Bring-up (**under way**: new game, Rogueport, field walking and a full first battle work in Azahar) | New game to Rogueport, first battle, save and load, partner, menus | Golden set passes on Azahar |
-| 7. Functional completion in Azahar | Map sweep, story sweep, every special effect scene, the remaining regions (JP, PAL with 50 Hz and languages), CIA install path | Sweeps clean in Azahar; game completable in Azahar |
+| 7. Functional completion in Azahar (**started**: map sweep about 230 of 334 maps; broken into 7.1 to 7.9 below) | Map sweep, story sweep, every special effect scene, the remaining regions (JP, PAL with 50 Hz and languages), CIA install path | Sweeps clean in Azahar; game completable in Azahar |
 | 8. First hardware run | Run the probe app and record results in `docs/PORT_3DS_HARDWARE.md`; settle the section 12 assumptions; boot the functional build on the N3DS over 3dslink; crash-handler and watchdog tests on hardware; fix hardware-only faults (hangs, unmapped accesses, cache maintenance) | The phase 6 path runs on the N3DS without a crash or hang; ready for the separate bug-fix and optimization passes |
+
+### Phase 7 in steps (added 2026-11-22)
+
+Each step ends with a commit, a short entry in PORT_3DS_STATUS.md, and the earlier steps' tests still passing. Steps 7.3 to 7.7 can overlap: a chapter in 7.3 brings its effects (7.5) and battles (7.4) with it.
+
+| Step | Work | Done when |
+|---|---|---|
+| 7.1 Test infrastructure | Map sweep fixes (a battle on entry counts as a pass; warp on without restarting Azahar; fewer frames per map). A "story jump" set-up for each chapter's start: story value (GSW 0), party, key items, flags, and padscripts that get past menus. Dolphin reference screenshots for chosen scenes, compared automatically with a tolerance. The `npctrace`/`gxdump`/`evtdump` tools documented per use case | One command runs the map sweep in under an hour. Any chapter start is reachable by switches |
+| 7.2 Map sweep clean | All 334 maps, plus the storybook `stg` maps through their own entry path | Every map loads, runs N frames and is left again with no fault, at its normal story value and at one later value |
+| 7.3 Story sweep, chapter by chapter | Prologue and Rogueport; ch. 1 (Petal Meadows, Hooktail Castle); ch. 2 (Boggly Woods, Great Tree); ch. 3 (Glitz Pit); ch. 4 (Twilight Town, Creepy Steeple); ch. 5 (Keelhaul Key, Pirate's Grotto); ch. 6 (Excess Express, Poshley Heights); ch. 7 (Fahr Outpost, the Moon, X-Naut Fortress); ch. 8 (Palace of Shadow) and the ending and credits; the Peach and Bowser interludes between chapters, including Bowser's side-scrolling stages | Each chapter played from its story jump to its end in Azahar with no crash, softlock or obvious visual fault, and its key scenes match Dolphin |
+| 7.4 Battle coverage | Every action command (`src/battle/sac/`), every partner and Mario move, special moves, stage hazards and audience events, every boss | A battle test list (one save per boss and per move set) passes; each action command is checked once for timing against Dolphin |
+| 7.5 Effects | Every effect (`src/effect/`, 77 files, plus 103 N64-style ones in `src/effect/n64/`) and every screen-copy, indirect-texture or z-texture scene. PICA-impossible ones get an equivalent registered as a per-game GX override (portability rule, section 1) | Each effect is seen at least once and compared with Dolphin; each equivalent is listed with a screenshot pair |
+| 7.6 Side content | Pit of 100 Trials, the Trouble Center, the Pianta Parlor games, the quiz shows, cooking, shops and badges, the ship/plane/paper/tube/boat transformations | Each one is entered and completed once |
+| 7.7 Systems | Save and load in every slot (copy and delete too), game over and continue, soft reset (B+X+Start) and the Select menu's Return to title, every pause-menu tab, mail and journal, options | All of it works in Azahar, and a save made on the 3DS loads after a restart |
+| 7.8 Regions | JP (G8MJ01) and PAL (G8MP01) disc images through the converter; PAL at 50 and 60 Hz and in all its languages | Boot, the title, a new game and the 7.2 map sweep pass for each region |
+| 7.9 Packaging | The CIA install path (title ID `000400000FD88600`, product code `KTR-N-TTYD`, ExHeader checked against a retail title), first-boot conversion messages, the HOME Menu banner and icon, the 3dsx fallback (FCRAM, no QTM) | The CIA installs, boots and uninstalls cleanly on Azahar and on the console; the 3dsx path still works |
+
+The phase is done when 7.2 to 7.8 are all done. That is: the whole game completed once in Azahar, in story order, from a new file to the credits, with saves along the way.
 
 **No hardware tests happen before phase 8** (decision, 2026-11-21). Until then:
 

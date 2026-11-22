@@ -18,6 +18,16 @@ byte-identical DOL, so its symbols are valid for the retail disc too.
   --addr 0xADDR:SIZE     read raw memory
   --break FUNC           after --frames, run to the next call of FUNC
 
+The GameCube debug DOL (configure.py --gcdebug; docs/PORT_3DS_TEST_INFRA.md):
+
+  --gcdebug              boot build/gcdebug/<version>/ (its DOL and RELs, copied
+                         into an extracted disc in build/gcdebug-disc/, made
+                         once with dolphin-tool) with its own symbols
+  --switches TEXT        the test switches, written to gcdbg_switches through
+                         the GDB stub before the game runs
+  --read-log             read the test log buffer (gcdbg_log) at the end into
+                         the JSON's "log" and build/dolphin-last/gcdbg_log.txt
+
 Results are printed as hex and, with --json, written as
 {"frame": N, "reads": {label: {"addr": A, "hex": "..."}}}.
 Exit status: 0 ok, 1 failure, 2 usage or setup error.
@@ -51,6 +61,34 @@ def parse_size(text):
     return int(text, 0)
 
 
+def prepare_gcdebug_disc(version, iso):
+    """The debug DOL needs its own RELs (the disc's are relocated against the retail DOL's addresses), so it boots
+    from an extracted disc (build/gcdebug-disc/, made from the image once) with sys/main.dol and files/rel/ replaced
+    by the debug build's. Returns the main.dol path to boot."""
+    disc = REPO / "build" / "gcdebug-disc"
+    out = REPO / "build" / "gcdebug" / version
+    dol = out / "MarioSt.dol"
+    if not dol.is_file():
+        die(f"{dol} not found; build it (python3 configure.py --version {version} --gcdebug && "
+            "ninja -f build_gcdebug.ninja)", 2)
+    if not (disc / "sys" / "boot.bin").is_file():
+        disc.mkdir(parents=True, exist_ok=True)
+        print(f"run_dolphin: extracting {iso} to {disc.relative_to(REPO)}/ (once)")
+        r = subprocess.run(["dolphin-tool", "extract", "-i", str(iso), "-o", str(disc), "-q"])
+        if r.returncode != 0:
+            die("dolphin-tool extract failed", 2)
+    shutil.copyfile(dol, disc / "sys" / "main.dol")
+    rels = 0
+    for rel in (disc / "files" / "rel").glob("*.rel"):
+        built = out / rel.stem / f"{rel.stem}.rel"
+        if not built.is_file():
+            die(f"{built} not found (the debug build makes every REL)", 2)
+        shutil.copyfile(built, rel)
+        rels += 1
+    print(f"run_dolphin: debug DOL and {rels} RELs in {disc.relative_to(REPO)}/")
+    return disc / "sys" / "main.dol"
+
+
 def main():
     ap = argparse.ArgumentParser(description="Run TTYD in headless Dolphin and read memory by symbol.")
     ap.add_argument("--version", default="G8ME01")
@@ -65,9 +103,21 @@ def main():
     ap.add_argument("--json", type=Path)
     ap.add_argument("--port", type=int, default=55555)
     ap.add_argument("--timeout", type=float, default=300.0)
+    ap.add_argument("--gcdebug", action="store_true", help="boot the debug DOL (configure.py --gcdebug)")
+    ap.add_argument("--switches", help="test switches for the debug DOL")
+    ap.add_argument("--read-log", action="store_true", help="read the debug DOL's test log at the end")
+    ap.add_argument("--profile", type=Path, help="Dolphin user folder (default build/dolphin-profile)")
     args = ap.parse_args()
+    global PROFILE
+    if args.profile:
+        PROFILE = args.profile.resolve()
+    if (args.switches is not None or args.read_log) and not args.gcdebug:
+        die("--switches and --read-log need --gcdebug", 2)
 
     elf = args.elf or REPO / "build" / args.version / "MarioSt.elf"
+    if args.gcdebug:
+        elf = args.elf or REPO / "build" / "gcdebug" / args.version / "MarioSt.elf"
+        args.dol = prepare_gcdebug_disc(args.version, args.iso)
     if not elf.is_file():
         die(f"{elf} not found; build the decomp first (python configure.py --version {args.version} && ninja)", 2)
     if not args.iso.is_file():
@@ -84,7 +134,9 @@ def main():
            "-C", "Dolphin.Core.EmulationSpeed=0",
            "-C", "Dolphin.Interface.ConfirmStop=False",
            "-C", "Dolphin.Analytics.PermissionAsked=True"]
-    if args.dol:
+    if args.gcdebug:
+        cmd += ["-e", str(args.dol.resolve())]  # sys/main.dol of an extracted disc: Dolphin boots the folder
+    elif args.dol:
         cmd += ["-C", f"Dolphin.Core.DefaultISO={args.iso.resolve()}", "-e", str(args.dol.resolve())]
     else:
         cmd += ["-e", str(args.iso.resolve())]
@@ -97,6 +149,11 @@ def main():
     try:
         rsp = RSP("127.0.0.1", args.port, connect_timeout=30.0, timeout=args.timeout)
         rsp.stop_reason()
+        if args.switches is not None:
+            text = args.switches.encode() + b"\0"
+            if len(text) > syms["gcdbg_switches"].size:
+                die("--switches is longer than gcdbg_switches", 2)
+            rsp.write(syms["gcdbg_switches"].addr, text)
 
         if args.frames > 0:
             bp = syms["marioStMain"].addr
@@ -134,6 +191,14 @@ def main():
         for spec in args.addr:
             addr, _, size = spec.partition(":")
             record(addr, int(addr, 0), parse_size(size or "4"))
+        if args.read_log:
+            n = struct.unpack(">I", rsp.read(syms["gcdbg_log_len"].addr, 4))[0]
+            lost = struct.unpack(">I", rsp.read(syms["gcdbg_log_lost"].addr, 4))[0]
+            text = rsp.read(syms["gcdbg_log"].addr, n).decode("latin-1") if n else ""
+            result["log"] = text
+            result["log_lost"] = lost
+            (LAST / "gcdbg_log.txt").write_text(text)
+            print(f"gcdbg_log: {n} bytes, {text.count(chr(10))} lines, {lost} lines lost (buffer full)")
     except RSPError as e:
         die(str(e))
     finally:

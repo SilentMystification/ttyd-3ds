@@ -47,7 +47,7 @@ static int32_t read_now(uint64_t offset, void* buf, uint32_t size) {
 /* Cores 0 and 2 never touch the card: their reads wait for the io thread on core 1 (this blocks
  * the caller, which is the game's own synchronous read by design). Boot-time reads before the
  * thread exists, and reads from core 1, run in place. */
-static int on_io_core(void) { return s_thread == NULL || svcGetProcessorID() == 1; }
+static int on_io_core(void) { return s_thread == NULL || plat_sd_core() == 1; }
 
 typedef struct {
     LightEvent ev;
@@ -65,7 +65,7 @@ int32_t plat_disc_read(uint64_t offset, void* buf, uint32_t size) {
         return -1;
     }
     if (on_io_core()) {
-        plat_sd_note_disc((int)svcGetProcessorID(), size);
+        plat_sd_note_disc(plat_sd_core(), size);
         return read_now(offset, buf, size);
     }
     Wait w;
@@ -107,7 +107,7 @@ int plat_disc_read_async(uint64_t offset, void* buf, uint32_t size, PlatDiscDone
         LightLock_Unlock(&s_queue_lock);
         return -1;
     }
-    s_queue[s_head % QUEUE] = (Request){offset, buf, size, done, ctx, (int)svcGetProcessorID()};
+    s_queue[s_head % QUEUE] = (Request){offset, buf, size, done, ctx, plat_sd_core()};
     s_head++;
     LightLock_Unlock(&s_queue_lock);
     LightEvent_Signal(&s_queue_event);

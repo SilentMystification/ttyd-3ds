@@ -66,15 +66,43 @@ if [ "$project" = "." ]; then
     fi
 fi
 
+# Machine-wide limit on concurrent builds (BUILD_MAX, default 2): one flock'd slot file per build, held on fd 9
+# until this script ends (the OS drops the lock if it dies). Each build runs ninja with BUILD_JOBS cores.
+build_max=${BUILD_MAX:-2}
+build_jobs=${BUILD_JOBS:-8}
+lockdir="${XDG_CACHE_HOME:-$HOME/.cache}/ttyd3ds"
+mkdir -p "$lockdir"
+told=
+while :; do
+    i=0
+    got=
+    while [ "$i" -lt "$build_max" ]; do
+        exec 9>"$lockdir/build-slot-$i"
+        if flock -n 9; then
+            got=1
+            break
+        fi
+        exec 9>&-
+        i=$((i + 1))
+    done
+    [ -n "$got" ] && break
+    if [ -z "$told" ]; then
+        echo "build.sh: waiting for a free build slot ($build_max in use)"
+        told=1
+    fi
+    sleep 5
+done
+
 mkdir -p "$repo/$out"
 # shellcheck disable=SC2086
 docker run --rm $gitmount \
     --user "$(id -u):$(id -g)" \
     -e HOME=/tmp \
+    -e "BUILD_JOBS=$build_jobs" \
     -v "$repo:/work" \
     -w /work \
     "$tag" \
-    sh -c 's=$1; o=$2; shift 2; cmake -S "$s" -B "$o" -G Ninja -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/3DS.cmake "$@" >/dev/null && cmake --build "$o"' \
+    sh -c 's=$1; o=$2; shift 2; cmake -S "$s" -B "$o" -G Ninja -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/3DS.cmake "$@" >/dev/null && cmake --build "$o" -j "$BUILD_JOBS"' \
     sh "$src" "$out" "$@"
 
 # Archive the game's ELF by build string, so tools/port3ds/crash_report.py can

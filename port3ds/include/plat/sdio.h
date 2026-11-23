@@ -52,6 +52,9 @@ void plat_sd_flush(void);
  * malloc'd block with a NUL after the n bytes, or NULL if the file is absent. */
 void* plat_sd_read_file(const char* path, size_t* n);
 
+/* The core the calling thread was created for (as sdstats sees it); the syscall's answer for threads made elsewhere. */
+int plat_sd_core(void);
+
 /* plat/disc.c: a disc read ran for a request from `req_core`. */
 void plat_sd_note_disc(int req_core, uint32_t bytes);
 

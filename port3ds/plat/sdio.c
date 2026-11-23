@@ -34,7 +34,7 @@ typedef struct {
     LightEvent* done; /* sync requests */
 } Req;
 
-static Req s_queue[QUEUE];
+static Req* s_queue; /* heap: the executable image must stay under 16 MB (boot.c), and had 14 KB to spare */
 static uint32_t s_head, s_tail;
 static uint32_t s_qbytes, s_qmax;
 static LightLock s_lock;
@@ -54,13 +54,73 @@ static const char* s_viol_what;
 static void* s_viol_pc;
 static int s_viol_core = -1;
 
+/* ---- Which core a thread runs on ----
+ * svcGetProcessorID is right on hardware but returns garbage in Azahar, so the core each thread was
+ * created for is recorded (linker --wrap of threadCreate) and preferred; threads made elsewhere (the
+ * main thread, libctru's own) fall back to the syscall. */
+
+typedef struct {
+    Thread t;
+    int core;
+} ThreadCore;
+#define THREAD_TAB 64
+static ThreadCore s_tab[THREAD_TAB];
+static uint32_t s_tab_n;
+
+typedef struct {
+    ThreadFunc entry;
+    void* arg;
+    int core;
+} Tramp;
+
+Thread __real_threadCreate(ThreadFunc entrypoint, void* arg, size_t stack_size, int prio, int affinity, bool detached);
+
+static void tramp_entry(void* p) {
+    Tramp t = *(Tramp*)p;
+    free(p);
+    uint32_t i = __atomic_fetch_add(&s_tab_n, 1, __ATOMIC_RELAXED) % THREAD_TAB;
+    s_tab[i].core = t.core;
+    __atomic_store_n(&s_tab[i].t, threadGetCurrent(), __ATOMIC_RELEASE);
+    t.entry(t.arg);
+}
+
+Thread __wrap_threadCreate(ThreadFunc entrypoint, void* arg, size_t stack_size, int prio, int affinity, bool detached) {
+    Tramp* t = affinity >= 0 && affinity <= 3 ? malloc(sizeof(*t)) : NULL;
+    if (t == NULL) {
+        return __real_threadCreate(entrypoint, arg, stack_size, prio, affinity, detached);
+    }
+    t->entry = entrypoint;
+    t->arg = arg;
+    t->core = affinity;
+    Thread th = __real_threadCreate(tramp_entry, t, stack_size, prio, affinity, detached);
+    if (th == NULL) {
+        free(t);
+    }
+    return th;
+}
+
+int plat_sd_core(void) {
+    Thread me = threadGetCurrent();
+    if (me != NULL) {
+        uint32_t n = __atomic_load_n(&s_tab_n, __ATOMIC_ACQUIRE);
+        uint32_t cnt = n < THREAD_TAB ? n : THREAD_TAB;
+        for (uint32_t k = 0; k < cnt; k++) { /* newest first: an address can be reused */
+            uint32_t i = (n - 1 - k) % THREAD_TAB;
+            if (__atomic_load_n(&s_tab[i].t, __ATOMIC_ACQUIRE) == me) {
+                return s_tab[i].core;
+            }
+        }
+    }
+    return (int)svcGetProcessorID() & 3;
+}
+
 /* ---- Direct-call watch (linker --wrap) ---- */
 
 static void note_direct(const char* what, void* pc) {
     if (s_thread != NULL && threadGetCurrent() == s_thread) {
         return;
     }
-    int core = (int)svcGetProcessorID() & 3;
+    int core = plat_sd_core();
     if (!__atomic_load_n(&s_boot_done, __ATOMIC_ACQUIRE)) {
         if (core != 1) {
             __atomic_fetch_add(&s_boot_direct[core], 1, __ATOMIC_RELAXED);
@@ -350,6 +410,11 @@ int plat_sd_start(void) {
     LightLock_Init(&s_lock);
     LightEvent_Init(&s_event, RESET_ONESHOT);
     s_stats_every = plat_switch_int("sdstats", 0);
+    s_queue = calloc(QUEUE, sizeof(Req));
+    if (s_queue == NULL) {
+        PLOG_E("sd: no memory for the queue; SD writes stay on the calling thread");
+        return -1;
+    }
     /* Core 1 only: the SD card's file service lives there, so a write on core 0 or 2 would
      * take time from the game or render thread. No fallback to another core. */
     s_thread = threadCreate(worker, NULL, 32 * 1024, 0x3E, 1, false);
@@ -384,7 +449,7 @@ static int post(const Req* r) {
         svcSleepThread(1000000);
     }
     s_queue[s_head % QUEUE] = *r;
-    s_queue[s_head % QUEUE].core = (uint8_t)svcGetProcessorID();
+    s_queue[s_head % QUEUE].core = (uint8_t)plat_sd_core();
     s_head++;
     s_qbytes += add;
     uint32_t depth = s_head - s_tail;

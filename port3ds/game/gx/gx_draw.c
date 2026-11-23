@@ -86,6 +86,7 @@ int gx_bbox_active;
 int gx_opt_statever = 0, gx_opt_fogcache = 1, gx_opt_unlit = 1;
 
 static void out_alloc(void); /* s_out, below */
+static void gx_bbx_init(void); /* switch gxbbox, below */
 
 void gx_opts_init(void) {
     out_alloc();
@@ -95,6 +96,7 @@ void gx_opts_init(void) {
     gx_opt_unlit = plat_switch_int("gxunlit", 1) != 0;
     gx_vsh_imm_on = plat_switch_int("gxvshimm", 1) != 0;
     gx_opt_vshbbox = plat_switch_int("gxvshbbox", 1);
+    gx_bbx_init();
     gx_opt_vshlit = plat_switch_int("gxvshlit", 1) != 0;
     gx_opt_vshtg = plat_switch_int("gxvshtg", 1) != 0;
     PLOG_I("gx: statever %d fogcache %d unlit %d", gx_opt_statever, gx_opt_fogcache, gx_opt_unlit);
@@ -665,6 +667,386 @@ static void box_add(u16* box, const Out* o) {
     if (y > box[3]) box[3] = (u16)y;
 }
 
+/* ---- Switch gxbbox: the box of a cached list on the shader path (PORT_3DS_60FPS.md, bounding box) ----
+ * exact (default): every vertex through xf_position, as above.
+ * cache: the list's box is kept with its cache entry beside the position matrix, projection, viewport and EFB
+ *   size it was made under (the entry's own checks cover the list and array contents); the same inputs give
+ *   the same box, so a repeat costs a compare.
+ * hull: the list's vertices pruned once to a superset of its model-space convex hull vertices (Akl-Toussaint:
+ *   a vertex strictly inside a tetrahedron of extreme vertices is not a hull vertex); the screen box of a
+ *   convex set lies at its vertices while every vertex is in front of the eye (w > 0), so the box of the kept
+ *   vertices is the box of all of them. Any kept vertex behind the eye: exact.
+ * corners: the 8 corners of the model-space AABB, a box that can only be larger (for measurement only).
+ * gxbbox_verify=1: the exact box is made beside it and compared at each read (the gxthreadstats bbox line). */
+enum { BBX_EXACT, BBX_CACHE, BBX_HULL, BBX_CORNERS };
+static int s_bbx_mode, s_bbx_verify;
+void** gx_bbx_hint; /* set before gx_draw_vsh: the cache entry's box record */
+static u16 s_bx_ref[4]; /* gxbbox_verify: the exact box since the clear */
+static int s_bx_ref_on;
+static struct {
+    u32 draws[8], verts[8]; /* lists: exact, cache hit, cache miss, hull, hull fallback, corners, corners fallback;
+                             * immediate-mode draws (always exact) */
+    u32 list_verts_hull;    /* the lists' vertices on the hull path (the ratio's denominator) */
+    u32 reads, mism, shrunk, grow_max, win_reads;
+    u32 tot[8];
+    u32 cpu_draws, cpu_verts; /* armed draws on the CPU path (their box costs nothing extra) */
+    u64 extra_area;
+    u32 hulls, hull_in, hull_out;
+    u64 t, t_build;
+} s_bx;
+enum { BX_EXACT, BX_HIT, BX_MISS, BX_HULL, BX_HULL_FB, BX_CORN, BX_CORN_FB, BX_IMM };
+
+typedef struct {
+    f32 key[25];  /* position matrix, projection, viewport, EFB size the box was made under */
+    u16 box[4];
+    u8 key_ok, one_mtx, hull_done, pad;
+    u32 nhull, nall;
+    u32* hull;    /* vertex indices */
+    f32 lo[3], hi[3];
+} GxBbx;
+
+void gx_bbx_free(void* p) {
+    GxBbx* b = p;
+    if (b != NULL) {
+        free(b->hull);
+        free(b);
+    }
+}
+
+static void bbx_key(f32* k, u32 pn) {
+    memcpy(k, gx.pos_mtx[pn % GX_POS_MTX_COUNT], 12 * sizeof(f32));
+    memcpy(k + 12, gx.proj, 7 * sizeof(f32));
+    memcpy(k + 19, gx.vp, 4 * sizeof(f32));
+    k[23] = gx.efb_w;
+    k[24] = gx.efb_h;
+}
+
+static void bbx_exact(u16* box, const GxVertex* v, const GxDlcDraw* d, u32 nd, u32* nv) {
+    Out o;
+    f32 p[3];
+    for (u32 i = 0; i < nd; i++) {
+        for (u32 j = d[i].first; j < d[i].first + d[i].count; j++) {
+            xf_position(&v[j], &o, p);
+            if (o.front) {
+                box_add(box, &o);
+            }
+        }
+        *nv += d[i].count;
+    }
+}
+
+static f32 orient(const f32* a, const f32* b, const f32* c, const f32* p) {
+    f32 ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+    f32 vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+    f32 wx = p[0] - a[0], wy = p[1] - a[1], wz = p[2] - a[2];
+    return ux * (vy * wz - vz * wy) - uy * (vx * wz - vz * wx) + uz * (vx * wy - vy * wx);
+}
+
+/* p strictly inside tetrahedron t (with a margin of 1/1000 of its volume per face) */
+static int in_tet(const f32* const* t, f32 vol, const f32* p) {
+    f32 m = vol * 1e-3f;
+    for (int f = 0; f < 4; f++) {
+        const f32* q[4] = {t[0], t[1], t[2], t[3]};
+        q[f] = p;
+        f32 s = orient(q[0], q[1], q[2], q[3]);
+        if (vol > 0 ? s <= m : s >= m) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* The AABB and the hull candidates of a list's vertices (once per cache entry). */
+static void bbx_build(GxBbx* b, const GxVertex* v, const GxDlcDraw* d, u32 nd) {
+    u64 t0 = plat_ticks();
+    b->hull_done = 1;
+    b->one_mtx = 1;
+    u32 n = 0;
+    for (int k = 0; k < 3; k++) {
+        b->lo[k] = 1e30f;
+        b->hi[k] = -1e30f;
+    }
+    u8 pn = nd ? v[d[0].first].pnmtx : 0;
+    for (u32 i = 0; i < nd; i++) {
+        for (u32 j = d[i].first; j < d[i].first + d[i].count; j++) {
+            if (v[j].pnmtx != pn) {
+                b->one_mtx = 0;
+            }
+            for (int k = 0; k < 3; k++) {
+                if (v[j].pos[k] < b->lo[k]) b->lo[k] = v[j].pos[k];
+                if (v[j].pos[k] > b->hi[k]) b->hi[k] = v[j].pos[k];
+            }
+        }
+        n += d[i].count;
+    }
+    b->nall = n;
+    if (s_bbx_mode != BBX_HULL || !b->one_mtx || n == 0) {
+        s_bx.t_build += plat_ticks() - t0;
+        return;
+    }
+    /* extreme vertices in the 26 directions of a cube's faces, edges and corners */
+    static const s8 dir[26][3] = {
+        {1, 0, 0},  {-1, 0, 0}, {0, 1, 0},   {0, -1, 0}, {0, 0, 1},  {0, 0, -1}, {1, 1, 0},   {1, -1, 0},  {-1, 1, 0},
+        {-1, -1, 0}, {1, 0, 1}, {1, 0, -1},  {-1, 0, 1}, {-1, 0, -1}, {0, 1, 1}, {0, 1, -1},  {0, -1, 1},  {0, -1, -1},
+        {1, 1, 1},  {1, 1, -1}, {1, -1, 1},  {1, -1, -1}, {-1, 1, 1}, {-1, 1, -1}, {-1, -1, 1}, {-1, -1, -1}};
+    u32 ext[26];
+    f32 best[26];
+    for (int k = 0; k < 26; k++) {
+        best[k] = -1e30f;
+        ext[k] = d[0].first;
+    }
+    for (u32 i = 0; i < nd; i++) {
+        for (u32 j = d[i].first; j < d[i].first + d[i].count; j++) {
+            const f32* p = v[j].pos;
+            for (int k = 0; k < 26; k++) {
+                f32 s = dir[k][0] * p[0] + dir[k][1] * p[1] + dir[k][2] * p[2];
+                if (s > best[k]) {
+                    best[k] = s;
+                    ext[k] = j;
+                }
+            }
+        }
+    }
+    f32 c[3] = {0, 0, 0};
+    for (int k = 0; k < 26; k++) {
+        for (int a = 0; a < 3; a++) {
+            c[a] += v[ext[k]].pos[a] * (1.0f / 26);
+        }
+    }
+    /* the 48 triangles of the direction sphere (per octant: axis, axis + one more, corner), each a
+     * tetrahedron with the centroid; all of them lie inside the hull of the extreme vertices */
+    const f32* tet[48][4];
+    f32 vol[48];
+    int nt = 0;
+    for (int o = 0; o < 8; o++) {
+        int sg[3] = {o & 1 ? -1 : 1, o & 2 ? -1 : 1, o & 4 ? -1 : 1};
+        int corner = -1;
+        for (int k = 18; k < 26; k++) {
+            if (dir[k][0] == sg[0] && dir[k][1] == sg[1] && dir[k][2] == sg[2]) corner = k;
+        }
+        for (int a = 0; a < 3; a++) {
+            for (int bb = 0; bb < 3; bb++) {
+                if (a == bb) continue;
+                s8 ax[3] = {0, 0, 0}, ed[3] = {0, 0, 0};
+                ax[a] = (s8)sg[a];
+                ed[a] = (s8)sg[a];
+                ed[bb] = (s8)sg[bb];
+                int ka = -1, ke = -1;
+                for (int k = 0; k < 18; k++) {
+                    if (!memcmp(dir[k], ax, 3)) ka = k;
+                    if (!memcmp(dir[k], ed, 3)) ke = k;
+                }
+                tet[nt][0] = c;
+                tet[nt][1] = v[ext[ka]].pos;
+                tet[nt][2] = v[ext[ke]].pos;
+                tet[nt][3] = v[ext[corner]].pos;
+                vol[nt] = orient(tet[nt][0], tet[nt][1], tet[nt][2], tet[nt][3]);
+                if (vol[nt] != 0.0f) nt++;
+            }
+        }
+    }
+    b->hull = malloc(n * sizeof(u32));
+    if (b->hull == NULL) {
+        b->hull_done = 2; /* exact */
+        s_bx.t_build += plat_ticks() - t0;
+        return;
+    }
+    u32 m = 0;
+    for (u32 i = 0; i < nd; i++) {
+        for (u32 j = d[i].first; j < d[i].first + d[i].count; j++) {
+            int inside = 0;
+            for (int t = 0; t < nt && !inside; t++) {
+                inside = in_tet(tet[t], vol[t], v[j].pos);
+            }
+            if (!inside) {
+                b->hull[m++] = j;
+            }
+        }
+    }
+    b->nhull = m;
+    s_bx.hulls++;
+    s_bx.hull_in += n;
+    s_bx.hull_out += m;
+    s_bx.t_build += plat_ticks() - t0;
+}
+
+/* The box of a cached list on the shader path, in mode gxbbox; 0: the caller makes it exactly. */
+static int bbx_list(void** slot, const GxVertex* v, const GxDlcDraw* d, u32 nd) {
+    if (s_bbx_mode == BBX_EXACT || slot == NULL || nd == 0) {
+        return 0;
+    }
+    GxBbx* b = *slot;
+    if (b == NULL) {
+        b = calloc(1, sizeof(GxBbx));
+        if (b == NULL) {
+            return 0;
+        }
+        *slot = b;
+    }
+    if (!b->hull_done) {
+        bbx_build(b, v, d, nd);
+    }
+    if (!b->one_mtx) {
+        return 0;
+    }
+    u32 pn = v[d[0].first].pnmtx;
+    u64 t0 = plat_ticks();
+    u32 nv = 0;
+    int path;
+    if (s_bbx_mode == BBX_CACHE) {
+        f32 k[25];
+        bbx_key(k, pn);
+        if (b->key_ok && memcmp(k, b->key, sizeof(k)) == 0) {
+            path = BX_HIT;
+        } else {
+            b->box[0] = b->box[1] = 1023;
+            b->box[2] = b->box[3] = 0;
+            bbx_exact(b->box, v, d, nd, &nv);
+            memcpy(b->key, k, sizeof(k));
+            b->key_ok = 1;
+            path = BX_MISS;
+        }
+        if (b->box[0] < gx.bbox[0]) gx.bbox[0] = b->box[0];
+        if (b->box[1] < gx.bbox[1]) gx.bbox[1] = b->box[1];
+        if (b->box[2] > gx.bbox[2]) gx.bbox[2] = b->box[2];
+        if (b->box[3] > gx.bbox[3]) gx.bbox[3] = b->box[3];
+    } else {
+        u16 box[4] = {1023, 1023, 0, 0};
+        Out o;
+        f32 p[3];
+        int behind = 0;
+        if (s_bbx_mode == BBX_HULL && b->hull_done == 1) {
+            for (u32 i = 0; i < b->nhull && !behind; i++) {
+                xf_position(&v[b->hull[i]], &o, p);
+                behind = !o.front;
+                box_add(box, &o);
+            }
+            nv = b->nhull;
+            path = BX_HULL;
+            s_bx.list_verts_hull += b->nall;
+        } else if (s_bbx_mode == BBX_CORNERS) {
+            GxVertex c = v[d[0].first];
+            for (int k = 0; k < 8 && !behind; k++) {
+                c.pos[0] = k & 1 ? b->hi[0] : b->lo[0];
+                c.pos[1] = k & 2 ? b->hi[1] : b->lo[1];
+                c.pos[2] = k & 4 ? b->hi[2] : b->lo[2];
+                xf_position(&c, &o, p);
+                behind = !o.front;
+                box_add(box, &o);
+            }
+            nv = 8;
+            path = BX_CORN;
+        } else {
+            behind = 1;
+            path = BX_HULL;
+        }
+        if (behind) {
+            box[0] = box[1] = 1023;
+            box[2] = box[3] = 0;
+            nv = 0;
+            bbx_exact(box, v, d, nd, &nv);
+            path = path == BX_HULL ? BX_HULL_FB : BX_CORN_FB;
+        }
+        if (box[0] < gx.bbox[0]) gx.bbox[0] = box[0];
+        if (box[1] < gx.bbox[1]) gx.bbox[1] = box[1];
+        if (box[2] > gx.bbox[2]) gx.bbox[2] = box[2];
+        if (box[3] > gx.bbox[3]) gx.bbox[3] = box[3];
+    }
+    s_bx.t += plat_ticks() - t0;
+    s_bx.draws[path]++;
+    s_bx.verts[path] += nv;
+    if (s_bx_ref_on) {
+        u32 dummy = 0;
+        bbx_exact(s_bx_ref, v, d, nd, &dummy);
+    }
+    return 1;
+}
+
+static void gx_bbx_init(void) {
+    char m[16] = "";
+    plat_switch_value("gxbbox", m, sizeof(m));
+    s_bbx_mode = !strcmp(m, "cache")     ? BBX_CACHE
+                 : !strcmp(m, "hull")    ? BBX_HULL
+                 : !strcmp(m, "corners") ? BBX_CORNERS
+                                         : BBX_EXACT;
+    s_bbx_verify = plat_switch_int("gxbbox_verify", 0) != 0;
+    if (s_bbx_mode != BBX_EXACT || s_bbx_verify) {
+        PLOG_I("gxbbox %s%s", m, s_bbx_verify ? ", verify" : "");
+    }
+}
+
+static u32 box_area(const u16* b) {
+    return b[2] < b[0] || b[3] < b[1] ? 0 : (u32)(b[2] - b[0] + 1) * (b[3] - b[1] + 1);
+}
+
+/* gxbbox_verify: the box against the exact one, at a read */
+static void bbx_compare(void) {
+    s_bx.reads++;
+    if (memcmp(s_bx_ref, gx.bbox, sizeof(s_bx_ref)) == 0) {
+        return;
+    }
+    s_bx.mism++;
+    s32 out = 0, in = 0;
+    s32 g[4] = {s_bx_ref[0] - gx.bbox[0], s_bx_ref[1] - gx.bbox[1], gx.bbox[2] - s_bx_ref[2], gx.bbox[3] - s_bx_ref[3]};
+    for (int k = 0; k < 4; k++) {
+        if (g[k] > out) out = g[k];
+        if (-g[k] > in) in = -g[k];
+    }
+    if (in > 0) {
+        s_bx.shrunk++; /* smaller than the exact box: wrong */
+        if (s_bx.shrunk <= 8) {
+            PLOG_W("gxbbox verify: box %u,%u %u,%u smaller than the exact %u,%u %u,%u", gx.bbox[0], gx.bbox[1],
+                   gx.bbox[2], gx.bbox[3], s_bx_ref[0], s_bx_ref[1], s_bx_ref[2], s_bx_ref[3]);
+        }
+    }
+    if ((u32)out > s_bx.grow_max) {
+        s_bx.grow_max = (u32)out;
+    }
+    u32 a = box_area(gx.bbox), r = box_area(s_bx_ref);
+    s_bx.extra_area += a > r ? a - r : 0;
+}
+
+/* The gxthreadstats bbox line (game thread; the counters are the translator's, read without a lock: a stat).
+ * Per frame: reads, armed lists and their vertices, the box's time; totals: paths, hull builds, verify. */
+void gx_bbox_stats_log(u32 frames) {
+    u32 armed = 0, nv = 0;
+    for (int k = 0; k < 8; k++) {
+        armed += s_bx.draws[k];
+        nv += s_bx.verts[k];
+    }
+    if (frames == 0 || (armed == 0 && s_bx.win_reads == 0 && s_bx.cpu_draws == 0)) {
+        return;
+    }
+    static const char* mode[4] = {"exact", "cache", "hull", "corners"};
+    u32 f = frames;
+    for (int k = 0; k < 8; k++) {
+        s_bx.tot[k] += s_bx.draws[k];
+    }
+    PLOG_I("gxthread   bbox %s: per frame %lu.%02lu reads; shader path %lu.%02lu armed draws, %lu verts, %lu us; "
+           "CPU path %lu.%02lu armed draws, %lu verts",
+           mode[s_bbx_mode], (unsigned long)(s_bx.win_reads / f), (unsigned long)(s_bx.win_reads * 100 / f % 100),
+           (unsigned long)(armed / f), (unsigned long)(armed * 100 / f % 100), (unsigned long)(nv / f),
+           (unsigned long)(s_bx.t * 1000000u / PLAT_TICKS_PER_SEC / f), (unsigned long)(s_bx.cpu_draws / f),
+           (unsigned long)(s_bx.cpu_draws * 100 / f % 100), (unsigned long)(s_bx.cpu_verts / f));
+    PLOG_I("gxthread   bbox (total): lists exact %lu, cache hit %lu miss %lu, hull %lu fallback %lu, corners %lu "
+           "fallback %lu; immediate %lu | hull kept %lu of %lu verts (%lu lists, %lu us)",
+           (unsigned long)s_bx.tot[BX_EXACT], (unsigned long)s_bx.tot[BX_HIT], (unsigned long)s_bx.tot[BX_MISS],
+           (unsigned long)s_bx.tot[BX_HULL], (unsigned long)s_bx.tot[BX_HULL_FB], (unsigned long)s_bx.tot[BX_CORN],
+           (unsigned long)s_bx.tot[BX_CORN_FB], (unsigned long)s_bx.tot[BX_IMM], (unsigned long)s_bx.hull_out,
+           (unsigned long)s_bx.hull_in, (unsigned long)s_bx.hulls,
+           (unsigned long)(s_bx.t_build * 1000000u / PLAT_TICKS_PER_SEC));
+    if (s_bbx_verify) {
+        PLOG_I("gxthread   bbox verify (total): reads %lu, mismatches %lu, smaller %lu, grow max %lu px, extra area %lu px",
+               (unsigned long)s_bx.reads, (unsigned long)s_bx.mism, (unsigned long)s_bx.shrunk,
+               (unsigned long)s_bx.grow_max, (unsigned long)s_bx.extra_area);
+    }
+    memset(s_bx.draws, 0, sizeof(s_bx.draws));
+    memset(s_bx.verts, 0, sizeof(s_bx.verts));
+    s_bx.t = 0;
+    s_bx.win_reads = 0;
+    s_bx.cpu_draws = s_bx.cpu_verts = 0;
+}
+
 /* Switch gxvshbbox (default 1 since eki_00's row was found to be texel ties, accepted 2026-11-23). 1: a draw made while the bounding box is armed takes the shader path like any
  * other, and the box gets the window positions of its vertices from xf_position on the CPU (the arithmetic
  * transform() uses, so the box is the same); GXReadBoundingBox disarms it (every TTYD read follows its own
@@ -684,11 +1066,17 @@ void gx_bbox_clear(void) {
     gx_bbox_active = 1;
     memcpy(s_bref, gx.bbox, sizeof(s_bref));
     s_bref_on = gx_opt_vshbbox == 2;
+    memcpy(s_bx_ref, gx.bbox, sizeof(s_bx_ref));
+    s_bx_ref_on = s_bbx_verify;
 }
 
 void gx_bbox_read(u16* out) {
     memcpy(out, gx.bbox, sizeof(gx.bbox));
     s_bbox_reads++;
+    s_bx.win_reads++;
+    if (s_bx_ref_on) {
+        bbx_compare();
+    }
     if (s_bref_on && memcmp(s_bref, gx.bbox, sizeof(s_bref)) != 0) {
         if (s_bbox_mism++ < 8) {
             PLOG_W("gxvshbbox verify: box %u,%u %u,%u, the CPU path's %u,%u %u,%u", gx.bbox[0], gx.bbox[1], gx.bbox[2],
@@ -711,6 +1099,9 @@ static void bbox_add(const Out* o) {
     }
     if (gx_bbox_active) {
         box_add(gx.bbox, o);
+        if (s_bx_ref_on) {
+            box_add(s_bx_ref, o);
+        }
     }
     if (s_bref_on) {
         box_add(s_bref, o);
@@ -729,6 +1120,9 @@ static void bbox_shader_draw(const GxVertex* v, u32 n) {
         xf_position(&v[i], &o, p);
         if (gx_bbox_active && o.front) {
             box_add(gx.bbox, &o);
+            if (s_bx_ref_on) {
+                box_add(s_bx_ref, &o);
+            }
         }
         if (s_bref_on) {
             transform(&v[i], &o);
@@ -1114,7 +1508,15 @@ static int draw_vsh_imm(u8 prim, const GxVertex* v, u32 n, const void* ident, u3
     if (!gx_vsh_route(v[0].pnmtx, why, ident, ident_n, n, imm)) {
         return 0;
     }
-    bbox_shader_draw(v, n);
+    if (gx_bbox_active) {
+        u64 t0 = plat_ticks();
+        bbox_shader_draw(v, n);
+        s_bx.t += plat_ticks() - t0;
+        s_bx.draws[BX_IMM]++;
+        s_bx.verts[BX_IMM] += n;
+    } else {
+        bbox_shader_draw(v, n);
+    }
     if (gx.cull == GX_CULL_ALL) {
         return 1;
     }
@@ -1139,6 +1541,7 @@ int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nb
                 const GxDlcDraw* d, u32 nd) {
     ensure_state();
     if (empty_target()) {
+        gx_bbx_hint = NULL;
         return 1; /* the CPU path would draw nothing either */
     }
     vsh_state();
@@ -1147,11 +1550,20 @@ int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nb
         why |= GXV_R_BBOX; /* GXReadBoundingBox needs the window positions on the CPU */
     }
     if (!gx_vsh_route(gx.cur_pnmtx, why, list, nbytes, nverts, 0)) {
+        gx_bbx_hint = NULL;
         return 0;
     }
+    void** bbx = gx_bbx_hint;
+    gx_bbx_hint = NULL;
     if (gx_bbox_active || s_bref_on) {
-        for (u32 i = 0; i < nd; i++) { /* the vertices replay() would transform, in its order */
-            bbox_shader_draw(v + d[i].first, d[i].count);
+        if (s_bref_on || !gx_bbox_active || !bbx_list(bbx, v, d, nd)) {
+            u64 t0 = plat_ticks();
+            for (u32 i = 0; i < nd; i++) { /* the vertices replay() would transform, in its order */
+                bbox_shader_draw(v + d[i].first, d[i].count);
+                s_bx.verts[BX_EXACT] += d[i].count;
+            }
+            s_bx.draws[BX_EXACT]++;
+            s_bx.t += plat_ticks() - t0;
         }
     }
     if (gx.cull == GX_CULL_ALL) {
@@ -1221,6 +1633,10 @@ routed:
     for (u32 i = 0; i < n; i++) {
         transform(&v[i], &s_out[i]);
         bbox_add(&s_out[i]);
+    }
+    if (gx_bbox_active) {
+        s_bx.cpu_draws++; /* the box came with the CPU transform */
+        s_bx.cpu_verts += n;
     }
     if (gx_perf_on > 0) {
         u64 t2 = plat_ticks();

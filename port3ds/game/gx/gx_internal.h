@@ -366,6 +366,9 @@ extern int gx_opt_vshtg;   /* switch gxvshtg */
 void gx_bbox_clear(void);
 void gx_bbox_read(u16* out);
 void gx_bbox_counts(u32* reads, u32* mism);
+extern void** gx_bbx_hint;     /* set before gx_draw_vsh: the cache entry's box record (switch gxbbox) */
+void gx_bbx_free(void* p);
+void gx_bbox_stats_log(u32 frames); /* the gxthreadstats bbox line */
 /* Decodes a GameCube-format texture to RGBA8 (row-major). */
 void gx_tex_decode_rgba8(const u8* src, u32 w, u32 h, u32 fmt, const u16* tlut, u32 tlut_fmt, u8* out);
 

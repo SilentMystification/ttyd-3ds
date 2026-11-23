@@ -177,6 +177,35 @@ Render thread (tid 9), busy 36% (gor_01) and 21% (battle) of the stops: waiting 
 
 Not a target: the game's own frame pacing (6.).
 
+### Future lever, measured: the bounding box (`gxbbox`, 2026-11-23)
+
+TTYD reads `GXReadBoundingBox` in four places: NPCs drawn into an offscreen buffer (`npcdrv.c`), the paper pose (`animdrv.c`), the scissor action command (`sac_scissor.c`) and the unused E3 sequence. Every read follows its own `GXClearBoundingBox`, and the port disarms the box at the read. While the box is armed, a draw on the shader path gets its box from `xf_position` on the CPU (`gxvshbbox=1`). A CPU-path draw gets the box from the transform it does anyway.
+
+`gxbbox=exact|cache|hull|corners` (default `exact`) applies to cached lists drawn by the shader while the box is armed:
+- `cache`: keeps the list's box with its cache entry, together with the position matrix, projection, viewport and EFB size it was made under.
+- `hull`: keeps the list's vertices pruned once to a superset of their model-space convex hull. A vertex strictly inside a tetrahedron of the 26-direction extreme vertices is pruned (Akl-Toussaint). The box is exact while every kept vertex is in front of the eye; otherwise the path falls back to exact.
+- `corners`: uses the 8 model-space AABB corners. This box can only be larger, so the mode is for measurement only.
+
+`gxbbox_verify=1` makes the exact box beside the chosen one and compares them at each read. `gxthreadstats=N` prints three `gxthread   bbox` lines:
+- per frame: reads, armed draws and vertices on each path, and the box's time;
+- totals for each path, plus the hull builds;
+- the verify result.
+
+Short runs (`fastboot`, warp at frame 595, about 300 frames after it; the battle to frame 1141):
+
+| Scene | Reads per frame | Armed draws per frame, shader path | Armed draws per frame, CPU path | Box time |
+|---|---|---|---|---|
+| gor_01, story 30 | 0 | 0 | 0 | 0 |
+| gor_00 (crowd), story 30 | 0 | 0 | 0 | 0 |
+| eki_00, story 30 | 0.76 | 0 | 5.4 (21 vertices) | 0 us (the CPU transform makes it) |
+| las_00 | 0 | 0 | 0 | 0 |
+| battle (gon_02, `btlauto=perfect`) | 0 | 0 | 0 | 0 |
+| pause menu (gor_01) | 0 | 0 | 0 | 0 |
+
+In eki_00 under each of `cache`, `hull` and `corners`, `gxbbox_verify=1` showed 46 reads and 0 mismatches, and no cached list took any of the three paths. Cache hit rate, hull vertex ratio and corner growth therefore have no sample in these scenes.
+
+**Verdict: the box is not a lever.** The boxed draws are a few skinned NPC parts per frame, and they are on the CPU path. The default stays `exact`. The 967 armed draws per 60 frames reported for eki_00 in round 3 came from `gxvshbbox=2`: its reference box stays armed after the read, so that mode counted every later draw. With the box disarmed at the read, the real count is about 5 draws per frame. Revisit only if a scene shows shader-path armed draws on the first `gxthread   bbox` line; the switches are there for that.
+
 ## Step 2: hardware baseline (owner session, through `ctr-devkit`)
 
 Rosalina profiles plus `gxthreadstats`, `gxstats`, `stereostats` and the counters above, in the same scenes, for `gxthread=0` and `gxthread=2`. Plus a CPU and memory microbenchmark run on both Azahar and the console, to calibrate Azahar's ratios. This is the only way to know how far we are from 16.7 ms.

@@ -95,6 +95,7 @@ typedef struct {
     u32 blob_bytes;
     GxVshStream* vsh; /* gxvsh: the vertices as a PICA stream (linear memory), or NULL */
     u32 vsh_reason;   /* why there is none (GXV_R_*) */
+    void* bbx;        /* gxbbox: the list's box record (gx_draw.c), or NULL */
 } DlcEntry;
 
 static DlcEntry* s_e; /* DLC_ENTRIES, heap (gx_bigmem.h) */
@@ -148,6 +149,8 @@ static void free_blob(DlcEntry* e) {
         gx_vsh_stream_free(e->vsh);
         e->vsh = NULL;
     }
+    gx_bbx_free(e->bbx);
+    e->bbx = NULL;
 }
 
 static u32 bucket_of(const void* list, u32 n) {
@@ -480,6 +483,7 @@ int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
             if (gx_vsh_on) {
                 /* the pass group decides: the shader draws the stream, or the CPU replays as before */
                 gx_vsh_rec_hint = &e->vsh_rec;
+                gx_bbx_hint = &e->bbx;
                 if (gx_draw_vsh(e->vsh, e->vsh_reason, e->list, e->nbytes, e->nverts, e_verts(e), e_draws(e), e->ndraws)) {
                     if (gx_perf_on > 0) {
                         gx_perf.dl_verts += e->nverts;

@@ -794,7 +794,9 @@ def acquire_slot(wait_s):
         try:
             import run_azahar
             if hasattr(run_azahar, "acquire_slot"):
-                run_azahar.acquire_slot(kind="session")  # a session is never reaped
+                # a session is never reaped; --slot-wait bounds the wait
+                if not run_azahar.acquire_slot(kind="session", wait_s=wait_s):
+                    return None
                 global SLOT_INDEX
                 SLOT_INDEX = run_azahar._slot_index
                 return run_azahar._slot_fd

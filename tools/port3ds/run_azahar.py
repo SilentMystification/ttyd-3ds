@@ -120,6 +120,16 @@ _usage["t0"] = time.monotonic()
 atexit.register(_log_usage)
 
 
+HEARTBEAT = re.compile(r"\bhb \d+\b")  # the game's progress line (heartbeat= switch)
+BOOT_STALL = 60.0  # until the first heartbeat (the boot, the disc open) a run may be quiet this long
+
+
+def stall_limit(stall, text):
+    """Seconds without progress that fail a run: --stall once the game has sent a heartbeat, else at least
+    BOOT_STALL (the boot screens write little before the first heartbeat)."""
+    return stall if HEARTBEAT.search(text) else max(stall, BOOT_STALL)
+
+
 DEVUPDATE_BASE = 5050  # the console's devupdate port; a slot's run gets DEVUPDATE_BASE + 10 + slot index
 _slot_index = None
 _slot_path = None
@@ -137,18 +147,19 @@ def set_slot_info(**fields):
         emu_usage.write_slot_info(_slot_fd, _slot_info)
 
 
-def acquire_slot(kind="run"):
+def acquire_slot(kind="run", wait_s=None):
     """Machine-wide limit on Azahar instances: one flock'd slot file per instance, held until this
     process ends (the OS drops the lock if it dies). AZAHAR_MAX (default 3) is the number of slots.
     A busy slot whose run is past its limit (or whose owner is gone, or whose game log is quiet) is reaped:
     its emulator is stopped and the slot is taken (see emu_usage.reap_slot). kind "session" (devupdate's
-    azahar-session) is never reaped."""
+    azahar-session) is never reaped. Returns True once the slot is taken; with wait_s, False after that many seconds."""
     global _slot_fd, _slot_index, _slot_path, _slot_info
     n = int(os.environ.get("AZAHAR_MAX", "3"))
     run = os.environ.get("XDG_RUNTIME_DIR")
     d = Path(run) / "ttyd-azahar" if run and os.access(run, os.W_OK) else Path(f"/tmp/ttyd-azahar-{os.getuid()}")
     d.mkdir(parents=True, exist_ok=True)
     told = False
+    end = None if wait_s is None else time.monotonic() + wait_s
     while True:
         used = 0
         for i in range(n):
@@ -161,12 +172,14 @@ def acquire_slot(kind="run"):
                               "hint": "azahar", "limit": None, "log": None, "worktree": str(REPO), "switches": ""}
                 emu_usage.write_slot_info(fd, _slot_info)
                 _usage["slot"] = time.monotonic()
-                return
+                return True
             except OSError:
                 os.close(fd)
                 used += 1
                 if emu_usage.reap_slot(path, "azahar", i, emu_usage.record, print):
                     time.sleep(1)  # the killed emulator's owner lets go of the slot as it exits
+        if end is not None and time.monotonic() > end:
+            return False
         if not told:
             print(f"run_azahar: waiting for a free Azahar slot ({used} in use)", flush=True)
             told = True
@@ -399,6 +412,9 @@ def main():
     if args.frames is not None:
         sw = [w for w in sw if not w.startswith("framemark=")] + [f"framemark={args.frames}"]
     # Each slot has its own devupdate port, so one agent's push cannot reach another agent's instance.
+    # The game's heartbeat ("hb F" every 120 frames) is progress through the boot screens, where the log is quiet.
+    if "noheartbeat" not in sw and not any(w.startswith("heartbeat=") for w in sw):
+        sw.append("heartbeat=120")
     if "nodevupdate" not in sw and not any(w.startswith("devupdateport=") for w in sw):
         sw.append(f"devupdateport={devupdate_port(_slot_index)}")
         print(f"run_azahar: devupdate port {devupdate_port(_slot_index)} (slot {_slot_index})", flush=True)
@@ -454,8 +470,9 @@ def main():
                 verdict, reason = True, f"matched {args.until!r}"
             elif proc.poll() is not None:
                 verdict, reason = (until is None), f"Azahar exited (status {proc.returncode})"
-            elif args.stall and now - last_growth > args.stall:
-                verdict, reason = False, f"stall: no log growth for {args.stall:.0f}s"
+            elif args.stall and now - last_growth > stall_limit(args.stall, text):
+                verdict, reason = False, (f"stall: no heartbeat or log growth for "
+                                          f"{stall_limit(args.stall, text):.0f}s")
             elif now - start > args.timeout:
                 verdict, reason = False, f"timeout after {args.timeout:.0f}s"
     finally:

@@ -494,6 +494,9 @@ static void script_frame(void) {
 static int s_warped;
 
 static void warp_new_game(int story, int party) {
+    if (tst_storyjump_apply()) {
+        return; /* storyjump=: the story point's own set-up (test_mode.c) */
+    }
     psndStopAllFadeOut();
     psndSFXAllOff();
     stg0_00_init();
@@ -511,6 +514,8 @@ static void warp_switch(void) {
     static char map[16], bero[16];
     if (state < 0) {
         char v[40];
+        const char* sj_map;
+        const char* sj_bero;
         state = 0;
         if (tst_sw_value("map", v, sizeof(v)) && v[0] != '\0') {
             char* comma = strchr(v, ',');
@@ -522,6 +527,12 @@ static void warp_switch(void) {
             }
             strncpy(map, v, 15);
             map[15] = '\0';
+            state = 1;
+        } else if (tst_storyjump_target(&sj_map, &sj_bero)) { /* storyjump= alone: the point's map */
+            strncpy(map, sj_map, 15);
+            map[15] = '\0';
+            strncpy(bero, sj_bero, 15);
+            bero[15] = '\0';
             state = 1;
         }
     }
@@ -589,7 +600,9 @@ static void frame_hooks(void) {
     s_hook_time = OSGetTime();
     if (stop < 0) {
         stop = tst_sw_int("stopframe", 0);
-        tst_log("gcdbg: switches \"%s\"", gcdbg_switches);
+        /* at most 400 characters: tst_log formats into 512 bytes on the stack (vsprintf, no bound), and the
+         * switches hold up to 1023 (a long padscript overran the line and crashed the game) */
+        tst_log("gcdbg: switches \"%.400s%s\"", gcdbg_switches, strlen(gcdbg_switches) > 400 ? "..." : "");
     }
     s_frames++;
     tst_frame(s_frames);

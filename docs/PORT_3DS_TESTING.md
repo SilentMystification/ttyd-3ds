@@ -84,6 +84,7 @@ Switches the game reads (space-separated words in `--switches`):
 | Switch | Effect |
 |---|---|
 | `map=<map>[,<bero>]` | Starts a new game on that map once the title or the opening is up (`fastboot` presses A through the warning screen). `story=N` sets the story so far (GSW 0, default 0); `party=N` the partner (default 1, Goombella; 0 none) |
+| `storyjump=<id>[.n]` | Starts a new game at a story point of the game's own story table (`src/event.c`, the rows the E3 scenario select uses): `<id>` is the row's text id (`STG1_16`; `.n` picks the n-th row with that id, from 0: `STG9_00.2`), or `<stage>.<row>`. As the scenario select does: the story flags cleared, GSW 0 set to the previous row's id (so the row's own scene plays next), every set-up function up to the row run (key items, flags), the row's partner and follower. Unlike the select it keeps the items the set-ups give. Without `map=` it warps to the row's map and entrance. Both builds (`port3ds/game/test_mode.c`). Replaces `story=`/`party=` |
 | `fastboot` | Presses A every 6 game frames (held 2) through the boot sequences before the title (the warning screen, the logos), and stops for good once the title sequence starts or a `map=`/`sweep=` warp begins. `run_azahar.py`, `run_hw.py` and `map_sweep.py` add it by default; pass `nofastboot` (`--nofastboot` for `map_sweep.py`) to leave it out |
 | `crashtest=<kind>` | Tests the crash handler (`crashwait=N` seconds on the crash screen, default 300; `crashframe=N` game frame of the test, default 60; `wdog=N` hang limit in seconds). Kinds, run on the game thread at that frame: `segv` (write to address 0), `fatal` (`plat_fatal`), `break` (`svcBreak(USERBREAK_PANIC)`), `hang` (endless loop, the watchdog fires after `wdog`). At boot: `self` (the handler called with made-up registers), `null` (write to `crashaddr`, default 4), `undef`, `boot-fatal`. Azahar never raises a fault for an unmapped access, so `segv` only logs `UnmappedAccess` there; use `self` for the exception path |
 | `padscript=<steps>` | Scripted input: comma-separated `KEYS*frames` steps (`a*3`, `wait*40`, `start*3`, `a+b*2`). Frames are game frames (one per VIWaitForRetrace). Keys: `a b x y l r zl zr start select up down left right`; `cl cr cu cd` push the circle pad (the game's control stick) fully left, right, up or down. TTYD's menus and dialogs move with the stick, not the D-pad, so use `cu`/`cd` there. Up to 2048 steps |
@@ -182,6 +183,65 @@ tools/port3ds/map_sweep.py --maps gor_01,hei_00
 
 A battle that a map starts counts as a pass (`ok (battle on entry)`): the game raises `BATTLE_SEQ_END`, the flag `battleMain` sets itself, so `seq_battleMain` exits through `battle_exit` to the field and the sweep goes on (victory screens skipped).
 It writes the map list to the SD card, runs the game with `sweep=N`, and reads the log. A run that ends early (a crash, a stall, a battle a map starts on entry) is followed by one that resumes after the map being visited. Results are in `build/map-sweep/`: `results.json` (each map `ok`, `timeout`, `stopped`, `crash`, `stall` or `not in map table`: the storybook's `stg` maps, which the map change cannot enter), `shots/<map>.png`, and for a crash or stall the whole game log in `logs/<map>.txt`. Maps are entered without an entrance, so Mario starts where the map's default position puts him (often below the ground, from where the game's fall recovery lifts him).
+
+### Story sweep
+
+```sh
+tools/port3ds/story_sweep.py                          # every point of tools/port3ds/story_points.json
+tools/port3ds/story_sweep.py --only ch1_,ending_      # names starting with these
+tools/port3ds/story_sweep.py --report                 # re-classify and rebuild table.md and index.html
+```
+
+A full input replay of the story does not exist, so the story is checked at checkpoints.
+
+- **Points.** `tools/port3ds/story_points.json` holds 76 rows of the game's own story table (`src/event.c`, `stageN_evt`, the rows the E3 scenario select applies): 4 to 9 per chapter, covering the chapter cards, key cutscenes, boss arenas (with `btlauto=perfect`), every Peach and Bowser interlude chosen, three of Bowser's side-scrolling stages (`kpa_02`, `kpa_03`, `kpa_05`), the epilogue and the credits. Each names its `storyjump` id, the map and entrance, the GSW 0 value the jump sets (`story`) and the partner. `padscript: "mash"` presses A every 30 frames from frame 640, through dialogue. By default a point runs 1100 game frames (the warp is at frame 604), with shots at 700, 850, 1000 and 1080. The chapter cards and the ending run 1600 frames. A point's `frames` and `shots` override these. Keep runs short (the owner's rule); `--only` picks points.
+- **Runs.** Both builds get the same switches: `storyjump=<id> determ gwdump=20 shotat=<frames> padscript=...`. The port runs in Azahar (`run_azahar.py`, slot-locked; own profile `build/story-azahar/`) and the debug DOL in Dolphin (`run_dolphin.py --gcdebug --shots`, own profile, port 55677), one of each at a time, side by side. If the Dolphin shot run fails, Dolphin runs again without shots (the Null backend), so the state is still compared.
+- **Comparison.** The `gwdump` records are compared as `gw_diff.py` does (all fields but the raw `gw` hash), and each shot pair (port EFB and GameCube XFB, both 608x480 at the same game frame) as `gallery.py` does (mean of the largest channel's absolute difference, 0-255).
+- **Results** (`build/story-sweep/`: `results.json`, `table.md`, `index.html` with the pairs and amplified differences, `logs/<point>/`), worst first:
+  - `port-crash`;
+  - `hang` (the port stopped before the last frame);
+  - `gc-failed` (the Dolphin run failed);
+  - `state-diverged` (first frame and fields; `rng/event only` when only `rng`, `evtgw` or `gwv` differ, the sound-timing difference of backlog lane F 5);
+  - `image-diff` (a shot before the divergence over `--image-threshold`, default 12);
+  - `ok`.
+  Edge filtering and the XFB's YUV 4:2:2 round trip alone give a mean of about 4 to 10 in busy scenes.
+
+#### Story sweep results (2026-11-23)
+
+The run used 1800 frames per point (2400 for the chapter cards and the ending), about 5 hours for the 76 points. Under the owner's short-run rule the defaults in `story_points.json` are now 1100 frames (1600 for the chapter cards and the ending). Shots are in `build/story-sweep/{port,gc,diff}/<point>/fNNNNN.png`.
+
+| Result | Points |
+|---|---|
+| Port crash or hang | **none** |
+| State equal for the whole run (`ok` 32, `image-diff` 8) | 40 |
+| Diverged, first field `rng` only | 22 |
+| Diverged, Mario's position by one float ULP only (`ch2_stg2_00`, `ch2_stg2_25_02`, `ch5_stg5_00`, `ch5_stg5_42`) | 4 |
+| Diverged at frame 680 to 720, Mario's height and `rng` | 8 |
+| Diverged, `gsw` hash (`ch3_stg3_00`, frame 1600, Glitzville chapter card) | 1 |
+| Dolphin failed (`ch5_stg5_10`) | 1 |
+
+The epilogue, the credits (`end_00`) and every Peach and Bowser interlude and Bowser stage in the list run through with state equal or diverging only in `rng`.
+
+Divergences:
+
+- **`rng` only.** The random-number state differs first, at different frames. These are most likely the sound-timing difference of backlog lane F 5 (Dolphin skips silent voices, so sound-driven events and their `rand` calls come at other frames). This was not confirmed per point.
+- **One ULP.** The PowerPC rounds Mario's position one bit differently from the ARM build (fused multiply-add), for example `4139b208` against `4139b207`. This is expected between the two CPUs.
+- **Frames 680 to 720.** These are the `mash` points whose map starts with Mario free to move (`ch6_stg6_39`, `ch6_stg6_48`, `ch7_stg7_26`, `ch8_stg8_01`, `ch8_stg8_15`, `ch8_stg8_15_1`, `ch5_stg5_42`, `ending_stg9_00_12`). The A press at frame 700 makes Mario jump on the GameCube; on the port he jumps one press later. The two runs are equal at frame 700, input included. Open.
+
+Real visual differences (port against GameCube, state equal at the shot):
+
+1. **Map fog is missing or much weaker on the port.** The GameCube darkens and tints distant geometry (and, more weakly, near geometry) toward the map's fog colour; the port draws it unfogged. Seen in `tik_01`, `tik_02`, `tik_05` (scores 22 to 25), `gon_06`, `gon_11` (Hooktail's walls stay bright grey against a dark blue room), `las_26` (Gloomtail), `las_29`, `tik_00` and more mildly elsewhere. It is the same with `gxvsh=0`, so it is not the vertex-shader path. The map code (`mapdrv.c`, `fog_table` from the converted `map.dat`) is shared; the converter swaps `fog_table` with `MapFileFog`. Suspects: the PICA fog LUT's depth mapping (`fog_lut` in `gx_draw.c`, window depth 0..1) against the depth the port writes. Pairs: `prologue_stg0_13_1/f01100`, `ch1_stg1_16/f01100`, `ch8_stg8_04/f01100`, `ch8_stg8_end/f01100`.
+2. **The chapter card's "CHAPTER" letters are dark grey on the port.** On the GameCube they are rainbow-coloured with a white outline. All chapter cards are affected (`sys_01`, score about 17). It is the same with `gxvsh=0`. Pair: `ch1_stg1_00/f01300`.
+3. **Glitz Pit big screen (`tou_03`).** The screen above the ring shows the scene (an EFB copy) on the GameCube; on the port it is black apart from a partial strip. Pairs: `ch3_stg3_06/f00900`, `f01400`.
+4. **Glitz Pit audience (`tou_03`).** The audience sprites are smaller, and in other places, than on the GameCube, while the state (RNG included) is equal through frame 1800. Pair: `ch3_stg3_06/f00900`. Needs a closer look.
+5. **Pirate's Grotto water (`dou_00`).** The water is darker and opaque on the port. On the GameCube it is lighter and translucent, and the submerged barrel shows through it. Pair: `ch5_stg5_19_01/f01100`.
+6. **Area-name banner.** It appears a few frames earlier on the port (its mosaic is on screen at frame 720 in `nok_00`; the GameCube has no banner yet). Pair: `ch1_stg1_01a/f00720`.
+7. **`tik_00` in the epilogue (`ending_stg9_00_12`).** The GameCube frame is softly blurred and fogged; the port's is sharp and bright. The state diverged at frame 680 (a frames 680 to 720 point), so check this again.
+
+Dolphin (tool) issues found by the sweep:
+
+- **Debug DOL stack overflow (fixed).** A long `padscript` overran the 512-byte line of the debug DOL's `tst_log` when the switches were echoed at boot. The game crashed (invalid reads in `OSDumpContext`) and Dolphin died with SIGILL (`prologue_stg0_00`, the first run). The echo is now cut to 400 characters (`gcdebug.c`). The rerun passes.
+- **Dolphin's Vulkan backend crashes (SIGSEGV)** between frames 1400 and 1720 in `ch3_stg3_06` (`tou_03`) and `ch5_stg5_10` (`muj_20`): 3 times out of 3 and 2 out of 2. The same `tou_03` run with the Null backend (no shots) runs through, and its state equals the port's through frame 1800. `story_sweep.py` now repeats a failed shot run without shots, so the state is still compared.
 
 ### Crashes, svcBreak and hangs
 
@@ -367,7 +427,7 @@ Results in Azahar (2026-11-21, CIA):
 |---|---|
 | `tools/port3ds/memcompare.py`: the same structures read from Dolphin, paper-cut and Azahar and compared field by field. GameCube and 3DS layouts come from the 3DS ELF's debug info (the two layouts are identical apart from byte order); paper-cut values come from its own debug info | 1 |
 | `tools/port3ds/golden.py` | 4 |
-| Story sweeps | 6–7 |
+| Story sweep by full input replay (checkpoints done: "Story sweep" above) | 6–7 |
 
 ### Host decode (no console, no emulator)
 

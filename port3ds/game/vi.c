@@ -161,6 +161,9 @@ VIRetraceCallback VISetPostRetraceCallback(VIRetraceCallback callback) {
  * set-up, no partner out, the save flags cleared, the story so far
  * (GSW 0, which map scripts branch on) and one partner joined and out. */
 static void warp_new_game(int story, int party) {
+    if (tst_storyjump_apply()) {
+        return; /* storyjump=: the story point's own set-up (test_mode.c) */
+    }
     /* the file select's new game stops the title's (or the opening's) music
      * and sounds; the warp skips it */
     psndStopAllFadeOut();
@@ -233,6 +236,13 @@ static void warp_switch(void) {
             }
             snprintf(map, sizeof(map), "%.15s", v);
             state = 1;
+        } else {
+            const char *sj_map, *sj_bero;
+            if (tst_storyjump_target(&sj_map, &sj_bero)) { /* storyjump= alone: the point's map */
+                snprintf(map, sizeof(map), "%.15s", sj_map);
+                snprintf(bero, sizeof(bero), "%.15s", sj_bero);
+                state = 1;
+            }
         }
     }
     if (state != 1 || gp == NULL) {

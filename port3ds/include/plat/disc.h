@@ -24,6 +24,11 @@ typedef void (*PlatDiscDone)(void* ctx, int32_t result);
 int plat_disc_read_async(uint64_t offset, void* buf, uint32_t size, PlatDiscDone done, void* ctx);
 /* Reads done since boot and bytes moved (HUD, profiler). */
 void plat_disc_stats(uint32_t* reads, uint64_t* bytes);
+/* Ticks spent inside the SD card reads themselves (not the queueing), and read-ahead cache hits (switch discra). */
+uint64_t plat_disc_sd_ticks(void);
+uint32_t plat_disc_cache_hits(void);
+/* Requests answered by another request's FSFILE_Read (switch discbatch). */
+uint32_t plat_disc_merged(void);
 
 #ifdef __cplusplus
 }

@@ -1,13 +1,12 @@
 {
  "comment": "Story checkpoints for tools/port3ds/story_sweep.py. Each point is a row of the game's own story table (src/event.c, stageN_evt, the table the E3 scenario select uses), applied with the test switch storyjump=<textId>[.n]: story = the GSW 0 value set (the previous row's id), party = the row's partner and follower, map/bero = where it starts (informative; storyjump picks them). padscript 'mash' = A every 30 frames from frame 640. Generated from the table; edit by hand freely.",
  "defaults": {
-  "frames": 1800,
+  "frames": 1100,
   "shots": [
-   720,
-   900,
-   1100,
-   1400,
-   1700
+   700,
+   850,
+   1000,
+   1080
   ],
   "every": 20
  },
@@ -141,14 +140,12 @@
     0
    ],
    "padscript": "mash",
-   "frames": 2400,
+   "frames": 1600,
    "shots": [
     720,
     1000,
     1300,
-    1600,
-    1900,
-    2300
+    1580
    ]
   },
   {
@@ -295,14 +292,12 @@
     10
    ],
    "padscript": "mash",
-   "frames": 2400,
+   "frames": 1600,
    "shots": [
     720,
     1000,
     1300,
-    1600,
-    1900,
-    2300
+    1580
    ]
   },
   {
@@ -434,14 +429,12 @@
     0
    ],
    "padscript": "mash",
-   "frames": 2400,
+   "frames": 1600,
    "shots": [
     720,
     1000,
     1300,
-    1600,
-    1900,
-    2300
+    1580
    ]
   },
   {
@@ -557,14 +550,12 @@
     0
    ],
    "padscript": "mash",
-   "frames": 2400,
+   "frames": 1600,
    "shots": [
     720,
     1000,
     1300,
-    1600,
-    1900,
-    2300
+    1580
    ]
   },
   {
@@ -696,14 +687,12 @@
     0
    ],
    "padscript": "mash",
-   "frames": 2400,
+   "frames": 1600,
    "shots": [
     720,
     1000,
     1300,
-    1600,
-    1900,
-    2300
+    1580
    ]
   },
   {
@@ -834,14 +823,12 @@
     0
    ],
    "padscript": "mash",
-   "frames": 2400,
+   "frames": 1600,
    "shots": [
     720,
     1000,
     1300,
-    1600,
-    1900,
-    2300
+    1580
    ]
   },
   {
@@ -988,14 +975,12 @@
     0
    ],
    "padscript": "mash",
-   "frames": 2400,
+   "frames": 1600,
    "shots": [
     720,
     1000,
     1300,
-    1600,
-    1900,
-    2300
+    1580
    ]
   },
   {
@@ -1110,14 +1095,12 @@
     0
    ],
    "padscript": "mash",
-   "frames": 2400,
+   "frames": 1600,
    "shots": [
     720,
     1000,
     1300,
-    1600,
-    1900,
-    2300
+    1580
    ]
   },
   {
@@ -1251,14 +1234,12 @@
     0
    ],
    "padscript": "mash",
-   "frames": 2400,
+   "frames": 1600,
    "shots": [
     720,
     1000,
     1300,
-    1600,
-    1900,
-    2300
+    1580
    ]
   },
   {
@@ -1276,14 +1257,12 @@
     0
    ],
    "padscript": "mash",
-   "frames": 2400,
+   "frames": 1600,
    "shots": [
     720,
     1000,
     1300,
-    1600,
-    1900,
-    2300
+    1580
    ]
   },
   {
@@ -1301,14 +1280,12 @@
     0
    ],
    "padscript": "mash",
-   "frames": 2400,
+   "frames": 1600,
    "shots": [
     720,
     1000,
     1300,
-    1600,
-    1900,
-    2300
+    1580
    ]
   },
   {
@@ -1326,14 +1303,12 @@
     0
    ],
    "padscript": "mash",
-   "frames": 2400,
+   "frames": 1600,
    "shots": [
     720,
     1000,
     1300,
-    1600,
-    1900,
-    2300
+    1580
    ]
   },
   {
@@ -1351,14 +1326,12 @@
     0
    ],
    "padscript": "mash",
-   "frames": 2400,
+   "frames": 1600,
    "shots": [
     720,
     1000,
     1300,
-    1600,
-    1900,
-    2300
+    1580
    ]
   }
  ]

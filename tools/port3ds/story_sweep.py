@@ -99,6 +99,13 @@ def gc_job(p, sw, frames, shots, every, a):
     ok, reason, text = gallery.run_gc(runner_args(a), sw, frames + every, OUT / "gc" / name, OUT / "logs" / name / "gc")
     with LOCK:
         print(f"story: dolphin {name}: {'ok' if ok else 'FAILED'} {reason}", flush=True)
+    if not ok:
+        # Dolphin's Vulkan backend (needed for the shots) has crashed in some scenes (SIGSEGV, the Glitz Pit arena)
+        # where the Null backend runs through: get the state stream without shots
+        ok, r2, text = gallery.run_gc(runner_args(a), sw, frames + every, None, OUT / "logs" / name / "gc-noshots")
+        reason = f"{reason}; without shots: {'ok' if ok else r2}"
+        with LOCK:
+            print(f"story: dolphin {name} without shots: {'ok' if ok else 'FAILED'} {r2}", flush=True)
     return ok, reason, text
 
 
@@ -211,7 +218,7 @@ def summary_cell(r):
     if res == "state-diverged":
         dv = r["divergence"]
         fields = ",".join(list(dv["fields"])[:4])
-        res += f" f={dv['at']} ({fields}{'; rng' if r.get('rng_only') else ''})"
+        res += f" f={dv['at']} ({fields}{'; rng/event only' if r.get('rng_only') else ''})"
     elif res in ("hang", "port-crash"):
         res += f" ({r['port']['reason'][:60]}; last f={r['port']['last'].get('f')})"
     elif res == "gc-failed":
@@ -273,9 +280,9 @@ def main():
     ap.add_argument("--gc-timeout", type=float, default=1800)
     ap.add_argument("--reuse-gc", action="store_true", help="reuse a Dolphin log made with exactly these switches")
     ap.add_argument("--pixel-threshold", type=int, default=32)
-    ap.add_argument("--image-threshold", type=float, default=6.0,
-                    help="max mean |diff| of the shots before the divergence for an ok (filtering and the YUV round trip "
-                    "give 1-3)")
+    ap.add_argument("--image-threshold", type=float, default=12.0,
+                    help="max mean |diff| of the shots before the divergence for an ok (edge filtering and the XFB's YUV "
+                    "4:2:2 round trip give about 4-8 in busy scenes with nothing wrong)")
     ap.add_argument("--no-dolphin", action="store_true", help="the port only (results then have no comparison)")
     a = ap.parse_args()
 
@@ -288,6 +295,9 @@ def main():
     order = [p["name"] for p in doc["points"]]
     results = load()
     if a.report:
+        for r in results.values():  # thresholds may have changed
+            r["result"] = classify(r, a)
+        save(results)
         report(results, order)
         return 0
     gallery.AZ_PROFILE = REPO / "build" / "story-azahar"

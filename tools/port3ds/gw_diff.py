@@ -27,8 +27,10 @@ Exit status: 0 no difference, 1 a difference (or a run failed), 2 usage error.
 """
 
 import argparse
+import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -90,6 +92,29 @@ def compare(a, b, align, skip, label_a, label_b):
     return 0, None
 
 
+def prepare_card(spec):
+    """Gives both runs the same memory card: the port's sdmc card folder and Dolphin's GCI-folder card for the
+    gcdebug profile are emptied, then get the one GCI file when spec is a path. The file-select screen draws the
+    save data, so a different card changes the text, and with it the RNG calls."""
+    port_dir = REPO / "build" / "azahar-profile" / "data" / "azahar-emu" / "sdmc" / "3ds" / "ttyd" / "card"
+    dol_root = REPO / "build" / "dolphin-profile-gcdebug" / "GC"
+    dol_dir = next(iter(sorted(dol_root.glob("*/Card A"))), dol_root / "USA" / "Card A")
+    src = None if spec == "empty" else Path(spec)
+    if src is not None and not src.is_file():
+        print(f"gw_diff: --card {spec}: no such file")
+        return False
+    for d in (port_dir, dol_dir):
+        d.mkdir(parents=True, exist_ok=True)
+        for f in d.iterdir():
+            if f.is_file():
+                f.unlink()
+        if src is not None:
+            shutil.copyfile(src, d / src.name)
+    state = "empty" if src is None else f"{src.name} sha1 {hashlib.sha1(src.read_bytes()).hexdigest()[:12]}"
+    print(f"gw_diff: card state: {state} (port {port_dir.relative_to(REPO)}, dolphin {dol_dir.relative_to(REPO)})")
+    return True
+
+
 def run_port(args, switches):
     log = REPO / "build" / "gw-diff" / "port"
     cmd = [sys.executable, str(REPO / "tools/port3ds/run_azahar.py"), "--build", str(args.cia),
@@ -141,6 +166,8 @@ def main():
     ap.add_argument("--cia", type=Path, default=REPO / "build/3ds/game/ttyd.cia")
     ap.add_argument("--timeout", type=float, default=900)
     ap.add_argument("--dolphin-port", type=int, default=55571)
+    ap.add_argument("--card", default="empty", metavar="empty|PATH.gci",
+                    help="the memory card both runs start with: no save files (default) or exactly this GCI")
     ap.add_argument("--json", type=Path, help="write the result here")
     args = ap.parse_args()
 
@@ -154,6 +181,8 @@ def main():
         sw = f"{args.switches} determ gwdump={args.every}"
         if args.padscript:
             sw += f" padscript={args.padscript}"
+        if not prepare_card(args.card):
+            return 2
         a = run_port(args, sw)
         b = run_dolphin(args, sw) if a is not None else None
         if a is None or b is None:

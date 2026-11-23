@@ -260,8 +260,8 @@ def slot_bytes(path, i, backup=False):
 def new_file_events(moves=(), create_card=True):
     ev = [(950, "start", 3)]
     if create_card:
-        ev += [(1600, "a", 3), (1900, "a", 3)]  # "Create a Save File now?" Yes; "A Save File has been created."
-        t = 2000
+        ev += [(1600, "a", 3), (2150, "a", 3)]  # "Create a Save File now?" Yes; "A Save File has been created."
+        t = 2250
     else:
         ev += [(1400, "a", 3)]  # "The Save File has been loaded."
         t = 1560
@@ -325,11 +325,15 @@ def save_gw(ctx):
     return f, r
 
 
-SAVE_NEW_PAD = pad(new_file_events() + [(2700 + 100 * i, "a", 3) for i in range(16)] + [(4400, "b+x+start", 60)])
+NEW_T = 2250  # new_file_events' New Game press with a card to create
+# A every 100 frames: the new-file save's messages, then (Mario placed under the block) the jump into the save
+# block, its first-time tutorial, "Save all game progress up to this point?" Yes, "Your progress was saved."
+SAVE_NEW_PAD = pad(new_file_events() + [(NEW_T + 700 + 100 * i, "a", 3) for i in range(16)] +
+                   [(NEW_T + 2400, "b+x+start", 60)])
 
 
 @scenario("save_new", card_out="slot1", until=r"OSResetSystem", timeout=1500,
-          switches="warpingame map=gor_01 story=30 marioat=185,0,-55 marioatwait=60 shots=100 shotfrom=1900",
+          switches="warpingame map=gor_01 story=30 marioat=185,0,-55 marioatwait=60 shots=20 shotfrom=1900",
           pad=SAVE_NEW_PAD,
           doc="fresh card: create the save file, new game in slot 1, warp to gor_01, hit the save block, soft reset")
 def _save_new(ctx):
@@ -398,12 +402,12 @@ slot_scenario(3, ["cr"], "slots123", "slots1234")
 # overwrite this data?" starts on No: up, A), "Data was copied" A; then left to Erase Data, down to file 3, A, the
 # "Erase File 3?" prompt (No first: up, A), "File 3 was erased." A.
 COPY_DELETE_PAD = pad([(950, "start", 3), (1400, "a", 3), (1520, "cd", 3), (1560, "a", 3), (1640, "a", 3),
-                       (1700, "a", 3), (1880, "cu", 3), (1920, "a", 3), (2200, "a", 3), (2300, "cl", 3),
-                       (2340, "a", 3), (2420, "cd", 3), (2480, "a", 3), (2620, "cu", 3), (2660, "a", 3),
-                       (2900, "a", 3)])
+                       (1700, "a", 3), (1880, "cu", 3), (1920, "a", 3), (2300, "a", 3), (2450, "cl", 3),
+                       (2490, "a", 3), (2570, "cd", 3), (2630, "a", 3), (2770, "cu", 3), (2810, "a", 3),
+                       (3150, "a", 3)])
 
 
-@scenario("copy_delete", card_in="slots1234", until=until_frame(3090), timeout=900,
+@scenario("copy_delete", card_in="slots1234", until=until_frame(3360), timeout=900,
           switches="shots=20 shotfrom=1440", pad=COPY_DELETE_PAD,
           doc="file select: copy file 1 onto file 2, erase file 3")
 def _copy_delete(ctx):
@@ -419,7 +423,7 @@ def _copy_delete(ctx):
     ctx.check(slot_bytes(ctx.card, 0) == slot_bytes(before, 0) and slot_bytes(ctx.card, 3) == slot_bytes(before, 3),
               "files 1 and 4 unchanged")
     ctx.check(slot_bytes(before, 1) != slot_bytes(before, 0), "(file 2 differed from file 1 before the copy)")
-    for f, what in ((1460, "the four files"), (2240, "after the copy"), (3000, "after the erase")):
+    for f, what in ((1460, "the four files"), (2400, "after the copy"), (3260, "after the erase")):
         shot = shot_near(ctx, f, 40)
         ctx.check(shot, f"file select shot {what}: {shot.relative_to(OUT) if shot else 'missing'}")
 

@@ -526,11 +526,21 @@ static u32 model_due(const Job* j) {
     return j->post_frame + 1 + (u32)((d - MODEL_POST_EARLY_TICKS) / (s64)tst_retrace_ticks());
 }
 
+/* One log line per create, write and format (tools/port3ds/systems_test.py reads them). */
+static void log_job(const Job* j, s32 r) {
+    static const char* const kind[] = {"mount", "check", "format", "create", "read", "write", "status"};
+    if (j->kind == JOB_CREATE || j->kind == JOB_WRITE || j->kind == JOB_FORMAT) {
+        PLOG_I("card: %s %s offset 0x%lx length 0x%lx result %ld", kind[j->kind], j->kind == JOB_CREATE ? j->name : "",
+               (unsigned long)j->offset, (unsigned long)(j->kind == JOB_CREATE ? j->size : (u32)j->length), (long)r);
+    }
+}
+
 static void card_complete(const Job* j, s32 r, u32 frame_label) {
     if (j->kind == JOB_REMOVE) {
         return;
     }
     stat_done(j, r);
+    log_job(j, r);
     if (tst_rngtrace_wanted()) {
         tst_log("[CARD] job %d done result %d at game frame %u len=%d off=%d", (int)j->kind, (int)r,
                 (unsigned)frame_label, (int)(j->kind == JOB_CREATE ? (s32)j->size : j->length), (int)j->offset);
@@ -622,11 +632,7 @@ static void card_thread(void* arg) {
                 continue;
             }
             stat_done(&j, r);
-            if (j.kind == JOB_CREATE || j.kind == JOB_WRITE || j.kind == JOB_FORMAT) {
-                static const char* const kind[] = {"mount", "check", "format", "create", "read", "write", "status"};
-                PLOG_I("card: %s %s offset 0x%lx length 0x%lx result %ld", kind[j.kind], j.kind == JOB_CREATE ? j.name : "",
-                       (unsigned long)j.offset, (unsigned long)(j.kind == JOB_CREATE ? j.size : (u32)j.length), (long)r);
-            }
+            log_job(&j, r);
             if (tst_rngtrace_wanted()) {
                 tst_log("[CARD] job %d done result %d at game frame %u len=%d off=%d", (int)j.kind, (int)r,
                         (unsigned)tst_cur_frame(), (int)(j.kind == JOB_CREATE ? (s32)j.size : j.length), (int)j.offset);

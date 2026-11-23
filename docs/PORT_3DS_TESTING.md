@@ -385,7 +385,7 @@ tools/port3ds/systems_test.py adhoc --card slots1234 --switches "shots=20" --pad
 ```
 
 - **Profile.** Its own Azahar profile, `build/systems-profile/` (the disc is hard-linked in on first use). Before each run the SD card's `card/` folder is emptied or set to a fixture, and old shots and logs are removed.
-- **Input.** Each scenario is a `padscript` under `determ`, so a run repeats frame for frame (the same scenario gave the same RNG state at the same frame in every run so far). The game also gets `syslog` and `gwdump=30`.
+- **Input.** Each scenario is a `padscript` under `determ`, so a run repeats frame for frame (the same scenario gave the same RNG state at the same frame in every run so far). The game also gets `syslog` and `gwdump=30`. The presses are at fixed game frames, fitted with shots (`adhoc`); a change that moves the game's timing (the `determ` card model's durations moved the file select by about 250 frames) needs them refitted. A press that comes too early, while a message is still printing or a prompt is still opening, is ignored.
 - **Fixtures.** A scenario that passes and leaves a card saves it as `build/systems-test/cards/<name>.gci`; later scenarios start from it (`slot1`, `slots12`, `slots123`, `slots1234`).
 - **Results.** `build/systems-test/<scenario>/`: the game and Azahar logs, the shots as PNG, the card after the run; `results.json` for all.
 - **Checks.** Every scenario fails on a `run_azahar.py` failure (crash, stall, Azahar fault lines) and on `[CRASH]`, `ERROR` or `fatal` lines in the game log.
@@ -412,7 +412,7 @@ Test switches added for these (port only, `port3ds/game/test_systems.c` and `vi.
 
 `card.c` now logs each create, write and format (`card: write offset ... length ... result ...`) and each delete.
 
-Results (Azahar, US build, 2026-11-22): **9 of 9 scenarios pass**, from an empty card, about 27 minutes of runs on a shared machine (57 s to 7 min each, mostly the wait for an Azahar slot and software rendering). Found:
+Results (Azahar, US build, 2026-11-23, with the `determ` card model): **9 of 9 scenarios pass**, from an empty card, 41 minutes on a shared machine (1 to 10 minutes each, mostly the wait for an Azahar slot and software rendering). Found:
 
 - **Mario 5 units off after a load.** The save block save stores Mario's position (`savePlayerPos`, 185, 0, -55 in the GCI) and the map change puts him there (`seq_mapchange.c`), but the first record after the load (9 frames after the map is up) has him at 180, 0, -55. Not yet compared with Dolphin, so it may be the game's own (the partner placed beside him, or the save block's collision); `reset_load` allows 10 units.
 - `test_gci.py selftest` no longer linked: `card.c` calls `tst_rngtrace_wanted`, `tst_cur_frame` and `tst_log`, which its host stubs lacked (fixed in the stubs).

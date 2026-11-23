@@ -805,6 +805,20 @@ void plat_gpu_tex_free(uint32_t handle) {
     LightLock_Unlock(&s_tex_lock);
 }
 
+void plat_gpu_tex_reclaim(void) {
+    plat_gpu_sync();
+    LightLock_Lock(&s_tex_lock);
+    for (u32 i = 1; i < MAX_TEX; i++) {
+        TexSlot* t = &s_tex[i];
+        /* copy targets are released by the render thread (reap_targets) */
+        if (t->pending_free && t->target == NULL) {
+            C3D_TexDelete(&t->tex);
+            memset(t, 0, sizeof(*t));
+        }
+    }
+    LightLock_Unlock(&s_tex_lock);
+}
+
 uint32_t plat_gpu_tex_read(uint32_t handle, void* rgba8, uint32_t width, uint32_t height) {
     plat_gpu_sync();
     if (handle == 0 || handle >= MAX_TEX || !s_tex[handle].live) {

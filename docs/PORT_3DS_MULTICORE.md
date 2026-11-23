@@ -16,10 +16,19 @@ Status: planned 2026-11-22. Measurements so far come from Azahar, which gives sh
 | game (`os_thread.c`) | 0 | All game logic, **plus all GX translation**: display-list parsing, vertex decode, CPU transform and lighting, texture hashing and conversion, TEV compile, recording |
 | render (`plat/gpu.c`) | 2 (`gpucore`) | Replays the record into citro3d |
 | gxtranslate (`game/gx/gx_rec.c`), only with `gxthread=2` | 2, priority 0x2F (below render) | Translates the recorded GX calls |
-| log writer (`plat/log.c`) | 2, falling back to 1 | SD writes |
+| log writer (`plat/log.c`) | 1 only (priority 0x3F), no fallback | `log.txt` writes |
+| sdio (`plat/sdio.c`) | 1 only (priority 0x3E) | Every other SD write and read at run time: options, padrec, shots, wavdump, sweep list |
 | audio (`plat/audio.c`) | 1 | MusyX software mix into one NDSP channel |
 | dvd/io (`plat/disc.c`) | 1 | Disc image reads |
 | arq (`game/ar.c`), card, alarm, vblank, watchdog | 1 | Small or waiting |
+
+#### SD card rule: core 1 only (2026-11-22)
+
+All SD access at run time happens on core 1; cores 0 and 2 never block on the card.
+- **Disc image:** `plat_disc_read` from core 0 or 2 posts to the io thread's queue (core 1) and waits. It blocks the caller, which is the game's own synchronous `DVDRead` by design. Job workers never read the disc.
+- **Log:** the writer thread is on core 1 only, lowest priority. If it cannot be created, the log stays direct (and `sdstats` shows the direct calls).
+- **Everything else** (options save, padrec flushes, test shots, wavdump, sweep list read, padfile load) goes through `plat/sdio.c`: producers copy or give up their buffer and go on; the core 1 worker does the file work. Only boot reads (switches, options load before the first frame, DVDInit, the log's start) and the crash report stay direct.
+- **Watch:** `sdstats=N` counts SD calls made outside the service from cores 0 and 2 after the first frame (linker `--wrap` of fopen, open, opendir, remove, rename, mkdir, unlink, fsync, stat). It must stay 0. `game/card.c` was not moved by this change: its `CARDInit` scan and `CARDDelete` remove run on the game thread and show up there until its owner moves them.
 
 Azahar sampling (`gor_01`, shares of all busy time):
 

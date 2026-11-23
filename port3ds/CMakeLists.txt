@@ -329,7 +329,7 @@ add_executable(ttyd
 add_dependencies(ttyd ttyd_rels)
 # --no-enum-size-warning: the two enum ABIs are mixed on purpose (see above).
 # --wrap=svcBreak: the crash library turns every svcBreak (libctru and citro3d panics too) into a crash report
-target_link_options(ttyd PRIVATE -Wl,--gc-sections -Wl,--wrap=svcBreak -Wl,--no-enum-size-warning
+target_link_options(ttyd PRIVATE -Wl,--gc-sections -Wl,--wrap=svcBreak -Wl,--wrap=threadCreate -Wl,--wrap=fopen -Wl,--wrap=open -Wl,--wrap=opendir -Wl,--wrap=remove -Wl,--wrap=rename -Wl,--wrap=mkdir -Wl,--wrap=unlink -Wl,--wrap=fsync -Wl,--wrap=stat -Wl,--no-enum-size-warning
     -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/ttyd.map)
 target_link_libraries(ttyd PRIVATE ttyd_gx_shader_bin ttyd_sjis_font_bin ctrdk_devupdate ctrdk_crash citro3d ctru z m)
 # The image must end below 0x01000000 (PORT_IS_ADDR, sound-id flag bits): fail the build, not the boot.

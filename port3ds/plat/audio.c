@@ -53,8 +53,9 @@ static int16_t* s_wav;
 static uint32_t s_wav_frames, s_wav_max;
 
 static void wav_write(const char* name, const int16_t* data, uint32_t frames, uint32_t rate) {
-    FILE* f = fopen(name, "wb");
-    if (f != NULL) {
+    /* The file is built in memory and queued to the SD service (core 1's worker): no SD call here. */
+    uint8_t* file = malloc(44 + (size_t)frames * 4);
+    if (file != NULL) {
         uint32_t bytes = frames * 4;
         uint8_t h[44] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'A', 'V', 'E', 'f', 'm', 't', ' ', 16, 0, 0, 0, 1, 0, 2, 0};
         uint32_t riff = 36 + bytes, byte_rate = rate * 4;
@@ -65,9 +66,9 @@ static void wav_write(const char* name, const int16_t* data, uint32_t frames, ui
         h[34] = 16;
         memcpy(h + 36, "data", 4);
         memcpy(h + 40, &bytes, 4);
-        fwrite(h, 1, sizeof(h), f);
-        fwrite(data, 4, frames, f);
-        fclose(f);
+        memcpy(file, h, sizeof(h));
+        memcpy(file + sizeof(h), data, bytes);
+        plat_sd_write_file_own(name, file, sizeof(h) + bytes, 0);
         PLOG_I("audio: wrote %s (%lu frames)", name, (unsigned long)frames);
     }
 }

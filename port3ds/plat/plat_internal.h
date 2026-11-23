@@ -5,6 +5,7 @@
 #include <3ds.h>
 
 #include "plat/plat.h"
+#include "plat/sdio.h"
 
 /* switches.c */
 void plat_switches_load(int argc, char** argv);

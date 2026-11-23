@@ -15,6 +15,8 @@
  *              per game frame, neutral after the last; the file must be in
  *              the extracted disc folder, e.g. padfile=/pad1.tpad for
  *              build/<disc>/files/pad1.tpad (read once, through DVDOpen)
+ *   rngtrace=<from>,<to>  [FRM], [SEQ] and [CARD] lines (test_mode.c); the CARD*Async
+ *              calls are wrapped below to log each job's post and completion
  *   determ, gwdump=N, fx=, battle=, btlauto=   test_mode.h
  *   stopframe=N  calls gcdbg_stop at game frame N (a breakpoint target)
  *
@@ -23,6 +25,7 @@
  * Log lines (tst_log) go to the gcdbg_log buffer, which the same tool reads.
  * C89, for MWCC.
  */
+#include <dolphin/card.h>
 #include <dolphin/dvd.h>
 #include <dolphin/os.h>
 #include <dolphin/pad.h>
@@ -331,6 +334,77 @@ static void padfile_load(void) {
     }
     s_pf_on = 1;
     tst_log("[PAD] padfile %s: %lu frames", path, (unsigned long)s_pf_frames);
+}
+
+/* ---- card jobs: [CARD] lines as the port's card.c logs them (kinds as its JobKind:
+ * 0 mount, 1 check, 2 format, 3 create, 4 read, 5 write, 6 setstatus) ---- */
+
+static CARDCallback s_card_cb[7];
+
+static void card_posted(int kind) {
+    if (tst_rngtrace_wanted()) {
+        tst_log("[CARD] job %d posted at game frame %lu", kind, (unsigned long)tst_cur_frame());
+    }
+}
+
+static void card_done(int kind, s32 chan, s32 result) {
+    CARDCallback cb = s_card_cb[kind];
+    if (tst_rngtrace_wanted()) {
+        tst_log("[CARD] job %d done result %d at game frame %lu", kind, (int)result, (unsigned long)tst_cur_frame());
+    }
+    if (cb != NULL) {
+        cb(chan, result);
+    }
+}
+
+static void card_cb0(s32 chan, s32 result) { card_done(0, chan, result); }
+static void card_cb1(s32 chan, s32 result) { card_done(1, chan, result); }
+static void card_cb2(s32 chan, s32 result) { card_done(2, chan, result); }
+static void card_cb3(s32 chan, s32 result) { card_done(3, chan, result); }
+static void card_cb4(s32 chan, s32 result) { card_done(4, chan, result); }
+static void card_cb5(s32 chan, s32 result) { card_done(5, chan, result); }
+static void card_cb6(s32 chan, s32 result) { card_done(6, chan, result); }
+
+s32 gcdbg_CARDMountAsync(s32 chan, void* workArea, CARDCallback detachCallback, CARDCallback attachCallback) {
+    card_posted(0);
+    s_card_cb[0] = attachCallback;
+    return CARDMountAsync(chan, workArea, detachCallback, card_cb0);
+}
+
+s32 gcdbg_CARDCheckAsync(s32 chan, CARDCallback callback) {
+    card_posted(1);
+    s_card_cb[1] = callback;
+    return CARDCheckAsync(chan, card_cb1);
+}
+
+s32 gcdbg_CARDFormatAsync(s32 chan, CARDCallback callback) {
+    card_posted(2);
+    s_card_cb[2] = callback;
+    return CARDFormatAsync(chan, card_cb2);
+}
+
+s32 gcdbg_CARDCreateAsync(s32 chan, const char* fileName, u32 size, CARDFileInfo* fileInfo, CARDCallback callback) {
+    card_posted(3);
+    s_card_cb[3] = callback;
+    return CARDCreateAsync(chan, fileName, size, fileInfo, card_cb3);
+}
+
+s32 gcdbg_CARDReadAsync(CARDFileInfo* fileInfo, void* buf, s32 length, s32 offset, CARDCallback callback) {
+    card_posted(4);
+    s_card_cb[4] = callback;
+    return CARDReadAsync(fileInfo, buf, length, offset, card_cb4);
+}
+
+s32 gcdbg_CARDWriteAsync(CARDFileInfo* fileInfo, void* buf, s32 length, s32 offset, CARDCallback callback) {
+    card_posted(5);
+    s_card_cb[5] = callback;
+    return CARDWriteAsync(fileInfo, buf, length, offset, card_cb5);
+}
+
+s32 gcdbg_CARDSetStatusAsync(s32 chan, s32 fileNo, CARDStat* stat, CARDCallback callback) {
+    card_posted(6);
+    s_card_cb[6] = callback;
+    return CARDSetStatusAsync(chan, fileNo, stat, card_cb6);
 }
 
 u32 gcdbg_PADRead(PADStatus* status) {

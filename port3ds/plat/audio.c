@@ -125,6 +125,7 @@ static void set_mix(int ch, float l, float r) {
 
 static uint32_t s_fill_pos; /* output frame of the quantum being filled (voice event times) */
 static uint64_t s_busy_ticks; /* system ticks spent in the fill calls and in applying voice events */
+static int s_audio_stats; /* switch audiostats=1: the peak line every 10 s, not only with underruns */
 
 static void fill_block(int16_t* out) {
     /* quantum by quantum, so each quantum's voice calls get its own time */
@@ -149,10 +150,16 @@ static void fill_block(int16_t* out) {
     if (s_frames - since >= (uint64_t)s_rate * 10) {
         /* busy: the share of the time spent filling (the software mix, MusyX's frame, the voices' set-up) */
         static uint64_t busy_before, tick_before;
+        static uint32_t under_before;
         uint64_t now = svcGetSystemTick();
         uint32_t busy = tick_before ? (uint32_t)((s_busy_ticks - busy_before) * 1000 / (now - tick_before)) : 0;
-        PLOG_I("audio: peak %d of 32767 over the last 10 s, %lu underruns, fill busy %lu.%lu%%", peak,
-               (unsigned long)s_underruns, (unsigned long)(busy / 10), (unsigned long)(busy % 10));
+        /* U is this window's underruns; the line prints only when there were some, unless audiostats=1 */
+        uint32_t under = s_underruns - under_before;
+        if (under > 0 || s_audio_stats) {
+            PLOG_I("audio: peak %d of 32767 over the last 10 s, %lu underruns, fill busy %lu.%lu%%", peak,
+                   (unsigned long)under, (unsigned long)(busy / 10), (unsigned long)(busy % 10));
+        }
+        under_before = s_underruns;
         busy_before = s_busy_ticks;
         tick_before = now;
         peak = 0;
@@ -1234,6 +1241,7 @@ int plat_audio_start(uint32_t rate, uint32_t quantum_frames, PlatAudioFill fill)
         s_wav_max = (uint32_t)wav_seconds * rate;
         s_wav = malloc(s_wav_max * 4);
     }
+    s_audio_stats = plat_switch_int("audiostats", 0) != 0;
     s_batch = plat_switch_int("audiobatch", 1);
     if (s_batch < 1) {
         s_batch = 1;

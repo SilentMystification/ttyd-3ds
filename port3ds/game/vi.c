@@ -476,6 +476,25 @@ void port_debug_frame(u32 frame);
 void port_card_frame(u32 frame);
 void plat_memory_log(const char* when);
 
+/* One log line per map change: "map: <from> -> <to> (entrance <bero>)", "-" for the first map. */
+static void map_log_frame(void) {
+    static char from[16];
+    if (gp == NULL || gp->currentMapName[0] == '\0') {
+        return;
+    }
+    char to[16];
+    memcpy(to, gp->currentMapName, sizeof(to));
+    to[sizeof(to) - 1] = '\0';
+    if (strcmp(from, to) == 0) {
+        return;
+    }
+    char bero[17];
+    memcpy(bero, gp->beroEnterName, sizeof(bero) - 1);
+    bero[sizeof(bero) - 1] = '\0';
+    PLOG_I("map: %s -> %s (entrance %s)", from[0] != '\0' ? from : "-", to, bero[0] != '\0' ? bero : "-");
+    memcpy(from, to, sizeof(from));
+}
+
 static void frame_hooks(void) {
     s_frames++;
     /* determ: exactly one retrace of game time per frame */
@@ -496,6 +515,7 @@ static void frame_hooks(void) {
     }
     warp_switch();
     sweep_frame();
+    map_log_frame();
     if (port_lp_active()) {
         int seq = gp != NULL ? seqGetSeq() : SEQ_UNDEFINED;
         int ready = (seq == SEQ_BATTLE && _battleWorkPointer != NULL && gp->inBattle);

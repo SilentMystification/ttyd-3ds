@@ -5,7 +5,8 @@
  *
  * Pages: Controls (GameCube button remap, C-stick source), Display (3D, bottom
  * screen HUD, texture filter), Audio (master volume), Performance (quality: stored only),
- * Language (PAL builds only: stored only).
+ * Language (PAL builds only: stored only), Debug (debug mode: the developer Select
+ * menu on, auto (development builds only) or off).
  *
  * The settings that only other code reads (3D, quality, language) have their
  * getters in include/plat/options.h (opt_get_stereo3d and friends). */
@@ -30,6 +31,7 @@ static const char* const k_onoff_names[] = {"off", "on", NULL};
 static const char* const k_hud_names[] = {"off", "FPS only", "full", NULL};
 static const char* const k_texfilter_names[] = {"game", "linear", "mip", "nearest", NULL};
 static const char* const k_quality_names[] = {"auto", "high", "fast", NULL};
+static const char* const k_debug_names[] = {"auto", "on", "off", NULL}; /* PLAT_OPT_DEBUG_* order */
 #ifdef VERSION_G8MP01
 static const char* const k_lang_names[] = {"English", "Deutsch", "Francais", "Espanol", "Italiano", NULL};
 #endif
@@ -38,8 +40,17 @@ static const char* const k_pages[] = {"Controls", "Display", "Audio", "Performan
 #ifdef VERSION_G8MP01
                                       "Language",
 #endif
-                                      NULL};
-enum { PAGE_CONTROLS, PAGE_DISPLAY, PAGE_AUDIO, PAGE_PERF, PAGE_LANG };
+                                      "Debug", NULL};
+enum {
+    PAGE_CONTROLS,
+    PAGE_DISPLAY,
+    PAGE_AUDIO,
+    PAGE_PERF,
+#ifdef VERSION_G8MP01
+    PAGE_LANG,
+#endif
+    PAGE_DEBUG, /* the last page */
+};
 
 /* Pad button keys, in the order of the pad layer's GC button enum (pad.c). */
 static const char* const k_pad_keys[8] = {"pad_a", "pad_b", "pad_x", "pad_y", "pad_z", "pad_l", "pad_r", "pad_start"};
@@ -71,6 +82,8 @@ static const PlatOptItem k_items[] = {
 #ifdef VERSION_G8MP01
     {PLAT_OPT_KEY_LANGUAGE, "Game language", PLAT_OPT_CHOICE, PAGE_LANG, 0, 0, 0, 0, k_lang_names, NULL},
 #endif
+
+    {PLAT_OPT_KEY_DEBUGMODE, "Debug mode", PLAT_OPT_CHOICE, PAGE_DEBUG, PLAT_OPT_DEBUG_AUTO, 0, 0, 0, k_debug_names, NULL},
 };
 
 static void on_change(const char* key, int32_t value) {

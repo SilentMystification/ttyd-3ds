@@ -42,6 +42,9 @@ const char* plat_get_phase(void);    /* the last plat_set_phase text (what the g
 const char* plat_get_map_name(void); /* the last plat_set_map_name text ("-" before a map) */
 int plat_options_menu_is_open(void);
 
+/* boot.c: 1 for a development build (PORT3DS_VERSION contains "-dev"); the one test for it. */
+int plat_is_dev_build(void);
+
 /* devupdate.c (glue to libs/ctr-devkit/devupdate; switch devupdate) */
 typedef bool (*PlatRecoveryHook)(const char* report, void* user);
 int plat_devupdate_enabled(void);

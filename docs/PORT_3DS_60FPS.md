@@ -31,7 +31,7 @@ A frame that misses on any one of these drops to 30 fps on the retrace wait. Fra
 
 **Every millisecond below is Azahar's** (New 3DS mode, no frame limit, JIT ARM11, faked GPU timing): use them as ratios between builds and between scenes, never as console times. Frames are quantised to whole vblanks (16.7 ms), so a build that saves a few ms shows in `busy`, not always in `frame`.
 
-Method: `gxthreadstats=60` (one tick read per frame), the 7 windows from frame 1141 to 1501 averaged. Scenes: `gor_01` and `gor_00` at story 30, a battle (`gon_02` story 30, `btlauto=perfect`: attacks and effects), `aaa_00` (the opening cutscene), the pause menu (`gor_01`, `padscript=wait*1000,start*3`). Identical output: `determ` with 6 consecutive shots from frame 1200, compared byte for byte (the noise floor under `determ` is zero). Each row is one `run_azahar.py --build <cia> --log 3ds/ttyd/log.txt --switches "<scene> gxthreadstats=60" --until "gxthread \d frame 1501:"` run (one instance at a time); the samples are `run_azahar.py --gdb --gdb-port <own port>` plus `pc_sample.py --port <same> --start-after "gxthread \d frame 1141" --duration 150 --interval 250`. Use a port of your own: with the default 24689, another agent's `pc_sample.py` can attach to your Azahar.
+Method: `gxthreadstats=60` (one tick read per frame), the 7 windows from frame 1141 to 1501 averaged. Scenes: `gor_01` and `gor_00` at story 30, a battle (`gon_02` story 30, `btlauto=perfect`: attacks and effects), `aaa_00` (the opening cutscene), the pause menu (`gor_01`, `padscript=wait*1000,start*3`). Identical output: `determ` with 6 consecutive shots from frame 1200, compared byte for byte (the noise floor under `determ` is zero). Each row is one `run_azahar.py --build <cia> --log 3ds/ttyd/latest.log --switches "<scene> gxthreadstats=60" --until "gxthread \d frame 1501:"` run (one instance at a time); the samples are `run_azahar.py --gdb --gdb-port <own port>` plus `pc_sample.py --port <same> --start-after "gxthread \d frame 1141" --duration 150 --interval 250`. Use a port of your own: with the default 24689, another agent's `pc_sample.py` can attach to your Azahar.
 
 ### 1. Build flags
 
@@ -59,6 +59,26 @@ New CMake options (both off by default): `TTYD_LTO` (LTO over the DOL code, Musy
 Noise: two -O2 builds (before and after the counters below) gave gor_01 70.8 / 70.8 and battle 36.0 / 35.8. The combined build drops gor_01 from 5 to 4 vblanks.
 
 LTO also found type mismatches between translation units that the per-file build cannot see (`-Wlto-type-mismatch`, 14). One is a real ABI bug on the 3DS today, independent of LTO: `partyNrmToAngle` is defined as `f32 partyNrmToAngle(Vec n)` (`party_hit.c`) but `party.c` and `party_move.c` declare and call it as `partyNrmToAngle(Vec* n)`. MWCC passes a struct by reference, so the GameCube is fine; with the ARM hard-float ABI the callee reads the vector from `s0`-`s2` while the caller passes a pointer in `r0`. The others: `marioJumpData` (array vs struct), `cloudGetStatus`/`bomheiGetStatus` (`u8` vs `s32`), `evt_cam_road_reset`, `effCoinFukidashiEntry`, `shadowFlagOn`, `shadowSetCamId`, `iconGetWidthHight`, `iconGetTexObj`, `effSparkEntry`, three `marioWeapon_*` (all in the LTO build log). Also `-Waggressive-loop-optimizations` in `sac_zubastar.c` (a loop to 17 over a 16-entry array, the game's) and the generated `mtx_sdk.c`. **Before LTO becomes the default, fix the declarations** (header prototypes), since LTO may optimise across them.
+
+**Fixed (2026-11-23).** The GameCube build stays 100% (G8ME01: all categories, MusyX 31/31), so every fix that would change MWCC's code is under `TARGET_PORT` and the GameCube keeps its FAKE:
+
+| Mismatch | Fix |
+|---|---|
+| `partyNrmToAngle` | `party.h` prototype `f32 partyNrmToAngle(Vec* n)` and a pointer definition in `party_hit.c`, port only (a pointer definition changes the GameCube code: `party_hit` fell to 97.4%); the GameCube keeps the by-value definition and the callers' local pointer externs |
+| `cloudGetStatus`, `bomheiGetStatus` | `evt_party.c` includes the real headers (`u8`) under `TARGET_PORT`; the GameCube keeps the `s32` externs |
+| `evt_cam_road_reset` | `seq_mapchange.c` includes `evt/evt_cam.h` instead of its `void (s32, s32)` prototype; same GameCube code |
+| `effCoinFukidashiEntry` | `evt_mobj.c`: real prototype in the port, a macro keeps the position-first call order (the GameCube evaluates it in that order) |
+| `effSparkEntry` | `battle_status_effect.c`: the port calls the 4-argument prototype (the two extra arguments were never read) |
+| `shadowSetCamId`, `shadowFlagOn` | prototypes in `shadowdrv.h` under `TARGET_PORT` (`s16`/`u16`); `party.c` keeps its `s32`/`u32` ones on the GameCube |
+| `iconGetTexObj`, `iconGetWidthHight` | `fontmgr.c`, `win_main.c`, `eff_updown.c` include `icondrv.h`; `eff_naniga.c` and `msgdrv.c` call directly (all port only) |
+| `marioJumpData` | `koopa.c` declares `MarioJumpData` and reads `.jump` (port only) |
+| `marioDefaultWeapon_Jump`, `marioWeapon_KururinJump`, `marioDefaultWeapon_Hammer` (the three `marioWeapon_*`) | `battle_seq.c` declares them as `BattleWeapon` (port only) |
+| `sac_zubastar.c` loop to 17 | the 17th "line" is the next member of the work, `capture` (a pointer), whose first word is read as `state`; a pointer is never 5, so that pass does nothing. The port stops at 16 |
+| `mtx_sdk.c` warning | it is `sac_deka.c` `yuka_main`: `prev[r][j - 1]` and `prev[r][j + 1]` run one element past each row, into the neighbouring row, `vel[1][128]` or `u[0][0..2]`, all inside the same `YukaMesh` with the same layout in the port. The port reads them through the mesh's base (`DEKA_PREV`) so the compiler sees them in bounds |
+
+**`partyNrmToAngle` in game.** It is the slope test of `partyGetAppearPos3` (party_move.c; the demo's copy is in party.c): where the partner is put back next to Mario (Goombella, Ms. Mowz, `party_motion.c`, `party_kuribo.c`, `party_chuchu.c`). It tries nine spots 30 units from Mario and skips floors steeper than 60 degrees. With the ARM ABI bug the angle was computed from whatever was in `s0`-`s2` (the normal was never passed), so the test accepted or rejected spots at random: a partner could be placed on a cliff face, or fail all nine spots. Not measured in a run (no cheap trigger found; the owner limited emulator runs to short ones); read from the code and the ABI.
+
+**Result, LTO + `-O3` GX, with the fixes.** No `-Wlto-type-mismatch` and no `-Waggressive-loop-optimizations` in the US, JP and PAL builds. Image ends: US 0x00b7dabc, JP 0x00b67ff8, PAL 0x00c7267c (limit 0x01000000). `determ` shots 1200 to 1205 compared with the `-O2` build of the same source: identical, 6/6 in `gor_01` and 6/6 in the battle (`gon_02 story=30 battle=1 btlauto=perfect`). Short map sweep (story 30, 120 frames): `gor_01`, `gon_02` (a battle on entry), `usu_00`, `pik_00` all ok. Both options are now on by default in `port3ds/CMakeLists.txt` (`release.py` uses the same build).
 
 ### 2. Debug overhead in a normal run
 
@@ -175,6 +195,8 @@ Render thread (tid 9), busy 36% (gor_01) and 21% (battle) of the stops: waiting 
 | 9 | **Render record headroom**: gor_01 uses 409 of 512 KB | (4.) | avoids segments (each now costs a submit, no longer a vblank) | low |
 | 10 | **Debug overhead** | (2.) | < 1-2%: nothing to do | — |
 
+Target 2 is done (`textrust`, PORT_3DS_GX_PERF.md "Texture trust"): hashes per frame 62-189 -> 0 in four steady scenes, game-thread busy -4 to -6% in Azahar, shots identical, `texverify` 0 stale.
+
 Not a target: the game's own frame pacing (6.).
 
 ### Future lever, measured: the bounding box (`gxbbox`, 2026-11-23)
@@ -223,3 +245,12 @@ Rosalina profiles plus `gxthreadstats`, `gxstats`, `stereostats` and the counter
 ## Done when
 
 `fps` HUD at 60 in every scene of the map sweep, the story checkpoints and the battle gallery on the console, with stereo off; and a measured cost for stereo on.
+
+## Future levers kept open (owner, 2026-11-23)
+
+**Bounding box (`GXReadBoundingBox`).** The exact positions-only path is the default. Alternatives stay available behind `gxbbox=` and are measured with `gxbbox_verify=1`:
+- `cache`: exact box reused while the display list, matrix, projection, viewport and arrays are unchanged. Hits only with a still camera and static objects.
+- `hull`: exact box from model-space convex-hull vertices (closed meshes, in front of the near plane); otherwise exact.
+- `corners`: conservative box from the model AABB. Not for play: a larger box can capture neighbouring objects into offscreen effects and raise smart-heap use.
+A fully-GPU box is not possible on the PICA: it has no bounding-box output or occlusion query, and the game reads the box directly after the draw, before the GPU runs it. QTM does not change this (it changes where data lives, not when it is ready).
+

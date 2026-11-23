@@ -1,5 +1,8 @@
 /* TTYD's glue to the ctr-devkit updater (libs/ctr-devkit/devupdate/).
- * Development use only: off unless the switch devupdate is given.
+ * On in development builds (PORT3DS_VERSION contains "-dev") unless the switch
+ * nodevupdate is given or the option "devupdate" (Select menu, options.txt) is off.
+ * Release builds are off unless the switch devupdate is given, the option is on,
+ * or this launch is a devupdate relaunch.
  *
  *   devupdate             start the server at boot (TCP 5050)
  *   devupdateport=N       another port
@@ -21,23 +24,78 @@
  *     through plat/sdio.c; each log line goes to the queue's `until` matcher
  *     and each game frame is counted. See docs/PORT_3DS_TESTING.md, "Console walk".
  */
+#include <arpa/inet.h>
+#include <stdio.h>
+#include <netinet/in.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "ctrdk/crash.h"
 #include "ctrdk/devupdate.h"
 #include "plat/audio.h"
 #include "plat/gpu.h"
+#include "plat/options.h"
 #include "plat_internal.h"
+#include "port3ds_build.h"
 
 static volatile int s_pause_req, s_paused, s_relaunch;
 static LightEvent s_resume;
 static int (*s_save_busy)(void);
 static char s_token[32];
+static volatile int s_update_failed;
+static char s_build_line[64];
 
 void plat_set_save_busy(int (*fn)(void)) { s_save_busy = fn; }
-/* The switch, or this launch is a devupdate relaunch (which keeps the server
- * on even when the restart gave no switches). */
-int plat_devupdate_enabled(void) { return plat_switch_has("devupdate") || devupdate_launched(); }
+/* On when this launch is a devupdate relaunch (which keeps the server on even
+ * when the restart gave no switches), or the switch devupdate is given, or
+ * this is a development build and the switch nodevupdate is not given. */
+int plat_devupdate_enabled(void) {
+    static int s_enabled = -1; /* decided once, at boot (the option is read from options.txt then) */
+    if (s_enabled >= 0) {
+        return s_enabled;
+    }
+    int opt = plat_opt_get(PLAT_OPT_KEY_DEVUPDATE, -1); /* -1: the player never set it */
+    int dev_build = strstr(PORT3DS_VERSION, "-dev") != NULL;
+    if (devupdate_launched() || plat_switch_has("devupdate") || opt == 1) {
+        s_enabled = 1;
+    } else {
+        s_enabled = dev_build && !plat_switch_has("nodevupdate") && opt != 0;
+    }
+    return s_enabled;
+}
+
+/* The option's value as the Select menu shows it: what the next launch will do. */
+int plat_devupdate_wanted(void) {
+    int opt = plat_opt_get(PLAT_OPT_KEY_DEVUPDATE, -1);
+    if (opt >= 0) {
+        return opt;
+    }
+    return strstr(PORT3DS_VERSION, "-dev") != NULL && !plat_switch_has("nodevupdate");
+}
+
+/* "192.168.1.20:5050" while the server runs and the console has an address, else "". */
+void plat_devupdate_address(char* out, size_t n) {
+    out[0] = '\0';
+    if (!devupdate_running()) {
+        return;
+    }
+    unsigned long ip = (uint32_t)gethostid(); /* libctru's soc: the console's address, network byte order */
+    if (ip == 0 || ip == 0x0100007f) {
+        return;
+    }
+    snprintf(out, n, "%lu.%lu.%lu.%lu:%d", ip & 255, (ip >> 8) & 255, (ip >> 16) & 255, ip >> 24,
+             plat_switch_int("devupdateport", DEVUPDATE_DEFAULT_PORT));
+}
+
+/* Restart the title now with the current switches (the way a devupdate restart does), so a
+ * changed option or the server takes effect at once. */
+void plat_relaunch(void) {
+    PLOG_I("relaunch requested, args \"%s\"", plat_switches_text());
+    plat_options_save();
+    devupdate_set_next_args(plat_switches_text());
+    devupdate_prepare_relaunch();
+    plat_quit(1);
+}
 
 /* The files and queue commands write the card through plat/sdio.c (core 1), like every other writer. */
 static int st_write(const char* path, uint64_t off, const void* data, size_t n, void* user) {
@@ -91,6 +149,11 @@ void plat_devupdate_frame(void) {
 
 static void on_begin(void* user) {
     (void)user;
+    plat_updater_screen(1);
+    snprintf(s_build_line, sizeof(s_build_line), "build %s -> %s", plat_build_string(),
+             devupdate_incoming_version()[0] ? devupdate_incoming_version() : "?");
+    PLOG_I("devupdate: %s", s_build_line);
+    plat_updater_draw("Updater", s_build_line, "Starting", 0);
     crash_wd_hold(true); /* no frames while paused: not a hang */
     s_relaunch = 0;
     LightEvent_Clear(&s_resume);
@@ -107,8 +170,47 @@ static void on_begin(void* user) {
     plat_cpu_limit_transfer(1);
 }
 
+static void on_status(DevUpdatePhase phase, uint32_t done, uint32_t total, const char* text, void* user) {
+    (void)user;
+    static uint64_t t0, last_t, last_done;
+    static float kibs;
+    uint64_t now = svcGetSystemTick();
+    if (phase == DEVUPDATE_PH_RECEIVING) {
+        if (done == 0 || t0 == 0 || done < last_done) {
+            t0 = last_t = now;
+            last_done = done;
+            kibs = 0;
+        } else if (now - last_t >= SYSCLOCK_ARM11 / 2 || done == total) {
+            kibs = (float)(done - last_done) / 1024.0f / ((float)(now - last_t) / (float)SYSCLOCK_ARM11);
+            last_t = now;
+            last_done = done;
+        }
+    }
+    char line[48];
+    const char* title = "Updater";
+    switch (phase) {
+    case DEVUPDATE_PH_RECEIVING:
+        snprintf(line, sizeof(line), "Receiving CIA %lu of %lu KiB %.0f KiB/s", (unsigned long)(done / 1024),
+                 (unsigned long)(total / 1024), (double)kibs);
+        break;
+    case DEVUPDATE_PH_CHECKING: snprintf(line, sizeof(line), "Checking CRC"); break;
+    case DEVUPDATE_PH_INSTALLING: snprintf(line, sizeof(line), "Installing and committing"); break;
+    case DEVUPDATE_PH_RELAUNCHING: snprintf(line, sizeof(line), "Relaunching"); done = total = 1; break;
+    default: snprintf(line, sizeof(line), "Error: %s", text != NULL ? text : "update stopped"); s_update_failed = 1; break;
+    }
+    plat_updater_draw(title, s_build_line, line, total ? (int)((uint64_t)done * 100 / total) : 0);
+}
+
 static void on_resume(void* user) {
     (void)user;
+    if (s_update_failed) {
+        for (int i = 0; i < 10; i++) {
+            svcSleepThread(300000000LL); /* the error stays readable before the old screen returns */
+            plat_menu_shot_tick();
+        }
+        s_update_failed = 0;
+    }
+    plat_updater_screen(0);
     plat_cpu_limit_transfer(0);
     if (plat_audio_has_output()) {
         ndspSetMasterVol(1.0f);
@@ -168,6 +270,9 @@ void plat_devupdate_init(void) {
         return;
     }
     LightEvent_Init(&s_resume, RESET_ONESHOT);
+    if (devupdate_launch_from()[0] != '\0') {
+        PLOG_I("updated from %s", devupdate_launch_from());
+    }
     PLOG_I("devupdate: launch args \"%s\"%s", devupdate_launch_args(),
            devupdate_launched() ? " (relaunched by devupdate)" : "");
     DevUpdateConfig cfg;
@@ -177,14 +282,16 @@ void plat_devupdate_init(void) {
         cfg.token = s_token;
     }
     cfg.version = plat_build_string();
-    cfg.log_path = "log.txt";
+    cfg.log_path = "latest.log";
     cfg.on_begin = on_begin;
     cfg.on_ready = on_ready;
     cfg.on_resume = on_resume;
     cfg.on_relaunch = on_relaunch;
+    cfg.on_status = on_status;
     cfg.on_recovery_exit = on_recovery_exit;
     cfg.log = log_line;
     cfg.files_dir = "queue"; /* sdmc:/3ds/ttyd/queue: uploaded padfiles, queue.txt, results.txt, out/ */
+    cfg.files_ro_dir = "sdmc:/3ds/ttyd"; /* read-only over the PC ("files get @/latest.log"): the game's latest.log and previous.log */
     cfg.store = &s_store;
     int32_t rc = devupdate_start(&cfg);
     if (rc != 0) {

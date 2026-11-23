@@ -12,7 +12,7 @@ void plat_switches_load(int argc, char** argv);
 const char* plat_switches_text(void);
 
 /* log.c */
-void plat_log_init(int live);        /* open log.txt (previous run kept as log.old), live socket */
+void plat_log_init(int live);        /* open latest.log (previous run kept as previous.log), live socket */
 void plat_log_start_writer(void);    /* the writer thread on core 1; before it, lines are written directly */
 void plat_log_stop(void);            /* normal exit: write everything, stop the writer */
 void plat_log_crash_flush(void);     /* crash path: write the queue in the calling thread */
@@ -33,6 +33,7 @@ void plat_crash_setup(void);         /* config and the main thread's handler, as
 void plat_crash_init(void);          /* watchdog thread, boot crash tests */
 void plat_stack_register(int slot, const char* name, unsigned size);
 void plat_thread_register(const char* name, unsigned stack_bytes); /* call at a thread's entry (installs the handler) */
+Result plat_thread_refusal(int priority, int core); /* thread.c: the Result of a refused threadCreate */
 void plat_set_audio_abort(void (*fn)(void)); /* DSP release for the crash exit (no waiting on the audio thread) */
 void plat_wd_quiesce(void);
 uint32_t plat_wd_frames(void);       /* plat_wd_progress calls so far */
@@ -40,6 +41,9 @@ uint32_t plat_wd_frames(void);       /* plat_wd_progress calls so far */
 /* devupdate.c (glue to libs/ctr-devkit/devupdate; switch devupdate) */
 typedef bool (*PlatRecoveryHook)(const char* report, void* user);
 int plat_devupdate_enabled(void);
+int plat_devupdate_wanted(void);     /* the option as set (or its default): what the next launch does */
+void plat_devupdate_address(char* out, size_t n); /* "ip:port" while the server runs, else "" */
+void plat_relaunch(void);            /* restart the title now with the current switches (does not return) */
 void plat_devupdate_init(void);      /* starts the server when the switch is on */
 void plat_devupdate_stop(void);
 void plat_devupdate_frame(void);     /* game thread, each frame: pauses there during an update */
@@ -47,7 +51,13 @@ PlatRecoveryHook plat_devupdate_recovery_hook(void); /* for the crash handler; N
 
 /* menu.c: returns 1 while the Select menu is open (it consumed the input). */
 int plat_menu_input(uint32_t held, uint32_t down);
-void plat_console_menu_mode(int on); /* a menu owns rows 3-14 and the log shrinks to rows 16-30 (on), or the log has rows 3-30 (off); caller holds the console lock for on */
+void plat_pause_grey(void);          /* pause look: the top screen's last frame, greyed and darker (both eyes); the game's next frame replaces it */
+void plat_pause_release(void);
+void plat_pause_dump(int tick);      /* test aid: the frozen top screen as shots/pNNNNN.ppm */
+void plat_updater_screen(int on);    /* the updater screen (devupdate) replaces the bottom screen (on) or the previous screen returns (off) */
+void plat_updater_draw(const char* title, const char* build, const char* line, int percent); /* title row, build line, one status line, progress bar; the log below keeps scrolling */
+void plat_console_menu_mode(int on); /* on: a menu covers the whole screen and the log goes to a buffer only; off: HUD and log are repainted from the buffers. Caller holds the console lock */
+void plat_console_log(const char* s, size_t n); /* the console writer's text, under the console lock: buffered, and shown unless a menu covers the screen */
 void plat_menu_shot_tick(void);      /* switch shotbottom=N: bottom screen to shots/bNNNNN.ppm */
 
 /* memplace.c */

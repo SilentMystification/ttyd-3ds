@@ -341,7 +341,7 @@ The port binary contains no game data.
 
 These are taken from the PM64 3DS port and adapted:
 
-- **Log:** a lock-free 1024-slot queue with a writer on core 1. It writes to `sdmc:/3ds/ttyd/log.txt` and to a TCP live log on port 17492, with replay on connect. Lines carry `#seq` numbers, so a gap shows dropped lines. The bottom console also shows the log.
+- **Log:** a lock-free 1024-slot queue with a writer on core 1. It writes to `sdmc:/3ds/ttyd/latest.log` and to a TCP live log on port 17492, with replay on connect. Lines carry `#seq` numbers, so a gap shows dropped lines. The bottom console also shows the log.
 - **Debug switches:** `sdmc:/3ds/ttyd/debug3ds.txt` plus 3dslink arguments: `map=`, `bero=`, `padscript=`, `shots`, `fixedseed`, `fast`, `phase`, `wdog=` and others.
 - **Profiler:** a push/pop phase profiler using `svcGetSystemTick`, with counters (draws, vertices, texture uploads, state changes, cache misses from the ARM11 performance monitor where available). It writes `[PERF]` and `[PHASE]` log lines, and `tools/port3ds/phase_report.py` parses them.
 - **Crash handler:** `threadOnException` on every thread, with a static handler stack. It writes registers, a stack scan with symbols resolved offline from the archived ELF, the last profiler phase, the current map and the build number to the log, `crash.txt` and the live log. Then it calls `svcExitProcess`, which returns to the Homebrew Launcher or HOME Menu.
@@ -365,7 +365,7 @@ Every test is one command that returns a non-zero exit code on failure. All of t
 
 - `tools/port3ds/run_azahar.py --build <3dsx|cia> --switches "map=gor_01 shots exitframe=600" --until "<regex>" --timeout 120`
   - Writes `debug3ds.txt` into Azahar's `sdmc`, sets turbo and vsync in the config (and restores the config afterwards), and starts Azahar with the GDB stub.
-  - Tails `log.txt`. It stops on the regex, a `[CRASH]` line, log silence or the timeout, and always kills the emulator.
+  - Tails `latest.log`. It stops on the regex, a `[CRASH]` line, log silence or the timeout, and always kills the emulator.
   - Collects the log, the screenshots and any `UnmappedAccess` lines from Azahar's own log. Those lines count as failures, because they fault on hardware.
 - `tools/port3ds/run_dolphin.py --map gor_01 --frames 600 --read GlobalWork`
   - Boots the user ISO, or the instrumented decomp build, headless with the GDB stub.
@@ -374,7 +374,7 @@ Every test is one command that returns a non-zero exit code on failure. All of t
   - Warps by writing the same globals the game's own debug warp uses.
 - `tools/port3ds/run_papercut.py`: wraps the paper-cut environment variables shown in section 4.
 - `tools/port3ds/memcompare.py --scene gor_01_idle`: runs the same scene in all three and compares the selected structures, such as `marioGetPtr()`, `GlobalWork`, the event work and the party. It prints field-level differences, using struct layouts taken from the headers through `pycparser` or a generated offset table.
-- `tools/port3ds/push_3ds.py` (needs hardware): finds the console, sends the build with `3dslink`, captures the live log, and fetches `log.txt`, `crash.txt` and Luma dumps over ftpd.
+- `tools/port3ds/push_3ds.py` (needs hardware): finds the console, sends the build with `3dslink`, captures the live log, and fetches `latest.log`, `crash.txt` and Luma dumps over ftpd.
 
 **Test suites**
 
@@ -432,7 +432,7 @@ Every test is one command that returns a non-zero exit code on failure. All of t
 
 **The disc check.** `DVDInit` reads the disc header before anything region-specific (the FST, main.dol, the RELs) and refuses another region's disc: "This build is for the US version (G8ME01); the disc is G8MP01."
 
-**Generators that need the disc.** Only the GameCube arena's high end (where the IPL puts the FST, from the disc's maximum FST size) is read from the disc itself. `gen_disc_data.py --disc <image>` reads it and fails with "needs the G8MP01 disc" for a missing or wrong image. The build passes `--disc` when `TTYD_DISC` names an image or `iso/<version>.iso` / `iso/game.iso` is this version's disc; otherwise G8ME01 uses its Dolphin-measured value (the same the disc gives) and JP and PAL use it as a stand-in, a few KiB off. To finish once a disc is available: put it at `iso/G8MJ01.iso` (or `iso/G8MP01.iso`) and re-run the region's build (the generated header then says `PORT_GAME_ARENA_HI_FROM_DISC 1`).
+**The arena's high end** (where the IPL puts the FST, from the disc's maximum FST size) is a committed table, `ARENA_HI` in `gen_disc_data.py`; no build reads a disc for it. The US value comes from the US disc. JP and PAL are unknown until someone with that disc runs `gen_disc_data.py --print-arena iso/G8MJ01.iso` (or `G8MP01`) once and commits the printed line; until then their dev builds use the US value with a warning and `release.py` refuses to package them (docs/RELEASE.md).
 
 **PAL 50/60 Hz.** As on the GameCube, the TV format follows the render mode the game configures (`VIConfigure`): the PAL build starts in `VI_PAL` (50 Hz) and the start-up prompt stays there or configures its EURGB60 mode (60 Hz); `VIGetTvFormat` returns the current format, so `gp->framerate` and every `FPS_FRAMES`/`FPS_EASE` follow it. NTSC, EURGB60 and MPAL retrace on every LCD vertical blank (59.83 Hz). In 50 Hz mode `vi.c` emulates a 20 ms retrace on the LCD's blanks: the retrace runs on the blank nearest each 20 ms tick (5 of every 6 blanks), so game frames and the game clocks run at 50 Hz, paced by this emulation and not by the LCD, and a frame is shown for one or two LCD refreshes. The game-time budget per frame is 2 retraces: 33 ms at 60 Hz, 40 ms at 50 Hz. The prompt preselects 60 Hz (the 3DS screen's rate); switch `hz=50` preselects 50 Hz. Tools that count game frames as 1/60 s (the deterministic test mode in 7.1) must use 1/50 s in 50 Hz mode.
 
@@ -444,7 +444,7 @@ Every test is one command that returns a non-zero exit code on failure. All of t
 - PAL's 50 Hz render modes have a 568-line XFB (`xfbHeight` 0x238); the EFB is 480 lines in every mode and the port presents the EFB, so the image should be unchanged, but the display-copy scale is unchecked.
 - The arena's high end is the US value until the region's disc is seen by the generator (above).
 
-**Once the discs are available:** put them at `iso/G8MJ01.iso` and `iso/G8MP01.iso`, then for each region: rebuild (`tools/port3ds/build.sh . -DREGION=JP`, with the image under the repository so the Docker build sees it, or `-DTTYD_DISC=<path>`) and check that `build/3ds/game_jp/generated/port_disc_data_gen.h` says `PORT_GAME_ARENA_HI_FROM_DISC 1`; build `host_decode` with `-DTTYD_VERSION=G8MJ01` and run `host_decode --disc iso/G8MJ01.iso all` (every format must decode); copy the image to the Azahar profile's `sdmc:/3ds/ttyd/game.iso` and boot to the title, a new game and `map=gor_01`; run the 7.2 map sweep. For PAL also boot with `hz=50` and pick 50 Hz at the prompt (the log shows each `VI: TV format` change and `EURGB60:` choice), and boot once per `lang=` value.
+**Once the discs are available:** put them at `iso/G8MJ01.iso` and `iso/G8MP01.iso`, then for each region: fill the region's `ARENA_HI` line (`gen_disc_data.py --print-arena`), rebuild (`tools/port3ds/build.sh . -DREGION=JP`) and check that `build/3ds/game_jp/generated/port_disc_data_gen.h` says `PORT_GAME_ARENA_HI_KNOWN 1`; build `host_decode` with `-DTTYD_VERSION=G8MJ01` and run `host_decode --disc iso/G8MJ01.iso all` (every format must decode); copy the image to the Azahar profile's `sdmc:/3ds/ttyd/game.iso` and boot to the title, a new game and `map=gor_01`; run the 7.2 map sweep. For PAL also boot with `hz=50` and pick 50 Hz at the prompt (the log shows each `VI: TV format` change and `EURGB60:` choice), and boot once per `lang=` value.
 
 ## 10. Phases and exit criteria
 

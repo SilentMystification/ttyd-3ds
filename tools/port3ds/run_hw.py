@@ -20,7 +20,7 @@
 3. Stops on --until (pass), a [CRASH] line (fail), --timeout, or the game
    closing the connection (fail unless --until already matched).
 
-The full log is also on the SD card: sdmc:/3ds/ttyd/log.txt (and log.old,
+The full log is also on the SD card: sdmc:/3ds/ttyd/latest.log (and previous.log,
 the run before), for ftpd.
 """
 import argparse
@@ -86,7 +86,7 @@ def main():
             now = time.monotonic()
             if now - start >= args.connect_timeout:
                 print(f"run_hw: FAIL: no live log on {args.ip}:{LIVE_PORT} after {args.connect_timeout:.0f} s "
-                      f"({e}; the game did not start, or crashed early: see sdmc:/3ds/ttyd/log.txt)")
+                      f"({e}; the game did not start, or crashed early: see sdmc:/3ds/ttyd/latest.log)")
                 return 1
             if now - last_err >= 10:
                 print(f"run_hw: connect failed: {e}", flush=True)

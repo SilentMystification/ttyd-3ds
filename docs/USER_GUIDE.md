@@ -67,14 +67,15 @@ The game sees one GameCube controller. The 3DS maps to it like this:
 
 ### Options menu
 
-Press **SELECT**, or touch the two status lines at the top of the bottom screen (with the HUD on FPS only or off they show an **[Options]** label on the right).
-The game pauses while the menu is open and receives no input.
+Press **SELECT**, or touch the two status lines at the top of the bottom screen (outside the menu) (with the HUD on FPS only or off they show an **[Options]** label on the right).
+The game pauses while the menu is open and receives no input. The top screen shows the last frame, greyed and darker, and all sound is muted
+(it fades out over a few milliseconds); both come back when you close the menu.
 
-The bottom screen changes mode when the menu opens: the menu takes rows 3-14 and the log shrinks to the rows below it
-(it keeps scrolling there). When you close the menu the log gets the whole area back. The status lines stay on top in both modes.
+While the menu is open it covers the whole bottom screen (the status lines and the log are hidden). The log keeps collecting in the
+background; when you close the menu the status lines and the last 28 log lines are painted back exactly as they would have been.
 
 - **L / R** change the page. **Up / Down** move. **Left / Right** or **A** change a value. **B** or **SELECT** closes it.
-- With the touch screen, tap a line to change it, tap the title line to go to the next page, tap **[ Close ]** to close.
+- With the touch screen, tap a line to change it, tap the title line (top row) to go to the next page, tap **[ Close ]** (top right) to close.
 - Changes apply at once and are saved when you close the menu.
 
 | Page | Option | Values |
@@ -92,7 +93,10 @@ The bottom screen changes mode when the menu opens: the menu takes rows 3-14 and
 - The options are kept in **`sdmc:/3ds/ttyd/options.txt`**, a small text file, not in your save. Delete it to go back to the defaults.
   If it is damaged the port ignores it, writes a line to the log and uses the defaults.
 - The Select menu of earlier builds was a developer menu. It is now only for developers (switch `devmenu`, **ZL + SELECT**):
-  log level, warping to any map, return to title, exit. Warping can break the story. Do not use it in a save you care about.
+  log level, warping to any map, return to title, exit, **Update server** (on or off, kept in `options.txt`; while it runs the row shows the
+  console's IP address and port, for `libs/ctr-devkit/devupdate/devupdate.py`) and **Relaunch** (restarts the game at once with the current
+  switches, so a changed option or the update server takes effect). Warping can break the story. Do not use it in a save you care about.
+  Release builds start with the update server off; development builds start with it on.
 
 ## Saves
 
@@ -145,7 +149,7 @@ The port shows these and waits for START. Press START to leave.
 
 - The port has a crash handler. It shows a report on the screen. Press START to exit.
 - It also saves the report to **`sdmc:/3ds/ttyd/crash.txt`**. The file keeps old reports, and new ones are added to the end.
-- The normal log of the last run is **`sdmc:/3ds/ttyd/log.txt`**.
+- The normal log of the last run is **`sdmc:/3ds/ttyd/latest.log`**.
 - A watchdog ends a run that stops responding for 10 seconds, and reports it as a crash.
 
 ### Saves
@@ -161,10 +165,10 @@ The port shows these and waits for START. Press START to leave.
 Please include:
 
 1. What you did, and what you expected.
-2. The build string. It is the first line of `log.txt`, like `TTYD 3DS build #240 f4b3cc42`, and it is shown on the error screens.
+2. The build string. It is the first line of `latest.log`, like `TTYD 3DS build #240 f4b3cc42`, and it is shown on the error screens.
 3. Your console model (New 3DS, New 3DS XL, New 2DS XL) and your Luma3DS version.
 4. Where in the game it happened (the map name is in the status line on the bottom screen).
-5. The files `sdmc:/3ds/ttyd/crash.txt` and `sdmc:/3ds/ttyd/log.txt`.
+5. The files `sdmc:/3ds/ttyd/crash.txt` and `sdmc:/3ds/ttyd/latest.log`.
 6. Do not send your disc image or your save files unless asked. They contain nothing the port needs for a bug report
    except when the bug is about saves.
 

@@ -54,6 +54,12 @@ int tst_rngtrace_wanted(void); /* the window is open */
 void tst_rngtrace(unsigned long caller, unsigned long caller2, unsigned long caller3, u32 val);
 /* Game frames since the first map change (the switch warp), 0 before. */
 u32 tst_warp_frames(void);
+/* storyjump=<textId>[.<n>] or <stage>.<row>: a story point of src/event.c's
+ * table. _target gives its map and entrance (0 if the switch is unset or the
+ * point unknown); _apply sets up the story there as the E3 scenario select
+ * does, at the warp, instead of story=/party= (returns 0 if unset). */
+int tst_storyjump_target(const char** map, const char** bero);
+int tst_storyjump_apply(void);
 
 /* ---- test_gallery.c: fx=, battle= and the gallery shots ---- */
 void tst_gallery_frame(u32 frame);

@@ -12,6 +12,8 @@
  *                that core)
  *   rm <path>    remove a file
  * Paths are relative to files_dir: letters, digits and . _ - + /, no "..".
+ * A leading "@/" selects the read-only files_ro_dir instead: only get and ls
+ * (put and rm answer "error 20 read-only").
  */
 #include <dirent.h>
 #include <errno.h>
@@ -161,6 +163,8 @@ void* du_store_read(const char* path, size_t* n) {
 
 bool du_files_enabled(void) { return du_cfg()->files_dir != NULL && du_cfg()->files_dir[0] != '\0'; }
 
+bool du_files_ro_enabled(void) { return du_cfg()->files_ro_dir != NULL && du_cfg()->files_ro_dir[0] != '\0'; }
+
 bool du_rel_ok(const char* rel) {
     size_t n = strlen(rel);
     if (n == 0 || n > 100 || rel[0] == '/') {
@@ -191,6 +195,18 @@ bool du_files_path(char* out, size_t n, const char* rel) {
         return false;
     }
     int w = rel[0] != '\0' ? snprintf(out, n, "%s/%s", du_cfg()->files_dir, rel) : snprintf(out, n, "%s", du_cfg()->files_dir);
+    return w > 0 && (size_t)w < n;
+}
+
+bool du_files_ro_path(char* out, size_t n, const char* rel) {
+    if (!du_files_ro_enabled()) {
+        return false;
+    }
+    if (rel[0] != '\0' && !du_rel_ok(rel)) {
+        return false;
+    }
+    int w = rel[0] != '\0' ? snprintf(out, n, "%s/%s", du_cfg()->files_ro_dir, rel)
+                           : snprintf(out, n, "%s", du_cfg()->files_ro_dir);
     return w > 0 && (size_t)w < n;
 }
 
@@ -267,15 +283,21 @@ static void do_put(int fd, const char* rel, uint32_t size, uint32_t crc) {
     du_send_line(fd, "done");
 }
 
-static void do_get(int fd, const char* rel) {
+static void do_get(int fd, const char* rel, bool ro) {
     char path[PATH_MAX_LEN];
-    if (!du_files_path(path, sizeof(path), rel) || rel[0] == '\0') {
+    bool ok = ro ? du_files_ro_path(path, sizeof(path), rel) : du_files_path(path, sizeof(path), rel);
+    if (!ok || rel[0] == '\0') {
         du_send_line(fd, "error 20 bad path");
         return;
     }
-    du_store_flush();
     size_t n = 0;
-    uint8_t* data = du_store_read(path, &n);
+    uint8_t* data;
+    if (ro) {
+        data = std_read(path, &n, NULL); /* the read-only root: stdio, on this thread */
+    } else {
+        du_store_flush();
+        data = du_store_read(path, &n);
+    }
     if (data == NULL) {
         du_send_line(fd, "error 21 no such file %s", rel);
         return;
@@ -293,13 +315,16 @@ static void do_get(int fd, const char* rel) {
     du_send_line(fd, "done");
 }
 
-static void do_ls(int fd, const char* rel) {
+static void do_ls(int fd, const char* rel, bool ro) {
     char path[PATH_MAX_LEN];
-    if (!du_files_path(path, sizeof(path), rel)) {
+    bool ok = ro ? du_files_ro_path(path, sizeof(path), rel) : du_files_path(path, sizeof(path), rel);
+    if (!ok) {
         du_send_line(fd, "error 20 bad path");
         return;
     }
-    du_store_flush();
+    if (!ro) {
+        du_store_flush();
+    }
     DIR* d = opendir(path);
     if (d == NULL) {
         du_send_line(fd, "error 21 no such folder %s", rel);
@@ -340,10 +365,6 @@ static void do_rm(int fd, const char* rel) {
 }
 
 void du_cmd_files(int fd, const char* args, uint32_t size, uint32_t crc) {
-    if (!du_files_enabled()) {
-        du_send_line(fd, "error 19 this app has no files folder");
-        return;
-    }
     char op[8] = "";
     const char* rel = "";
     size_t n = strcspn(args, " ");
@@ -356,12 +377,24 @@ void du_cmd_files(int fd, const char* args, uint32_t size, uint32_t crc) {
     if (args[n] == ' ') {
         rel = args + n + 1;
     }
+    bool ro = rel[0] == '@' && rel[1] == '/'; /* "@/<path>": files_ro_dir */
+    if (ro) {
+        rel += 2;
+    }
+    if (ro ? !du_files_ro_enabled() : !du_files_enabled()) {
+        du_send_line(fd, ro ? "error 19 this app has no read-only files folder" : "error 19 this app has no files folder");
+        return;
+    }
+    if (ro && (strcmp(op, "put") == 0 || strcmp(op, "rm") == 0)) {
+        du_send_line(fd, "error 20 read-only");
+        return;
+    }
     if (strcmp(op, "put") == 0) {
         do_put(fd, rel, size, crc);
     } else if (strcmp(op, "get") == 0) {
-        do_get(fd, rel);
+        do_get(fd, rel, ro);
     } else if (strcmp(op, "ls") == 0) {
-        do_ls(fd, rel);
+        do_ls(fd, rel, ro);
     } else if (strcmp(op, "rm") == 0) {
         do_rm(fd, rel);
     } else {

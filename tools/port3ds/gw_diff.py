@@ -35,6 +35,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import emu_usage  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[2]
 LINE = re.compile(r"gwdump (f=\d+ .*)$")
 CROSS_SKIP = {"gw"}
@@ -118,7 +121,7 @@ def prepare_card(spec):
 def run_port(args, switches):
     log = REPO / "build" / "gw-diff" / "port"
     cmd = [sys.executable, str(REPO / "tools/port3ds/run_azahar.py"), "--build", str(args.cia),
-           "--switches", switches, "--until", f"gwdump f={args.frames} ", "--timeout", str(args.timeout),
+           "--switches", switches, "--until", f"gwdump f={args.frames} ", *emu_usage.time_args(args.timeout),
            "--stall", "60", "--last", str(log)]
     print("gw_diff: port:", " ".join(cmd[2:]))
     r = subprocess.run(cmd, cwd=REPO)
@@ -139,7 +142,7 @@ def run_dolphin(args, switches):
         words.append("fastboot")  # as run_azahar.py adds it for the port
     cmd = [sys.executable, str(REPO / "tools/port3ds/run_dolphin.py"), "--gcdebug", "--switches",
            " ".join(words + [f"stopframe={args.frames}"]), "--break", "gcdbg_stop", "--read-log", "--json", str(out),
-           "--timeout", str(args.timeout), "--port", str(args.dolphin_port),
+           *emu_usage.time_args(args.timeout), "--port", str(args.dolphin_port),
            "--profile", str(REPO / "build" / "dolphin-profile-gcdebug")]
     print("gw_diff: dolphin:", " ".join(cmd[2:]))
     r = subprocess.run(cmd, cwd=REPO)
@@ -164,13 +167,16 @@ def main():
     ap.add_argument("--ignore", default="", help="comma-separated fields not to compare")
     ap.add_argument("--cross", action="store_true", help="with --logs: the logs come from different builds")
     ap.add_argument("--cia", type=Path, default=REPO / "build/3ds/game/ttyd.cia")
-    ap.add_argument("--timeout", type=float, default=900)
+    ap.add_argument("--timeout", type=float, help="seconds per run (default 30 + frames/12: the port in Azahar, determ; "
+                    "a run over 60 s is a --long run)")
     ap.add_argument("--dolphin-port", type=int, default=55571)
     ap.add_argument("--card", default="empty", metavar="empty|PATH.gci",
                     help="the memory card both runs start with: no save files (default) or exactly this GCI")
     ap.add_argument("--json", type=Path, help="write the result here")
     args = ap.parse_args()
 
+    if args.timeout is None:
+        args.timeout = 30 + args.frames / 12.0
     skip = {f for f in args.ignore.split(",") if f}
     if args.logs:
         a, b = (p.read_text(errors="replace") for p in args.logs)

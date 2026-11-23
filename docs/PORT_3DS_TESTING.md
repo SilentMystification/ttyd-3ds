@@ -33,7 +33,7 @@ Both scripts build in the image from `tools/port3ds/docker/Dockerfile`:
 
 The image tag is the first 12 hex digits of the Dockerfile's SHA-256, so editing the Dockerfile rebuilds the image.
 
-Compiler A/B options for the game (both off by default; PORT_3DS_60FPS.md, "Step 1 results"): `tools/port3ds/build.sh . -DTTYD_LTO=ON` (link-time optimisation of the DOL code, MusyX and the port; the static RELs stay plain) and `-DTTYD_GX_O3=ON` (`-O3` on `port3ds/game/gx/*.c`). They stay in the build directory's cache: pass `=OFF` to go back.
+Compiler options for the game (both on by default since the declaration mismatches were fixed; PORT_3DS_60FPS.md, "Step 1 results"): `tools/port3ds/build.sh . -DTTYD_LTO=ON` (link-time optimisation of the DOL code, MusyX and the port; the static RELs stay plain) and `-DTTYD_GX_O3=ON` (`-O3` on `port3ds/game/gx/*.c`). They stay in the build directory's cache: pass `=OFF` for the plain -O2 build.
 
 On Windows the sources are copied into the Docker volume `ttyd3ds-work` with rsync and built there, because bind mounts are slow. `iso/`, `orig/`, `build/` and `.git/` are not copied.
 
@@ -74,7 +74,7 @@ The game reads the disc image from the emulated SD card. Link it there once (a h
 mkdir -p build/azahar-profile/data/azahar-emu/sdmc/3ds/ttyd
 ln -f iso/game.iso build/azahar-profile/data/azahar-emu/sdmc/3ds/ttyd/game.iso
 tools/port3ds/build.sh
-tools/port3ds/run_azahar.py --build build/3ds/game/ttyd.cia --log 3ds/ttyd/log.txt \
+tools/port3ds/run_azahar.py --build build/3ds/game/ttyd.cia --log 3ds/ttyd/latest.log \
     --switches "map=gor_01 shots=100 shotmax=40" \
     --until "shot shots/04000" --timeout 500 --stall 0
 ```
@@ -84,6 +84,7 @@ Switches the game reads (space-separated words in `--switches`):
 | Switch | Effect |
 |---|---|
 | `map=<map>[,<bero>]` | Starts a new game on that map once the title or the opening is up (`fastboot` presses A through the warning screen). `story=N` sets the story so far (GSW 0, default 0); `party=N` the partner (default 1, Goombella; 0 none) |
+| `storyjump=<id>[.n]` | Starts a new game at a story point of the game's own story table (`src/event.c`, the rows the E3 scenario select uses): `<id>` is the row's text id (`STG1_16`; `.n` picks the n-th row with that id, from 0: `STG9_00.2`), or `<stage>.<row>`. As the scenario select does: the story flags cleared, GSW 0 set to the previous row's id (so the row's own scene plays next), every set-up function up to the row run (key items, flags), the row's partner and follower. Unlike the select it keeps the items the set-ups give. Without `map=` it warps to the row's map and entrance. Both builds (`port3ds/game/test_mode.c`). Replaces `story=`/`party=` |
 | `fastboot` | Presses A every 6 game frames (held 2) through the boot sequences before the title (the warning screen, the logos), and stops for good once the title sequence starts or a `map=`/`sweep=` warp begins. `run_azahar.py`, `run_hw.py` and `map_sweep.py` add it by default; pass `nofastboot` (`--nofastboot` for `map_sweep.py`) to leave it out |
 | `crashtest=<kind>` | Tests the crash handler (`crashwait=N` seconds on the crash screen, default 300; `crashframe=N` game frame of the test, default 60; `wdog=N` hang limit in seconds). Kinds, run on the game thread at that frame: `segv` (write to address 0), `fatal` (`plat_fatal`), `break` (`svcBreak(USERBREAK_PANIC)`), `hang` (endless loop, the watchdog fires after `wdog`). At boot: `self` (the handler called with made-up registers), `null` (write to `crashaddr`, default 4), `undef`, `boot-fatal`. Azahar never raises a fault for an unmapped access, so `segv` only logs `UnmappedAccess` there; use `self` for the exception path |
 | `padscript=<steps>` | Scripted input: comma-separated `KEYS*frames` steps (`a*3`, `wait*40`, `start*3`, `a+b*2`). Frames are game frames (one per VIWaitForRetrace). Keys: `a b x y l r zl zr start select up down left right`; `cl cr cu cd` push the circle pad (the game's control stick) fully left, right, up or down. TTYD's menus and dialogs move with the stick, not the D-pad, so use `cu`/`cd` there. Up to 2048 steps |
@@ -101,7 +102,9 @@ Switches the game reads (space-separated words in `--switches`):
 | `noqtm` | Keeps the per-frame buffers in FCRAM even when QTM is mapped. QTM's application part (the first 2 MB) is used by default |
 | `place=<name>:<tier>[,<name>:<tier>...]` | Forces a memory placement's tier (`qtm`, `linear` or `heap`) for A/B runs. Write spaces in names as `_` (`gx_record:linear`). Unknown names or tiers are logged as `[MEM] place=... ignored` and skipped; the GPU/DSP rules still apply |
 | `qtmgpu` | Allows `GPU_READ`/`GPU_WRITE` placements in QTM. Off by default: GPU access to QTM is unverified on hardware. `DSP` placements never go in QTM |
-| `texstats=N` | Every N frames, logs texture hashes, bytes hashed, lookups, hash mismatches and uploads per frame. The first change of each texture is logged with its address, size, format, memory region and the caller of the last `GXInitTexObj*` for that address |
+| `texstats=N` | Every N frames, logs texture hashes, bytes hashed, lookups, hash mismatches and uploads per frame. The first change of each texture is logged with its address, size, format, memory region and the caller of the last `GXInitTexObj*` for that address. The line also shows `trusted` (first uses per frame that skipped the hash), `grants` (trust grants in the interval) and `stale` (see `texverify`) |
+| `textrust=0/1` | 1 (default): a cached texture whose image and TLUT spans lie in covered memory of the content-stable registry (`port3ds/plat/memstable.c`), unchanged since the hash that validated it, skips the per-frame hash (`gx_tex.c`; PORT_3DS_GX_PERF.md, "Texture trust"). 0: hash every texture on its first use each frame (A/B) |
+| `texverify=1` | Test of `textrust`: hashes every texture anyway and compares with the trust decision. A trusted texture whose bytes changed is logged as `texverify: trust skipped a change` and counted as `stale` in the `texstats` line (and is converted again, as without trust). Must stay 0 over a sweep: `texverify=1 texstats=60` on `gor_01`, a `gon_02` battle, `usu_00`, `pik_00`, `aaa_00`, the pause menu, and `gallery.py fx --items 0-20 --no-dolphin --extra "texverify=1 texstats=300"`; `trusted` shows how many decisions the hash checked |
 | `texfilter=<game\|linear\|mip\|nearest>` | Forces the texture filter mode (the `texfilter` option, which it overrides): `game` GX's filters as set (the port ignores GX mip levels), `linear` bilinear min and mag, `mip` bilinear plus a mip chain (GX's own levels where the texture has them, else a box filter at upload; trilinear), `nearest` point sampling. Never applied to `GXCopyTex` targets, textures a TEV stage reads as an indirect offset map, or textures with a side of 4 or less; one-bit-alpha cut-outs get no chain. A mode change drops every converted texture |
 | `texlodbias=<float>` | Added to the level-of-detail bias of every sampler in `linear`, `mip` and `nearest` modes (positive blurs, negative sharpens; default 0). `game` mode ignores it (no chains there) |
 | `texcensus=N` | Every N frames logs what the game asks for: distinct uploaded textures and sampler setups by GX min filter, mag filter and mip flag, GX formats, how many are copy targets, indirect maps or tiny, and the `texmem:` line (textures live, KB, KB of them mip levels). `texstats=N` also logs `texmem:` every N frames |
@@ -117,7 +120,7 @@ Switches the game reads (space-separated words in `--switches`):
 | `aramfast=1` | ARAM DMA callbacks come 20 us after the post whatever the size, instead of after the 80 MB/s transfer time |
 | `discra=KB` | Disc read-ahead on the file thread: a read of at most 64 KB that starts where the previous read ended reads KB kilobytes from there in one SD call, and the next reads that fall inside come from memory. Measured as a loss (over-read, no time saved); off by default |
 | `discbatch=1` | Requests queued behind the one the file thread is reading that continue it on disc and in memory are read in the same SD call; each still completes in order with its own result. The queue is almost always one deep, so it merges nothing in the measured loads |
-| `dvdsettle=1` | While a map change or a battle start loads (outside `determ`), a frame does not end until the DVD manager's queued reads have finished (at most 250 ms). A load then takes the frames the game's own logic needs (what `determ` and Dolphin show) instead of about one frame per read: `gor_01` 79 to 63 frames, `gor_00` 78 to 52 in Azahar. Default off until judged on hardware |
+| `dvdsettle` (default 1) | While a map change or a battle start loads (outside `determ`), a frame does not end until the DVD manager's queued reads have finished (at most 250 ms). A load then takes the frames the game's own logic needs (what `determ` and Dolphin show) instead of about one frame per read: `gor_01` 79 to 63 frames, `gor_00` 78 to 52 in Azahar. On by default; `dvdsettle=0` turns it off (`determ` never uses it). To be judged on hardware |
 | `padlog` | Logs `padlog: 3ds=<held hex> gc=<GameCube button bits>` whenever the GameCube button state changes, to verify remaps |
 | `lang=<en\|de\|fr\|es\|it\|nl>` | PAL: the game language. The default comes from the 3DS system language; any other language falls back to English |
 | `hz=50` | PAL: preselects 50 Hz at the 50/60 Hz prompt (default 60 Hz) |
@@ -142,6 +145,10 @@ Switches the game reads (space-separated words in `--switches`):
 | `battle=<id\|name>` | Starts the given entry of the current area's battle setup table after the map is up (`battlewait=N`) |
 | `fonttest=sjis` | Draws fixed Shift-JIS strings (katakana, full-width digits, hiragana, half-width, kanji) over every frame in any region build, through the port's SJIS ROM font: `OSInitFont`, `OSGetFontTexture` and one GX quad per glyph (port3ds/game/test_font.c). Logs `fonttest: SJIS font loaded ...`. The font is rendered at build time by `tools/port3ds/gen_sjis_font.py` (Noto Sans CJK JP, SIL OFL); `build.sh` runs it on the host (Python Pillow; the font is downloaded once into `build/fonts/`). The JP build uses the same font for its system messages |
 | `btlauto=perfect\|fail` | Runs battles unattended. `btlmoves=` gives the menu keys per turn and `btlstep=` the frames between presses. `perfect` forces every action command to succeed and `fail` presses nothing during them |
+| `shotat=F,...` / `fxshots=O,...` / `btlshots=O,...` | Gallery shots of game frame F (or O frames after each `fx=` spawn or `battle=` start): the port saves the EFB as `gallery/fFFFFF.ppm`, the debug DOL stops at `tst_shot_point` for `run_dolphin.py --shots` |
+| `fx=0-80,n64:0-102` | `fx=` also takes index ranges, up to 128 effects per boot |
+| `battle=0-5,7` | Several battles per boot, one after another, HP and FP refilled before each |
+| `btllist` | Logs each map's NPC count and, once per area, its battle setup table (use with `sweep=`) |
 | `stopframe=N` | GameCube debug DOL only: stops at game frame N, for `run_dolphin.py --break gcdbg_stop` |
 | `ndspvoices=1` | Plays MusyX's dry DSP-ADPCM voices on NDSP channels 1–23, timed to the software mix on channel 0. Streams, PCM, voices with an aux send, and starts beyond the free channels stay in software, and a voice that later gets an aux send moves back. Loops that start inside an ADPCM frame are re-aligned at load. Default off. See [PORT_3DS_AUDIO.md](PORT_3DS_AUDIO.md) |
 | `ndspstats=N` | Every N seconds, `[NDSPV]` lines: voice-frames in software, on NDSP and with aux, overflows, starts, cache hits, re-aligned loops, late events, and the share of time in the mixer. Also channel 0 flushes, `flush ticks`, and with streams on: starts, refills, underruns, waits and dropped events |
@@ -162,12 +169,21 @@ Switches the game reads (space-separated words in `--switches`):
 | `gxthreadrel=0/1` | 1 (default): a memory release reported while translation is pending is a fence. 0 is for verify experiments only |
 | `gxthreadkb=N` | Record ring size in KB (default 4096) |
 | `gxnull=1` | Measuring only: GX calls are recorded as with `gxthread=1` and the record is dropped at each fence, so nothing is translated, drawn or shown (the screen stays black) while the fences and read-backs still answer. With `gxthreadstats=N` the game thread's busy time is the game's own work plus recording: the floor GX translation sits on (PORT_3DS_60FPS.md, "Step 1 results") |
+| `gpufence=0/1` | 1 (default): before the game thread refills a render record's vertex and index arenas, it waits until the GPU has finished that record (the render thread publishes it once its next `C3D_FrameBegin` has drained the GPU queue), and `plat_gpu_sync` waits for the GPU, not only the render thread. 0: the old hand-over (render thread idle only) |
+| `gpusyncall=1` | Every render record (segments and mid-frame syncs too) waits for a vblank, the behaviour before Step 1; default 0: only a frame's first record |
+| `gxflushrender=0/1` | 1 (default): the record's stream ranges are flushed from the CPU cache by the render thread before it replays them; 0: by the recording thread at submit |
+| `gxstatedelta=0/1` | 1 (default): state changes are recorded as the changed words; 0: every state in full |
+| `gxurow=0/1` | 1 (default): the render thread skips shader uniform rows equal to the value it set last in the record; 0: every row is set every time |
+| `gxsync` | No render thread: records are replayed on the game thread |
 | `gpucore=N` | Render thread core (default 2 on New 3DS, 1 on old) |
 | `yieldsleep[=us]` | When `OSYieldThread` finds no other ready OS thread, sleeps `us` µs (default 100) instead of returning at once. This stops the DVD manager's `proc_main` spinning on core 0. Default off until measured on hardware |
 | `yieldstats=N` | Every N seconds, a `[THREADS]` line: each OS thread's share of baton-holding time, idle yields, and time slept by `yieldsleep` |
-| `shotbottom=N` | Saves the bottom screen as `shots/bNNNNN.ppm` (320x240, at most 60) every N ticks. A tick is a game frame, or a ~16 ms menu poll while the Options menu is open, so it also catches the open menu (the log line says `menu=1` or `menu=0`). Layout: rows 1-2 HUD, rows 3-30 log; with a menu open, rows 3-14 menu and rows 16-30 log (`plat/menu.c`) |
+| `shotbottom=N` | Saves the bottom screen as `shots/bNNNNN.ppm` (320x240, at most 60) every N ticks. A tick is a game frame, or a ~16 ms menu poll while the Options menu is open, so it also catches the open menu (the log line says `menu=1` or `menu=0`). Layout: rows 1-2 HUD, rows 3-30 log; a menu open covers all 30 rows, the log goes to a 28-row buffer only, and the close repaints HUD and log from the buffers, changed lines only (`plat/menu.c`) |
+| `devupdate` / `nodevupdate` | The update server (see `devupdate.c`): `devupdate` forces it on, `nodevupdate` off in a development build. The Select menu's "Update server" row sets the option `devupdate` in `options.txt` (on: the server starts at boot, even in a release build; off: a dev build does not start it); it takes effect at the next launch. Order: relaunched by devupdate, switch `devupdate`, option on, then (dev build, no `nodevupdate`, option not off) |
+| Select menu "Relaunch" | `plat_relaunch`: logs `relaunch requested, args "<switches>"`, saves options, sets the next launch's switches and ends with `plat_quit(1)`. Azahar has no APT chainloader: the log line is the check, and `sdmc:/3ds/ctrdk-emulate-relaunch` makes the library write the args to `sdmc:/3ds/ctrdk-launch-args.txt` for the harness |
 | `devmenu` | Enables the developer menu, opened with ZL+SELECT. SELECT alone opens the player Options menu, so a `padscript` that pressed `select` for the old developer menu now opens Options. While the Options menu is open, `padscript` steps advance once per ~16 ms menu poll, not per game frame. Example: `wait*900,select*3,wait*5,right*2,wait*5,select*3` |
-| `devupdate` | Development only: starts the ctr-devkit updater at boot (TCP 5050, `devupdateport=N`, `devupdatetoken=TEXT`), and a crash then goes to recovery mode instead of waiting for START. See "ctr-devkit: crash and devupdate" below |
+| `devupdate` | Starts the ctr-devkit updater at boot (TCP 5050, `devupdateport=N`, `devupdatetoken=TEXT`), and a crash then goes to recovery mode instead of waiting for START. On by default in development builds (`-dev` in the version) unless `nodevupdate` is given; release builds need this switch. See "ctr-devkit: crash and devupdate" below |
+| `nodevupdate` | Turns the updater off in a development build (no effect when `devupdate` is given) |
 
 Sound needs `sdmc:/3ds/dspfirm.cdc` (dumped from a console with DSP1), in the profile's SD card as on the console. Without it the game runs silently with the same sound timing. `--lle-audio` makes Azahar run that firmware itself (its LLE DSP) instead of its own model of it, which is slower but closer to the console. `wavdump=N` saves the first N seconds of the game's mix as `sdmc:/3ds/ttyd/audio.wav`, and the log has the output's peak level every 10 s.
 
@@ -181,6 +197,65 @@ tools/port3ds/map_sweep.py --maps gor_01,hei_00
 
 A battle that a map starts counts as a pass (`ok (battle on entry)`): the game raises `BATTLE_SEQ_END`, the flag `battleMain` sets itself, so `seq_battleMain` exits through `battle_exit` to the field and the sweep goes on (victory screens skipped).
 It writes the map list to the SD card, runs the game with `sweep=N`, and reads the log. A run that ends early (a crash, a stall, a battle a map starts on entry) is followed by one that resumes after the map being visited. Results are in `build/map-sweep/`: `results.json` (each map `ok`, `timeout`, `stopped`, `crash`, `stall` or `not in map table`: the storybook's `stg` maps, which the map change cannot enter), `shots/<map>.png`, and for a crash or stall the whole game log in `logs/<map>.txt`. Maps are entered without an entrance, so Mario starts where the map's default position puts him (often below the ground, from where the game's fall recovery lifts him).
+
+### Story sweep
+
+```sh
+tools/port3ds/story_sweep.py                          # every point of tools/port3ds/story_points.json
+tools/port3ds/story_sweep.py --only ch1_,ending_      # names starting with these
+tools/port3ds/story_sweep.py --report                 # re-classify and rebuild table.md and index.html
+```
+
+A full input replay of the story does not exist, so the story is checked at checkpoints.
+
+- **Points.** `tools/port3ds/story_points.json` holds 76 rows of the game's own story table (`src/event.c`, `stageN_evt`, the rows the E3 scenario select applies): 4 to 9 per chapter, covering the chapter cards, key cutscenes, boss arenas (with `btlauto=perfect`), every Peach and Bowser interlude chosen, three of Bowser's side-scrolling stages (`kpa_02`, `kpa_03`, `kpa_05`), the epilogue and the credits. Each names its `storyjump` id, the map and entrance, the GSW 0 value the jump sets (`story`) and the partner. `padscript: "mash"` presses A every 30 frames from frame 640, through dialogue. By default a point runs 1100 game frames (the warp is at frame 604), with shots at 700, 850, 1000 and 1080. The chapter cards and the ending run 1600 frames. A point's `frames` and `shots` override these. Keep runs short (the owner's rule); `--only` picks points.
+- **Runs.** Both builds get the same switches: `storyjump=<id> determ gwdump=20 shotat=<frames> padscript=...`. The port runs in Azahar (`run_azahar.py`, slot-locked; own profile `build/story-azahar/`) and the debug DOL in Dolphin (`run_dolphin.py --gcdebug --shots`, own profile, port 55677), one of each at a time, side by side. If the Dolphin shot run fails, Dolphin runs again without shots (the Null backend), so the state is still compared.
+- **Comparison.** The `gwdump` records are compared as `gw_diff.py` does (all fields but the raw `gw` hash), and each shot pair (port EFB and GameCube XFB, both 608x480 at the same game frame) as `gallery.py` does (mean of the largest channel's absolute difference, 0-255).
+- **Results** (`build/story-sweep/`: `results.json`, `table.md`, `index.html` with the pairs and amplified differences, `logs/<point>/`), worst first:
+  - `port-crash`;
+  - `hang` (the port stopped before the last frame);
+  - `gc-failed` (the Dolphin run failed);
+  - `state-diverged` (first frame and fields; `rng/event only` when only `rng`, `evtgw` or `gwv` differ, the sound-timing difference of backlog lane F 5);
+  - `image-diff` (a shot before the divergence over `--image-threshold`, default 12);
+  - `ok`.
+  Edge filtering and the XFB's YUV 4:2:2 round trip alone give a mean of about 4 to 10 in busy scenes.
+
+#### Story sweep results (2026-11-23)
+
+The run used 1800 frames per point (2400 for the chapter cards and the ending), about 5 hours for the 76 points. Under the owner's short-run rule the defaults in `story_points.json` are now 1100 frames (1600 for the chapter cards and the ending). Shots are in `build/story-sweep/{port,gc,diff}/<point>/fNNNNN.png`.
+
+| Result | Points |
+|---|---|
+| Port crash or hang | **none** |
+| State equal for the whole run (`ok` 32, `image-diff` 8) | 40 |
+| Diverged, first field `rng` only | 22 |
+| Diverged, Mario's position by one float ULP only (`ch2_stg2_00`, `ch2_stg2_25_02`, `ch5_stg5_00`, `ch5_stg5_42`) | 4 |
+| Diverged at frame 680 to 720, Mario's height and `rng` | 8 |
+| Diverged, `gsw` hash (`ch3_stg3_00`, frame 1600, Glitzville chapter card) | 1 |
+| Dolphin failed (`ch5_stg5_10`) | 1 |
+
+The epilogue, the credits (`end_00`) and every Peach and Bowser interlude and Bowser stage in the list run through with state equal or diverging only in `rng`.
+
+Divergences:
+
+- **`rng` only.** The random-number state differs first, at different frames. These are most likely the sound-timing difference of backlog lane F 5 (Dolphin skips silent voices, so sound-driven events and their `rand` calls come at other frames). This was not confirmed per point.
+- **One ULP.** The PowerPC rounds Mario's position one bit differently from the ARM build (fused multiply-add), for example `4139b208` against `4139b207`. This is expected between the two CPUs.
+- **Frames 680 to 720.** These are the `mash` points whose map starts with Mario free to move (`ch6_stg6_39`, `ch6_stg6_48`, `ch7_stg7_26`, `ch8_stg8_01`, `ch8_stg8_15`, `ch8_stg8_15_1`, `ch5_stg5_42`, `ending_stg9_00_12`). The A press at frame 700 makes Mario jump on the GameCube; on the port he jumps one press later. The two runs are equal at frame 700, input included. Open.
+
+Real visual differences (port against GameCube, state equal at the shot):
+
+1. **Map fog is missing or much weaker on the port.** The GameCube darkens and tints distant geometry (and, more weakly, near geometry) toward the map's fog colour; the port draws it unfogged. Seen in `tik_01`, `tik_02`, `tik_05` (scores 22 to 25), `gon_06`, `gon_11` (Hooktail's walls stay bright grey against a dark blue room), `las_26` (Gloomtail), `las_29`, `tik_00` and more mildly elsewhere. It is the same with `gxvsh=0`, so it is not the vertex-shader path. The map code (`mapdrv.c`, `fog_table` from the converted `map.dat`) is shared; the converter swaps `fog_table` with `MapFileFog`. Suspects: the PICA fog LUT's depth mapping (`fog_lut` in `gx_draw.c`, window depth 0..1) against the depth the port writes. Pairs: `prologue_stg0_13_1/f01100`, `ch1_stg1_16/f01100`, `ch8_stg8_04/f01100`, `ch8_stg8_end/f01100`.
+2. **The chapter card's "CHAPTER" letters are dark grey on the port.** On the GameCube they are rainbow-coloured with a white outline. All chapter cards are affected (`sys_01`, score about 17). It is the same with `gxvsh=0`. Pair: `ch1_stg1_00/f01300`.
+3. **Glitz Pit big screen (`tou_03`).** The screen above the ring shows the scene (an EFB copy) on the GameCube; on the port it is black apart from a partial strip. Pairs: `ch3_stg3_06/f00900`, `f01400`.
+4. **Glitz Pit audience (`tou_03`).** The audience sprites are smaller, and in other places, than on the GameCube, while the state (RNG included) is equal through frame 1800. Pair: `ch3_stg3_06/f00900`. Needs a closer look.
+5. **Pirate's Grotto water (`dou_00`).** The water is darker and opaque on the port. On the GameCube it is lighter and translucent, and the submerged barrel shows through it. Pair: `ch5_stg5_19_01/f01100`.
+6. **Area-name banner.** It appears a few frames earlier on the port (its mosaic is on screen at frame 720 in `nok_00`; the GameCube has no banner yet). Pair: `ch1_stg1_01a/f00720`.
+7. **`tik_00` in the epilogue (`ending_stg9_00_12`).** The GameCube frame is softly blurred and fogged; the port's is sharp and bright. The state diverged at frame 680 (a frames 680 to 720 point), so check this again.
+
+Dolphin (tool) issues found by the sweep:
+
+- **Debug DOL stack overflow (fixed).** A long `padscript` overran the 512-byte line of the debug DOL's `tst_log` when the switches were echoed at boot. The game crashed (invalid reads in `OSDumpContext`) and Dolphin died with SIGILL (`prologue_stg0_00`, the first run). The echo is now cut to 400 characters (`gcdebug.c`). The rerun passes.
+- **Dolphin's Vulkan backend crashes (SIGSEGV)** between frames 1400 and 1720 in `ch3_stg3_06` (`tou_03`) and `ch5_stg5_10` (`muj_20`): 3 times out of 3 and 2 out of 2. The same `tou_03` run with the Null backend (no shots) runs through, and its state equals the port's through frame 1800. `story_sweep.py` now repeats a failed shot run without shots, so the state is still compared.
 
 ### Crashes, svcBreak and hangs
 
@@ -220,7 +295,8 @@ tools/port3ds/run_hw.py --switches "wdog=30" --until "warp:|title" --timeout 300
 tools/port3ds/run_hw.py --switches "map=gor_01 wdog=30" --until "warp: gor_01" --timeout 300
 ```
 
-`run_hw.py` sends the `.3dsx` with 3dslink, passing the switches as arguments, and then connects to the game's live log on TCP port 17492. A netloaded game opens that port by itself. It prints and saves every line to `build/hw-last/log.txt` and stops like the Azahar runner. The game also writes `sdmc:/3ds/ttyd/log.txt` and keeps the previous run as `log.old`, so the report of a crash that cut the connection can be fetched with ftpd.
+`run_hw.py` sends the `.3dsx` with 3dslink, passing the switches as arguments, and then connects to the game's live log on TCP port 17492. A netloaded game opens that port by itself. It prints and saves every line to `build/hw-last/log.txt` and stops like the Azahar runner. The game also writes `sdmc:/3ds/ttyd/latest.log` and keeps the previous run as `previous.log`, so the report of a crash that cut the connection can be fetched with ftpd.
+Without FTP: `devupdate.py log [--prev] [-o FILE]` reads the same `latest.log` / `previous.log` over devupdate (`files_ro_dir`, read-only, needs the devupdate server).
 
 A 3dsx gets the memory of the title the Homebrew Launcher runs in, and it does not get the QTM mapping. If the game reports at boot that the heap or linear heap is too small, install the CIA instead (copy `build/3ds/game/ttyd.cia` to the SD card and install it with FBI) and start it from the HOME Menu. A CIA's switches come from `sdmc:/3ds/ttyd/debug3ds.txt`. Its live log needs the `livelog` switch.
 Put `livelog` in `sdmc:/3ds/ttyd/debug3ds.txt`, start the CIA, then run `run_hw.py --no-send --until ...` to attach (`run_hw.py` adds `livelog` itself when it sends a 3dsx).
@@ -274,7 +350,11 @@ $D --ip $N3DS_IP report --out build/devupdate-last/report.txt   # after a crash 
 $D --ip $N3DS_IP bootstrap --cia build/3ds/game/ttyd.cia --switches devupdate   # first install, no FBI
 ```
 
-- **Switches.** `restart` and `push` switches reach the relaunched game as APT deliver arguments, which `plat_switches_load` puts first. They hold for that one launch; a start from the HOME Menu gets only `debug3ds.txt`. A devupdate relaunch keeps the server on.
+- **Updater screen.** When a push, restart or queue relaunch begins (`on_begin`), the bottom screen is replaced by: `Updater`, the line `build <running> -> <incoming>`, a status line (receiving N of M KiB and KiB/s, checking CRC, installing, relaunching, `Error: <reason>`), a 30-block progress bar, and below them the log, still scrolling. A refused or aborted update shows the error for 3 s and then repaints the exact earlier screen (`on_resume`). The library reports it through `DevUpdateConfig.on_status` (phase, bytes done and total, text; every 64 KiB or 100 ms while receiving); the screen is `plat_updater_*` in `plat/menu.c`. `shotbottom=N` also counts the updater's redraws, so `shotbottom=4` with a push into an Azahar session (`devupdate.py azahar-session start`, then `push ... --no-relaunch [--bad-crc]`) gives shots of every phase.
+- **Incoming build text.** `devupdate.py push` sends a version text in the protocol header (flag bit 2, a length byte and the text at the start of the argument area). Default: the first line of `<cia name>.version` next to the CIA (`build.sh` writes `build/3ds/game/ttyd.version`); `--version-text TEXT` overrides; none shows `?`. The same line is logged (`devupdate: build #463 57c52944 -> #470 deadbeef`). A relaunch appends `ctrdk_from=<running build>` to the next launch's switches; that launch logs `updated from #455 19cb5688`.
+- **Pause look (Options menu).** While Options is open, `plat/pause_screen.c` greys the last frame of the top screen on the CPU (both eyes when 3D is on) and swaps it in; the game's next frame replaces it. `plat/audio.c` applies a gain to the mix that ramps to 0 over one buffer, so `wavdump` shows silence and the 10-second `audio: peak` line reads 0. `shotbottom=N` also saves the frozen top screen as `shots/pNNNNN.ppm`.
+
+- **Switches.** `restart` and `push` switches reach the relaunched game as APT deliver arguments, which `plat_switches_load` puts first. They hold for that one launch; a start from the HOME Menu gets only `debug3ds.txt`. In a development build the server is on for a HOME Menu start too (unless `nodevupdate`); in a release build it needs the `devupdate` switch. A devupdate relaunch keeps the server on.
 - **Saves.** Before a relaunch the game only waits for a card write in progress. It never touches the files in `sdmc:/3ds/ttyd/`.
 - **Azahar.** The same commands work with `--ip 127.0.0.1` against one long-lived headless instance:
 
@@ -366,7 +446,7 @@ Results in Azahar (2026-11-21, CIA):
 |---|---|
 | `tools/port3ds/memcompare.py`: the same structures read from Dolphin, paper-cut and Azahar and compared field by field. GameCube and 3DS layouts come from the 3DS ELF's debug info (the two layouts are identical apart from byte order); paper-cut values come from its own debug info | 1 |
 | `tools/port3ds/golden.py` | 4 |
-| Story sweeps | 6–7 |
+| Story sweep by full input replay (checkpoints done: "Story sweep" above) | 6–7 |
 
 ### Host decode (no console, no emulator)
 
@@ -450,7 +530,7 @@ Player settings live in `sdmc:/3ds/ttyd/options.txt` as `key=value` lines ending
 
 - **Building:**
   - `tools/port3ds/build.sh . -DREGION=JP` (or `PAL`) writes to `build/3ds/game_jp` (or `build/3ds/game_pal`).
-  - The discs go in `iso/G8MJ01.iso` and `iso/G8MP01.iso`, or are given with `-DTTYD_DISC=`.
+  - The discs go in `iso/G8MJ01.iso` and `iso/G8MP01.iso`, (the arena table in `gen_disc_data.py` is filled from them once: `--print-arena`).
 - **Wrong-disc check:** a build refuses a disc from another region. With the US disc, `run_azahar.py --build build/3ds/game_pal/ttyd.cia --switches "" --until "This build is for"` should pass.
 - **JP and PAL in-game testing needs the JP and PAL discs.** The steps are in PORT_3DS_PLAN.md section 9.1.
 
@@ -460,6 +540,11 @@ Player settings live in `sdmc:/3ds/ttyd/options.txt` as `key=value` lines ending
 - **Run:** `run_dolphin.py --gcdebug` boots it headless.
 - **Compare:** `tools/port3ds/gw_diff.py` runs the same switches and padscript in Azahar (with `determ`) and in Dolphin, and reports the first frame and the fields that differ. Both runs start with the same memory card, no save files by default (`--card empty`) or exactly one GCI (`--card PATH.gci`); the port's `sdmc:/3ds/ttyd/card/` and Dolphin's `GC/<region>/Card A` folder are emptied and filled to match, and the state is printed. Save data changes the file-select text and so the RNG, so a run on a card with saves differs from one without.
 - Details are in [PORT_3DS_TEST_INFRA.md](PORT_3DS_TEST_INFRA.md).
+
+### Screenshot galleries and the TEV check
+
+- `tools/port3ds/gallery.py fx|battle|frames|battlelist|battlesweep|report` runs the port in Azahar and the debug DOL in Dolphin (`run_dolphin.py --shots`, Vulkan headless) with the same switches in `determ`, diffs the 608x480 shots and writes `build/gallery/<name>/index.html`. Details in [PORT_3DS_TEST_INFRA.md](PORT_3DS_TEST_INFRA.md).
+- `tools/port3ds/tev_check/build.sh && build/tev_check/tev_check [-v] [-b] [setup...]` checks the TEV to PICA compiler (`gx_tev.c` and the game's overrides, `port3ds/game/tev_override_ttyd.c`) on the PC: the game's TEV setups evaluated as GX TEV and as the compiled PICA program over random inputs, largest and mean difference per setup; `-v` prints the program, `-b` gives textures 1-bit alpha. No emulator.
 
 ### Recorded inputs
 

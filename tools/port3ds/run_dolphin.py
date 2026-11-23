@@ -56,6 +56,7 @@ Exit status: 0 ok, 1 failure, 2 usage or setup error.
 """
 
 import argparse
+import atexit
 import fcntl
 import json
 import os
@@ -70,14 +71,33 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from elfsyms import load_symbols  # noqa: E402
 from gdbrsp import RSP, RSPError  # noqa: E402
+import emu_usage  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 PROFILE = REPO / "build" / "dolphin-profile"
 LAST = REPO / "build" / "dolphin-last"
 
 
+_usage = {"start": time.time(), "t0": time.monotonic(), "slot": None, "switches": "", "result": "no result"}
+
+
+def _log_usage():
+    # Every run ends here (ok, failure, usage error, signal): one line in the machine-wide log.
+    now = time.monotonic()
+    slot = _usage["slot"]
+    if slot is None:
+        waited, ran = now - _usage["t0"], 0.0
+    else:
+        waited, ran = slot - _usage["t0"], now - slot
+    emu_usage.record("dolphin", REPO, waited, ran, _usage["result"], _usage["switches"], _usage["start"])
+
+
+atexit.register(_log_usage)
+
+
 def die(msg, code=1):
     print(f"run_dolphin: FAIL: {msg}")
+    _usage["result"] = f"FAIL: {msg}"
     sys.exit(code)
 
 
@@ -109,6 +129,7 @@ def acquire_slot():
                 os.ftruncate(fd, 0)
                 os.write(fd, f"{os.getpid()}\n".encode())
                 _slot_fd = fd
+                _usage["slot"] = time.monotonic()
                 return
             except OSError:
                 os.close(fd)
@@ -269,7 +290,10 @@ def main():
     ap.add_argument("--addr", action="append", default=[])
     ap.add_argument("--json", type=Path)
     ap.add_argument("--port", type=int, default=55555)
-    ap.add_argument("--timeout", type=float, default=300.0)
+    ap.add_argument("--timeout", type=float, default=None,
+                    help="seconds the emulator may run once it has a slot (default 60; more needs --long)")
+    ap.add_argument("--long", type=float, metavar="SECONDS", default=None,
+                    help="a run that genuinely needs more than 60 s: the limit in seconds (max 1800)")
     ap.add_argument("--gcdebug", action="store_true", help="boot the debug DOL (configure.py --gcdebug)")
     ap.add_argument("--switches", help="test switches for the debug DOL")
     ap.add_argument("--read-log", action="store_true", help="read the debug DOL's test log at the end")
@@ -282,6 +306,10 @@ def main():
     ap.add_argument("--video", help="video backend (default Null; Vulkan with --shots)")
     args = ap.parse_args()
     global PROFILE
+    args.timeout, err = emu_usage.resolve_timeout("run_dolphin", args.timeout, args.long)
+    if err:
+        die(err, 2)
+    _usage["switches"] = args.switches or ""
     if args.profile:
         PROFILE = args.profile.resolve()
     if (args.switches is not None or args.read_log or args.shots) and not args.gcdebug:
@@ -412,6 +440,7 @@ def main():
     if args.json:
         args.json.write_text(json.dumps(result, indent=1))
     print(f"run_dolphin: OK ({result['frame']} frames, {time.monotonic() - start:.1f}s)")
+    _usage["result"] = f"OK {result['frame']} frames"
     return 0
 
 

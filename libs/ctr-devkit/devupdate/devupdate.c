@@ -19,6 +19,8 @@
  *      files.c and queue.c)
  *   8  u32 flags: bit 0 relaunch this title after a push, bit 1 jump to the
  *      pushed (or given) title after a push
+ *      bit 2: the argument area starts with a version text for the incoming build
+ *      (one length byte, then that many characters; args_len counts it)
  *  12  u32 payload size (the CIA)
  *  16  u32 payload CRC32 (zlib's)
  *  20  u32 argument length (switch text for the next launch)
@@ -66,7 +68,7 @@
 #define THREAD_PRIO 0x30
 
 enum { CMD_PING = 1, CMD_PUSH, CMD_RESTART, CMD_REPORT, CMD_LAUNCH, CMD_FILES, CMD_QUEUE };
-enum { FLAG_RELAUNCH = 1u << 0, FLAG_LAUNCH = 1u << 1 };
+enum { FLAG_RELAUNCH = 1u << 0, FLAG_LAUNCH = 1u << 1, FLAG_VERSION = 1u << 2 };
 
 typedef struct __attribute__((packed)) {
     char magic[4];
@@ -94,6 +96,8 @@ static Result s_am_rc;
 static u64 s_title_id;
 static aptHookCookie s_cookie;
 static const char* s_report;
+static char s_incoming[48]; /* the PC tool's version text of the build being pushed ("" = none) */
+static char s_from[48];     /* the build that relaunched us (deliver argument ctrdk_from=) */
 
 static u8 s_buf[CHUNK] __attribute__((aligned(64)));
 static u32 s_crc_table[256];
@@ -288,6 +292,22 @@ bool devupdate_in_recovery(void) { return s_recovery != 0; }
 
 static bool s_launched;
 
+const char* devupdate_incoming_version(void) { return s_incoming; }
+
+const char* devupdate_launch_from(void) {
+    const char* a = devupdate_launch_args();
+    const char* p = strstr(a, "ctrdk_from=");
+    s_from[0] = '\0';
+    if (p != NULL) {
+        size_t i = 0;
+        for (p += 11; *p != '\0' && *p != ' ' && i + 1 < sizeof(s_from); p++) {
+            s_from[i++] = *p == '_' ? ' ' : *p;
+        }
+        s_from[i] = '\0';
+    }
+    return s_from;
+}
+
 bool devupdate_launched(void) {
     devupdate_launch_args();
     return s_launched;
@@ -350,6 +370,12 @@ static void recovery_exit(bool relaunch) {
 
 /* ---- Requests ---- */
 
+static void status(DevUpdatePhase phase, u32 done, u32 total, const char* text) {
+    if (s_cfg.on_status != NULL) {
+        s_cfg.on_status(phase, done, total, text, s_cfg.user);
+    }
+}
+
 static void begin(bool recovery) {
     if (!recovery && s_cfg.on_begin != NULL) {
         s_cfg.on_begin(s_cfg.user);
@@ -364,6 +390,16 @@ static void resume(bool recovery) {
 
 /* After a push, a restart or a launch: hands over to the next launch. */
 static void hand_over(int fd, bool self, u64 tid, const char* args, bool recovery) {
+    char with_from[DEVUPDATE_MAX_ARGS + 64];
+    if (self && s_cfg.version != NULL && strlen(args) + strlen(s_cfg.version) + 16 < sizeof(with_from)) {
+        /* the running build's stamp travels to the next launch, spaces as '_' */
+        char* o = with_from + snprintf(with_from, sizeof(with_from), "%s%sctrdk_from=", args, args[0] ? " " : "");
+        for (const char* c = s_cfg.version; *c != '\0'; c++) {
+            *o++ = *c == ' ' ? '_' : *c;
+        }
+        *o = '\0';
+        args = with_from;
+    }
     set_next(self, tid, args);
     if (recovery) {
         if (fd >= 0) {
@@ -397,6 +433,7 @@ static void hand_over(int fd, bool self, u64 tid, const char* args, bool recover
     }
     log_msg(2, "devupdate: relaunch requested (%s, args \"%s\")", self ? "this title" : "another title",
             s_next_args + ARG_PREFIX_LEN);
+    status(DEVUPDATE_PH_RELAUNCHING, 0, 0, s_next_args + ARG_PREFIX_LEN);
     s_relaunch_req = true;
     if (s_cfg.on_relaunch != NULL) {
         if (!(envIsHomebrew() && !s_jump_self)) {
@@ -429,15 +466,19 @@ static void do_push(int fd, const Header* h, const char* args, bool recovery) {
     Handle cia = 0;
     Result rc = AM_StartCiaInstall(MEDIATYPE_SD, &cia);
     if (R_FAILED(rc)) {
+        status(DEVUPDATE_PH_ERROR, 0, 0, "AM_StartCiaInstall failed");
         send_line(fd, "error 13 AM_StartCiaInstall %08lx", (unsigned long)rc);
         resume(recovery);
         return;
     }
     u32 crc = 0xFFFFFFFFu, done = 0, next_report = 1u << 20;
+    u64 last_status = 0;
+    status(DEVUPDATE_PH_RECEIVING, 0, h->size, NULL);
     while (done < h->size) {
         u32 want = h->size - done < CHUNK ? h->size - done : CHUNK;
         int r = recv_some(fd, s_buf, want, 15000);
         if (r <= 0) {
+            status(DEVUPDATE_PH_ERROR, done, h->size, r == -2 ? "sleep, install cancelled" : "transfer broke, install cancelled");
             AM_CancelCIAInstall(cia);
             send_line(fd, r == -2 ? "error 16 sleep (install cancelled)"
                         : r == 0 ? "error 14 connection closed after %lu bytes (install cancelled)"
@@ -451,6 +492,7 @@ static void do_push(int fd, const Header* h, const char* args, bool recovery) {
         u32 written = 0;
         rc = FSFILE_Write(cia, &written, done, s_buf, (u32)r, 0);
         if (R_FAILED(rc) || written != (u32)r) {
+            status(DEVUPDATE_PH_ERROR, done, h->size, "write to AM failed");
             AM_CancelCIAInstall(cia);
             send_line(fd, "error 17 write failed at %lu: %08lx (install cancelled)", (unsigned long)done,
                       (unsigned long)rc);
@@ -465,9 +507,16 @@ static void do_push(int fd, const Header* h, const char* args, bool recovery) {
         if (s_cfg.on_progress != NULL) {
             s_cfg.on_progress(done, h->size, s_cfg.user);
         }
+        u64 now = svcGetSystemTick();
+        if (done == h->size || now - last_status >= SYSCLOCK_ARM11 / 10) {
+            last_status = now;
+            status(DEVUPDATE_PH_RECEIVING, done, h->size, NULL);
+        }
     }
     crc = ~crc;
+    status(DEVUPDATE_PH_CHECKING, done, h->size, NULL);
     if (crc != h->crc) {
+        status(DEVUPDATE_PH_ERROR, done, h->size, "CRC mismatch, install cancelled");
         AM_CancelCIAInstall(cia);
         send_line(fd, "error 5 crc mismatch: received %08lx, header %08lx (install cancelled)", (unsigned long)crc,
                   (unsigned long)h->crc);
@@ -476,8 +525,10 @@ static void do_push(int fd, const Header* h, const char* args, bool recovery) {
         return;
     }
     send_line(fd, "installing");
+    status(DEVUPDATE_PH_INSTALLING, done, h->size, NULL);
     rc = AM_FinishCiaInstall(cia);
     if (R_FAILED(rc)) {
+        status(DEVUPDATE_PH_ERROR, done, h->size, "AM_FinishCiaInstall failed");
         send_line(fd, "error 18 AM_FinishCiaInstall %08lx", (unsigned long)rc);
         log_msg(0, "devupdate: AM_FinishCiaInstall %08lx", (unsigned long)rc);
         resume(recovery);
@@ -571,6 +622,13 @@ static void handle_client(int fd, bool recovery) {
         return;
     }
     args[h.args_len] = '\0';
+    s_incoming[0] = '\0';
+    if ((h.flags & FLAG_VERSION) && h.args_len >= 1 && (u8)args[0] < sizeof(s_incoming) && h.args_len >= 1u + (u8)args[0]) {
+        u32 n = (u8)args[0];
+        memcpy(s_incoming, args + 1, n);
+        s_incoming[n] = '\0';
+        memmove(args, args + 1 + n, h.args_len - 1 - n + 1); /* the switches follow, NUL included */
+    }
     switch (h.cmd) {
     case CMD_PING: do_ping(fd); break;
     case CMD_REPORT:
@@ -847,6 +905,7 @@ void du_send_all(int fd, const char* s, size_t n) { send_all(fd, s, n); }
 int du_recv_some(int fd, void* buf, size_t n, int timeout_ms) { return recv_some(fd, buf, n, timeout_ms); }
 uint8_t* du_buf(void) { return s_buf; }
 uint32_t du_crc_update(uint32_t crc, const uint8_t* p, uint32_t n) { return crc_update(crc, p, n); }
+void devupdate_set_next_args(const char* args) { set_next(true, 0, args); }
 void du_set_next(bool self, uint64_t tid, const char* args) { set_next(self, tid, args); }
 void du_begin(bool recovery) { begin(recovery); }
 void du_hand_over(int fd, bool self, uint64_t tid, const char* args, bool recovery) {

@@ -33,4 +33,12 @@ The log banner and the error screen show `<version>-dev+<shorthash>` for any bui
 
 Code compiled from the decomp and the port, and generated placeholder banner, icon and sound (`make_placeholder_art.py`). No game data: the port reads textures, models, maps and sounds from the player's own `game.iso`. `release.py` checks only that an artifact is not a disc image and is not oversized, so do not add files to the CIA without reading PORT_3DS_PLAN.md section 6.1.
 
-One number comes from the disc at build time: the GameCube arena's high end (`PORT_GAME_ARENA_HI`, from the disc's FST size, `gen_disc_data.py`). It is read from `iso/<id>.iso` when the build finds that disc, else a stand-in is used for JP and PAL. For a release build, have all three discs in `iso/` so the JP and PAL values are the real ones.
+One number depends on the disc: the GameCube arena's high end (`PORT_GAME_ARENA_HI`, where the IPL puts the FST, from the disc's FST size). The build does not read a disc for it: it comes from the committed `ARENA_HI` table in `tools/port3ds/gen_disc_data.py`. The US value (`0x817EE1A0`) was computed from the US disc and equals the one measured in Dolphin; **JP and PAL are unknown** (`None`) until filled.
+
+A dev build of JP or PAL uses the US value as a stand-in and prints a build warning. `release.py` refuses to package a JP or PAL release while its value is unknown (`--regions US` packages only the known ones). To fill the table, someone with that disc runs this once:
+
+```
+tools/port3ds/gen_disc_data.py --print-arena iso/G8MJ01.iso     # or iso/G8MP01.iso
+```
+
+and puts the printed line (`"G8MJ01": 0x...,`) in `ARENA_HI`, then commits. After that no disc is needed for any build.

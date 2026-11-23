@@ -47,6 +47,9 @@ typedef struct DekaTiming {
     u8 hit;                      // 0x35
 } DekaTiming;
 
+#ifdef TARGET_PORT
+#include <stddef.h>
+#endif
 typedef struct YukaMesh {
     Vec pos[2][129];  // 0x0
     Vec disp[2][129]; // 0xC18
@@ -55,6 +58,15 @@ typedef struct YukaMesh {
     f32 u[2][129];    // 0x3060
     f32 v[2][129];    // 0x3468
 } YukaMesh;
+
+#ifdef TARGET_PORT
+// yuka_main reads prev[r][-1] and prev[r][129], one element past either end of the row: on the GameCube that is
+// the neighbouring row (or vel[1][128] / u[0][0..2] at the ends), which the port's layout shares. Reached through
+// the mesh's base, so the compiler sees a read inside the YukaMesh object instead of past a row.
+#define DEKA_PREV(m, r, j) ((Vec*)((u8*)(m) + offsetof(YukaMesh, prev)) + (r) * 129 + (j))
+#else
+#define DEKA_PREV(m, r, j) (&(m)->prev[r][j])
+#endif
 
 typedef struct DekaWork {
     /* 0x000 */ smartEntry* tex;
@@ -274,11 +286,11 @@ static void yuka_main(void) {
             Vec n;
             Vec t;
 
-            PSVECSubtract(&m->prev[r][j], &m->prev[r][j + 1], &d);
+            PSVECSubtract(DEKA_PREV(m, r, j), DEKA_PREV(m, r, j + 1), &d);
             PSVECNormalize(&d, &n);
             PSVECScale(&n, &n, 1.0f - PSVECMag(&d));
             PSVECAdd(&acc, &n, &acc);
-            PSVECSubtract(&m->prev[r][j], &m->prev[r][j - 1], &d);
+            PSVECSubtract(DEKA_PREV(m, r, j), DEKA_PREV(m, r, j - 1), &d);
             PSVECNormalize(&d, &n);
             PSVECScale(&n, &n, 1.0f - PSVECMag(&d));
             PSVECAdd(&acc, &n, &acc);

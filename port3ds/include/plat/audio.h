@@ -28,6 +28,8 @@ int plat_audio_start(uint32_t rate, uint32_t quantum_frames, PlatAudioFill fill)
 
 /* 1 while samples reach the speakers. */
 int plat_audio_has_output(void);
+void plat_audio_set_muted(int on); /* mute or restore the output (ramped over one buffer); the pause of the Options menu */
+int plat_audio_muted(void);
 
 /* Frames filled since the start, and the blocks the DSP ran out of (each
  * one an audible gap), for the HUD and the log. */

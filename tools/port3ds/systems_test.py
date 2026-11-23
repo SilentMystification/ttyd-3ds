@@ -28,6 +28,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools" / "port3ds"))
 import test_gci  # noqa: E402
+import emu_usage  # noqa: E402
 
 PROFILE = ROOT / "build" / "systems-profile"
 SDMC = PROFILE / "data" / "azahar-emu" / "sdmc"
@@ -85,7 +86,7 @@ def prepare_profile(card):
             raise FileNotFoundError(f"fixture {src.name} is missing: run the scenario that makes it first")
         shutil.copy(src, GAME_DIR / "card" / SAVE_GCI)
     shutil.rmtree(GAME_DIR / "shots", ignore_errors=True)
-    for f in ("log.txt", "log.old", "crash.txt", "options.txt"):
+    for f in ("latest.log", "previous.log", "crash.txt", "options.txt"):
         (GAME_DIR / f).unlink(missing_ok=True)
 
 
@@ -94,7 +95,7 @@ def run_game(build, switches, padscript, until, timeout, last, expect_exit=False
     if padscript:
         sw += f" padscript={padscript}"
     cmd = [sys.executable, str(ROOT / "tools/port3ds/run_azahar.py"), "--build", str(build), "--profile", str(PROFILE),
-           "--last", str(last), "--switches", sw, "--log", "3ds/ttyd/log.txt", "--timeout", str(timeout),
+           "--last", str(last), "--switches", sw, "--log", "3ds/ttyd/latest.log", *emu_usage.time_args(timeout),
            "--stall", "90"]
     if until:
         cmd += ["--until", until]

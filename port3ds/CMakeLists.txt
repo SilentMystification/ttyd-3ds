@@ -167,26 +167,11 @@ file(WRITE "${TTYD_GEN_DIR}/rel_table.c.tmp"
     "const int port_rel_count = sizeof(port_rel_table) / sizeof(port_rel_table[0]);\n")
 configure_file("${TTYD_GEN_DIR}/rel_table.c.tmp" "${TTYD_GEN_DIR}/rel_table.c" COPYONLY)
 # Where this version keeps the data ports read from the disc (port_disc_data.h),
-# and its GameCube arena. The arena's high end comes from the disc itself:
-# TTYD_DISC names the image, else iso/<version>.iso or iso/game.iso is used
-# when it is this version's disc. Without it the generator uses the G8ME01
-# value (exact for G8ME01, a stand-in for the others; see gen_disc_data.py).
-set(TTYD_DISC "" CACHE FILEPATH "This version's disc image, for the generators that read the disc (optional)")
-set(_disc_args)
-if(TTYD_DISC)
-    set(_disc_args --disc "${TTYD_DISC}")
-else()
-    foreach(_cand "${TTYD_REPO_DIR}/iso/${TTYD_VERSION}.iso" "${TTYD_REPO_DIR}/iso/game.iso")
-        if(EXISTS "${_cand}" AND NOT _disc_args)
-            file(READ "${_cand}" _id LIMIT 6)
-            if(_id STREQUAL TTYD_VERSION)
-                set(_disc_args --disc "${_cand}")
-            endif()
-        endif()
-    endforeach()
-endif()
+# and its GameCube arena. The arena's high end is a committed table in
+# gen_disc_data.py (ARENA_HI); a version whose value is unknown builds with the
+# US value and a warning, and release.py refuses to package it.
 execute_process(COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/gen_disc_data.py"
-    --version ${TTYD_VERSION} ${_disc_args} "${TTYD_GEN_DIR}/port_disc_data_gen.h.tmp" RESULT_VARIABLE _gen_rc)
+    --version ${TTYD_VERSION} "${TTYD_GEN_DIR}/port_disc_data_gen.h.tmp" RESULT_VARIABLE _gen_rc)
 if(NOT _gen_rc EQUAL 0)
     message(FATAL_ERROR "gen_disc_data.py failed")
 endif()
@@ -320,12 +305,12 @@ target_compile_definitions(ttyd_port_plat PRIVATE PORT3DS_PLAT_SIDE=1)
 target_include_directories(ttyd_port_plat PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include" "${TTYD_GEN_DIR}"
     "${TTYD_REPO_DIR}/libs/ctr-devkit/include")
 
-# Compiler A/B switches (docs/PORT_3DS_60FPS.md, "Step 1 results"); both off by default.
+# Compiler A/B switches (docs/PORT_3DS_60FPS.md, "Step 1 results"); both on by default (pass =OFF for the plain -O2 build).
 #   TTYD_LTO:    link-time optimisation over the decomp's DOL code, MusyX and both port halves (the static
 #                RELs stay plain objects: tools/port3ds/rel_link.py links them with ld -r).
 #   TTYD_GX_O3:  -O3 on the GX front end (port3ds/game/gx/*.c) only.
-option(TTYD_LTO "Link-time optimisation of the DOL code, MusyX and the port" OFF)
-option(TTYD_GX_O3 "-O3 on port3ds/game/gx/*.c" OFF)
+option(TTYD_LTO "Link-time optimisation of the DOL code, MusyX and the port" ON)
+option(TTYD_GX_O3 "-O3 on port3ds/game/gx/*.c" ON)
 if(TTYD_LTO)
     foreach(_t ttyd_dol ttyd_musyx ttyd_port_game ttyd_port_plat)
         target_compile_options(${_t} PRIVATE -flto=auto -ffat-lto-objects)

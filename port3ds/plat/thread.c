@@ -28,6 +28,18 @@ static void probe_entry(void* arg) {
     svcExitThread();
 }
 
+/* The Result of a refused threadCreate (libctru does not return it): the kernel is asked again
+ * with a thread that exits at once. Same core and priority, so the same refusal comes back. */
+Result plat_thread_refusal(int priority, int core) {
+    Handle h = 0;
+    Result pr = svcCreateThread(&h, probe_entry, 0, (u32*)(probe_stack + sizeof(probe_stack)), priority,
+                                core < 0 ? -2 : core);
+    if (R_SUCCEEDED(pr)) {
+        svcCloseHandle(h);
+    }
+    return pr;
+}
+
 static void thread_trampoline(void* p) {
     PlatThread* t = p;
     plat_crash_install_thread();
@@ -52,14 +64,7 @@ PlatThread* plat_thread_create(void (*entry)(void* arg), void* arg, uint32_t sta
     }
     t->thread = threadCreate(thread_trampoline, t, (stack_bytes + 7u) & ~7u, priority, core < 0 ? -2 : core, false);
     if (t->thread == NULL) {
-        /* threadCreate does not return the Result: ask the kernel again with
-         * a thread that exits at once, to get the code for the log. */
-        Handle h = 0;
-        Result pr = svcCreateThread(&h, probe_entry, 0, (u32*)(probe_stack + sizeof(probe_stack)), priority,
-                                    core < 0 ? -2 : core);
-        if (R_SUCCEEDED(pr)) {
-            svcCloseHandle(h);
-        }
+        Result pr = plat_thread_refusal(priority, core);
         PLOG_E("thread %s: refused (core %d, priority %#x, result %08lx)", t->name, core, priority,
                (unsigned long)pr);
         free(t);

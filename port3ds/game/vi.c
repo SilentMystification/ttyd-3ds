@@ -25,6 +25,7 @@
 #include "driver/swdrv.h"
 #include "event.h"
 #include "pmario_sound.h"
+#include "mario/mario.h"
 #include "mario/mario_party.h"
 #include "mario/mariost.h"
 #include "memory.h"
@@ -161,6 +162,9 @@ VIRetraceCallback VISetPostRetraceCallback(VIRetraceCallback callback) {
  * set-up, no partner out, the save flags cleared, the story so far
  * (GSW 0, which map scripts branch on) and one partner joined and out. */
 static void warp_new_game(int story, int party) {
+    if (tst_storyjump_apply()) {
+        return; /* storyjump=: the story point's own set-up (test_mode.c) */
+    }
     /* the file select's new game stops the title's (or the opening's) music
      * and sounds; the warp skips it */
     psndStopAllFadeOut();
@@ -233,6 +237,13 @@ static void warp_switch(void) {
             }
             snprintf(map, sizeof(map), "%.15s", v);
             state = 1;
+        } else {
+            const char *sj_map, *sj_bero;
+            if (tst_storyjump_target(&sj_map, &sj_bero)) { /* storyjump= alone: the point's map */
+                snprintf(map, sizeof(map), "%.15s", sj_map);
+                snprintf(bero, sizeof(bero), "%.15s", sj_bero);
+                state = 1;
+            }
         }
     }
     if (state != 1 || gp == NULL) {
@@ -350,6 +361,21 @@ static void sweep_frame(void) {
         if (_mariostSystemLevel != 0 || (gp->systemLevelFlags & 0xF) != 0) {
             PLOG_I("sweep: reset system level %d -> 0", (int)_mariostSystemLevel);
             marioStSystemLevel(0);
+        }
+        /* Likewise the previous map may have left Mario as Peach or Bowser, or in the second pose set (a
+         * Peach scene's event sets it): Peach has no third pose group, so marioPreDisp would run
+         * animPoseMain(-1) on the memory in front of the pose table (NULL vertex buffers, writes at 0x0 to 0x13C,
+         * a fault on hardware; the GameCube writes into the heap there). A real play-through never leaves a map
+         * in this state; peach.c clears the same two flags on the next pose change. */
+        {
+            MarioWork* mw = marioGetPtr();
+            if (mw->characterId != 0 || (mw->dispFlags & (MARIO_DISP_FLAG_ANIM_SET_2 | MARIO_DISP_FLAG_POSE_UNUSED))) {
+                PLOG_I("sweep: reset character %d (dispFlags %x) to Mario", (int)mw->characterId, (unsigned)mw->dispFlags);
+                mw->dispFlags &= ~(MARIO_DISP_FLAG_ANIM_SET_2 | MARIO_DISP_FLAG_POSE_UNUSED);
+                if (mw->characterId != 0) {
+                    marioSetCharMode(0);
+                }
+            }
         }
         seqSetSeq(SEQ_MAP_CHANGE, s_sweep_warp, NULL);
         s_sweep_state = 2;
@@ -553,7 +579,7 @@ static void determ_retrace(void) {
     port_ai_pump(quanta);
 }
 
-/* Switch dvdsettle=1 (outside determ): while a map change or a battle start loads, a frame does not end until
+/* Switch dvdsettle (on by default outside determ; dvdsettle=0 turns it off): while a map change or a battle start loads, a frame does not end until
  * the DVD manager's queued reads have finished (up to SETTLE_MAX_MS), as determ's frames do. The DVD manager
  * thread only runs while the game thread sleeps, so with one slow frame per read the load took one frame per read
  * (the GameCube's frames are short and its drive slow: reads overlapped frames; a determ run of the same load
@@ -564,7 +590,7 @@ static int s_settle = -1;
 
 static void dvd_settle(void) {
     if (s_settle < 0) {
-        s_settle = plat_switch_has("dvdsettle");
+        s_settle = plat_switch_int("dvdsettle", 1) != 0;
     }
     if (!s_settle || gp == NULL) {
         return;

@@ -36,7 +36,16 @@ Updated 2026-11-22. Owner goals: original GameCube frame rates, stereo 3D, all t
 ## Lane B: correctness (Azahar, after the A items they need)
 
 1. ~~Storybook `stg` maps~~: these are the 52 battle-background maps. **Done:** swept through a battle, 52/52 ok. The `hei_01` host now comes from a registered sweep-entry hook (`plat_sweep_register_entry_hook`, `port3ds/include/plat/sweep.h`), so the generic sweep code holds no TTYD map names (portability).
-2. Story playthrough by replay, chapter by chapter, including the Peach and Bowser interludes and Bowser's side-scrolling stages, through the ending and credits.
+2. Story playthrough, chapter by chapter, including the Peach and Bowser interludes and Bowser's side-scrolling stages, through the ending and credits. **Checkpoints done (2026-11-23):** `storyjump=` (the game's own story table, both builds) and `tools/port3ds/story_sweep.py`, 76 points ([PORT_3DS_TESTING.md](PORT_3DS_TESTING.md), "Story sweep").
+   - **Results:** no port crash or hang. State equal for the whole run in 40 points. 22 diverge first in `rng` only (most likely the sound timing of F 5), 4 by one float ULP, and 1 in a `gsw` hash (Glitzville card).
+   - **Open, port-side visual bugs:**
+     - map fog missing or much weaker (`tik`, `gon_11`, `las`; not the vertex-shader path);
+     - dark "CHAPTER" letters on every chapter card;
+     - the Glitz Pit big screen (EFB copy) black;
+     - the Glitz Pit audience sprites smaller;
+     - the Pirate's Grotto water opaque.
+   - **Open, divergence:** in 8 points Mario does not jump at an A press (frame 700) where the GameCube does.
+   - **Still to do:** a full input replay (a TAS or recorded play) once one exists.
 3. Battles: every action command, partner and special move, boss, hazard and audience event, through `battle=` plus a test hook that picks moves and forces action-command results.
 4. Effects: all of `src/effect/` and `src/effect/n64/`, plus the screen-copy, indirect-texture and z-texture scenes, with per-game GX overrides where the PICA can't. This includes the curtain fix and closing out the prologue-cabin black frames.
 5. Side content: the Pit of 100 Trials, Trouble Center, Pianta Parlor, quizzes, cooking, shops, the transformations.

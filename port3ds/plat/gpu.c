@@ -71,7 +71,34 @@ typedef struct {
         uintptr_t lo, hi;
     } dirty[32];
     u32 ndirty;
+    u32 seq; /* submit number (gpufence) */
 } Record;
+
+/* GPU fence for the records (switch gpufence, default 1). The game thread refills a record's vertex and index
+ * arenas (linear memory the GPU reads) right after handing over the next one; the render thread's
+ * C3D_FrameEnd only queues the GPU work. C3D_FrameBegin waits until the queued work has finished, so once the
+ * render thread is past it for record S, record S - 1 is done on the GPU: s_gpu_done_seq says so, and submit
+ * waits for it before reusing that record's memory. Before, only the vblank wait of C3D_FRAME_SYNCDRAW on the
+ * render thread kept the GPU ahead of the CPU, and only when there was one record per frame.
+ * Switch gpusyncall=1: every record takes the vblank wait (the behaviour before Step 1). */
+static int s_gpu_fence = 1, s_sync_all;
+static u32 s_submit_seq, s_gpu_done_seq;
+static LightEvent s_fence_ev;
+
+static void gpu_done_publish(u32 seq) {
+    __atomic_store_n(&s_gpu_done_seq, seq, __ATOMIC_RELEASE);
+    LightEvent_Signal(&s_fence_ev);
+}
+
+static void gpu_fence_wait(u32 seq) {
+    while ((s32)(__atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE) - seq) < 0) {
+        LightEvent_Clear(&s_fence_ev);
+        if ((s32)(__atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE) - seq) >= 0) {
+            break;
+        }
+        LightEvent_Wait(&s_fence_ev);
+    }
+}
 
 typedef struct {
     C3D_Tex tex;
@@ -202,9 +229,21 @@ static void* rec_put(u16 type, u32 size) {
     return h + 1;
 }
 
+static volatile u32 s_apt_hold;
+static volatile int s_apt_parked, s_apt_discard, s_apt_off;
+
 static void wait_idle(void) {
+    u64 t0 = svcGetSystemTick();
+    int logged = 0;
     while (__atomic_load_n(&s_busy, __ATOMIC_ACQUIRE)) {
-        LightEvent_Wait(&s_done);
+        /* Still waits for as long as it takes: a render thread in the middle of a frame cannot be
+         * abandoned. A timed wait only to say so when it takes long. */
+        if (LightEvent_WaitTimeout(&s_done, 1000000000LL) != 0 && !logged &&
+            svcGetSystemTick() - t0 > 2ull * SYSCLOCK_ARM11) {
+            logged = 1;
+            PLOG_W("gpu: the game thread has waited 2 s for the render thread (hold %u, parked %d, vblank %lu)",
+                   (unsigned)s_apt_hold, s_apt_parked, (unsigned long)plat_vblank_count());
+        }
     }
 }
 
@@ -216,6 +255,7 @@ static void stream_take_dirty(Record* r);
 static void submit(int present) {
     Record* r = &s_rec[s_cur];
     r->present = present;
+    r->seq = ++s_submit_seq;
     stream_take_dirty(r); /* the streams this record draws: the render thread flushes them */
     wait_idle(); /* the render thread finished the previous record */
     if (s_threaded) {
@@ -228,6 +268,9 @@ static void submit(int present) {
         render_record(r);
     }
     s_cur ^= 1;
+    if (s_gpu_fence && s_rec[s_cur].seq != 0) {
+        gpu_fence_wait(s_rec[s_cur].seq); /* the record refilled next is finished on the GPU */
+    }
     s_rec[s_cur].used = 0;
     s_rec[s_cur].nverts = 0;
     s_rec[s_cur].nidx = 0;
@@ -592,6 +635,13 @@ void plat_gpu_frame_end(uint16_t efb_w, uint16_t efb_h) {
 void plat_gpu_sync(void) {
     s_stats.syncs++;
     end_segment();
+    if (s_gpu_fence) {
+        /* the callers read GPU results (GXPeekARGB) or free memory the GPU read (streams): wait until the GPU,
+         * not only the render thread, is done. An empty segment's C3D_FrameBegin is that fence. */
+        u32 seq = s_submit_seq;
+        end_segment();
+        gpu_fence_wait(seq);
+    }
     wait_idle();
 }
 
@@ -1142,13 +1192,14 @@ static void rot_rows(float r0[4], float r1[4]) {
  * force is not set again, so citro3d uploads only the rows that changed. Only vsh_apply_* write these rows;
  * the cache is cleared at the start of every record. */
 static u32 s_vunif[96][4];
+static int s_urow = 1; /* switch gxurow (default 1); 0 sets every uniform row every time (hardware bisect) */
 static void vunif_reset(void) { memset(s_vunif, 0xFF, sizeof(s_vunif)); }
 static inline void vunif(int id, float x, float y, float z, float w) {
     if (id < 0 || id >= 96) {
         return;
     }
     float v[4] = {x, y, z, w};
-    if (memcmp(s_vunif[id], v, 16) == 0) {
+    if (s_urow && memcmp(s_vunif[id], v, 16) == 0) {
         return;
     }
     memcpy(s_vunif[id], v, 16);
@@ -1409,12 +1460,25 @@ static void render_record(Record* r) {
     u32 tail_cmds = 0, tail_zwrites = 0;
     u8* split = r->present && stereo_wanted() ? stereo_split(r, &tail_cmds, &tail_zwrites) : NULL;
     int stereo = split != NULL && stereo_begin();
-    /* C3D_FRAME_SYNCDRAW waits for the next vblank of both screens. Only a frame's first record takes it: a
-     * segment or a mid-frame sync (plat_gpu_sync) after it would wait for one more vblank each, a frame lost
-     * per extra record. The game thread is paced by the retrace already. */
+    /* C3D_FrameBegin waits until the GPU has finished the work queued so far (the previous record): the fence
+     * for the memory of that record (gpufence). Then the vblank wait C3D_FRAME_SYNCDRAW would have made first:
+     * only before a frame's first record, since a segment or a mid-frame sync (plat_gpu_sync) after it would
+     * wait for one more vblank each (gpusyncall=1: before every record, as before Step 1). */
     u64 tw = svcGetSystemTick();
-    C3D_FrameBegin(s_begin_records == 0 ? C3D_FRAME_SYNCDRAW : 0);
+    if (s_gpu_fence) {
+        C3D_FrameBegin(0);
+        gpu_done_publish(r->seq - 1);
+        if (s_begin_records == 0 || s_sync_all) {
+            C3D_FrameSync();
+        }
+    } else {
+        C3D_FrameBegin(s_begin_records == 0 || s_sync_all ? C3D_FRAME_SYNCDRAW : 0);
+    }
     s_begin_wait_acc += svcGetSystemTick() - tw;
+    if (svcGetSystemTick() - tw > SYSCLOCK_ARM11) {
+        PLOG_W("gpu: C3D_FrameBegin took %lu ms (a vblank or GX interrupt was missed, or the process was suspended)",
+               (unsigned long)((svcGetSystemTick() - tw) / (SYSCLOCK_ARM11 / 1000u)));
+    }
     s_begin_records++;
     if (stereo) {
         stereo_prepare();
@@ -1720,9 +1784,6 @@ eye_again:
 #define APT_HOLD_SLEEP 2u
 #define APT_HOLD_EXIT 4u
 static aptHookCookie s_apt_first, s_apt_last;
-static volatile u32 s_apt_hold;
-static volatile int s_apt_parked, s_apt_discard, s_apt_off;
-
 /* Render thread, before a record: 1 = replay it, 0 = drop it (exiting). */
 static int render_gate(void) {
     if (!__atomic_load_n(&s_apt_hold, __ATOMIC_ACQUIRE)) {
@@ -1802,8 +1863,11 @@ static void render_thread(void* arg) {
         while (s_dead) {
             svcSleepThread(1000000000LL);
         }
+        Record* rr = &s_rec[__atomic_load_n(&s_render_idx, __ATOMIC_ACQUIRE)];
         if (render_gate()) {
-            render_record(&s_rec[__atomic_load_n(&s_render_idx, __ATOMIC_ACQUIRE)]);
+            render_record(rr);
+        } else {
+            gpu_done_publish(rr->seq); /* not replayed (no GPU access now): nothing of it is in flight */
         }
         __atomic_store_n(&s_busy, 0, __ATOMIC_RELEASE);
         LightEvent_Signal(&s_done);
@@ -2124,6 +2188,12 @@ void plat_gpu_init(void) {
     s_threaded = !plat_switch_has("gxsync");
     s_flush_on_render = plat_switch_int("gxflushrender", 1) != 0;
     s_state_delta = plat_switch_int("gxstatedelta", 1) != 0;
+    s_urow = plat_switch_int("gxurow", 1) != 0;
+    s_sync_all = plat_switch_int("gpusyncall", 0) != 0;
+    s_gpu_fence = plat_switch_int("gpufence", 1) != 0;
+    LightEvent_Init(&s_fence_ev, RESET_STICKY);
+    PLOG_I("gpu: gpusyncall %d gpufence %d gxflushrender %d gxstatedelta %d gxurow %d gxsync %d", s_sync_all,
+           s_gpu_fence, s_flush_on_render, s_state_delta, s_urow, !s_threaded);
     /* Switch gpucore=N: the render thread's core (default 2 on the New 3DS, 1 on the old one). */
     int core = plat_switch_int("gpucore", plat_is_new3ds() ? 2 : 1);
     if (s_threaded) {

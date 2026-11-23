@@ -417,9 +417,12 @@ int plat_sd_start(void) {
     }
     /* Core 1 only: the SD card's file service lives there, so a write on core 0 or 2 would
      * take time from the game or render thread. No fallback to another core. */
+    /* Must run after plat_cpu_limit_init (boot.c): a thread on core 1 is refused until the process has its core-1 limit. */
     s_thread = threadCreate(worker, NULL, 32 * 1024, 0x3E, 1, false);
     if (s_thread == NULL) {
-        PLOG_E("sd: worker thread not created; SD writes stay on the calling thread");
+        Result pr = plat_thread_refusal(0x3E, 1);
+        PLOG_E("sd: worker thread on core 1 failed: result %08lx; SD writes stay on the calling thread",
+               (unsigned long)pr);
         return -1;
     }
     s_started = 1;

@@ -10,6 +10,7 @@
     devupdate.py launch 000400000FD88600 [--switches ...]
     devupdate.py bootstrap --cia build/app.cia [--boot devupdate-boot.3dsx] [--switches ...]
     devupdate.py files put a.tpad b.tpad [--dest sub] | get remote [-o local] | ls [dir] | rm path...
+    devupdate.py log [--prev | --crash] [-o FILE]
     devupdate.py queue add manifest.json [files...] | list | clear | start | status | pull DIR
 
 The console runs an app with devupdate_start() (or the bootstrap 3dsx).
@@ -25,6 +26,8 @@ bootstrap sends the bootstrap 3dsx with 3dslink to the Homebrew Launcher
 has it jump into the installed title.
 
 files works in one folder the app chose (e.g. sdmc:/3ds/<app>/queue/), with a CRC32 check.
+A path starting "@/" is in the app's read-only folder instead (get and ls only):
+`files get @/latest.log`, `files ls @/`. log prints the game's latest.log tail.
 
 queue runs a list of test runs on the console without anyone there. The manifest
 is JSON, a list or {"defaults": {...}, "entries": [...]}; an entry is
@@ -162,6 +165,19 @@ def wait_ping(args, seconds):
     return None
 
 
+FLAG_VERSION = 4
+
+
+def version_text(args, cia_path):
+    """The incoming build's version text: --version-text, else the first line of the sidecar
+    next to the CIA (<name>.version, written by the build), else none (the console shows "?")."""
+    text = getattr(args, "version_text", None)
+    if text is None:
+        side = Path(cia_path).with_suffix(".version")
+        text = side.read_text().splitlines()[0].strip() if side.exists() and side.read_text().strip() else ""
+    return text.encode()[:47]
+
+
 def push(args, cia_path, flags, switches, bad_crc=False):
     data = Path(cia_path).read_bytes()
     tid = cia_title_id(data)
@@ -169,6 +185,10 @@ def push(args, cia_path, flags, switches, bad_crc=False):
     if bad_crc:
         crc ^= 0xDEADBEEF
     sw = switch_bytes(switches)
+    vt = version_text(args, cia_path)
+    if vt:
+        sw = bytes([len(vt)]) + vt + sw
+        flags |= FLAG_VERSION
     print(f"devupdate: pushing {cia_path} ({len(data)} bytes, title {tid:016x}, crc {crc:08x}) to {args.ip}:{args.port}")
     link = Link(args)
     with link.connect() as s:
@@ -196,7 +216,66 @@ def push(args, cia_path, flags, switches, bad_crc=False):
         return result.get("last", "error no answer"), tid
 
 
+def ping_line(args, timeout=5):
+    """The console's pong line, or None if it does not answer."""
+    got = []
+    link = Link(args)
+    try:
+        with link.connect(timeout) as s:
+            s.sendall(header("ping", token=args.token))
+            last = link.lines(s, lambda line, *_: got.append(line))
+    except OSError:
+        return None
+    if last != "done":
+        return None
+    return next((line for line in got if line.startswith("pong ")), None)
+
+
+def fetch_report(args):
+    """The crash report and log tail as one text, and the last reply line."""
+    link = Link(args)
+    out = []
+
+    def on_line(line, s, buf):
+        parts = line.split()
+        if len(parts) == 2 and parts[0] in ("report", "log") and parts[1].isdigit():
+            n = int(parts[1])
+            while len(buf) < n:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+            out.append(f"== {parts[0]} ({n} bytes)\n{buf[:n].decode(errors='replace')}")
+            return buf[n:]
+        return None
+
+    with link.connect() as s:
+        s.sendall(header("report", token=args.token))
+        last = link.lines(s, on_line)
+    return "\n".join(out), last
+
+
+def preflight_report(args):
+    """Before an install or a relaunch: if the console is in recovery mode (it crashed
+    and waits there), save its crash report under build/devupdate-last/ and print the path."""
+    if getattr(args, "no_report", False):
+        return
+    pong = ping_line(args)
+    if pong is None or "recovery=1" not in pong.split():
+        return
+    text, last = fetch_report(args)
+    if last != "done" or not text:
+        print(f"devupdate: the console is in recovery mode; no crash report ({last})")
+        return
+    out = HERE.parents[2] / "build/devupdate-last"
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"crash-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+    path.write_text(text)
+    print(f"devupdate: the console is in recovery mode; crash report saved to {path}")
+
+
 def cmd_push(args):
+    preflight_report(args)
     flags = 0 if args.no_relaunch else FLAG_RELAUNCH
     if args.launch:
         flags = FLAG_LAUNCH
@@ -212,6 +291,7 @@ def cmd_push(args):
 
 
 def cmd_restart(args):
+    preflight_report(args)
     sw = switch_bytes(" ".join(args.switches))
     link = Link(args)
     with link.connect() as s:
@@ -406,6 +486,25 @@ def cmd_files(args):
     return status
 
 
+def cmd_log(args):
+    """The game's latest.log (or previous.log, the last run's with --prev): the last 200 lines, or the whole file with -o."""
+    remote = "@/crash.txt" if args.crash else "@/previous.log" if args.prev else "@/latest.log"
+    try:
+        data = files_get(args, remote)
+    except RuntimeError as e:
+        print(f"devupdate: {remote}: {e}")
+        return 1
+    if args.out:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        print(f"devupdate: {remote} -> {out} ({len(data)} bytes)")
+        return 0
+    for line in data.decode(errors="replace").splitlines()[-200:]:
+        print(line)
+    return 0
+
+
 def queue_lines(entries, shots_switches=None, shots_collect="shots", defaults=None):
     """Entry dicts -> (queue.txt text, local files to upload as {name: path})."""
     defaults = defaults or {}
@@ -566,6 +665,8 @@ def cmd_queue(args):
         for r in rows:
             print(f"{r['index']:>3} {r['name']:<24} {r['result']:<8} {r['frames']:>6} frames {r['ms'] / 1000:7.1f} s  {len(r['files'])} files  {r['detail']}")
         return 0
+    if act == "start":
+        preflight_report(args)
     last, lines = request(args, "queue", act)  # clear, start
     for line in lines:
         if line != "done":
@@ -844,9 +945,12 @@ def main():
     p.add_argument("--no-relaunch", action="store_true", help="install only")
     p.add_argument("--launch", action="store_true", help="jump to the pushed title (for another title)")
     p.add_argument("--wait", type=float, default=0, help="after the relaunch, wait this long for a ping answer")
+    p.add_argument("--version-text", help="the build's version text shown on the console (default: the CIA's .version sidecar)")
     p.add_argument("--bad-crc", action="store_true", help="send a wrong CRC (test: the install must be refused)")
+    p.add_argument("--no-report", action="store_true", help="do not save the crash report first (when the console is in recovery)")
     p = sub.add_parser("restart", help="relaunch with switches")
     p.add_argument("switches", nargs="*")
+    p.add_argument("--no-report", action="store_true", help="do not save the crash report first (when the console is in recovery)")
     p = sub.add_parser("report", help="the crash report and the log tail")
     p.add_argument("--out")
     p = sub.add_parser("launch", help="jump into an installed title")
@@ -857,8 +961,13 @@ def main():
     p.add_argument("paths", nargs="*")
     p.add_argument("--dest", default="", help="put: a folder under the files folder")
     p.add_argument("-o", "--out", help="get: the local file")
+    p = sub.add_parser("log", help="the game's latest.log (read-only folder): the last 200 lines")
+    p.add_argument("--prev", action="store_true", help="previous.log, the last run's log")
+    p.add_argument("--crash", action="store_true", help="crash.txt, the crash handler's report (the same folder)")
+    p.add_argument("-o", "--out", help="write the whole file here instead of printing the tail")
     p = sub.add_parser("queue", help="a list of test runs the console works through unattended")
     p.add_argument("action", choices=["add", "list", "clear", "start", "status", "pull"])
+    p.add_argument("--no-report", action="store_true", help="start: do not save the crash report first (when the console is in recovery)")
     p.add_argument("paths", nargs="*", help="add: manifest.json and more files to upload; pull: the folder")
     p.add_argument("--shots-switches", help='add: switches for an entry\'s "shots": N, e.g. "shots={n} shotmax=40"')
     p.add_argument("--shots-collect", help="add: the app path the screenshots are collected from (default shots)")
@@ -885,7 +994,8 @@ def main():
         ap.error("give --ip or set N3DS_IP (Azahar: --ip 127.0.0.1)")
     try:
         return {"ping": cmd_ping, "push": cmd_push, "restart": cmd_restart, "report": cmd_report,
-                "launch": cmd_launch, "bootstrap": cmd_bootstrap, "files": cmd_files, "queue": cmd_queue}[args.cmd](args)
+                "launch": cmd_launch, "bootstrap": cmd_bootstrap, "files": cmd_files, "queue": cmd_queue,
+                "log": cmd_log}[args.cmd](args)
     except OSError as e:
         print(f"devupdate: no connection to {args.ip}:{args.port}: {e}")
         return 2

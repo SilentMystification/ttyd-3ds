@@ -18,9 +18,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gdbrsp import RSP  # noqa: E402
+import emu_usage  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
-LOG = ROOT / "build/azahar-profile/data/azahar-emu/sdmc/3ds/ttyd/log.txt"
+LOG = ROOT / "build/azahar-profile/data/azahar-emu/sdmc/3ds/ttyd/latest.log"
 
 
 def symbolize(elf, addrs):
@@ -36,7 +37,7 @@ def main():
     ap.add_argument("--switches", required=True)
     ap.add_argument("--after", required=True, help="regex in the game log; the stop comes --wait seconds later")
     ap.add_argument("--wait", type=float, default=6.0)
-    ap.add_argument("--timeout", type=float, default=400.0)
+    ap.add_argument("--timeout", type=float, default=120.0, help="seconds; over 60 is a --long run")
     ap.add_argument("--port", type=int, default=24689)
     ap.add_argument("--peek", action="append", default=[], help="ADDR:SIZE (hex address) read at each sample")
     ap.add_argument("--samples", type=int, default=1, help="stops, 0.5 s apart; threads in a system call are left out after the first")
@@ -49,7 +50,7 @@ def main():
         LOG.unlink()
     runner = subprocess.Popen([sys.executable, str(ROOT / "tools/port3ds/run_azahar.py"), "--build", str(args.build),
                                "--switches", args.switches, "--gdb", "--gdb-port", str(args.port),
-                               "--timeout", str(args.timeout), "--allow-hw-faults"], cwd=ROOT)
+                               *emu_usage.time_args(args.timeout), "--allow-hw-faults"], cwd=ROOT)
     try:
         rsp = RSP("127.0.0.1", args.port, connect_timeout=120)
         rsp.stop_reason()

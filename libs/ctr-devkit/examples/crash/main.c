@@ -9,7 +9,7 @@
  * instruction. START exits.
  *
  * The report is appended to sdmc:/3ds/ctrdk-crash/crash.txt and written to
- * log.txt in the same folder. For unattended runs the test kind can come
+ * latest.log in the same folder. For unattended runs the test kind can come
  * from the first 3dslink argument or from sdmc:/3ds/ctrdk-crash/test.txt
  * ("break", "fatal", "hang", "self", ...); it runs at frame 30.
  */
@@ -69,7 +69,7 @@ static void read_test(int argc, char** argv, char* out, size_t n) {
 int main(int argc, char** argv) {
     mkdir("sdmc:/3ds", 0777);
     mkdir(DIR, 0777);
-    s_log = fopen(DIR "/log.txt", "w");
+    s_log = fopen(DIR "/latest.log", "w");
 
     static char test[16];
     read_test(argc, argv, test, sizeof(test));

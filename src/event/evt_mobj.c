@@ -2483,7 +2483,14 @@ static inline void recoveryHeal(void) {
 
 // FAKE: the recovery block's coin price bubble is declared with its position first (same registers as
 // eff_batfukidashi.h), so mobj_recovery_blk evaluates the position before the other arguments as in the target.
+#ifdef TARGET_PORT
+// The port uses the real prototype (LTO checks it); the macro keeps the position-first call sites.
+#include "eff/eff_batfukidashi.h"
+#define effCoinFukidashiEntryXYZ(x, y, z, type, number, duration) effCoinFukidashiEntry(type, number, duration, x, y, z)
+#else
 extern EffectEntry* effCoinFukidashiEntry(f32 x, f32 y, f32 z, s32 type, s32 number, s32 duration);
+#define effCoinFukidashiEntryXYZ effCoinFukidashiEntry
+#endif
 
 /**
  * Main function of the heart (recovery) blocks:
@@ -2500,7 +2507,7 @@ static s32 mobj_recovery_blk(MapObjectEntry* mobj) {
     s32 kind;
     switch (mobj->state) {
         case -1:
-            mobj->effect = effCoinFukidashiEntry(mobj->position.x, 25.0f + mobj->position.y, mobj->position.z - 10.0f, 0, mobj->typeData[1], 0);
+            mobj->effect = effCoinFukidashiEntryXYZ(mobj->position.x, 25.0f + mobj->position.y, mobj->position.z - 10.0f, 0, mobj->typeData[1], 0);
             mobj->state++;
             break;
         case 0:
@@ -2590,7 +2597,7 @@ static s32 mobj_recovery_blk(MapObjectEntry* mobj) {
             break;
         case 6:
             if (mobj->effect == NULL) {
-                mobj->effect = effCoinFukidashiEntry(mobj->position.x, 25.0f + mobj->position.y, mobj->position.z - 10.0f, 0, mobj->typeData[1], 0);
+                mobj->effect = effCoinFukidashiEntryXYZ(mobj->position.x, 25.0f + mobj->position.y, mobj->position.z - 10.0f, 0, mobj->typeData[1], 0);
             }
             if (animPoseGetLoopTimes(mobj->poseId) < 1.0f) {
                 break;

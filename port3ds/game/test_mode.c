@@ -20,6 +20,11 @@
 
 #include "battle/battle.h"
 #include "driver/seqdrv.h"
+#include "driver/swdrv.h"
+#include "event.h"
+#include "mario/mario_motion.h"
+#include "mario/mario_party.h"
+#include "pmario_sound.h"
 #include "manager/dvdmgr.h"
 #include "manager/evtmgr.h"
 #include "mario/mario.h"
@@ -307,4 +312,127 @@ void tst_frame(u32 frame) {
 #ifdef PORT3DS_GAME_SIDE
     tst_font_frame(frame);
 #endif
+}
+
+/* ---- storyjump=: the game's own story points (src/event.c) ----
+ *
+ * storyjump=<textId>[.<n>] (the n-th row with that id, from 0; e.g. STG1_16,
+ * STG9_00.2) or storyjump=<stage>.<row> (event_dt[stage].data[row]). Applied
+ * at the warp instead of story=/party=, the way the E3 scenario select applies
+ * a story point (seq_e3.c, state 102): the story flags cleared, GSW 0 set to
+ * the previous row's id (so the row's own scene is the next to play), every
+ * row's set-up function up to and including this row run in order (key items,
+ * flags), the row's motion and its partner and follower. Unlike the E3 select
+ * it keeps the items and badges the set-ups give. */
+static int s_sj_state = -1; /* -1 unread, 0 none, 1 found */
+static int s_sj_stage, s_sj_row;
+
+static int sj_num(const char* s) {
+    int n = 0;
+    while (*s >= '0' && *s <= '9') {
+        n = n * 10 + (*s++ - '0');
+    }
+    return n;
+}
+
+static int sj_find(void) {
+    char v[32];
+    char* dot;
+    int stage, row, nth = 0, want = 0;
+    if (s_sj_state >= 0) {
+        return s_sj_state;
+    }
+    s_sj_state = 0;
+    if (!tst_sw_value("storyjump", v, sizeof(v)) || v[0] == '\0') {
+        return 0;
+    }
+    dot = strchr(v, '.');
+    if (dot != NULL) {
+        *dot = '\0';
+        want = sj_num(dot + 1);
+    }
+    if (v[0] >= '0' && v[0] <= '9') {
+        stage = sj_num(v);
+        if (stage < eventStgNum() && want < eventStgDtPtr(stage)->count) {
+            s_sj_stage = stage;
+            s_sj_row = want;
+            s_sj_state = 1;
+        }
+    } else {
+        for (stage = 0; stage < eventStgNum() && s_sj_state == 0; stage++) {
+            EventStage* st = eventStgDtPtr(stage);
+            for (row = 0; row < st->count; row++) {
+                if (strcmp(st->data[row].textId, v) == 0 && nth++ == want) {
+                    s_sj_stage = stage;
+                    s_sj_row = row;
+                    s_sj_state = 1;
+                    break;
+                }
+            }
+        }
+    }
+    if (s_sj_state == 0) {
+        tst_log("storyjump: %s not found in the story table", v);
+    }
+    return s_sj_state;
+}
+
+int tst_storyjump_target(const char** map, const char** bero) {
+    EventData* d;
+    if (!sj_find()) {
+        return 0;
+    }
+    d = &eventStgDtPtr(s_sj_stage)->data[s_sj_row];
+    *map = d->mapName;
+    *bero = d->beroName != NULL ? d->beroName : "";
+    return 1;
+}
+
+int tst_storyjump_apply(void) {
+    int stage, row;
+    u32 prev = 0;
+    EventData* d;
+    if (!sj_find()) {
+        return 0;
+    }
+    d = &eventStgDtPtr(s_sj_stage)->data[s_sj_row];
+    if (s_sj_row > 0) {
+        prev = d[-1].id;
+    } else if (s_sj_stage > 0) {
+        EventStage* st = eventStgDtPtr(s_sj_stage - 1);
+        prev = st->data[st->count - 1].id;
+    }
+    psndStopAllFadeOut();
+    psndSFXAllOff();
+    marioPartyKill();
+    swInit();
+    swByteSet(0, prev);
+    for (stage = 0; stage <= s_sj_stage; stage++) {
+        EventStage* st = eventStgDtPtr(stage);
+        for (row = 0; row < st->count && (stage < s_sj_stage || row <= s_sj_row); row++) {
+            if (st->data[row].initEvent != NULL) {
+                st->data[row].initEvent();
+            }
+        }
+    }
+    if (d->motionType == 1) {
+        marioChgShipMotion();
+    } else {
+        marioChgStayMotion();
+    }
+    marioPartyKill();
+    marioGetPtr()->prevPartyMemberId[0] = 0;
+    marioGetPtr()->prevPartyMemberId[1] = 0;
+    for (row = 0; row < 2; row++) {
+        if (d->partners[row] != 0) {
+            if (d->partners[row] < 8) {
+                partyJoin((PartyId)d->partners[row]);
+            }
+            marioPartyEntry((PartyId)d->partners[row]);
+        }
+    }
+    tst_log("storyjump: %s (%d.%d) gsw0=%lu map=%s bero=%s partners=%u,%u", d->textId, s_sj_stage, s_sj_row,
+            (unsigned long)prev, d->mapName, d->beroName != NULL ? d->beroName : "-", (unsigned)d->partners[0],
+            (unsigned)d->partners[1]);
+    return 1;
 }

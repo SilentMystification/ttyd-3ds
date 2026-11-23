@@ -175,6 +175,16 @@ static inline f32 partyNrmTo(Vec* n) {
     return angleABf(0.0f, 0.0f, sqrtf(n->x * n->x + n->z * n->z), -n->y);
 }
 
+#ifdef TARGET_PORT
+/**
+ * Slope in degrees of a surface normal. The original takes the Vec by value and its callers (party.c, party_move.c)
+ * declare a pointer: MWCC passes a struct as a pointer to a copy, so that is the same on the GameCube. On the
+ * ARM hard-float ABI a by-value Vec arrives in s0-s2 and a pointer in r0, so the port defines it as the pointer.
+ */
+f32 partyNrmToAngle(Vec* n) {
+    return angleABf(0.0f, 0.0f, sqrtf(n->x * n->x + n->z * n->z), -n->y);
+}
+#else
 /**
  * Slope in degrees of a surface normal, by value (party_move.c calls it through a pointer prototype,
  * the same thing at the ABI level).
@@ -182,6 +192,7 @@ static inline f32 partyNrmTo(Vec* n) {
 f32 partyNrmToAngle(Vec n) {
     return angleABf(0.0f, 0.0f, sqrtf(n.x * n.x + n.z * n.z), -n.y);
 }
+#endif
 
 /**
  * Per-frame ground check for a walking partner (Goombella, Bobbery, Ms. Mowz):

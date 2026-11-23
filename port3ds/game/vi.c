@@ -25,6 +25,7 @@
 #include "driver/swdrv.h"
 #include "event.h"
 #include "pmario_sound.h"
+#include "mario/mario.h"
 #include "mario/mario_party.h"
 #include "mario/mariost.h"
 #include "memory.h"
@@ -340,6 +341,21 @@ static void sweep_frame(void) {
         if (_mariostSystemLevel != 0 || (gp->systemLevelFlags & 0xF) != 0) {
             PLOG_I("sweep: reset system level %d -> 0", (int)_mariostSystemLevel);
             marioStSystemLevel(0);
+        }
+        /* Likewise the previous map may have left Mario as Peach or Bowser, or in the second pose set (a
+         * Peach scene's event sets it): Peach has no third pose group, so marioPreDisp would run
+         * animPoseMain(-1) on the memory in front of the pose table (NULL vertex buffers, writes at 0x0 to 0x13C,
+         * a fault on hardware; the GameCube writes into the heap there). A real play-through never leaves a map
+         * in this state; peach.c clears the same two flags on the next pose change. */
+        {
+            MarioWork* mw = marioGetPtr();
+            if (mw->characterId != 0 || (mw->dispFlags & (MARIO_DISP_FLAG_ANIM_SET_2 | MARIO_DISP_FLAG_POSE_UNUSED))) {
+                PLOG_I("sweep: reset character %d (dispFlags %x) to Mario", (int)mw->characterId, (unsigned)mw->dispFlags);
+                mw->dispFlags &= ~(MARIO_DISP_FLAG_ANIM_SET_2 | MARIO_DISP_FLAG_POSE_UNUSED);
+                if (mw->characterId != 0) {
+                    marioSetCharMode(0);
+                }
+            }
         }
         seqSetSeq(SEQ_MAP_CHANGE, s_sweep_warp, NULL);
         s_sweep_state = 2;

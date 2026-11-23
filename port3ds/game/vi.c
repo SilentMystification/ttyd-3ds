@@ -556,6 +556,15 @@ static void frame_hooks(void) {
     if (s_framemark > 0 && s_frames == (u32)s_framemark) {
         PLOG_I("frame %u reached", (unsigned)s_frames);
     }
+    /* Switch heartbeat=N (run_azahar.py passes it by default): "hb F" every N game frames, a cheap sign of
+     * progress for the runner's stall check, through the boot screens as well. */
+    static int s_heartbeat = -1; /* -1 unread, 0 off */
+    if (s_heartbeat < 0) {
+        s_heartbeat = plat_switch_int("heartbeat", 0);
+    }
+    if (s_heartbeat > 0 && s_frames % (u32)s_heartbeat == 0) {
+        PLOG_I("hb %u", (unsigned)s_frames);
+    }
 }
 
 static void wait_retrace_raw(void) {

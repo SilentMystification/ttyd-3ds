@@ -144,6 +144,13 @@ Switches the game reads (space-separated words in `--switches`):
 | `stereostats=N` | Every N frames, a `stereostats` line: stereo and mono render-thread and GPU time, mesh time, 2D tail size and its depth writes, convergence |
 | `stereolog=N` | Logs the draw order of stereo frames N and N+300 (S/s scene draw on the CPU/shader path, L/l screen-layer draw, C copy, X clear) and where the 2D tail starts |
 | `scrshot` | Mono shots also save the top screen target as `shots/N.M.ppm` (400x240), for comparing against stereo eye shots |
+| `gxthread=0/1/2/3` | Where GX is translated (`port3ds/game/gx/gx_rec.c`). 0 (default): on the game thread as each call is made. 1: recorded by value into a ring and translated by the game thread at fences (draw sync, `GXDrawDone`, read-backs, a memory release while translation is pending, a full ring). 2: a translator thread on core 2 follows the ring; the game thread translates the first part of each frame itself (see `gxthreadsplit`). 3: verify, as 1 plus getter, list-byte and late-read checks (`gxthread verify` warnings, `verify (total)` line). See PORT_3DS_MULTICORE.md "A, built" |
+| `gxthreadstats=N` | Every N frames, `gxthread` lines: frame, game busy, fence and idle times, translator and render busy and core-2 share, record words, commands, lists, primitives, split point, fences by cause, array snapshot bytes. Cheap, unlike `gxstats` |
+| `gxthreadsplit=0/1` | `gxthread=2`: 1 (default) translates each frame's first display-list calls on the game thread while core 2 replays the previous frame (hill-climbed split); 0 records everything |
+| `gxthreadsplitat=N` | `gxthread=2`: fixed split of N display-list calls, for measuring |
+| `gxthreadrel=0/1` | 1 (default): a memory release reported while translation is pending is a fence. 0 is for verify experiments only |
+| `gxthreadkb=N` | Record ring size in KB (default 4096) |
+| `gpucore=N` | Render thread core (default 2 on New 3DS, 1 on old) |
 | `yieldsleep[=us]` | When `OSYieldThread` finds no other ready OS thread, sleeps `us` µs (default 100) instead of returning at once. This stops the DVD manager's `proc_main` spinning on core 0. Default off until measured on hardware |
 | `yieldstats=N` | Every N seconds, a `[THREADS]` line: each OS thread's share of baton-holding time, idle yields, and time slept by `yieldsleep` |
 | `devmenu` | Enables the developer menu, opened with ZL+SELECT. SELECT alone opens the player Options menu, so a `padscript` that pressed `select` for the old developer menu now opens Options. While the Options menu is open, `padscript` steps advance once per ~16 ms menu poll, not per game frame. Example: `wait*900,select*3,wait*5,right*2,wait*5,select*3` |

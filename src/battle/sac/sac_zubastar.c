@@ -528,7 +528,14 @@ static USER_FUNC(zubastar_main) {
             top[0] = bot[0] = -96.0f;
             i = 0;
             n = 1;
+#ifdef TARGET_PORT
+            // The GameCube loop runs to 17 over the 16 lines: the 17th "line" is the work's next member, the
+            // `capture` pointer, whose first word is read as `state`. A pointer is never 5, so the 17th pass
+            // does nothing; the port stops at 16 (GCC treats the read past the array as undefined).
+            for (; i < 16; i++) {
+#else
             for (; i < 17; i++) {
+#endif
                 ZSLine* l = &w->lines[i];
                 if (l->state == 5) {
                     if (240.0f == l->y0) {

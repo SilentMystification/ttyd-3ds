@@ -87,7 +87,11 @@ static USER_FUNC(itemUseFunc);
 #endif
 static void winLectureKeyMask(void);
 // FAKE: the prototype this file was compiled with (u16 icon id; icondrv.h has s16/s32), so callers zero-extend the id
+#ifdef TARGET_PORT
+#include "driver/icondrv.h" // the port needs the real prototype (LTO checks it)
+#else
 void iconGetTexObj(GXTexObj* obj, u16 iconId);
+#endif
 static void winDisp(CameraId camId, void* param);
 static void winDispKoopa(CameraId camId, void* param);
 

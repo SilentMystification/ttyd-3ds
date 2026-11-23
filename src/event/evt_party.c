@@ -27,8 +27,14 @@ typedef void (*PartyChgPoseNoProtoFn)();
 
 // FAKE: bomheiGetStatus and cloudGetStatus return u8, but this file was compiled against
 // int-returning declarations: the callers test the full register (cmpwi, no clrlwi).
+#ifdef TARGET_PORT
+// The port's LTO build needs the prototypes to match the definitions (u8); the call sites behave the same.
+#include "party/party_bomhei.h"
+#include "party/party_cloud.h"
+#else
 extern s32 bomheiGetStatus();
 extern s32 cloudGetStatus();
+#endif
 
 /**
  * Sets or clears PartyFlags bits on a partner slot.

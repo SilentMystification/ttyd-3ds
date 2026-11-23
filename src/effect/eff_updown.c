@@ -23,7 +23,11 @@ typedef struct EffUpdownWork {
 } EffUpdownWork;
 
 // FAKE: local prototype: iconGetTexObj takes the icon id as u16 (icondrv.h: s16/s32 by version); this file was compiled with it and the header prototype changes the code.
+#ifdef TARGET_PORT
+#include "driver/icondrv.h" // the port needs the real prototype (LTO checks it)
+#else
 extern void iconGetTexObj(GXTexObj* texObj, u16 iconId);
+#endif
 static void effUpdownMain(EffectEntry* effect);
 static void effUpdownDisp(CameraId cameraId, EffectEntry* effect);
 

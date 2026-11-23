@@ -183,7 +183,13 @@ void BattleStatusEffectDelete(BattleUnit* unit) {
 #include "driver/effdrv.h"
 // FAKE: local prototype with two extra arguments (eff_spark.h: (s32 type, f32 x, f32 y, f32 z)): BSE_Biribiri passes
 // 10 and half the unit width, which effSparkEntry never reads; the target computes and passes them.
+#ifdef TARGET_PORT
+// The port calls it through the real prototype (eff_spark.h) so LTO sees matching declarations; the two extra
+// arguments the GameCube build passes are never read.
+#include "eff/eff_spark.h"
+#else
 EffectEntry* effSparkEntry(s32, s32, f32, f32, f32, f32);
+#endif
 #define EFF_SLEEP(u) ((u)->sleepEff)
 #define EFF_SPARK(u) ((u)->sparkEff)
 
@@ -248,7 +254,11 @@ static void BSE_Biribiri(BattleUnit* unit) {
     }
     if (on) {
         if (EFF_SPARK(unit) == NULL) {
+#ifdef TARGET_PORT
+            EFF_SPARK(unit) = effSparkEntry(0, -1000.0f, -1000.0f, -1000.0f);
+#else
             EFF_SPARK(unit) = effSparkEntry(0, 10, -1000.0f, -1000.0f, -1000.0f, BtlUnit_GetWidth(unit) / 2);
+#endif
         }
         wk = (f32*)EFF_SPARK(unit)->userdata;
         BtlUnit_GetPartsWorldPos(BtlUnit_GetPartsPtr(unit, BtlUnit_GetBodyPartsId(unit)), &x, &y, &z);

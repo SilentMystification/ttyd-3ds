@@ -320,12 +320,12 @@ target_compile_definitions(ttyd_port_plat PRIVATE PORT3DS_PLAT_SIDE=1)
 target_include_directories(ttyd_port_plat PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include" "${TTYD_GEN_DIR}"
     "${TTYD_REPO_DIR}/libs/ctr-devkit/include")
 
-# Compiler A/B switches (docs/PORT_3DS_60FPS.md, "Step 1 results"); both off by default.
+# Compiler A/B switches (docs/PORT_3DS_60FPS.md, "Step 1 results"); both on by default (pass =OFF for the plain -O2 build).
 #   TTYD_LTO:    link-time optimisation over the decomp's DOL code, MusyX and both port halves (the static
 #                RELs stay plain objects: tools/port3ds/rel_link.py links them with ld -r).
 #   TTYD_GX_O3:  -O3 on the GX front end (port3ds/game/gx/*.c) only.
-option(TTYD_LTO "Link-time optimisation of the DOL code, MusyX and the port" OFF)
-option(TTYD_GX_O3 "-O3 on port3ds/game/gx/*.c" OFF)
+option(TTYD_LTO "Link-time optimisation of the DOL code, MusyX and the port" ON)
+option(TTYD_GX_O3 "-O3 on port3ds/game/gx/*.c" ON)
 if(TTYD_LTO)
     foreach(_t ttyd_dol ttyd_musyx ttyd_port_game ttyd_port_plat)
         target_compile_options(${_t} PRIVATE -flto=auto -ffat-lto-objects)

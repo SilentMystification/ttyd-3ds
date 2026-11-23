@@ -248,7 +248,7 @@ static int used_blocks(void) {
 
 /* ---- The card thread ---- */
 
-typedef enum { JOB_MOUNT, JOB_CHECK, JOB_FORMAT, JOB_CREATE, JOB_READ, JOB_WRITE, JOB_SETSTATUS } JobKind;
+typedef enum { JOB_MOUNT, JOB_CHECK, JOB_FORMAT, JOB_CREATE, JOB_READ, JOB_WRITE, JOB_SETSTATUS, JOB_REMOVE } JobKind;
 
 typedef struct {
     JobKind kind;
@@ -261,6 +261,8 @@ typedef struct {
     u32 size;
     s32 file_no;
     CARDStat stat;
+    char path[96]; /* JOB_REMOVE: the host file to delete */
+    u32 post_frame, due; /* determ: the game frame of the post, and the frame the modelled completion lands in */
 } Job;
 
 #define JOBS 16
@@ -270,6 +272,9 @@ static PlatMutex* s_lock;
 static PlatEvent* s_wake;
 static PlatThread* s_thread;
 static volatile int s_cancel;
+static volatile u32 s_exec; /* determ: the next job the card thread runs (completions are delivered in the frame hook) */
+static volatile int s_fin[JOBS];
+static s32 s_res[JOBS];
 
 static s32 do_create(Job* j) {
     if (strlen(j->name) > CARD_FILENAME_MAX) {
@@ -387,6 +392,9 @@ static s32 run_job(Job* j) {
         }
         memset(s_files, 0, sizeof(s_files));
         return CARD_RESULT_READY;
+    case JOB_REMOVE:
+        remove(j->path);
+        return CARD_RESULT_READY;
     case JOB_CREATE: return do_create(j);
     case JOB_READ: return do_rw(j, 0);
     case JOB_WRITE: return do_rw(j, 1);
@@ -407,10 +415,182 @@ static s32 run_job(Job* j) {
     return CARD_RESULT_FATAL_ERROR;
 }
 
+/* ---- switch cardstats: per job, its wall time, the longest game frame while it ran (against the average frame), and the disc reads in between */
+#include "plat/disc.h"
+
+static int s_stats = -1;
+static uint64_t s_st_t0, s_st_last, s_st_worst, s_st_idle_avg, s_st_dvd_bytes0;
+static uint32_t s_st_dvd_reads0, s_st_frames;
+static int s_st_busy;
+
+static int stats_on(void) {
+    if (s_stats < 0) {
+        s_stats = plat_switch_has("cardstats") ? 1 : 0;
+    }
+    return s_stats;
+}
+
+static void stat_post(const Job* j) {
+    (void)j;
+    if (stats_on() && !s_st_busy) {
+        s_st_busy = 1;
+        s_st_t0 = plat_ticks();
+        s_st_worst = 0;
+        s_st_frames = 0;
+        plat_disc_stats(&s_st_dvd_reads0, &s_st_dvd_bytes0);
+    }
+}
+
+static void stat_done(const Job* j, s32 r) {
+    if (!stats_on() || !s_st_busy) {
+        return;
+    }
+    uint32_t reads;
+    uint64_t bytes;
+    plat_disc_stats(&reads, &bytes);
+    PLOG_I("[CARDSTAT] job %d result %d wall %u ms, %u frames, worst frame %u us (average frame without a job: %u us), disc reads %u (%u KB)",
+           (int)j->kind, (int)r, (unsigned)((plat_ticks() - s_st_t0) * 1000 / PLAT_TICKS_PER_SEC), (unsigned)s_st_frames,
+           (unsigned)(s_st_worst * 1000000 / PLAT_TICKS_PER_SEC), (unsigned)(s_st_idle_avg * 1000000 / PLAT_TICKS_PER_SEC),
+           (unsigned)(reads - s_st_dvd_reads0), (unsigned)((bytes - s_st_dvd_bytes0) / 1024));
+    s_st_busy = 0;
+}
+
+/* each frame hook: the time since the last one, kept as the worst of the frames with a job running and of the rest */
+static void stat_frame(void) {
+    uint64_t now = plat_ticks();
+    if (s_st_last != 0) {
+        uint64_t dt = now - s_st_last;
+        if (s_st_busy) {
+            s_st_frames++;
+            if (dt > s_st_worst) {
+                s_st_worst = dt;
+            }
+        } else {
+            s_st_idle_avg = s_st_idle_avg == 0 ? dt : s_st_idle_avg + (int64_t)(dt - s_st_idle_avg) / 64;
+        }
+    }
+    s_st_last = now;
+}
+
+/* ---- determ: modelled completion time ----
+ * Under determ a job finishes at a time a GameCube card would take, not when the card thread is done, and the
+ * completion callback runs at the start of the game frame it falls in, so card timing is the same every run
+ * and matches the GameCube debug DOL under Dolphin. The numbers were measured on that DOL (determ, the
+ * title to file select of the first save screen), in 40.5 MHz ticks:
+ *   - a job is posted about 671100 ticks into a frame (the game's post comes at the end of the frame's wait);
+ *   - a read takes 39790 ticks per 512-byte sector (8192 bytes 636k, 16384 bytes 1273k);
+ *   - mount takes 3204170, check 15406.
+ * Unmeasured, so guesses: format as mount, create and set-status as check, write as read.
+ * A job landing at tick T of the post frame completes in frame post + T / frame length, where the frame
+ * length is a retrace (675675) plus 13000 of hook latency seen in the same measurements. */
+#define MODEL_POST_TICKS 671100
+#define MODEL_FRAME_SLACK 13000
+#define MODEL_SECTOR_TICKS 39790
+#define MODEL_MOUNT_TICKS 3204170
+#define MODEL_SMALL_TICKS 15406
+
+static int determ_on(void) {
+    static int s_on = -1;
+    if (s_on < 0) {
+        s_on = tst_determ() ? 1 : 0;
+    }
+    return s_on;
+}
+
+static u32 model_due(const Job* j) {
+    s64 d;
+    if (j->kind == JOB_REMOVE) {
+        return j->post_frame;
+    }
+    switch (j->kind) {
+    case JOB_MOUNT:
+    case JOB_FORMAT: d = MODEL_MOUNT_TICKS; break;
+    case JOB_READ:
+    case JOB_WRITE: d = (s64)((j->length + 511) / 512) * MODEL_SECTOR_TICKS; break;
+    default: d = MODEL_SMALL_TICKS; break;
+    }
+    s64 frame_len = (s64)tst_retrace_ticks() + MODEL_FRAME_SLACK;
+    return j->post_frame + (u32)((MODEL_POST_TICKS + d) / frame_len);
+}
+
+static void card_complete(const Job* j, s32 r, u32 frame_label) {
+    if (j->kind == JOB_REMOVE) {
+        return;
+    }
+    stat_done(j, r);
+    if (tst_rngtrace_wanted()) {
+        tst_log("[CARD] job %d done result %d at game frame %u len=%d off=%d", (int)j->kind, (int)r,
+                (unsigned)frame_label, (int)(j->kind == JOB_CREATE ? (s32)j->size : j->length), (int)j->offset);
+    }
+    port_irq_enter();
+    s_result[j->chan & 1] = r;
+    if (j->cb != NULL) {
+        j->cb(j->chan, r);
+    }
+    port_irq_leave();
+    port_thread_dispatch_if_idle();
+}
+
+/* Called from the frame hook (game thread, after the frame counter moved to `frame`): delivers the completions
+ * of the jobs whose modelled time has come, waiting for the card thread if it is not done with one yet. A
+ * completion in the frame of its post is seen by the next frame's logic, so it is delivered then. */
+void port_card_frame(u32 frame) {
+    if (stats_on()) {
+        stat_frame();
+    }
+    if (!determ_on() || s_lock == NULL) { /* no lock before CARDInit */
+        return;
+    }
+    for (;;) {
+        plat_mutex_lock(s_lock);
+        if (s_job_tail == s_job_head) {
+            plat_mutex_unlock(s_lock);
+            return;
+        }
+        u32 idx = s_job_tail % JOBS;
+        Job j = s_jobs[idx];
+        plat_mutex_unlock(s_lock);
+        u32 deadline = j.due > j.post_frame ? j.due : j.post_frame + 1;
+        if (frame < deadline) {
+            return;
+        }
+        while (!s_fin[idx]) {
+            plat_thread_yield();
+        }
+        plat_mutex_lock(s_lock);
+        s_job_tail++;
+        s_fin[idx] = 0;
+        s32 r = s_res[idx];
+        plat_mutex_unlock(s_lock);
+        card_complete(&j, r, j.due);
+    }
+}
+
 static void card_thread(void* arg) {
     (void)arg;
     for (;;) {
         plat_event_wait(s_wake);
+        if (determ_on()) {
+            for (;;) {
+                plat_mutex_lock(s_lock);
+                if (s_exec == s_job_head) {
+                    plat_mutex_unlock(s_lock);
+                    break;
+                }
+                u32 idx = s_exec % JOBS;
+                Job j = s_jobs[idx];
+                plat_mutex_unlock(s_lock);
+                plat_wd_hold(1);
+                s32 r = s_cancel && j.kind != JOB_REMOVE ? CARD_RESULT_CANCELED : run_job(&j);
+                plat_wd_hold(0);
+                plat_mutex_lock(s_lock);
+                s_res[idx] = r;
+                s_fin[idx] = 1;
+                s_exec++;
+                plat_mutex_unlock(s_lock);
+            }
+            continue;
+        }
         for (;;) {
             plat_mutex_lock(s_lock);
             if (s_job_tail == s_job_head) {
@@ -420,11 +600,15 @@ static void card_thread(void* arg) {
             Job j = s_jobs[s_job_tail % JOBS];
             plat_mutex_unlock(s_lock);
             plat_wd_hold(1);
-            s32 r = s_cancel ? CARD_RESULT_CANCELED : run_job(&j);
+            s32 r = s_cancel && j.kind != JOB_REMOVE ? CARD_RESULT_CANCELED : run_job(&j);
             plat_wd_hold(0);
             plat_mutex_lock(s_lock);
             s_job_tail++;
             plat_mutex_unlock(s_lock);
+            if (j.kind == JOB_REMOVE) {
+                continue;
+            }
+            stat_done(&j, r);
             if (tst_rngtrace_wanted()) {
                 tst_log("[CARD] job %d done result %d at game frame %u len=%d off=%d", (int)j.kind, (int)r,
                         (unsigned)tst_cur_frame(), (int)(j.kind == JOB_CREATE ? (s32)j.size : j.length), (int)j.offset);
@@ -449,14 +633,21 @@ static s32 post(const Job* j) {
         plat_mutex_unlock(s_lock);
         return CARD_RESULT_BUSY;
     }
-    if (tst_rngtrace_wanted()) {
+    if (j->kind != JOB_REMOVE && tst_rngtrace_wanted()) {
         tst_log("[CARD] job %d posted at game frame %u len=%d off=%d", (int)j->kind, (unsigned)tst_cur_frame(),
                 (int)(j->kind == JOB_CREATE ? (s32)j->size : j->length), (int)j->offset);
     }
+    if (j->kind != JOB_REMOVE) {
+        stat_post(j);
+    }
     s_jobs[s_job_head % JOBS] = *j;
+    s_jobs[s_job_head % JOBS].post_frame = tst_cur_frame();
+    s_jobs[s_job_head % JOBS].due = model_due(&s_jobs[s_job_head % JOBS]);
     s_job_head++;
-    s_result[0] = CARD_RESULT_BUSY;
-    s_cancel = 0;
+    if (j->kind != JOB_REMOVE) {
+        s_result[0] = CARD_RESULT_BUSY;
+        s_cancel = 0;
+    }
     plat_mutex_unlock(s_lock);
     plat_event_signal(s_wake);
     return CARD_RESULT_READY;
@@ -576,8 +767,14 @@ s32 CARDDelete(s32 chan, const char* fileName) {
     if (n < 0) {
         return CARD_RESULT_NOFILE;
     }
-    remove(s_files[n].path);
+    /* the bookkeeping is immediate (the SDK's CARDDelete is synchronous); the file goes on the card thread,
+     * ordered before any job posted later */
+    Job j = {.kind = JOB_REMOVE, .chan = chan};
+    strncpy(j.path, s_files[n].path, sizeof(j.path) - 1);
     s_files[n].used = 0;
+    if (post(&j) != CARD_RESULT_READY) {
+        remove(j.path); /* queue full: rare, and a stall is better than a stale file */
+    }
     return CARD_RESULT_READY;
 }
 

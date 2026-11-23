@@ -435,6 +435,7 @@ OSTime port_game_time_take(OSTime want) {
 }
 
 void port_debug_frame(u32 frame);
+void port_card_frame(u32 frame);
 void plat_memory_log(const char* when);
 
 static void frame_hooks(void) {
@@ -444,6 +445,7 @@ static void frame_hooks(void) {
     __atomic_store_n(&s_time_budget, budget, __ATOMIC_RELAXED);
     port_debug_frame(s_frames);
     tst_frame(s_frames);
+    port_card_frame(s_frames); /* determ: modelled card completions */
     plat_input_frame();
     plat_set_phase("frame hooks");
     if (!plat_frame_poll()) {

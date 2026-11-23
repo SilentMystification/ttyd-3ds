@@ -22,7 +22,7 @@ real hardware is unverified.
 
 ## Installing
 
-1. Get `ttyd.cia`.
+1. Get the CIA for your disc's region, `ttyd-3ds-<version>-us.cia` (or `-jp`, `-pal`). Check it against `SHA256SUMS`.
 2. Install it with FBI. Either:
    - copy `ttyd.cia` to the SD card, open FBI, choose SD, find the file, and choose Install CIA; or
    - in FBI choose Remote Install, then Receive URLs over the network, and send the file from a computer.

@@ -473,6 +473,33 @@ Planner's round-2 brief: put immediate-mode draws on the shader path too, so cha
 - The box itself is exact: `gxvshbbox=2` in eki_00, 46 reads, **0 mismatches**.
 - eki_00's 86 differing static pixels are one row along a wall edge (y 388-391) and one pixel, stable over all 24 frames: the edge between two faces is owned by the other face, from the 24-bit transform. That is the shader path's own precision, which eki_00 now gets because its map no longer stays on the CPU; the offload rules fail a cluster along an edge, so `gxvshbbox` stays 0 until the owner judges it (1 fixes the never-disarmed box and takes eki_00 from 50 to 33 ms).
 
+## Texture trust (`textrust`, `texverify`)
+
+Every cached texture used to be hashed on its first use in each frame (gor_01: 181 textures, 666 KB a frame, `hash_span` about 6% of the game thread) with 0 mismatches. `gx_tex.c` now uses the same content-stable registry as the display-list cache (`port3ds/plat/memstable.c`).
+
+**Design.**
+- A `CacheEntry` carries `trust_gen` and `trust_epoch`. The epoch is read before the hash that validates the entry (the hash at upload, or the first-use check of a frame). When the hash agrees with the converted texture, `plat_memstable_trust` is asked for the spans {image, `GXGetTexBufferSize` bytes} and, for a CI texture, {TLUT data, entries * 2}. It grants a generation only if every span lies in covered memory (memory the disc filled: `DVDRead` and friends call `plat_memstable_fill`) and nothing covered changed since that epoch.
+- Later frames: `trust_gen == plat_memstable_gen()` means no covered memory that someone relied on was written, flushed (`DCFlushRange` -> `plat_memstable_write`), released or refilled since. The lookup then skips both hashes and uses the cached conversion. Any report touching a relied range bumps the generation, so every trusted texture falls back to the hash on its next first use (and asks for trust again once its hash agrees; `trust_epoch` stops a refused request from being repeated until covered memory changes).
+- Textures the registry does not cover are never trusted and keep the per-frame hash: memory the CPU wrote that no disc read filled (presumably fonts, generated images, TLUTs in static data; not identified by address). Big textures (over 32 KB) were hashed by 64 sampled spans before; they are trusted the same way.
+- A texture the CPU rewrites in covered memory without `DCFlushRange` is the one case trust cannot see. The per-frame hash would have caught it; with trust on only `texverify` does. `texverify=1` (like `gxcache=2`) hashes anyway and compares: a trusted texture whose hash changed is logged (`texverify: trust skipped a change`), counted as `stale`, and converted again. `textrust=0` switches the whole thing off.
+- The glue outside `gx_tex.c` is none: the registry API and the existing hooks (`DCFlushRange`, DVD fills, memory release) are unchanged. The shader and TEV agents' files are untouched.
+
+**Numbers** (Azahar, `gxthreadstats=60 texstats=60`, the 7 windows from frame 1141, one run each, `textrust=0` against the default; these were taken before the owner's short-run rule, the identity and verify runs below are short):
+
+| Scene | hashes / bytes per frame, before -> after | game thread busy | frame |
+|---|---|---|---|
+| gor_01 | 188.7 / 675.7 KB -> 0 / 0 | 72.3 -> **68.0** ms (-6.0%) | 83.6 -> 80.8 |
+| gor_00 | 95.0 / 365.7 KB -> 0 / 7 B | 38.2 -> **35.9** (-6.0%) | 50.2 -> 50.2 |
+| battle (gon_02, `btlauto=perfect`) | 89.7 / 324.6 KB -> 0.1 / 246 B | 35.2 -> **33.1** (-6.0%) | 49.6 -> 41.8 |
+| aaa_00 | 62.0 / 231.6 KB -> 0 / 0 | 35.2 -> **33.8** (-4.0%) | 50.2 -> 47.4 |
+| pause menu | 76.0 / 146.3 KB -> 30.0 / 24.7 KB | 18.8 -> **18.1** (-3.7%) | 33.4 -> 33.4 |
+
+The pause menu keeps 30 hashes a frame: 46 of its 76 textures are trusted, the other 30 are in memory the registry does not cover (presumably written by the CPU, not read from the disc), and none of them changed (0 mismatches in `texstats`). The busy gain is what `hash_span` cost in the profile (5-6%); frames are quantised to vblanks, so the battle's frame time drop (a whole vblank) is partly luck.
+
+**Identity.** `determ shots=1 shotmax=4` with `textrust=0` against `textrust=1`: gor_01 (frames 780-783) 4 of 4 byte-identical, gon_02 battle (frames 1040-1043) 4 of 4. (Consecutive frames differ within each run, so the shots do show motion.)
+
+**Verify sweep** (`texverify=1 texstats=30`, to frame 841, 1101 for the battle; `trusted` counts the trust decisions the hash re-checked): gor_01 **0 stale** (about 160 trusted decisions per frame checked), gon_02 battle 0 (88 per frame), usu_00 0 (96), pik_00 0 (114), aaa_00 0 (62), the pause menu 0 (94 per frame at the end, 46 steady), `gallery.py fx --items 0-8 --gap 40` (effects on gor_01) 0 (152 per frame). No `texverify:` line in any log. A full-length sweep (frame 1500, `fx 0-20`) was not run: the owner asked for short runs.
+
 ## Risks of the cache
 
 - **Hash collisions.** A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.

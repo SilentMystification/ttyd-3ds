@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "gx_internal.h"
+#include "plat/memstable.h"
 #include "plat/options.h"
 #include "plat/plat.h"
 
@@ -39,7 +40,18 @@ typedef struct {
     u16 tex_w, tex_h;
     u32 last_frame;   /* frame of the last use */
     u32 checked_frame;/* frame of the last hash check */
+    u32 trust_gen;    /* textrust: the memstable generation the image and TLUT are vouched stable in, or 0 */
+    u32 trust_epoch;  /* epoch of the last refused trust request (asked again only once covered memory changed) */
 } CacheEntry;
+
+/* ---- textrust (switch, default 1): the content-stable memory registry (plat/memstable.h) as for display lists.
+ * After a hash check (or the upload's hash) that began at epoch E, the entry asks the registry to vouch that its
+ * image and TLUT spans lie in covered memory (disc fills) with no write, release or fill reported since E. While
+ * the generation is unchanged the per-frame hash is skipped. Memory the game writes without DCFlushRange is
+ * not revoked by a report; texverify=1 hashes anyway and counts trust decisions the hash contradicts
+ * (texstats "stale", must be 0). */
+static int s_trust_on = 1, s_verify;
+static unsigned s_st_trusted, s_st_stale, s_st_grants;
 
 /* Per cache entry, parallel to s_cache but on the heap (the exe's static data must stay under 16 MB). */
 typedef struct {
@@ -205,10 +217,11 @@ static void stat_frame_end(void) {
     if (s_stats_every && s_st_frames >= (u32)s_stats_every) {
         unsigned f = s_st_frames;
         PLOG_I("texstats: frames %u: per frame hashes %u.%02u bytes %u lookups %u.%02u first-use-checks %u.%02u "
-               "mismatches %u.%02u uploads %u.%02u",
+               "mismatches %u.%02u uploads %u.%02u trusted %u.%02u grants %u stale %u",
                (unsigned)f, s_st_hashes / f, s_st_hashes * 100 / f % 100, s_st_bytes / f, s_st_lookups / f,
                s_st_lookups * 100 / f % 100, s_st_checks / f, s_st_checks * 100 / f % 100, s_st_mism / f,
-               s_st_mism * 100 / f % 100, s_st_uploads / f, s_st_uploads * 100 / f % 100);
+               s_st_mism * 100 / f % 100, s_st_uploads / f, s_st_uploads * 100 / f % 100, s_st_trusted / f,
+               s_st_trusted * 100 / f % 100, s_st_grants, s_st_stale);
         s_st_tot_hashes += s_st_hashes;
         s_st_tot_bytes += s_st_bytes;
         s_st_tot_lookups += s_st_lookups;
@@ -222,6 +235,7 @@ static void stat_frame_end(void) {
             }
         }
         s_st_hashes = s_st_bytes = s_st_lookups = s_st_checks = s_st_mism = s_st_uploads = s_st_frames = 0;
+        s_st_trusted = s_st_stale = s_st_grants = 0;
     }
 }
 
@@ -768,6 +782,21 @@ static int wants_mips(const GxTexObj* t) { return s_mode == TF_MIP && t->width >
 
 
 
+/* After a check or upload hash that began at `epoch` found the entry current: asks the registry to vouch for it. */
+static void tex_trust(CacheEntry* e, const GxTexObj* t, const GxTlutObj* tl, u32 bytes, u32 epoch) {
+    PlatMemSpan sp[2] = {{t->image, bytes}, {NULL, 0}};
+    u32 n = 1;
+    if (tl) {
+        sp[n++] = (PlatMemSpan){tl->data, (u32)tl->n_entries * 2};
+    }
+    e->trust_gen = plat_memstable_trust(sp, n, epoch);
+    if (e->trust_gen != 0) {
+        s_st_grants++;
+    } else {
+        e->trust_epoch = epoch;
+    }
+}
+
 /* Converts (or finds) the texture of texture map slot `map`. */
 u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
     s_last.copy = 0;
@@ -803,21 +832,40 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
         if (e->image == t->image && e->w == t->width && e->h == t->height && e->fmt == t->format &&
             e->is_ci == t->is_ci && (!tl || (e->tlut == tl->data && e->tlut_fmt == tl->format))) {
             if (e->checked_frame != s_frame) {
-                u32 h = hash_bytes(t->image, bytes);
-                u32 th = 0;
-                if (tl) {
-                    th = hash_bytes(tl->data, (u32)tl->n_entries * 2);
-                    h ^= th;
-                }
-                e->checked_frame = s_frame;
-                s_st_checks += s_stats_every != 0;
-                if (h != e->hash) {
-                    if (s_stats_every) {
-                        stat_mismatch(e, t, bytes, tl && th != s_dbg_tlut_hash[e - s_cache]);
+                int trusted = s_trust_on && e->trust_gen != 0 && e->trust_gen == plat_memstable_gen();
+                if (!trusted || s_verify) {
+                    u32 epoch = plat_memstable_epoch();
+                    u32 h = hash_bytes(t->image, bytes);
+                    u32 th = 0;
+                    if (tl) {
+                        th = hash_bytes(tl->data, (u32)tl->n_entries * 2);
+                        h ^= th;
                     }
-                    entry_free(e);
-                    free_e = e;
-                    break;
+                    e->checked_frame = s_frame;
+                    s_st_checks += s_stats_every != 0;
+                    s_st_trusted += trusted; /* texverify: the decisions the hash checks */
+                    if (trusted && h != e->hash) {
+                        s_st_stale++;
+                        PLOG_W("texverify: trust skipped a change: image %p %ux%u fmt %u frame %u", t->image,
+                               t->width, t->height, t->format, (unsigned)s_frame);
+                    }
+                    if (h != e->hash) {
+                        if (s_stats_every) {
+                            stat_mismatch(e, t, bytes, tl && th != s_dbg_tlut_hash[e - s_cache]);
+                        }
+                        entry_free(e);
+                        free_e = e;
+                        break;
+                    }
+                    if (!trusted) {
+                        e->trust_gen = 0;
+                        if (s_trust_on && e->trust_epoch != epoch) {
+                            tex_trust(e, t, tl, bytes, epoch);
+                        }
+                    }
+                } else {
+                    e->checked_frame = s_frame;
+                    s_st_trusted++;
                 }
             }
             e->last_frame = s_frame;
@@ -839,6 +887,7 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
         entry_free(lru);
         free_e = lru;
     }
+    u32 up_epoch = plat_memstable_epoch();
     gx_tex_decode_rgba8(t->image, t->width, t->height, t->format, tl ? tl->data : NULL, tl ? tl->format : 0,
                         s_rgba);
     CacheEntry* e = free_e;
@@ -883,6 +932,9 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
     s_st_uploads += s_stats_every != 0;
     e->hash = hash_bytes(t->image, bytes) ^ th0;
     e->last_frame = e->checked_frame = s_frame;
+    if (s_trust_on) {
+        tex_trust(e, t, tl, bytes, up_epoch);
+    }
     *out_w = e->tex_w;
     *out_h = e->tex_h;
     return e->handle;
@@ -1080,6 +1132,8 @@ u32 gx_tex_copy_target(const void* addr, u16 w, u16 h, u8 fmt) {
 
 void gx_tex_init(void) {
     s_stats_every = plat_switch_int("texstats", 0);
+    s_trust_on = plat_switch_int("textrust", 1) != 0;
+    s_verify = plat_switch_int("texverify", 0) != 0;
     mode_init();
     s_x = calloc(CACHE_SIZE, sizeof(CacheExtra));
     if (s_x == NULL) {

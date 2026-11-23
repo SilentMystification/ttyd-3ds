@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "gx_bigmem.h"
 #include "gx_internal.h"
 #include "plat/gpu.h"
 #include "plat/plat.h"
@@ -73,9 +74,12 @@ typedef struct {
     u32 hash;
     u32 frame; /* last frame it was called in */
 } Seen;
-static Seen s_seen[SEEN_SLOTS];
+static Seen* s_seen; /* SEEN_SLOTS, heap (gx_bigmem.h), on the first list under gxstats */
 
 void gx_perf_dl(const void* list, u32 nbytes) {
+    if (s_seen == NULL) {
+        s_seen = gx_big_alloc("gxstats seen lists", sizeof(Seen) * SEEN_SLOTS);
+    }
     u32 h = gx_hash32(list, nbytes, 0);
     u32 i = ((u32)(uintptr_t)list >> 5 ^ nbytes) & (SEEN_SLOTS - 1);
     for (u32 probe = 0; probe < 16; probe++, i = (i + 1) & (SEEN_SLOTS - 1)) {

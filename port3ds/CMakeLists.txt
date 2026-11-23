@@ -332,6 +332,11 @@ add_dependencies(ttyd ttyd_rels)
 target_link_options(ttyd PRIVATE -Wl,--gc-sections -Wl,--wrap=svcBreak -Wl,--no-enum-size-warning
     -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/ttyd.map)
 target_link_libraries(ttyd PRIVATE ttyd_gx_shader_bin ttyd_sjis_font_bin ctrdk_devupdate ctrdk_crash citro3d ctru z m)
+# The image must end below 0x01000000 (PORT_IS_ADDR, sound-id flag bits): fail the build, not the boot.
+add_custom_command(TARGET ttyd POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/check_image_end.py"
+            "${CMAKE_NM}" "$<TARGET_FILE:ttyd>"
+    VERBATIM)
 
 if(TTYD_VERSION STREQUAL G8ME01)
     set(_subtitle "PORT")

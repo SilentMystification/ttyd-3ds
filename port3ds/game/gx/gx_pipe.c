@@ -20,15 +20,16 @@
  */
 #include <string.h>
 
+#include "gx_bigmem.h"
 #include "gx_internal.h"
 #include "plat/memstable.h"
 #include "plat/plat.h"
 
 #define PIPE_SLOTS (64 * 1024)
 
-static PPCWGPipe s_pipe[PIPE_SLOTS];
-volatile PPCWGPipe* port_gx_wg_ptr = s_pipe;
-volatile PPCWGPipe* port_gx_wg_end = s_pipe + PIPE_SLOTS;
+static PPCWGPipe* s_pipe; /* PIPE_SLOTS, heap (gx_bigmem.h); set by gx_pipe_alloc */
+volatile PPCWGPipe* port_gx_wg_ptr;
+volatile PPCWGPipe* port_gx_wg_end;
 
 /* current primitive */
 static int s_in_begin;
@@ -40,7 +41,8 @@ static u8* s_dl_buf;
 static u32 s_dl_size, s_dl_used;
 static int s_dl_overflow;
 
-static GxVertex s_verts[4096];
+#define VERTS_MAX 4096
+static GxVertex* s_verts; /* VERTS_MAX, heap */
 
 /* Lists are recorded by the game thread; a translating thread is never inside one. */
 int gx_dl_recording(void) { return s_dl_buf != NULL && !gx_tls_translator; }
@@ -511,9 +513,9 @@ static void draw_from_reader(Reader* r, u8 prim, u8 fmt, u32 n) {
     }
     while (done < n) {
         u32 chunk = n - done;
-        if (chunk > sizeof(s_verts) / sizeof(s_verts[0])) {
+        if (chunk > VERTS_MAX) {
             /* split on a primitive boundary */
-            u32 max = sizeof(s_verts) / sizeof(s_verts[0]);
+            u32 max = VERTS_MAX;
             switch (prim) {
             case GX_QUADS: chunk = max & ~3u; break;
             case GX_TRIANGLES: chunk = max - max % 3; break;
@@ -603,7 +605,7 @@ void GXEnd(void) {
 
 /* Translator side of a recorded GXBegin/GXEnd: the pipe writes as words (each
  * write's low 32 bits, which is what the readers take from a slot). */
-static PPCWGPipe s_tr_slots[PIPE_SLOTS];
+static PPCWGPipe* s_tr_slots; /* PIPE_SLOTS, heap */
 
 void gx_draw_prim(u8 primfmt, u16 nverts, const void* caller, const u32* words, u32 nwords) {
     if (nwords > PIPE_SLOTS) {
@@ -756,6 +758,16 @@ void gx_run_raw(const u32* words, u32 nwords) {
     Reader r = {s_tr_slots, NULL, NULL};
     s_slots_end = s_tr_slots + nwords;
     run_commands(&r, 0);
+}
+
+void gx_pipe_alloc(void) {
+    if (s_pipe == NULL) {
+        s_pipe = gx_big_alloc("gx pipe", sizeof(PPCWGPipe) * PIPE_SLOTS);
+        s_tr_slots = gx_big_alloc("gx pipe (translator)", sizeof(PPCWGPipe) * PIPE_SLOTS);
+        s_verts = gx_big_alloc("gx pipe vertices", sizeof(GxVertex) * VERTS_MAX);
+        port_gx_wg_ptr = s_pipe;
+        port_gx_wg_end = s_pipe + PIPE_SLOTS;
+    }
 }
 
 void gx_pipe_reset(void) {

@@ -260,8 +260,13 @@ int main(int argc, char** argv) {
     s_boot_tick = svcGetSystemTick();
     if ((u32)__end__ > 0x01000000u) {
         /* port_addr_impl.h: sound ids with flag bits (up to 0x07FFFFFF) must
-         * not fall inside the executable image */
-        svcBreak(USERBREAK_PANIC);
+         * not fall inside the executable image. The build checks the same
+         * limit (tools/port3ds/check_image_end.py). */
+        char text[160];
+        snprintf(text, sizeof(text), "  Image ends at %08lx, limit 01000000\n  (PORT_IS_ADDR, sound-id flag bits).",
+                 (unsigned long)(u32)__end__);
+        message_screen(text);
+        return 0;
     }
 
     bool n3ds = false;

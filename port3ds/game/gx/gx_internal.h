@@ -312,6 +312,7 @@ void gx_copy_disp(void* dest, GXBool clear, const void* caller);
 /* ---- gx_pipe.c ---- */
 /* Write-gather pipe: 8-byte slots (GXVert.h on ports). */
 extern volatile PPCWGPipe* port_gx_wg_ptr;
+void gx_pipe_alloc(void); /* the pipe tables (heap, not .bss); once, from gx_opts_init */
 extern volatile PPCWGPipe* port_gx_wg_end;
 void gx_pipe_reset(void);
 /* Display list recording (GXBeginDisplayList .. GXEndDisplayList). */
@@ -445,7 +446,7 @@ extern int gx_dlc_capturing;
 /* the array indices the list's vertices read, in decode order (a list
  * that reads more than the capture holds is not cached) */
 #define GX_DLC_IDX_CAP (8192 * 12)
-extern u16 gx_dlc_idx[GX_DLC_IDX_CAP];
+extern u16* gx_dlc_idx; /* GX_DLC_IDX_CAP entries */
 extern u32 gx_dlc_nidx;
 static inline void gx_dlc_track(int attr, u32 idx) {
     (void)attr;

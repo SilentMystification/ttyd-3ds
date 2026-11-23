@@ -42,6 +42,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "gx_bigmem.h"
 #include "gx_internal.h"
 #include "plat/memstable.h"
 #include "plat/plat.h"
@@ -94,7 +95,7 @@ typedef struct {
     u32 vsh_reason;   /* why there is none (GXV_R_*) */
 } DlcEntry;
 
-static DlcEntry s_e[DLC_ENTRIES];
+static DlcEntry* s_e; /* DLC_ENTRIES, heap (gx_bigmem.h) */
 static u16 s_bucket[DLC_BUCKETS];
 static u16 s_free_head; /* free list through .next */
 static u16 s_lru_head, s_lru_tail; /* head = most recently used */
@@ -107,9 +108,9 @@ static u32 s_used_bytes, s_live;
 
 /* capture of the list being decoded */
 int gx_dlc_capturing;
-u16 gx_dlc_idx[GX_DLC_IDX_CAP];
+u16* gx_dlc_idx; /* GX_DLC_IDX_CAP, heap */
 u32 gx_dlc_nidx;
-static GxVertex s_cap_v[DLC_CAP_VERTS];
+static GxVertex* s_cap_v; /* DLC_CAP_VERTS, heap */
 static DlcDraw s_cap_d[DLC_CAP_DRAWS];
 static u32 s_cap_nv, s_cap_nd;
 static u8 s_cap_fmt_mask;
@@ -157,6 +158,9 @@ static void init(void) {
     if (s_enabled < 0 || s_enabled > 2) {
         s_enabled = 1;
     }
+    s_e = gx_big_alloc("gxcache entries", sizeof(DlcEntry) * DLC_ENTRIES);
+    gx_dlc_idx = gx_big_alloc("gxcache indices", sizeof(u16) * GX_DLC_IDX_CAP);
+    s_cap_v = gx_big_alloc("gxcache capture", sizeof(GxVertex) * DLC_CAP_VERTS);
     s_budget = (u32)plat_switch_int("gxcachekb", 8192) * 1024u;
     s_trust = plat_switch_int("gxtrust", 1) != 0;
     s_scribble_at = (u32)plat_switch_int("gxscribble", 0);

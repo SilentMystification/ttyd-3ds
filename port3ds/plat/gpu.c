@@ -27,6 +27,7 @@
 #include "gx_shbin.h"
 #include "plat/gpu.h"
 #include "plat/hud.h"
+#include "plat/pmu.h"
 #include "plat_internal.h"
 #include "stereo.h"
 
@@ -1881,7 +1882,9 @@ static void render_thread(void* arg) {
         }
         Record* rr = &s_rec[__atomic_load_n(&s_render_idx, __ATOMIC_ACQUIRE)];
         if (render_gate()) {
+            plat_pmu_begin(PLAT_PMU_RENDER);
             render_record(rr);
+            plat_pmu_end(PLAT_PMU_RENDER);
         } else {
             gpu_done_publish(rr->seq); /* not replayed (no GPU access now): nothing of it is in flight */
         }

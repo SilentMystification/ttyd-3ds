@@ -50,6 +50,7 @@
 #include "gx_internal.h"
 #include "plat/memstable.h"
 #include "plat/plat.h"
+#include "plat/pmu.h"
 #include "plat/thread.h"
 
 int gx_rec_mode;
@@ -207,7 +208,9 @@ static void run_one(u32 type, const u32* w, u32 n) {
     case REC_CopyDisp: {
         /* the frame's end: its submit waits for the replay of the last frame (counted apart) */
         u64 t0 = plat_ticks();
+        plat_pmu_begin(PLAT_PMU_PRESENT);
         gx_apply_call(type, w);
+        plat_pmu_end(PLAT_PMU_PRESENT);
         __atomic_fetch_add(&s_ts_present, plat_ticks() - t0, __ATOMIC_RELAXED);
         break;
     }
@@ -248,7 +251,9 @@ static void translator_main(void* arg) {
         u32 w = load_sc(&s_wr_pub);
         if (w != s_rd) {
             u64 t0 = plat_ticks();
+            plat_pmu_begin(PLAT_PMU_TRANSLATOR);
             consume(w);
+            plat_pmu_end(PLAT_PMU_TRANSLATOR);
             __atomic_fetch_add(&s_ts_busy, plat_ticks() - t0, __ATOMIC_RELAXED);
             continue;
         }
@@ -926,6 +931,7 @@ static u32 us_of(u64 ticks, u32 frames) {
 }
 
 void gx_rec_frame(void) {
+    plat_pmu_frame(); /* switch pmu=N: ARM11 counters per frame, next to these */
     s_after_copydisp = 1;
     if (s_stats_every == 0) {
         return;

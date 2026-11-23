@@ -16,7 +16,7 @@ Updated 2026-11-22. Owner goals: original GameCube frame rates, stereo 3D, all t
 | Shader path: matrix palette, lighting, `MTX3x4` texgen, bbox from positions; then pipelined frame end and delta recording (lane C 3, 5) | Opus |
 | Memory-card timing under `determ`; saves never stall the game | Sonnet |
 | NDSP stream clicks in `gor_01` | Sonnet |
-| Texture filter option (`texfilter`, generated mipmaps) | Sonnet |
+| Load times: breakdown vs Dolphin, batched disc reads, ARAM wait | Sonnet |
 
 **Done since the last update:** stereo 3D (Azahar), GX translation thread (`gxthread`), recorded inputs, Japanese ROM font, versioning and release script, battle-stage sweep hook, PM64-style bottom screen, SD access confined to core 1 (`sdstats`), large GX tables moved to the heap (image end 0x00ADED28; build fails past 0x01000000), emulator and build throttling.
 

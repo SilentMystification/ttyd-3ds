@@ -45,6 +45,8 @@ Then the measurement items from `PORT_3DS_BACKLOG.md` lane D, all through `devup
 13. **NDSP audio:** `ndspvoices=1 ndspstreams=1 ndspstats=10` on the title screen, `gor_01` and a battle. Listen for a tick every 17.5 ms in the music (ADPCM history not carried across wave buffers on firmware). Note the `[NDSPV] flush ticks` line, with `audiobatch=1` and `audiobatch=2`.
 14. **Stereo 3D:** the real slider, in `gor_01`, a battle and the pause menu. Judge depth and comfort at the default `stereosep=6` and median convergence, HUD crosstalk, and edge artifacts by near objects (try `stereogrid=80x48`). Compare `stereostats=60` against the slider at 0.
 15. **GX translation thread:** `gxthreadstats=60` with `gxthread=0` and `gxthread=2` in `gor_01`, a battle and `aaa_00`. Keep mode 2 only if frames are faster on the console.
+16. **Texture filter:** `texfilter=game` vs `texfilter=mip` (and `mip texlodbias=-0.5`) on a slow pan in `gor_01` and a battle. Judge distant-texture shimmer and softness; compare frame times.
+17. **SD on core 1:** `sdstats=10` during play, a save and Options close. Expect 0 direct SD calls from cores 0/2.
 
 What Azahar can't show, so these are the real tests:
 - the APT jump or relaunch: Azahar aborts on it;

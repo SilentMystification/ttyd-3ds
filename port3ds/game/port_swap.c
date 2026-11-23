@@ -5,6 +5,7 @@
 
 #include "plat/job.h"
 #include "plat/plat.h"
+#include "port3ds/loadprof.h"
 #include "port3ds/port_swap.h"
 
 void port_swap_begin(PortSwap* s, void* base, u32 size, const char* what) {
@@ -290,7 +291,7 @@ static void burst_flush(void) {
 
 u64 port_conv_begin(void) {
     if (s_conv_on < 0) {
-        s_conv_on = plat_switch_has("loadstats");
+        s_conv_on = plat_switch_has("loadstats") || port_lp_active();
         s_conv_hash = plat_switch_has("convhash");
     }
     if (!s_conv_on || s_conv_depth++ != 0) {
@@ -322,6 +323,7 @@ void port_conv_end(int kind, u64 start, const char* name, const void* data, u32 
         return;
     }
     u64 now = plat_ticks();
+    port_lp_conv(now - start);
     ConvKind* k = &s_burst[kind];
     k->count++;
     k->bytes += bytes;

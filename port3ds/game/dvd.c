@@ -21,6 +21,7 @@
 #include "plat/memstable.h"
 #include "plat/plat.h"
 #include "port3ds/fst.h"
+#include "port3ds/loadprof.h"
 #include "port3ds/os_internal.h"
 #include "port3ds/rel_static.h"
 #include "version.h"
@@ -199,6 +200,9 @@ static void sync_done(void* ctx, int32_t result) {
     port_irq_enter();
     r->result = result;
     r->done = 1;
+    if (port_lp_active()) {
+        port_lp_dvd_done(plat_ticks());
+    }
     OSWakeupThread(&r->queue);
     port_irq_leave();
 }
@@ -223,6 +227,9 @@ static s32 read_file(DVDFileInfo* fi, void* addr, s32 length, s32 offset) {
         s_stat_reads++;
         s_stat_bytes += (u32)r;
         s_stat_ticks += plat_ticks() - t0;
+        if (port_lp_active()) {
+            port_lp_dvd(fi->startAddr + (u32)offset, (u32)r, plat_ticks() - t0);
+        }
         OSRestoreInterrupts(level);
     }
     return r;

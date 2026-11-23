@@ -34,6 +34,8 @@
 #include "plat/plat.h"
 #include "plat/sdio.h"
 #include "plat/sweep.h"
+#include "plat/thread.h"
+#include "port3ds/loadprof.h"
 #include "port3ds/os_internal.h"
 #include "test_mode.h"
 #include "version.h"
@@ -455,6 +457,12 @@ static void frame_hooks(void) {
     }
     warp_switch();
     sweep_frame();
+    if (port_lp_active()) {
+        int seq = gp != NULL ? seqGetSeq() : SEQ_UNDEFINED;
+        int ready = (seq == SEQ_BATTLE && _battleWorkPointer != NULL && gp->inBattle);
+        port_lp_frame(s_frames, seq, ready, gp != NULL ? gp->currentMapName : NULL,
+                      s_frame_start ? plat_ticks() - s_frame_start : 0);
+    }
     fastboot_frame(s_sweep_state > 1 || s_warp_switch_done);
     if (s_frames % 1800 == 0) {
         plat_memory_log("now");
@@ -481,13 +489,23 @@ static void frame_hooks(void) {
     plat_hud_frame(&st);
 }
 
-static void wait_retrace(void) {
+static void wait_retrace_raw(void) {
     u32 target = s_retrace_count;
     BOOL level = OSDisableInterrupts();
     while (s_retrace_count == target) {
         OSSleepThread(&s_retrace_queue);
     }
     OSRestoreInterrupts(level);
+}
+
+static void wait_retrace(void) {
+    if (!port_lp_active()) {
+        wait_retrace_raw();
+        return;
+    }
+    u64 t0 = plat_ticks();
+    wait_retrace_raw();
+    port_lp_retrace(plat_ticks() - t0);
 }
 
 /* determ (test mode): DVD manager reads queued this frame finish first, then
@@ -522,11 +540,46 @@ static void determ_retrace(void) {
     port_ai_pump(quanta);
 }
 
+/* Switch dvdsettle=1 (outside determ): while a map change or a battle start loads, a frame does not end until
+ * the DVD manager's queued reads have finished (up to SETTLE_MAX_MS), as determ's frames do. The DVD manager
+ * thread only runs while the game thread sleeps, so with one slow frame per read the load took one frame per read
+ * (the GameCube's frames are short and its drive slow: reads overlapped frames; a determ run of the same load
+ * takes the frame count the game's own logic needs). The wait runs only in the loading sequences, so a read
+ * queued in the field (music, streaming) never stalls a frame. */
+#define SETTLE_MAX_MS 250
+static int s_settle = -1;
+
+static void dvd_settle(void) {
+    if (s_settle < 0) {
+        s_settle = plat_switch_has("dvdsettle");
+    }
+    if (!s_settle || gp == NULL) {
+        return;
+    }
+    int seq = seqGetSeq();
+    if ((seq != SEQ_MAP_CHANGE && seq != SEQ_BATTLE) || !tst_dvd_busy()) {
+        return;
+    }
+    u64 t0 = plat_ticks();
+    u64 limit = t0 + (u64)SETTLE_MAX_MS * (PLAT_TICKS_PER_SEC / 1000u);
+    while (tst_dvd_busy() && plat_ticks() < limit) {
+        OSYieldThread(); /* the DVD manager thread runs; returns at once while it waits for the file thread */
+        if (tst_dvd_busy()) {
+            plat_thread_sleep_ns(200000);
+        }
+    }
+    if (port_lp_active()) {
+        port_lp_retrace(plat_ticks() - t0);
+    }
+}
+
 void VIWaitForRetrace(void) {
     frame_hooks();
     wait_retrace();
     if (tst_determ()) {
         determ_retrace();
+    } else {
+        dvd_settle();
     }
     s_frame_start = plat_ticks();
     plat_set_phase("game frame");

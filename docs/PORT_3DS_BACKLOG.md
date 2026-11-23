@@ -14,7 +14,10 @@ Updated 2026-11-22. Owner goals: original GameCube frame rates, stereo 3D, all t
 | Systems tests: saves, copy/delete, game over, reset, pause tabs, mail, journal (lane B 6) | Opus |
 | Story checkpoints, every chapter, port vs Dolphin (lane B 2) | Opus |
 | Shader path: matrix palette, lighting, `MTX3x4` texgen, bbox from positions; then pipelined frame end and delta recording (lane C 3, 5) | Opus |
-| Memory-card timing under `determ`; saves never stall the game | Sonnet |
+| Console walk: queued padfiles/test runs on the console (`hw_walk.py`, ctr-devkit files/queue) | Sonnet |
+| Missing-pose writes in `animPoseMain` (bad low-memory writes) | Sonnet |
+| TEV fixes for bomb, flame_n64, itemget, stageclear, explosion_n64 | Opus |
+| 60 fps sanity audit (`PORT_3DS_60FPS.md` step 1) | Opus |
 | NDSP stream clicks in `gor_01` | Sonnet |
 | Load times: breakdown vs Dolphin, batched disc reads, ARAM wait | Sonnet |
 
@@ -24,7 +27,7 @@ Updated 2026-11-22. Owner goals: original GameCube frame rates, stereo 3D, all t
 
 1. `hw_harness.py` on top of `devupdate`, with Azahar and hardware targets: test lists, results JSON. *Needs `ctr-devkit`.*
 2. **Deterministic test mode:** game time advances exactly 1/60 s per frame (1/50 for PAL), so the same inputs replay the same way.
-3. **Recorded inputs:** Dolphin DTM movies or a TTYD TAS converted to padscripts, played back in the port.
+3. **Recorded inputs: done.** `padrec=`/`padfile=`, `dtm2pad.py`; a recorded title-to-new-save run replays identically in the port and the GameCube debug DOL (340/340 `gwdump` records) once card timing follows Dolphin under `determ` and both cards start empty.
 4. **GameCube debug DOL:** the same source with the same test switches, non-matching and separate from the matching build, so `fx=`, `battle=` and story jumps behave alike in Dolphin and the port.
 5. **Galleries:** `fx=<effect>` and `battle=<id>`, screenshotted in both builds and diffed automatically.
 6. **GX feature census:** runtime hashes of TEV, blend, texture-format and indirect configurations, compared with a static scan of `src/`.

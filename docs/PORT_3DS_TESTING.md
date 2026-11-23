@@ -393,6 +393,8 @@ Player settings live in `sdmc:/3ds/ttyd/options.txt` as `key=value` lines ending
 
 ### Recorded inputs
 
+**Regression replay (port vs GameCube):** `tools/port3ds/testdata/title_newgame_save.tpad` (3286 frames: title, file select, new save created and written). Copy it to `build/gcdebug-disc/files/` and to the Azahar profile's sdmc root, then `tools/port3ds/gw_diff.py --switches "determ gwdump=10 padfile=/title_newgame_save.tpad" --frames 3400`. Passing (2026-11-22): 340 of 340 records equal, f 10..3400, 22 fields, with both memory cards empty (`--card empty`, the default) and the determ card timing model.
+
 `padrec=` writes the pad state the game saw into a TPAD file, and `padfile=` plays it back, so a run (a hand-played session, or a `padscript` run) can be repeated exactly, or a Dolphin movie can drive the port.
 
 - **File format** (little-endian): a 16-byte header, the magic `TPAD`, version u32 (1), frame count u32, flags u32 (bit 0 = recorded under `determ`); then 8 bytes per game frame, the GameCube `PADStatus` fields the game reads: buttons u16, stickX s8, stickY s8, substickX s8, substickY s8, triggerL u8, triggerR u8. Buttons are the `PAD_BUTTON_*` bits.

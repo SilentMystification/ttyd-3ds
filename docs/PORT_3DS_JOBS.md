@@ -180,5 +180,5 @@ What needs the console: the SD card's real read times (Azahar's emulated card wa
 | `loadstats` | `[LOADCONV]` per conversion and per load. |
 | `convhash` | Adds a hash of each converted file to the `loadstats` lines. |
 | `loadprof` | Map-change and battle-start load profile (see above) |
-| `aramfast=1`, `discra=KB`, `discbatch=1`, `dvdsettle=1` | ARAM callback delay, disc read-ahead, queued request merging, wait for the DVD manager during loads (see above) |
+| `aramfast=1`, `discra=KB`, `discbatch=1`, `dvdsettle=0` (on by default now) | ARAM callback delay, disc read-ahead, queued request merging, wait for the DVD manager during loads (see above) |
 | `arqspin` | ARQ waits poll with a yield, as before, instead of sleeping until the next ARQ callback. |

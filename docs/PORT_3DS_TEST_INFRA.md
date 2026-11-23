@@ -198,6 +198,12 @@ Agents share one PC, so the run and build scripts cap how much runs at once and 
 | `BUILD_MAX` | 2 | `build.sh` builds at once (flock slots in `${XDG_CACHE_HOME:-~/.cache}/ttyd3ds`); a waiting build prints a line |
 | `BUILD_JOBS` | 8 | Ninja parallelism inside the build container (`cmake --build -j`) |
 
+### Run length
+
+Emulator runs are targeted and short, usually under a minute: boot with `fastboot`, go straight to the scene with `map=`, `story=` and warps, and stop on the first log line that answers the question (`--until`). `--timeout` defaults to 60 s and counts only the time the emulator runs after it has a slot (waiting for a slot is not counted); `--timeout` above 60 is refused. A run that genuinely needs more passes `--long SECONDS` (at most 1800) and prints `run_azahar: long run (N s) requested` (`run_dolphin:` for Dolphin). Callers that compute a limit from the work (frames, maps) go through `emu_usage.time_args()`, which picks `--timeout` or `--long`.
+
+Every run, from any worktree, appends one tab-separated line to `${XDG_CACHE_HOME:-~/.cache}/ttyd3ds/emu_runs.log`: start time, emulator, worktree path, seconds waited for a slot, seconds run, result, switches (120 characters). `tools/port3ds/emu_usage.py` summarises it: per worktree and emulator the runs, total and longest run time and total slot wait, then the 10 longest runs.
+
 Both emulators start with core dumps disabled (`RLIMIT_CORE` 0, so systemd-coredump keeps nothing) and at `nice` 10. A waiting slot polls every 5 s.
 
 ## Library hooks (for GC3DS_LIBRARY_NOTE.md)

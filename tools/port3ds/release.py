@@ -20,8 +20,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gen_disc_data  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[2]
 REGIONS = {"US": "game", "JP": "game_jp", "PAL": "game_pal"}
+VERSIONS = {"US": "G8ME01", "JP": "G8MJ01", "PAL": "G8MP01"}
 
 
 def git(*args):
@@ -60,6 +64,13 @@ def main():
     for r in regions:
         if r not in REGIONS:
             sys.exit(f"release.py: unknown region {r}")
+    for r in regions:
+        v = VERSIONS[r]
+        if not gen_disc_data.arena_hi(v)[1]:
+            sys.exit(f"release.py: cannot package {r}: the GameCube arena value for {v} is unknown "
+                     f"(ARENA_HI in tools/port3ds/gen_disc_data.py). A {r} disc is needed once to fill the table: "
+                     f"tools/port3ds/gen_disc_data.py --print-arena iso/{v}.iso, put the printed line in ARENA_HI, "
+                     "commit it (docs/RELEASE.md). Use --regions US to package only the regions that are known.")
     out = REPO / "build" / "release" / ver
     if out.exists():
         shutil.rmtree(out)

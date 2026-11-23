@@ -28,6 +28,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import emu_usage  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 SDMC = ROOT / "build/azahar-profile/data/azahar-emu/sdmc"
 GAME_DIR = SDMC / "3ds/ttyd"
@@ -64,6 +67,15 @@ EXTRA_SWITCHES = ""  # more game switches, e.g. " memmap"
 EXTRA = []  # more run_azahar.py arguments (--profile, --last, --gdb ...)
 
 
+SECONDS_PER_MAP = 20.0  # the load plus the 120-frame stay, with margin (Azahar, no frame limit)
+BASE_SECONDS = 25.0     # boot and fastboot
+MAX_MAPS_PER_RUN = 60   # keeps a run inside the --long cap (1800 s) and one bad map from costing a long run
+
+
+def estimate_timeout(n_maps, frames):
+    return BASE_SECONDS + n_maps * SECONDS_PER_MAP * max(frames, 60) / 120.0
+
+
 def run(build, todo, story, frames, party, timeout, fastboot=True):
     """One Azahar run over todo; returns {map: result} for the maps it reached."""
     GAME_DIR.mkdir(parents=True, exist_ok=True)
@@ -72,7 +84,7 @@ def run(build, todo, story, frames, party, timeout, fastboot=True):
     switches = f"sweep={frames} party={party} " + ("fastboot" if fastboot else "nofastboot") + EXTRA_SWITCHES
     cmd = [sys.executable, str(ROOT / "tools/port3ds/run_azahar.py"), "--build", str(build),
            "--switches", switches, "--log", "3ds/ttyd/log.txt", "--until", r"sweep: (done|stopped)",
-           "--timeout", str(timeout), "--stall", "60"] + EXTRA
+           *emu_usage.time_args(timeout), "--stall", "60"] + EXTRA
     child = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         out, err = child.communicate()
@@ -135,7 +147,9 @@ def main():
     ap.add_argument("--party", type=int, default=1)
     ap.add_argument("--frames", type=int, default=120, help="game frames on each map before its screenshot")
     ap.add_argument("--nofastboot", action="store_true", help="do not press A through the boot screens")
-    ap.add_argument("--timeout", type=float, default=3600.0, help="seconds per Azahar run")
+    ap.add_argument("--timeout", type=float, help="seconds per Azahar run (default: estimated from the maps in the run; "
+                    "over 60 s the run is a --long run, max 1800)")
+    ap.add_argument("--chunk", type=int, default=MAX_MAPS_PER_RUN, help="most maps in one Azahar run")
     ap.add_argument("--profile", type=Path, help="Azahar profile folder for a second instance (see run_azahar.py)")
     ap.add_argument("--last", type=Path, help="run_azahar's log folder (default build/azahar-last)")
     ap.add_argument("--out", type=Path, help="results folder (default build/map-sweep)")
@@ -164,12 +178,13 @@ def main():
     results = {}
     todo = list(maps)
     while todo:
-        got = run(args.build, todo, args.story, args.frames, args.party, args.timeout, not args.nofastboot)
+        batch = todo[:args.chunk]
+        timeout = args.timeout or min(emu_usage.MAX_LONG, estimate_timeout(len(batch), args.frames))
+        got = run(args.build, batch, args.story, args.frames, args.party, timeout, not args.nofastboot)
         results.update(got)
-        reached = [m for m in todo if m in got]
+        reached = [m for m in batch if m in got]
         if not reached:
-            for m in todo[:1]:
-                results[m] = {"result": "not reached", "line": ""}
+            results[batch[0]] = {"result": "not reached", "line": ""}
             todo = todo[1:]
             continue
         last = max(todo.index(m) for m in reached)

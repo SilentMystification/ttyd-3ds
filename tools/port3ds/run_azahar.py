@@ -37,6 +37,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import emu_usage  # noqa: E402
+
 APP_ID = "org.azahar_emu.Azahar"
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_PROFILE = REPO / "build" / "azahar-profile"
@@ -97,6 +100,22 @@ check_for_update_on_start\\default=false
 
 
 _slot_fd = None
+_usage = {"start": time.time(), "slot": None, "switches": "", "result": "no result"}
+
+
+def _log_usage():
+    # Every run ends here (pass, fail, usage error, signal): one line in the machine-wide log.
+    now = time.monotonic()
+    slot = _usage["slot"]
+    if slot is None:  # never got a slot: all waiting
+        waited, ran = now - _usage["t0"], 0.0
+    else:
+        waited, ran = slot - _usage["t0"], now - slot
+    emu_usage.record("azahar", REPO, waited, ran, _usage["result"], _usage["switches"], _usage["start"])
+
+
+_usage["t0"] = time.monotonic()
+atexit.register(_log_usage)
 
 
 def acquire_slot():
@@ -117,6 +136,7 @@ def acquire_slot():
                 os.ftruncate(fd, 0)
                 os.write(fd, f"{os.getpid()}\n".encode())
                 _slot_fd = fd
+                _usage["slot"] = time.monotonic()
                 return
             except OSError:
                 os.close(fd)
@@ -136,6 +156,7 @@ def emulator_preexec():
 
 def fail(msg, code=1):
     print(f"run_azahar: FAIL: {msg}")
+    _usage["result"] = f"FAIL: {msg}"
     sys.exit(code)
 
 
@@ -287,7 +308,10 @@ def main():
                     help="words written to sdmc:/3ds/ttyd/debug3ds.txt (fastboot is added unless nofastboot is given)")
     ap.add_argument("--log", default="3ds/ttyd/log.txt", help="game log path relative to the SD card root")
     ap.add_argument("--until", help="regex in the game log that means success")
-    ap.add_argument("--timeout", type=float, default=120.0)
+    ap.add_argument("--timeout", type=float, default=None,
+                    help="seconds the emulator may run once it has a slot (default 60; more needs --long)")
+    ap.add_argument("--long", type=float, metavar="SECONDS", default=None,
+                    help="a run that genuinely needs more than 60 s: the limit in seconds (max 1800)")
     ap.add_argument("--stall", type=float, default=0.0, help="fail after this many seconds without log growth (0 = off)")
     ap.add_argument("--gdb", action="store_true", help="enable Azahar's GDB stub; the guest waits for a debugger")
     ap.add_argument("--gdb-port", type=int, default=24689)
@@ -310,6 +334,10 @@ def main():
     if args.last:
         LAST = args.last.resolve()
 
+    args.timeout, err = emu_usage.resolve_timeout("run_azahar", args.timeout, args.long)
+    if err:
+        fail(err, 2)
+    _usage["switches"] = args.switches
     build = args.build.resolve()
     # A background job starts with SIGINT ignored, and SIGTERM would skip the finally blocks:
     # turn both into an exception so the Azahar this run started always goes down with it.
@@ -402,6 +430,7 @@ def main():
     print(f"run_azahar: logs in {LAST.relative_to(REPO)}/")
     if verdict:
         print(f"run_azahar: PASS: {reason}")
+        _usage["result"] = f"PASS: {reason}"
         return 0
     fail(reason)
 

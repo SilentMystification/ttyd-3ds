@@ -28,6 +28,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools" / "port3ds"))
 import test_gci  # noqa: E402
+import emu_usage  # noqa: E402
 
 PROFILE = ROOT / "build" / "systems-profile"
 SDMC = PROFILE / "data" / "azahar-emu" / "sdmc"
@@ -94,7 +95,7 @@ def run_game(build, switches, padscript, until, timeout, last, expect_exit=False
     if padscript:
         sw += f" padscript={padscript}"
     cmd = [sys.executable, str(ROOT / "tools/port3ds/run_azahar.py"), "--build", str(build), "--profile", str(PROFILE),
-           "--last", str(last), "--switches", sw, "--log", "3ds/ttyd/log.txt", "--timeout", str(timeout),
+           "--last", str(last), "--switches", sw, "--log", "3ds/ttyd/log.txt", *emu_usage.time_args(timeout),
            "--stall", "90"]
     if until:
         cmd += ["--until", until]

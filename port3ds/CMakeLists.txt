@@ -167,26 +167,11 @@ file(WRITE "${TTYD_GEN_DIR}/rel_table.c.tmp"
     "const int port_rel_count = sizeof(port_rel_table) / sizeof(port_rel_table[0]);\n")
 configure_file("${TTYD_GEN_DIR}/rel_table.c.tmp" "${TTYD_GEN_DIR}/rel_table.c" COPYONLY)
 # Where this version keeps the data ports read from the disc (port_disc_data.h),
-# and its GameCube arena. The arena's high end comes from the disc itself:
-# TTYD_DISC names the image, else iso/<version>.iso or iso/game.iso is used
-# when it is this version's disc. Without it the generator uses the G8ME01
-# value (exact for G8ME01, a stand-in for the others; see gen_disc_data.py).
-set(TTYD_DISC "" CACHE FILEPATH "This version's disc image, for the generators that read the disc (optional)")
-set(_disc_args)
-if(TTYD_DISC)
-    set(_disc_args --disc "${TTYD_DISC}")
-else()
-    foreach(_cand "${TTYD_REPO_DIR}/iso/${TTYD_VERSION}.iso" "${TTYD_REPO_DIR}/iso/game.iso")
-        if(EXISTS "${_cand}" AND NOT _disc_args)
-            file(READ "${_cand}" _id LIMIT 6)
-            if(_id STREQUAL TTYD_VERSION)
-                set(_disc_args --disc "${_cand}")
-            endif()
-        endif()
-    endforeach()
-endif()
+# and its GameCube arena. The arena's high end is a committed table in
+# gen_disc_data.py (ARENA_HI); a version whose value is unknown builds with the
+# US value and a warning, and release.py refuses to package it.
 execute_process(COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/gen_disc_data.py"
-    --version ${TTYD_VERSION} ${_disc_args} "${TTYD_GEN_DIR}/port_disc_data_gen.h.tmp" RESULT_VARIABLE _gen_rc)
+    --version ${TTYD_VERSION} "${TTYD_GEN_DIR}/port_disc_data_gen.h.tmp" RESULT_VARIABLE _gen_rc)
 if(NOT _gen_rc EQUAL 0)
     message(FATAL_ERROR "gen_disc_data.py failed")
 endif()

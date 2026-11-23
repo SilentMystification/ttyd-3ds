@@ -46,6 +46,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "gx_bigmem.h"
 #include "gx_internal.h"
 #include "plat/plat.h"
 
@@ -195,7 +196,10 @@ static struct {
 } s_st, s_sum;
 static u32 s_switch_total, s_split_total, s_frames_total, s_decal_frames_total;
 
+static void tables_alloc(void); /* s_rec, s_grp, s_touch: below */
+
 void gx_vsh_init(void) {
+    tables_alloc();
     gx_vsh_on = plat_switch_int("gxvsh", 1) != 0; /* default on: PORT_3DS_GX_PERF.md, "Round 2" */
     int k = plat_switch_int("gxvshk", 30);
     s_k = k < 1 ? 1 : (u32)k;
@@ -655,14 +659,21 @@ typedef struct {
     const void* first_list;
 } Group;
 
-static Rec s_rec[RECS];
-static Group s_grp[GROUPS];
+static Rec* s_rec; /* RECS, heap (gx_bigmem.h) */
+static Group* s_grp; /* GROUPS, heap */
 static u16 s_order[GROUPS]; /* this frame's groups, in order of their first draw */
 static u32 s_ngroups;
 static struct {
     u32 rec;
     u16 group;
-} s_touch[TOUCH_MAX];
+} * s_touch; /* TOUCH_MAX, heap */
+static void tables_alloc(void) {
+    if (s_rec == NULL) {
+        s_rec = gx_big_alloc("gxvsh records", sizeof(Rec) * RECS);
+        s_grp = gx_big_alloc("gxvsh groups", sizeof(Group) * GROUPS);
+        s_touch = gx_big_alloc("gxvsh touches", sizeof(*s_touch) * TOUCH_MAX);
+    }
+}
 static u32 s_ntouch;
 static struct {
     f32 vp[6];

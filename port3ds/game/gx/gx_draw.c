@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "gx_bigmem.h"
 #include "gx_internal.h"
 #include "plat/plat.h"
 
@@ -84,7 +85,11 @@ u32 gx_stat_draws, gx_stat_vertices, gx_stat_copies;
 int gx_bbox_active;
 int gx_opt_statever = 0, gx_opt_fogcache = 1, gx_opt_unlit = 1;
 
+static void out_alloc(void); /* s_out, below */
+
 void gx_opts_init(void) {
+    out_alloc();
+    gx_pipe_alloc();
     gx_opt_statever = plat_switch_int("gxstatever", 0) != 0; /* off by default: fewer rebuilds, but no time saved (PORT_3DS_GX_PERF.md) */
     gx_opt_fogcache = plat_switch_int("gxfogcache", 1) != 0;
     gx_opt_unlit = plat_switch_int("gxunlit", 1) != 0;
@@ -536,7 +541,12 @@ typedef struct {
     int front;  /* w > 0 */
 } Out;
 
-static Out s_out[4096 + 8];
+static Out* s_out; /* 4096 + 8, heap (gx_bigmem.h) */
+static void out_alloc(void) {
+    if (s_out == NULL) {
+        s_out = gx_big_alloc("gx transformed vertices", sizeof(Out) * (4096 + 8));
+    }
+}
 static int s_dump; /* this frame's draws are logged (switch gxdump) */
 
 int gx_draw_dumping(void) { return s_dump; }

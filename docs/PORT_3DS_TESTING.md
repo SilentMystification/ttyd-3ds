@@ -284,9 +284,29 @@ Azahar runs:
 - the protocol and the CRC refusal;
 - the AM install, also over the running game, which keeps running;
 - the pause at a frame boundary and the resume;
-- recovery mode after `crashtest=fatal`.
+- recovery mode after `crashtest=fatal`;
+- `files` and `queue`, and (with `azahar-session start --supervise`, which emulates the relaunch) restarts and whole queues.
 
-It cannot do an APT application jump: the Flatpak Azahar aborts, or never starts the new title, on any relaunch (`restart`, a push with relaunch, the bootstrap's jump). In Azahar a cancelled push over an installed title also removes that install, because its AM writes into the title's folder. Relaunches, their deliver arguments, and the old install surviving a refused push are therefore checked on the console only.
+It cannot do an APT application jump: the Flatpak Azahar aborts, or never starts the new title, on any relaunch (`restart`, a push with relaunch, the bootstrap's jump); `--supervise` stands in for it by starting the title again. In Azahar a cancelled push over an installed title also removes that install, because its AM writes into the title's folder. Whether APT really keeps the deliver arguments across a relaunch, and the old install surviving a refused push, are therefore checked on the console only.
+
+### Console walk (`hw_walk.py`): milestones only
+
+A walk runs a list of test runs on the console unattended: no live scripting, everything is uploaded first. **It is for milestone checks, not routine ones**: it ties up the console for tens of minutes, so routine checks (a map, a fix) stay in Azahar (`run_azahar.py`, `map_sweep.py`). `hw_walk.py` therefore takes only an explicit list (`--maps`, `--list` or `--manifest`; there is no "every map"), prints the entry count and an estimated time before it does anything, wants `--yes` for more than 12 entries, and pauses 10 s before starting.
+
+```sh
+export N3DS_IP=192.168.1.50                      # the title runs with the devupdate switch (debug3ds.txt)
+tools/port3ds/hw_walk.py --name m5 --maps gor_01,hei_00,gon_02 --story 30 --frames 600 --shots 1 --dry-run
+tools/port3ds/hw_walk.py --name m5 --maps gor_01,hei_00,gon_02 --story 30 --frames 600 --shots 1
+tools/port3ds/hw_walk.py --name pads --maps gor_01 --pad gor_01=build/pads/gor01.tpad     # the entry ends with the padfile
+tools/port3ds/hw_walk.py --name custom --manifest walk.json                                # any entries
+```
+
+- **Entries.** One per map: `fastboot livelog map=M story=S party=P`, ended after `--frames` game frames (from the process start, so include boot and load; about 30 fps is assumed for the estimate) or, with a `--pad MAP=FILE`, when the TPAD file ends (`[PAD] padfile end`). `--shots N` takes screenshots in the last 40 frames (`shots=1 shotfrom=... shotmax=N`) and collects `shots/`. `--timeout` is per entry, counted from the process start.
+- **What happens.** The manifest goes to `build/hw-walk/<name>/manifest.json`; the pad files and the queue are uploaded with `devupdate.py` (`files`, `queue`; docs in `libs/ctr-devkit/README.md`); `queue start` relaunches the game for each entry; the script follows the live log (`live.log`, reconnecting across the relaunches) and polls `queue status`; at the end it pulls `results.txt` and the collected files.
+- **Results.** `build/hw-walk/<name>/results.json` (per entry: result, frames, ms, detail, files), `shots/` as PNG (Pillow) or PPM, `live.log`, and a table on the terminal. Results: `pass` (the `until` pattern matched) and `frames` count as passing; `timeout` and `crash` (recorded by recovery mode, with the report in `out/.../crash.txt`) do not. Exit status 1 if any entry did not pass.
+- **Manifest** (JSON, `devupdate.py --help`): `{"defaults": {...}, "entries": [{"name", "switches", "padfile", "until", "frames", "timeout_s", "collect"}]}`. `until` is matched against the game's own log lines by a small matcher (no groups or counts). A crash test entry: `{"name": "crash", "switches": "fastboot map=gor_01 crashtest=fatal crashframe=300", "timeout_s": 300}`.
+- **On the SD card** (`sdmc:/3ds/ttyd/queue/`): `queue.txt`, `state.txt`, `results.txt`, the uploaded pad files and `out/r<run>_<N>_<name>/`. The log lines are `[QUEUE] entry N <name> start|done result ...` and `[QUEUE] done`. SD writes of the queue go through `plat/sdio.c` (core 1) like all others.
+- **Azahar.** Azahar has no APT relaunch, so `devupdate.py azahar-session start --supervise` emulates it (see the README): `devupdate.py azahar-session start --profile build/azahar-profile --boot build/3ds/game/ttyd.cia --supervise`, then `hw_walk.py --ip 127.0.0.1 ...`, then `azahar-session stop`. Checked 2026-11-22 with a 3-entry queue (a `gor_01` pad file, a `gon_02` battle, a deliberate `crashtest=fatal`). Not testable there: that APT keeps the deliver arguments across a self-relaunch, the relaunch time, and the Luma behaviour.
 
 ## Running the GameCube game in Dolphin
 

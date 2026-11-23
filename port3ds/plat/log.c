@@ -68,6 +68,8 @@ int plat_console_trylock(void) { return LightLock_TryLock(&s_console_lock) == 0;
 void plat_console_unlock(void) { LightLock_Unlock(&s_console_lock); }
 int plat_log_level(void) { return s_level; }
 void plat_log_set_level(int level) { s_level = level < 0 ? 0 : level > 3 ? 3 : level; }
+static void (*s_line_hook)(const char* line);
+void plat_log_set_line_hook(void (*fn)(const char* line)) { s_line_hook = fn; }
 unsigned plat_log_dropped(void) { return s_drop_total + s_dropped; }
 
 static void ring_add(const char* s, int n) {
@@ -198,6 +200,9 @@ void plat_log_init(int live) {
 /* Before the writer: write the line now (boot lines, and every line after a
  * crash). */
 static void direct_write(const char* line, int n, const char* body, size_t bl) {
+    if (s_line_hook != NULL) {
+        s_line_hook(body);
+    }
     if (s_log_fd >= 0 && write(s_log_fd, line, (size_t)n) > 0) {
         fsync(s_log_fd);
     }
@@ -342,6 +347,9 @@ static void drain_locked(void) {
         ln += n;
         memcpy(bb + bn, sl->text + skip, (size_t)(n - skip));
         bn += n - skip;
+        if (s_line_hook != NULL) {
+            s_line_hook(sl->text + skip); /* NUL-terminated by snprintf */
+        }
         __atomic_store_n(&sl->state, 0, __ATOMIC_RELEASE);
         t++;
         __atomic_store_n(&s_tail, t, __ATOMIC_RELEASE);

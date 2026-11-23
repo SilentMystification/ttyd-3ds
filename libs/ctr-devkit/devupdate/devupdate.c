@@ -12,7 +12,11 @@
  * Protocol v1 (little-endian), client to device:
  *   0  char magic[4] "CDU1"
  *   4  u16 version (1)
- *   6  u16 command: 1 ping, 2 push, 3 restart, 4 report, 5 launch
+ *   6  u16 command: 1 ping, 2 push, 3 restart, 4 report, 5 launch, 6 files,
+ *      7 queue (6 and 7: the argument text is "put <path>", "get <path>",
+ *      "ls <dir>", "rm <path>" or "add", "list", "clear", "start", "status";
+ *      put and add carry a payload with size and CRC32 as for push; see
+ *      files.c and queue.c)
  *   8  u32 flags: bit 0 relaunch this title after a push, bit 1 jump to the
  *      pushed (or given) title after a push
  *  12  u32 payload size (the CIA)
@@ -41,6 +45,15 @@
 #include <3ds.h>
 
 #include "ctrdk/devupdate.h"
+#include "internal.h"
+
+/* Azahar cannot do an APT application jump. A test harness that wants to
+ * emulate the relaunch creates EMU_MARKER; the library then also writes the
+ * next launch's arguments to EMU_ARGS when it relaunches, and the harness
+ * starts the title again, which reads (and deletes) that file when APT gave it
+ * no arguments. On a console neither file exists. */
+#define EMU_MARKER "sdmc:/3ds/ctrdk-emulate-relaunch"
+#define EMU_ARGS "sdmc:/3ds/ctrdk-launch-args.txt"
 
 #define MAGIC "CDU1"
 #define PROTO_VERSION 1
@@ -49,10 +62,10 @@
 #define DELIVER_BYTES 0x300
 #define CHUNK 0x10000
 #define LOG_TAIL 8192
-#define THREAD_STACK 0x4000
+#define THREAD_STACK 0x6000
 #define THREAD_PRIO 0x30
 
-enum { CMD_PING = 1, CMD_PUSH, CMD_RESTART, CMD_REPORT, CMD_LAUNCH };
+enum { CMD_PING = 1, CMD_PUSH, CMD_RESTART, CMD_REPORT, CMD_LAUNCH, CMD_FILES, CMD_QUEUE };
 enum { FLAG_RELAUNCH = 1u << 0, FLAG_LAUNCH = 1u << 1 };
 
 typedef struct __attribute__((packed)) {
@@ -90,6 +103,7 @@ static char s_next_args[DELIVER_BYTES];
 static u64 s_jump_tid;
 static bool s_jump_self = true;
 static volatile bool s_pending, s_relaunch_req;
+static volatile u64 s_relaunch_deadline; /* queue relaunches: the process must have ended by then */
 
 static void log_msg(int level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 static void log_msg(int level, const char* fmt, ...) {
@@ -226,7 +240,19 @@ static void set_next(bool self, u64 tid, const char* args) {
     s_jump_tid = tid;
 }
 
+static void emu_write_args(void) {
+    if (access(EMU_MARKER, F_OK) != 0) {
+        return;
+    }
+    FILE* f = fopen(EMU_ARGS, "w");
+    if (f != NULL) {
+        fwrite(s_next_args, 1, strnlen(s_next_args, sizeof(s_next_args)), f);
+        fclose(f);
+    }
+}
+
 void devupdate_prepare_relaunch(void) {
+    emu_write_args();
     if (s_jump_self) {
         aptSetChainloaderToSelf();
     } else {
@@ -285,6 +311,18 @@ const char* devupdate_launch_args(void) {
         memcpy(args, buf + ARG_PREFIX_LEN, n);
         args[n] = '\0';
         s_launched = true;
+    } else {
+        FILE* f = fopen(EMU_ARGS, "r"); /* the Azahar harness's stand-in for deliver arguments */
+        if (f != NULL) {
+            size_t got = fread(buf, 1, sizeof(buf) - 1, f);
+            fclose(f);
+            remove(EMU_ARGS);
+            buf[got] = '\0';
+            if (got >= ARG_PREFIX_LEN && memcmp(buf, ARG_PREFIX, ARG_PREFIX_LEN) == 0) {
+                memcpy(args, buf + ARG_PREFIX_LEN, got - ARG_PREFIX_LEN + 1);
+                s_launched = true;
+            }
+        }
     }
     return args;
 }
@@ -328,25 +366,35 @@ static void resume(bool recovery) {
 static void hand_over(int fd, bool self, u64 tid, const char* args, bool recovery) {
     set_next(self, tid, args);
     if (recovery) {
-        send_line(fd, self ? "relaunching" : "launching %016llx", (unsigned long long)tid);
-        send_line(fd, "done");
-        shutdown(fd, SHUT_RDWR);
-        close(fd);
+        if (fd >= 0) {
+            send_line(fd, self ? "relaunching" : "launching %016llx", (unsigned long long)tid);
+            send_line(fd, "done");
+            shutdown(fd, SHUT_RDWR);
+            close(fd);
+        }
         recovery_exit(true);
     }
     bool now = s_cfg.on_ready != NULL ? s_cfg.on_ready(s_cfg.user) : true;
     if (!now) {
-        send_line(fd, "relaunch deferred");
-        send_line(fd, "done");
+        if (fd >= 0) {
+            send_line(fd, "relaunch deferred");
+            send_line(fd, "done");
+        }
         return;
     }
-    if (self) {
-        send_line(fd, "relaunching");
+    if (fd >= 0) {
+        if (self) {
+            send_line(fd, "relaunching");
+        } else {
+            send_line(fd, "launching %016llx", (unsigned long long)tid);
+        }
+        send_line(fd, "done");
+        shutdown(fd, SHUT_RDWR);
     } else {
-        send_line(fd, "launching %016llx", (unsigned long long)tid);
+        /* A queue relaunch has no PC waiting: if the app's exit path does not end the process in
+         * time (its game thread is stuck), the server thread ends it. */
+        s_relaunch_deadline = svcGetSystemTick() + 8ull * SYSCLOCK_ARM11;
     }
-    send_line(fd, "done");
-    shutdown(fd, SHUT_RDWR);
     log_msg(2, "devupdate: relaunch requested (%s, args \"%s\")", self ? "this title" : "another title",
             s_next_args + ARG_PREFIX_LEN);
     s_relaunch_req = true;
@@ -481,6 +529,9 @@ static void do_ping(int fd) {
               envIsHomebrew() ? "3dsx" : "cia", (unsigned long long)free_bytes, s_recovery ? 1 : 0, s_pending ? 1 : 0,
               s_am_ok ? "ok" : "off");
     send_line(fd, "args %s", devupdate_launch_args());
+    if (du_files_enabled()) {
+        send_line(fd, "files %s", s_cfg.files_dir);
+    }
     send_line(fd, "done");
 }
 
@@ -549,6 +600,8 @@ static void handle_client(int fd, bool recovery) {
         hand_over(fd, h.title_id == s_title_id, h.title_id, args, recovery);
         break;
     case CMD_PUSH: do_push(fd, &h, args, recovery); break;
+    case CMD_FILES: du_cmd_files(fd, args, h.size, h.crc); break;
+    case CMD_QUEUE: du_cmd_queue(fd, args, h.size, h.crc, recovery); break;
     default: send_line(fd, "error 4 unknown command %u", (unsigned)h.cmd); break;
     }
 }
@@ -559,6 +612,14 @@ static void serve(bool recovery) {
     for (;;) {
         if (s_quit || (!recovery && s_recovery)) {
             return;
+        }
+        if (!recovery) {
+            du_queue_tick();
+            if (s_relaunch_deadline != 0 && svcGetSystemTick() > s_relaunch_deadline) {
+                s_relaunch_deadline = 0;
+                log_msg(0, "devupdate: the relaunch did not end the process in 8 s; ending it");
+                recovery_exit(true);
+            }
         }
         if (s_reopen && !recovery) {
             s_reopen = 0;
@@ -606,6 +667,8 @@ static void recovery_main(void* arg) {
         return;
     }
     log_msg(1, "devupdate: recovery mode");
+    du_files_use_direct(true); /* the app's SD layer may be what crashed */
+    du_queue_recovery(s_report); /* a queue run records the crash and relaunches; no return then */
     /* The server thread sees s_recovery within 0.5 s and returns; its
      * listener is then reused (closing and binding again can find the port
      * still taken). A server thread that does not return (it crashed, or it
@@ -694,6 +757,7 @@ int32_t devupdate_start(const DevUpdateConfig* cfg) {
     }
     s_am_rc = amInit();
     s_am_ok = R_SUCCEEDED(s_am_rc);
+    du_queue_init(devupdate_launch_args());
 
     s_soc_buf = memalign(0x1000, s_cfg.soc_buffer_size);
     if (FindDevice("soc:") < 0) {
@@ -746,3 +810,47 @@ void devupdate_stop(void) {
         s_am_ok = false;
     }
 }
+
+/* ---- Shared with files.c and queue.c ---- */
+
+const DevUpdateConfig* du_cfg(void) { return &s_cfg; }
+
+void du_log(int level, const char* fmt, ...) {
+    if (s_cfg.log == NULL) {
+        return;
+    }
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    s_cfg.log(level, buf, s_cfg.user);
+}
+
+void du_send_line(int fd, const char* fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        return;
+    }
+    if (n > (int)sizeof(buf) - 2) {
+        n = (int)sizeof(buf) - 2;
+    }
+    buf[n++] = '\n';
+    send_all(fd, buf, (size_t)n);
+}
+
+void du_send_all(int fd, const char* s, size_t n) { send_all(fd, s, n); }
+int du_recv_some(int fd, void* buf, size_t n, int timeout_ms) { return recv_some(fd, buf, n, timeout_ms); }
+uint8_t* du_buf(void) { return s_buf; }
+uint32_t du_crc_update(uint32_t crc, const uint8_t* p, uint32_t n) { return crc_update(crc, p, n); }
+void du_set_next(bool self, uint64_t tid, const char* args) { set_next(self, tid, args); }
+void du_begin(bool recovery) { begin(recovery); }
+void du_hand_over(int fd, bool self, uint64_t tid, const char* args, bool recovery) {
+    hand_over(fd, self, tid, args, recovery);
+}
+void du_recovery_exit(bool relaunch) { recovery_exit(relaunch); }
+bool du_relaunch_requested(void) { return s_relaunch_req; }

@@ -21,6 +21,9 @@ void plat_log_console_ready(void);   /* the bottom console exists: show the line
 void plat_log_poll(void);            /* accept a live-log client while the writer does not run */
 unsigned plat_log_dropped(void);
 void plat_log_set_level(int level);
+/* Every log line (no sequence number) goes to fn, one call at a time, on the thread that writes the log
+ * (the core 1 writer once it runs). For the devupdate queue's `until` pattern. */
+void plat_log_set_line_hook(void (*fn)(const char* line));
 void plat_console_lock(void);
 int plat_console_trylock(void);
 void plat_console_unlock(void);

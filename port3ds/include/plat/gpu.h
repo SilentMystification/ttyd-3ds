@@ -69,6 +69,9 @@ uint32_t plat_gpu_tex_max_levels(uint32_t width, uint32_t height);
 uint32_t plat_gpu_tex_create_target(uint32_t width, uint32_t height, uint32_t fmt);
 /* Freed once the render thread no longer uses it. */
 void plat_gpu_tex_free(uint32_t handle);
+/* Waits for the GPU, then releases every freed texture at once instead of after its frames in flight (a texture
+ * allocation that failed asks for this before it retries). Game thread. */
+void plat_gpu_tex_reclaim(void);
 /* Reads a texture back (copies whose memory the game reads with the CPU);
  * waits for the render thread. Returns bytes written in RGBA8 linear rows. */
 uint32_t plat_gpu_tex_read(uint32_t handle, void* rgba8, uint32_t width, uint32_t height);

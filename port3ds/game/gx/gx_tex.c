@@ -901,10 +901,21 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
                 entry_free(&s_cache[i]);
             }
         }
+        /* the freed textures wait out their frames in flight: wait for the GPU and release them now */
+        plat_gpu_tex_reclaim();
         e->handle = upload_rgba8(s_rgba, t->width, t->height, &e->tex_w, &e->tex_h, t, tl, mips, &xe->levels,
                                  &xe->bytes0, &xe->bytes_mip);
         if (e->handle == 0) {
-            plat_fatal("GX: no texture memory for a %ux%u texture", t->width, t->height);
+            /* A texture that cannot be made is not worth a crash (hardware build #461: a 608x480 texture in the
+             * opening demo with linear memory fragmented): the draw goes without it. */
+            static u32 s_fail_logged;
+            if (s_fail_logged++ < 8) {
+                PLOG_E("GX: no texture memory for a %ux%u texture (image %p, fmt %u): drawn without it",
+                       t->width, t->height, t->image, (unsigned)t->format);
+            }
+            memset(e, 0, sizeof(*e));
+            memset(xe, 0, sizeof(*xe));
+            return 0;
         }
     }
     if (s_census_every) {

@@ -50,6 +50,9 @@ import sys
 import wave
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import emu_usage  # noqa: E402
+
 try:
     import numpy as np
 except ImportError:  # pragma: no cover
@@ -525,8 +528,11 @@ def capture_port(scene, out, build, extra_switches, lle_audio, timeout, seconds,
         hook_sink(ra, raw, speed)
     switches = " ".join(s for s in (sc["port_switches"], f"wavdump={seconds}", extra_switches) if s)
     last = out / "azahar-last"
+    if timeout is None:
+        # the sink holds emulation to `speed` percent, so the scene takes seconds * 100 / speed; plus boot and margin
+        timeout = 45 + seconds * (100.0 / speed if sink else 1.0) * 1.3
     argv = ["run_azahar.py", "--build", str(build), "--switches", switches, "--log", "3ds/ttyd/log.txt",
-            "--until", "audio: wrote audio.wav", "--timeout", str(timeout), "--last", str(last)]
+            "--until", "audio: wrote audio.wav", *emu_usage.time_args(timeout), "--last", str(last)]
     if sink:
         argv.append("--realtime")
     if lle_audio:
@@ -598,7 +604,7 @@ def cpu_profile(scene, build, extra_switches, out, duration, start):
         log.unlink()
     here = Path(__file__).resolve().parent
     runner = subprocess.Popen([sys.executable, str(here / "run_azahar.py"), "--build", str(build), "--switches", switches,
-                               "--gdb", "--timeout", str(duration + 1800), "--allow-hw-faults",
+                               "--gdb", *emu_usage.time_args(duration + 900), "--allow-hw-faults",
                                "--last", str(out / "azahar-last")])
     try:
         cmd = [sys.executable, str(here / "pc_sample.py"), "--elf", str(build.with_suffix(".elf")),
@@ -900,7 +906,7 @@ def main():
     p.add_argument("--tag", default="", help="suffix of the output folder")
     p.add_argument("--lle-audio", action="store_true")
     p.add_argument("--seconds", type=int, default=0, help="wavdump length (default per scene)")
-    p.add_argument("--timeout", type=float, default=1800)
+    p.add_argument("--timeout", type=float, help="Azahar run limit in seconds (default: from the scene length; over 60 s is a --long run)")
     p.add_argument("--no-sink", action="store_true", help="only the game's software mix (wavdump), at full speed")
     p.add_argument("--speed", type=int, default=34,
                    help="emulation speed in percent while Azahar's output is recorded (default 34)")

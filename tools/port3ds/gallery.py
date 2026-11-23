@@ -52,6 +52,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import emu_usage  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[2]
 OUT_ROOT = REPO / "build" / "gallery"
 AZ_PROFILE = REPO / "build" / "gallery-azahar"
@@ -110,7 +113,7 @@ def run_port(args, switches, until, timeout, last):
     sd = ensure_azahar_profile()
     shutil.rmtree(sd / "gallery", ignore_errors=True)
     cmd = [sys.executable, str(REPO / "tools/port3ds/run_azahar.py"), "--build", str(args.cia), "--profile",
-           str(AZ_PROFILE), "--last", str(last), "--switches", switches, "--until", until, "--timeout", str(timeout),
+           str(AZ_PROFILE), "--last", str(last), "--switches", switches, "--until", until, *emu_usage.time_args(timeout),
            "--stall", str(args.stall), "--allow-hw-faults"]
     print("gallery: port:", switches[:200], flush=True)
     r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True)
@@ -157,7 +160,7 @@ def run_gc(args, switches, stopframe, shots, last):
         return True, "reused", (last / "gc_log.txt").read_text()
     cmd = [sys.executable, "-u", str(REPO / "tools/port3ds/run_dolphin.py"), "--gcdebug", "--profile", str(DOL_PROFILE),
            "--port", str(DOL_PORT), "--switches", " ".join(words + [f"stopframe={stopframe}"]), "--break",
-           "gcdbg_stop", "--read-log", "--timeout", str(args.gc_timeout), "--json", str(last / "dolphin.json")]
+           "gcdbg_stop", "--read-log", *emu_usage.time_args(args.gc_timeout), "--json", str(last / "dolphin.json")]
     if shots is not None:
         cmd += ["--shots", str(shots)]
     print(f"gallery: dolphin: to frame {stopframe}", flush=True)
@@ -600,8 +603,8 @@ def main():
         p.add_argument("--no-dolphin", dest="dolphin", action="store_false", help="the port only")
         p.add_argument("--stall", type=float, default=120)
         p.add_argument("--port-fps", type=float, default=12.0, help="game frames per second Azahar manages (timeouts)")
-        p.add_argument("--port-timeout-base", type=float, default=120)
-        p.add_argument("--gc-timeout", type=float, default=1800)
+        p.add_argument("--port-timeout-base", type=float, default=30)
+        p.add_argument("--gc-timeout", type=float, default=600)
         p.add_argument("--pixel-threshold", type=int, default=32)
         p.add_argument("--review-threshold", type=float, default=0.5)
         p.add_argument("--redo", action="store_true", help="run items already in results.json again")

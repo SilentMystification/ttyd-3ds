@@ -38,6 +38,9 @@ from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import emu_usage  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[2]
 OUT = REPO / "build" / "vsh-accept"
 MAGENTA = np.array([255, 0, 255], dtype=np.uint8)
@@ -59,7 +62,7 @@ def cmd_run(a):
           f"gxstats=60 gxclearrgb=FF00FF gxdepthshot shots=1 shotfrom={a.first} shotmax={a.count} " + a.switches)
     args = [sys.executable, str(REPO / "tools/port3ds/run_azahar.py"), "--build", str(a.build), "--log",
             "3ds/ttyd/log.txt", "--switches", sw, "--until", f"shot shots/{last:05d}.ppm: this record",
-            "--timeout", str(a.timeout), "--stall", "180", "--last", str(dest / "azahar")]
+            *emu_usage.time_args(a.timeout), "--stall", "180", "--last", str(dest / "azahar")]
     if a.profile is not None:
         args += ["--profile", str(profile)]
     print("vsh_accept: run", a.scene, a.tag, ":", sw, flush=True)
@@ -400,7 +403,7 @@ def main():
     r.add_argument("--count", type=int, default=24, help="consecutive shots")
     r.add_argument("--build", type=Path, default=REPO / "build/3ds/game/ttyd.cia")
     r.add_argument("--profile")
-    r.add_argument("--timeout", type=int, default=1200)
+    r.add_argument("--timeout", type=int, default=150, help="seconds; over 60 is a --long run (a burst of shots)")
     p = sub.add_parser("report")
     p.add_argument("--scene", required=True)
     p.add_argument("--ref", required=True)

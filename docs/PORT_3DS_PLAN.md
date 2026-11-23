@@ -302,6 +302,7 @@ How the port uses it:
 - A `qtm_alloc` arena owns the region.
 - Every placement is listed in one table, `port3ds/plat/memplace.c` (becoming the registration API in GC3DS_LIBRARY_NOTE.md), with a size budget. This gives one place to see what lives in QTM and to move it, and a boot-time check that the total fits.
 - Azahar does not model memory timing, so it shows that the placement works but not whether it helps. The final list is tuned in phase 8 from hardware profiles, using debug-switch A/B toggles that move one buffer to FCRAM for comparison. Those toggles are a measurement tool, not a shipping fallback.
+- The placement plan (what is in QTM today, the sampled hot data, the FCRAM traffic census, VRAM use and the console test list) is [PORT_3DS_QTM.md](PORT_3DS_QTM.md). Its finding so far: no concentrated hot CPU buffer exists, so the defaults stay as they are until the console benchmark says what QTM and VRAM are worth.
 
 ## 6. Game data: read from the disc image, decoded at load
 

@@ -1042,7 +1042,10 @@ void gx_rec_init(void) {
     while (words < kb * 256u && words < (1u << 22)) {
         words <<= 1;
     }
-    s_ring = malloc(words * 4u);
+    /* a placement, so that place=gx_ring:qtm can move it (heap by default; QTM holds it only with a small
+     * gxthreadkb): the game thread writes it, the translator on core 2 reads it */
+    int ring_place = plat_place_register("gx ring", words * 4u, 64, PLAT_PREFS(PLAT_TIER_HEAP), PLAT_PF_CPU_SHARED);
+    s_ring = plat_place_alloc(ring_place, words * 4u, 64);
     if (s_ring == NULL) {
         PLOG_W("gxthread: no memory for a %lu KB ring: GX translates on the game thread", (unsigned long)(words / 256u));
         return;

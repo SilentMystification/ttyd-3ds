@@ -24,7 +24,7 @@ The CIA's ExHeader maps `1e800000-1e9fffff` read/write (`port3ds/rsf/ttyd.rsf`).
 
 | Placement | Budget | In use | Who touches it | Why it is there |
 |---|---|---|---|---|
-| `gx record` | 1024 KiB | 2 x 512 KiB (`plat/gpu.c`, `RECORD_BYTES`) | the game thread (core 0) writes one record per frame, the render thread (core 2) reads it; 168 to 409 KiB of it per frame (gor_01: 409) | the largest per-frame CPU-to-CPU stream; the plan's first candidate |
+| `gx record` | 1024 KiB | 2 x 512 KiB (`plat/gpu.c`, `RECORD_BYTES`) | the game thread (core 0) writes one record per frame, the render thread (core 2) reads it; 170 KiB of it per frame in gor_01 (build #484; 409 KiB before state deltas) | the largest per-frame CPU-to-CPU stream; the plan's first candidate |
 | `log` | 320 KiB | the log slots (`plat/log.c`) | every thread writes, the writer on core 1 reads | shared by all cores; cold in a normal run (25 lines per 420 frames) |
 | `gx state` | 128 KiB | **0: nothing allocates from it** | | reserved for the GX state tracker, which is static data in the image |
 | `audio state` | 128 KiB | **0: nothing allocates from it** | | reserved for MusyX state, which is static data and game heap |
@@ -76,7 +76,7 @@ Candidates that remain, each to be decided by a console A/B:
 
 | Candidate | Size | Why it could matter | State |
 |---|---|---|---|
-| `gx record` (in QTM today) | 1024 KiB | 0.3 to 0.8 MiB written and read by two cores per frame: more than L1, part of L2 | A/B by `place=gx_record:heap` |
+| `gx record` (in QTM today) | 1024 KiB | 170 KiB written by one core and read by another per frame (gor_01): more than L1, a small part of L2 | A/B by `place=gx_record:heap` |
 | `gx ring` (`gxthread=1/2`: the GX call record core 0 writes and core 2 translates) | 4096 KiB by default | the same kind of stream, larger; too big for QTM unless `gxthreadkb` is small | registered now, heap; `place=gx_ring:qtm` with `gxthreadkb=256` |
 | `gx index` (the records' index arenas) | 768 KiB | the CPU writes 50 to 150 KiB of indices per frame and the GPU reads them: only useful in QTM if the PICA reads QTM | registered now, linear; `place=gx_index:qtm qtmgpu` |
 | game thread stack | 64 KiB would do | the most accessed data, but cache-resident | not built: needs a stack switch at boot; only if the benchmark shows QTM beating cached FCRAM at L1-miss latency |
@@ -88,13 +88,13 @@ The owner's idea: QTM and VRAM are separate memories, so traffic moved into them
 
 | # | Source | Per frame | Kind | Can it leave FCRAM? |
 |---|---|---|---|---|
-| 1 | **GPU texture reads.** Every game texture is in linear FCRAM (`C3D_TexInit`, `gpu.c` `plat_gpu_tex_create`). Bound per frame: see the `vramstats` table in section 6 (an upper bound: each bound texture read once in full; a minified texture without mip levels can be read more than once, a small or magnified one less) | 1 to 2 MB bound | GPU read | **VRAM** (the tier of section 6); 1.4 MiB free today, 3 MiB after the EFB change |
+| 1 | **GPU texture reads.** Every game texture is in linear FCRAM (`C3D_TexInit`, `gpu.c` `plat_gpu_tex_create`). Bound per frame: see the `vramstats` table in section 6 (an upper bound: each bound texture read once in full; a minified texture without mip levels can be read more than once, a small or magnified one less) | **3.5 MB bound** in gor_01 (182 textures; 1.7 to 1.9 MB in the battle and in aaa_00) | GPU read | **VRAM** (the tier of section 6); 1.5 MiB free today, 3.1 MiB after the EFB change |
 | 2 | **LCD scanout.** `gfxInitDefault` puts the framebuffers in linear FCRAM: top 240x400 BGR8 (288 KB, double buffered), bottom 240x320 RGB565 (154 KB, the console) | 442 KB at 59.83 Hz (26 MB/s); +288 KB in stereo | LCD read | the top screen's buffers could be in VRAM (`gfxInit(..., true)`: 576 KB of VRAM, 864 KB with the right eye). The pause screen greys the frame on the CPU and VRAM is mapped read-only, so that path would need the GPU. The bottom screen is drawn by the CPU and stays |
 | 3 | **Display transfer** of the 240x400 screen target (VRAM) into the top framebuffer (linear) | 288 KB written; twice in stereo | GPU write | leaves with the framebuffers of row 2 |
 | 4 | **Vertex streams** of the shader path (linear, 6 MiB budget): the lists drawn this frame, 27.9 K list vertices and 1.4 K immediate ones in gor_01 | 0.4 to 0.7 MB (estimate: 12 to 24 bytes a vertex) | GPU read; CPU write only when a list is first cached | VRAM is not possible for data the CPU writes every frame; cached streams could be copied there like textures, but they are larger than the VRAM left. QTM only if the PICA reads it |
 | 5 | **Index arenas** (linear, 2 x 384 KiB): the indices of the frame's shader-path draws | 50 to 150 KB written by core 0 and read by the GPU (estimate) | CPU write, GPU read | QTM only if the PICA reads it (`gx index` placement) |
-| 6 | **citro3d command buffer** (linear, 2 MiB, half active): 536 draw commands, states and uniforms in gor_01 | see `vramstats` (command buffer per mille of 1 MiB) | CPU write (core 2), GPU read | QTM only if the PICA reads command lists from it. With prebuilt PICA command lists per display list (the GX rework) most of this becomes static GPU-read data |
-| 7 | **Render record** (QTM in the CIA) | 409 KB written and read | CPU | already off FCRAM; `place=gx_record:heap` puts it back for the A/B |
+| 6 | **citro3d command buffer** (linear, 2 MiB, half active): 536 draw commands, states and uniforms in gor_01 | 155 KB (counted: `vramstats`) | CPU write (core 2), GPU read | QTM only if the PICA reads command lists from it. With prebuilt PICA command lists per display list (the GX rework) most of this becomes static GPU-read data |
+| 7 | **Render record** (QTM in the CIA) | 170 KB written and read | CPU | already off FCRAM; `place=gx_record:heap` puts it back for the A/B |
 | 8 | **CPU traffic of the game and the GX front end**: cache misses over the game heaps, the display-list cache (8 MiB), list bytes (355 KB of GX lists per frame in gor_01) | unknown; 1 to 3 MB is a guess from the sizes touched | CPU | needs the ARM11 performance counters (cache-miss counts) from the benchmark's API. No single buffer stands out (section 2) |
 | 9 | **EFB copies** (`GXCopyTex`) | none while the targets are in VRAM; a target that fell back to linear memory is written by `TextureCopy` | GPU write | stays in VRAM as long as VRAM has room |
 | 10 | **Stereo** (slider up): the colour snapshot `s_snap` is a 512x1024 RGBA8 texture in linear memory (`stereo.c:128`): the shown rows are copied into it and both eyes sample it | 1.6 MB written, up to 3 MB read (estimate: 480x800 pixels per eye) | GPU write and read | VRAM, once the EFB change frees room (1.19 MiB as 512x608 with the same view trick) |
@@ -111,7 +111,7 @@ What can move, and the bytes per frame it takes off the FCRAM bus:
 | Top framebuffers to VRAM | 576 KB (288 scanout + 288 transfer) | 576 KB of VRAM; a GPU path for the pause screen |
 | Stereo snapshot to VRAM | 1.6 to 4.6 MB, stereo only | 1.19 MiB of VRAM (after the EFB change) |
 | Index arenas, command buffer to QTM | 0.2 to 0.4 MB | the PICA reading QTM (benchmark) |
-| Render record in QTM (today) | 0.4 to 0.8 MB of CPU traffic | nothing; the A/B says whether it helps |
+| Render record in QTM (today) | 0.2 to 0.35 MB of CPU traffic (written once, read once) | nothing; the A/B says whether it helps |
 
 Whether any of this buys frame time is the benchmark's contention test (CPU against GPU on FCRAM, on QTM and on VRAM): if the GPU's FCRAM reads do not slow the CPU measurably, only the GPU-side gain (VRAM against FCRAM read speed) is left.
 
@@ -119,7 +119,7 @@ Whether any of this buys frame time is the benchmark's contention test (CPU agai
 
 Does the PICA read QTM? **Unknown on hardware.** What is known:
 
-- Azahar: the probe's `GX_TextureCopy` between QTM and linear memory fails in both directions (PORT_3DS_TESTING.md, "Hardware probe"), although Azahar's GPU code translates QTM addresses in some paths. Azahar is no evidence either way.
+- Azahar: the probe's `GX_TextureCopy` between QTM and linear memory fails in both directions (PORT_3DS_TESTING.md, "Hardware probe"), but its GPU does read index buffers from QTM: with `qtmgpu place=...,gx_index:qtm` the gor_01 shots are byte-identical to the default's (section 10). Azahar is no evidence either way.
 - libctru's `osConvertVirtToPhys` maps `0x1E800000` to physical `0x1F000000`, so a QTM address can be written into a GPU register. Whether the PICA's bus reaches that memory is the benchmark's GPU read and write test.
 - The placement table refuses `GPU_READ`/`GPU_WRITE` placements in QTM unless the switch `qtmgpu` is given; `DSP` placements never go there.
 
@@ -134,7 +134,7 @@ With the GX rework (prebuilt PICA command lists per cached display list) the per
 - `svcControlMemory(MEMOP_PROT)` takes read and write only.
 - `svcControlProcessMemory(MEMOP_PROT, R+X)` is what homebrew JITs use on heap pages under Luma3DS (which opens every SVC to every title). Whether the kernel accepts it for a static mapping is not documented.
 
-The probe now tests exactly this (`port3ds/probe`, lines `exec heap page` and `exec QTM page`): it asks for R+X with both calls, on a heap page as the control and on the last page of QTM, and calls a two-instruction function there only if `svcQueryMemory` then reports execute permission. In Azahar both report success (it does not enforce permissions), which says nothing about the console.
+The probe now tests exactly this (`port3ds/probe`, lines `exec heap page` and `exec QTM page`): it asks for R+X with both calls, on a heap page as the control and on the last page of QTM, and calls a two-instruction function there only if `svcQueryMemory` then reports execute permission. In Azahar both calls are refused for both pages (`svcControlMemory` 0xE0E01BEE, `svcControlProcessMemory` 0xFFFF8001: Azahar does not take the current-process handle there), so the function is not called. That says nothing about the console.
 
 **Is it worth it?** The hottest functions by `pc_sample.py` (game, render and audio threads, the three scenes together, 817 busy samples):
 
@@ -181,7 +181,19 @@ The picture drawn is 480x608 of the 512x1024 target: 1.14 of each 2 MiB. All gam
 
 Sides are padded to powers of two by nearest resampling. RGB565 and RGBA5551 already drop colour bits of 8-bit sources (CMPR's interpolated colours, RGBA8, palettes), so "exact" is not today's bar for those two.
 
-Bytes per scene come from `vramstats=60` (live = every texture alive; bound = the textures bound in a frame); the table is in "Azahar results" below.
+Bytes per scene, from `vramstats=60` at frame 900 (build #484; bound = the textures bound in a frame, each counted once; live = every texture alive):
+
+| Scene | Textures bound / live | KB bound / live | RGBA5551 | RGB565 | LA8 | RGBA8 |
+|---|---|---|---|---|---|---|
+| gor_01 (story 30) | 182 / 226 | **3510** / 3833 | 1871 / 2011 | 1316 / 1489 | 243 / 253 | 80 / 80 |
+| battle (gon_02) | 87 / 135 | **1852** / 3604 | 1314 / 1798 | 458 / 1436 | 64 / 354 | 15 / 16 |
+| aaa_00 | 63 / 90 | **1721** / 1877 | 891 / 963 | 806 / 890 | 8 / 8 | 16 / 16 |
+
+VRAM free at boot is 1510 KB (largest block 1024 KB). What this says:
+
+- **A scene's bound textures do not fit today.** With the 512 KB reserve the tier holds 960 KB: 27% of gor_01's bound bytes, about half in the other two scenes. After the EFB change (about 3.1 MiB free, 2.6 for the tier) the battle and aaa_00 fit whole and gor_01 fits to three quarters.
+- **The exact compact formats help little here.** Half or more of every scene is RGBA5551 (cut-outs: colour with one-bit alpha), which has no smaller exact format, and a third is RGB565. Only the LA8 part (8 to 350 KB) can shrink to L8, L4 or LA4. RGBA8 is already rare.
+- **The large saving is ETC1/ETC1A4** for the RGB565 and RGBA5551 textures that come from CMPR (4 bits a texel instead of 16; ETC1A4 for the cut-outs at 8), and that is the lossy path that needs the visual check. How much of the two formats comes from CMPR is not counted yet: `texcensus` counts uploads by GX format, not bytes; add bytes by GX format there before deciding.
 
 ### Compact formats (for the GX agent, `gx_tex.c`)
 
@@ -213,13 +225,14 @@ Needed: `PLAT_TEXFMT_L8/A8/LA4/L4/A4/RGBA4` in `plat/gpu.h`, cases in `tile_leve
   Rule for the renderer: nothing writes a non-target texture's `data` after it was created.
 - **Limits of the wrap version.** A copy target that fell back to linear memory is recognised by the failed VRAM allocation just before it, so the tier is off with `vramfail=1`. The promotion copy waits for the GPU inside the render thread's `C3D_FrameEnd`, so `render_us` includes it while textures are being promoted.
 - **Ranking.** "Bytes sampled per frame" cannot be counted: the PICA has no counter for it. The tier ranks by binds per frame, and `vramstats` reports bound bytes as the upper bound.
+- **Known weak points, to tune once the console says the tier is worth having.** (a) Ranking by binds favours many small textures (gor_01: 50 textures in 950 KB); bytes moved per VRAM byte are the same for any fully read texture, so this costs nothing in bytes, only in copies. (b) After a scene change the old scene's textures hold the VRAM until they have been unbound for 120 frames: in the battle run at frame 840 the tier's 959 KB held 66 textures of which only 39 (243 KB) were bound, and it reached 654 of 1852 bound KB from VRAM by frame 900. Evicting by heat as well as by age fixes that. (c) The tier's block is rounded down to 64 KiB and taken from one bank: 960 of the 998 KB the reserve allows.
 
 ### The EFB as 512x608 (approved; for the GX agent)
 
 The PICA samples only power-of-two textures, and the EFB is sampled as a texture by `present()`, by every EFB copy (`copy_pass`) and by stereo (the depth view and the snapshot rows). An exact 480x608 target could not be bound by any of them, and a power-of-two copy for them is 2 MiB, more than the change frees. So:
 
 - **Target:** 512x608, colour RGBA8 and depth D24S8: 2 x 1216 KiB = 2432 KiB instead of 4096. **Frees 1664 KiB (1.625 MiB).** (480x608 would free 152 KiB more and lose direct sampling.)
-- **View:** `s_efb_tex` stays a 512x1024 texture view at the colour buffer's address. Its rows past 608 are other VRAM and are never sampled: every sampler uses rows inside the picture. A texel's v shifts by a constant: memory row r of the 608-row target is row r of the view, and v = 1 - r/1024, so target viewport pixel y (which is memory row 607 - y) is v = (y + 416) / 1024 instead of y / 1024. `stereo.c`'s depth view is the same.
+- **View:** `s_efb_tex` stays a 512x1024 texture view at the colour buffer's address. Its rows past 608 are other VRAM and are never sampled: every sampler uses rows inside the picture. A texel's v shifts by a constant: memory row r of the 608-row target is memory row r of the view, and viewport pixel y of the target is memory row 607 - y, so it is sampled at v = (y + 416) / 1024 where a 1024-row target has y / 1024 (416 = 1024 - 608). `stereo.c`'s depth view is the same.
 - **Changes in `gpu.c`:** `TARGET_H` 1024 to 608 for the target, a separate view height 1024; `REGION_H` 800 to 608 and `EFB_X_OFFSET` 96 to 0 (the picture fills the target); the uv of `copy_pass` and `present` get the +416 rows; `present` draws the quad over the middle 304 of the 400 screen columns and clears the screen target to black first (the bars are EFB rows today); the tile index math of `GXPeekARGB`, the shots and the depth readback (`TARGET_H - 1 - ty`, the display transfers' `GX_BUFFER_DIM(TARGET_W, TARGET_H)`) uses 608.
 - **Changes in `stereo.c`:** its own `TARGET_H`/`REGION_H`; the snapshot copy's first tile row and row count; the mesh uv (`ty / TARGET_H`); `s_snap` can then be 512x608 in VRAM with the same view trick (row 10 of the census).
 - **Tests:** `determ` shots identical before and after in `gor_01`, a `gon_02` battle, `aaa_00`, the pause menu; `gputest` (orientation and the bars); the EFB-copy effects (`fx=indirect`, the START menu in `gor_01`, `eff_splash`'s `GXPeekARGB`); `vramfail=1` (strip copies) against the VRAM path, 0 differing bytes; `gxdepthshot`; `stereoforce=1` shots against the earlier ones; the boot log's VRAM line (expect about 3.0 MiB free).
@@ -290,4 +303,20 @@ A result is kept only if it is outside the noise of test 1 in at least two scene
 
 ## 10. Azahar results (correctness only)
 
-See the end of this file's history for the runs; the table is filled by the commit that adds the implementation.
+Each run: the CIA in Azahar, `determ shots=1 shotfrom=900 shotmax=3 vramstats=60 gxthreadstats=60`, the three shots (frames 900 to 902) compared byte for byte with the default run of the same scene. Runs need `--long 150` (frame 900 of gor_01 is past 60 s in Azahar); two runs timed out under machine load at frame 780 to 841 and passed when repeated.
+
+| Run | Switches | Result |
+|---|---|---|
+| Default | gor_01, battle, aaa_00 | reference; `[MEM]` lines as before plus `gx index ... in LINEAR` |
+| VRAM tier | `vramtex=1`, gor_01 | 3/3 identical; 50 textures, 950 KB sampled from VRAM per frame (of 3510 bound) |
+| VRAM tier | `vramtex=1`, battle | 3/3 identical; 654 KB of 1852 from VRAM at frame 900 |
+| VRAM tier | `vramtex=1`, aaa_00 | 3/3 identical (a still scene: the three frames are equal) |
+| Ring in QTM | `gxthread=2 gxthreadkb=256 place=gx_ring:qtm`, gor_01 | `placed gx ring 262144 bytes in QTM (forced)`; 3/3 identical to the default; the same with the ring in the heap |
+| Index arenas in QTM | `qtmgpu place=log:heap,gx_state:heap,audio_state:heap,gx_index:qtm`, gor_01 | placed as asked; 3/3 identical (Azahar's GPU reads indices from QTM) |
+| Record in the heap | `place=gx_record:heap`, gor_01 | 3/3 identical |
+| Memory map | `memmap` | `[MEMMAP] place_gx_record 0x1e800000 0x1e900000` and the other placements |
+| Probe | `ttyd_probe.cia` | runs to `PROBE DONE`; `exec` lines as in section 5 |
+
+Counted in these runs: citro3d's command buffer is 151/1000 of its 1 MiB half per record in gor_01, about 155 KB (census row 6).
+
+**Not exercised:** the tier's pressure path (a copy target failing to get VRAM). `fx=indirect` made no EFB copy in the frames shot (`0 copies`, `target pressure 0`), so eviction of everything and the pause are untested; console test 7 or an Azahar run of a scene with a large copy target covers it. No timing in these runs means anything.

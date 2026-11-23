@@ -12,6 +12,7 @@
 // word "autoexit" (used by tools/port3ds/run_azahar.py).
 
 #include <3ds.h>
+#include <malloc.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -200,6 +201,55 @@ static void probe_qtm_gpu(void *qtm) {
     }
 }
 
+// Can code run from QTM? Asks for read+execute on the last page of the application part, with
+// svcControlMemory and then svcControlProcessMemory (which Luma leaves open to every title), and
+// calls a two-instruction function there only when svcQueryMemory then reports execute
+// permission. A heap page takes the same steps as the control: it tells "the SVC is refused"
+// from "this kind of mapping cannot be reprotected".
+static void probe_exec_at(const char *label, u32 *page) {
+    page[0] = 0xE3A0002Au; // mov r0, #42
+    page[1] = 0xE12FFF1Eu; // bx lr
+    svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)page, 0x1000);
+    u32 tmp = 0;
+    Result r1 = svcControlMemory(&tmp, (u32)page, 0, 0x1000, MEMOP_PROT, MEMPERM_READ | MEMPERM_EXECUTE);
+    Result r2 = 0;
+    MemInfo mi;
+    PageInfo pi;
+    svcQueryMemory(&mi, &pi, (u32)page);
+    if (!(mi.perm & MEMPERM_EXECUTE)) {
+        r2 = svcControlProcessMemory(CUR_PROCESS_HANDLE, (u32)page, 0, 0x1000, MEMOP_PROT,
+                                     MEMPERM_READ | MEMPERM_EXECUTE);
+        svcQueryMemory(&mi, &pi, (u32)page);
+    }
+    int ran = -1;
+    if (mi.perm & MEMPERM_EXECUTE) {
+        ran = ((int (*)(void))page)();
+    }
+    out("%s: ControlMemory 0x%08lX, ControlProcessMemory 0x%08lX, perm %lu state %lu, call %s\n", label,
+        (unsigned long)r1, (unsigned long)r2, (unsigned long)mi.perm, (unsigned long)mi.state,
+        ran == 42 ? "ok (42)" : ran == -1 ? "not tried (no execute permission)" : "WRONG RESULT");
+    // back to read/write, so the page can be used and freed as before
+    svcControlProcessMemory(CUR_PROCESS_HANDLE, (u32)page, 0, 0x1000, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE);
+    svcControlMemory(&tmp, (u32)page, 0, 0x1000, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE);
+}
+
+static void probe_exec(void *qtm) {
+    u32 *heap = memalign(0x1000, 0x1000);
+    if (heap != NULL) {
+        probe_exec_at("exec heap page", heap);
+        free(heap);
+    }
+    MemInfo mi;
+    PageInfo pi;
+    const u32 page = QTM_VADDR + 0x1FF000u; // the last page of the application part
+    if (qtm != NULL && R_SUCCEEDED(svcQueryMemory(&mi, &pi, page)) && mi.state != MEMSTATE_FREE &&
+        (mi.perm & (MEMPERM_READ | MEMPERM_WRITE)) == (MEMPERM_READ | MEMPERM_WRITE)) {
+        probe_exec_at("exec QTM page ", (u32 *)page);
+    } else {
+        out("exec QTM page : not mapped read/write, skipped\n");
+    }
+}
+
 typedef struct {
     int core;
     volatile u64 ticks;
@@ -251,6 +301,7 @@ int main(void) {
         probe_qtm_gpu(qtm);
     }
     probe_bandwidth(qtm);
+    probe_exec(qtm);
     probe_cores();
     out("PROBE DONE\n");
 

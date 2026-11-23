@@ -6,8 +6,8 @@
  * Covers: the game's heaps and the smart heap, the OS arena, the libctru
  * heap and linear heap, every static REL's data and bss, and every sizeable
  * mapped block (svcQueryMemory), which names QTM, thread stacks, the GX
- * buffers and other allocations by the block they live in. Finer owners need
- * the plat layer to publish them (memplace.c's placement table is private). */
+ * buffers and other allocations by the block they live in, and the placement
+ * table's regions (plat_place_info) as "place_<name>". */
 #include <3ds/svc.h>
 #include <3ds/types.h>
 #include <stdio.h>
@@ -55,6 +55,22 @@ static void memmap_dump(const char* why) {
         line(name, (u32)r->data_start, (u32)r->data_end);
         snprintf(name, sizeof name, "rel_%s_bss", r->name);
         line(name, (u32)r->bss_start, (u32)r->bss_end);
+    }
+    /* the placement table (plat/memplace.c): "place_<name>", spaces as '_' */
+    for (int i = 0, count = plat_place_info(-1, NULL, NULL, NULL, NULL); i < count; i++) {
+        const char* pname = NULL;
+        void* base = NULL;
+        size_t bytes = 0;
+        plat_place_info(i, &pname, &base, &bytes, NULL);
+        if (pname != NULL && base != NULL) {
+            snprintf(name, sizeof name, "place_%s", pname);
+            for (char* c = name; *c != '\0'; c++) {
+                if (*c == ' ') {
+                    *c = '_';
+                }
+            }
+            line(name, (u32)base, (u32)base + (u32)bytes);
+        }
     }
     u32 addr = 0x00100000;
     int n = 0;

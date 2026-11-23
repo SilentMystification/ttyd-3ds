@@ -2173,7 +2173,7 @@ void plat_gpu_init(void) {
     for (int i = 0; i < 2; i++) {
         s_rec[i].data = plat_place_alloc(PLAT_PLACE_GX_RECORD, RECORD_BYTES, 64);
         s_rec[i].verts = linearAlloc(ARENA_VERTICES * sizeof(PlatGpuVertex));
-        s_rec[i].idx = linearAlloc(INDEX_ARENA * sizeof(u16));
+        s_rec[i].idx = plat_place_alloc(PLAT_PLACE_GX_INDEX, INDEX_ARENA * sizeof(u16), 64); /* linear unless place= moves it */
         if (s_rec[i].data == NULL || s_rec[i].verts == NULL || s_rec[i].idx == NULL) {
             plat_fatal("gpu: no memory for frame records");
         }

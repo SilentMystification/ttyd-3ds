@@ -333,7 +333,7 @@ add_executable(ttyd
 add_dependencies(ttyd ttyd_rels)
 # --no-enum-size-warning: the two enum ABIs are mixed on purpose (see above).
 # --wrap=svcBreak: the crash library turns every svcBreak (libctru and citro3d panics too) into a crash report
-target_link_options(ttyd PRIVATE -Wl,--gc-sections -Wl,--wrap=svcBreak -Wl,--wrap=threadCreate -Wl,--wrap=fopen -Wl,--wrap=open -Wl,--wrap=opendir -Wl,--wrap=remove -Wl,--wrap=rename -Wl,--wrap=mkdir -Wl,--wrap=unlink -Wl,--wrap=fsync -Wl,--wrap=stat -Wl,--no-enum-size-warning
+target_link_options(ttyd PRIVATE -Wl,--gc-sections -Wl,--wrap=svcBreak -Wl,--wrap=threadCreate -Wl,--wrap=fopen -Wl,--wrap=open -Wl,--wrap=opendir -Wl,--wrap=remove -Wl,--wrap=rename -Wl,--wrap=mkdir -Wl,--wrap=unlink -Wl,--wrap=fsync -Wl,--wrap=stat -Wl,--wrap=C3D_TexInitWithParams -Wl,--wrap=C3D_TexBind -Wl,--wrap=C3D_TexDelete -Wl,--wrap=C3D_FrameEnd -Wl,--no-enum-size-warning
     -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/ttyd.map)
 if(TTYD_LTO)
     target_link_options(ttyd PRIVATE -flto=auto -O2)

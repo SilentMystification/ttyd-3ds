@@ -17,7 +17,7 @@
  * tier of each placement is used: behaviour is the same, only speed differs,
  * and the fallback is reported in the log and on the HUD.
  *
- * The platform's own four placements are registered in plat_memplace_init
+ * The platform's own placements are registered in plat_memplace_init
  * (they keep their PLAT_PLACE_* ids as handles, for log.c and gpu.c). A game
  * registers its own from a manifest function given to
  * plat_place_set_manifest, which runs before packing.
@@ -209,7 +209,7 @@ static void plat_memplace_place(int h) {
 
 /* "place=<name>:<tier>[,<name>:<tier>...]": store the valid pairs, log the rest. Names
  * are checked against what is registered when packing starts; a name registered
- * later still works, it is only logged as unknown here. */
+ * later still works, it is only logged as not registered yet here. */
 static void parse_place_switch(void) {
     char val[256];
     if (!plat_switch_value("place", val, sizeof(val))) {
@@ -244,11 +244,13 @@ static void parse_place_switch(void) {
         }
         if (tier < 0) {
             PLOG_W("[MEM] place=%s:%s ignored: unknown tier (qtm, linear, heap)", item, tname);
-        } else if (!known) {
-            PLOG_W("[MEM] place=%s:%s ignored: no such placement", item, tname);
         } else if (s_force_count >= MAX_FORCE || strlen(item) >= sizeof(s_force[0].name)) {
             PLOG_W("[MEM] place=%s:%s ignored: too many or too long", item, tname);
         } else {
+            if (!known) {
+                /* a placement registered after boot (gx ring) takes it then; a misspelt name never matches */
+                PLOG_W("[MEM] place=%s:%s: no such placement yet, kept for a later registration", item, tname);
+            }
             strcpy(s_force[s_force_count].name, item);
             s_force[s_force_count].tier = tier;
             s_force_count++;
@@ -262,14 +264,19 @@ void plat_memplace_init(void) {
         const char* name;
         u32 bytes;
         unsigned flags;
+        u8 prefs[3];
     } k_own[PLAT_PLACE_COUNT] = {
-        [PLAT_PLACE_GX_RECORD] = {"gx record", 1u << 20, PLAT_PF_CPU_SHARED},
-        [PLAT_PLACE_GX_STATE] = {"gx state", 128u << 10, PLAT_PF_CPU_SHARED},
-        [PLAT_PLACE_AUDIO_STATE] = {"audio state", 128u << 10, PLAT_PF_CPU_SHARED},
-        [PLAT_PLACE_LOG] = {"log", 320u << 10, PLAT_PF_CPU_SHARED},
+        [PLAT_PLACE_GX_RECORD] = {"gx record", 1u << 20, PLAT_PF_CPU_SHARED, {PLAT_TIER_QTM, PLAT_TIER_HEAP, PLAT_TIER_NONE}},
+        /* gx state and audio state are reservations nothing allocates from yet (docs/PORT_3DS_QTM.md) */
+        [PLAT_PLACE_GX_STATE] = {"gx state", 128u << 10, PLAT_PF_CPU_SHARED, {PLAT_TIER_QTM, PLAT_TIER_HEAP, PLAT_TIER_NONE}},
+        [PLAT_PLACE_AUDIO_STATE] = {"audio state", 128u << 10, PLAT_PF_CPU_SHARED, {PLAT_TIER_QTM, PLAT_TIER_HEAP, PLAT_TIER_NONE}},
+        [PLAT_PLACE_LOG] = {"log", 320u << 10, PLAT_PF_CPU_SHARED, {PLAT_TIER_QTM, PLAT_TIER_HEAP, PLAT_TIER_NONE}},
+        /* 2 x 192 K u16 indices. Linear: the GPU reads them. In QTM only by place=gx_index:qtm with qtmgpu, and
+         * only when room was made (place=log:heap,gx_state:heap,audio_state:heap). */
+        [PLAT_PLACE_GX_INDEX] = {"gx index", 768u << 10, PLAT_PF_GPU_READ, {PLAT_TIER_LINEAR, PLAT_TIER_NONE, PLAT_TIER_NONE}},
     };
     for (int i = 0; i < PLAT_PLACE_COUNT; i++) {
-        plat_place_register(k_own[i].name, k_own[i].bytes, 64, PLAT_PREFS(PLAT_TIER_QTM, PLAT_TIER_HEAP), k_own[i].flags);
+        plat_place_register(k_own[i].name, k_own[i].bytes, 64, k_own[i].prefs, k_own[i].flags);
     }
     if (s_manifest != NULL) {
         s_manifest();
@@ -322,6 +329,25 @@ void* plat_place_alloc(int id, size_t size, size_t align) {
     }
     p->used = start + (u32)size;
     return p->base + start;
+}
+
+int plat_place_info(int i, const char** name, void** base, size_t* bytes, const char** tier) {
+    if (i >= 0 && i < s_count) {
+        const Placement* p = &s_table[i];
+        if (name != NULL) {
+            *name = p->name;
+        }
+        if (base != NULL) {
+            *base = p->base;
+        }
+        if (bytes != NULL) {
+            *bytes = p->budget;
+        }
+        if (tier != NULL) {
+            *tier = p->tier >= 0 ? k_tier_name[p->tier] : "unplaced";
+        }
+    }
+    return s_count;
 }
 
 void plat_memplace_report(void) {

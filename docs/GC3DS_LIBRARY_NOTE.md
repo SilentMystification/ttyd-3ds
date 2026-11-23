@@ -86,7 +86,11 @@ The optimisation *mechanisms* belong to the library. Each game only supplies *da
      - `[MEM] placed <name> <bytes> bytes in <tier>` lines;
      - `place=` A/B and `qtmgpu`;
      - VRAM is not a tier, because the CPU can't map it;
-     - the old `PLAT_PLACE_*` ids remain as handles of the four built-in placements.
+     - the old `PLAT_PLACE_*` ids remain as handles of the built-in placements.
+   - **Added 2026-11-23** (plan and measurements: [PORT_3DS_QTM.md](PORT_3DS_QTM.md)):
+     - `plat_place_info` lists the table (the `memmap` switch logs it as `[MEMMAP] place_<name>` lines for the data profiler);
+     - `place=` also applies to a placement registered after boot;
+     - a **VRAM texture tier** (`plat/vramtex.c`, switch `vramtex=1`, default off): hot textures get a GPU-made copy in VRAM, the linear copy is kept, render targets always win. It knows nothing about the game: it follows citro3d's texture calls. `vramstats=N` is the matching census (bytes bound per frame by PICA format, from linear memory and from VRAM).
 2. **GPU/CPU shared memory policy.**
    - **Library:** one set of rules plus helpers:
      - GPU-read-only data goes to VRAM or linear memory;

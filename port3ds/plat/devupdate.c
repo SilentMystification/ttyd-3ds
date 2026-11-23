@@ -15,7 +15,11 @@
  *     the normal exit, whose aptExit starts the new build with the switches
  *     as APT deliver arguments (plat_switches_load reads them);
  *   - on_resume undoes on_begin when there is no relaunch;
- *   - a crash hands over to the updater's recovery mode (plat/crash.c).
+ *   - a crash hands over to the updater's recovery mode (plat/crash.c);
+ *   - queue runs (devupdate.py queue ...): the library's files and queue
+ *     commands keep their files in sdmc:/3ds/ttyd/queue/ and write the card
+ *     through plat/sdio.c; each log line goes to the queue's `until` matcher
+ *     and each game frame is counted. See docs/PORT_3DS_TESTING.md, "Console walk".
  */
 #include <string.h>
 
@@ -35,8 +39,41 @@ void plat_set_save_busy(int (*fn)(void)) { s_save_busy = fn; }
  * on even when the restart gave no switches). */
 int plat_devupdate_enabled(void) { return plat_switch_has("devupdate") || devupdate_launched(); }
 
+/* The files and queue commands write the card through plat/sdio.c (core 1), like every other writer. */
+static int st_write(const char* path, uint64_t off, const void* data, size_t n, void* user) {
+    (void)user;
+    return off == 0 ? plat_sd_write_file(path, data, n, 0) : plat_sd_write_at(path, off, data, n);
+}
+static int st_append(const char* path, const void* data, size_t n, void* user) {
+    (void)user;
+    return plat_sd_append(path, data, n);
+}
+static int st_rename(const char* from, const char* to, void* user) {
+    (void)user;
+    plat_sd_remove(to); /* the queue runs in order: the remove is done before the rename */
+    return plat_sd_rename(from, to);
+}
+static int st_remove(const char* path, void* user) {
+    (void)user;
+    return plat_sd_remove(path);
+}
+static int st_mkdir(const char* path, void* user) {
+    (void)user;
+    return plat_sd_mkdir(path);
+}
+static void st_flush(void* user) {
+    (void)user;
+    plat_sd_flush();
+}
+static void* st_read(const char* path, size_t* n, void* user) {
+    (void)user;
+    return plat_sd_read_file(path, n);
+}
+static const DevUpdateStore s_store = {st_write, st_append, st_rename, st_remove, st_mkdir, st_flush, st_read};
+
 /* Game thread, once per frame (plat_frame_poll): the pause point. */
 void plat_devupdate_frame(void) {
+    devupdate_queue_frame(); /* a queue entry's frame count (a plain return when no queue runs) */
     if (!s_pause_req) {
         return;
     }
@@ -147,9 +184,13 @@ void plat_devupdate_init(void) {
     cfg.on_relaunch = on_relaunch;
     cfg.on_recovery_exit = on_recovery_exit;
     cfg.log = log_line;
+    cfg.files_dir = "queue"; /* sdmc:/3ds/ttyd/queue: uploaded padfiles, queue.txt, results.txt, out/ */
+    cfg.store = &s_store;
     int32_t rc = devupdate_start(&cfg);
     if (rc != 0) {
         PLOG_E("devupdate: not started (%08lx)", (unsigned long)rc);
+    } else if (devupdate_queue_active()) {
+        plat_log_set_line_hook(devupdate_queue_log_line); /* the entry's `until` pattern is matched against the log */
     }
 }
 

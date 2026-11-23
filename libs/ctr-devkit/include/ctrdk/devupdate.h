@@ -14,6 +14,9 @@
  *   restart  relaunch this title with the given switches
  *   report   the crash report and the app's log tail (recovery mode)
  *   launch   jump into an installed title (the bootstrap)
+ *   files    put/get/ls/rm in one app-chosen SD folder (files_dir), CRC32-checked
+ *   queue    add/list/clear/start/status: a list of test runs that the title
+ *            works through by relaunching itself (see "Queue" below)
  * The device answers with text lines and ends each request with "done" or
  * "error <code> <text>".
  *
@@ -35,8 +38,25 @@ extern "C" {
 #define DEVUPDATE_DEFAULT_PORT 5050
 #define DEVUPDATE_MAX_ARGS 0x2F0 /* switch text per launch (APT allows 0x300 with the prefix) */
 
+/* Where the files and queue commands put bytes on the SD card. All paths are
+ * relative to the app's working directory (or absolute "sdmc:/..."). Every
+ * callback may be NULL: a plain stdio default is used (fine for an app with
+ * no SD layer of its own). An app that keeps SD access on one core passes
+ * callbacks that queue the work there. All return 0 on success. */
 typedef struct {
-    uint16_t port;           /* 0 = 5050 */
+    /* offset 0 creates or truncates the file; later chunks follow in order */
+    int (*write)(const char* path, uint64_t offset, const void* data, size_t n, void* user);
+    int (*append)(const char* path, const void* data, size_t n, void* user);
+    int (*rename)(const char* from, const char* to, void* user); /* replaces an existing target */
+    int (*remove)(const char* path, void* user);
+    int (*mkdir)(const char* path, void* user); /* 0 also if it exists */
+    void (*flush)(void* user);                  /* everything queued so far has reached the card */
+    /* whole file: malloc'd block with a NUL after the n bytes, NULL if absent */
+    void* (*read)(const char* path, size_t* n, void* user);
+} DevUpdateStore;
+
+typedef struct {
+    uint16_t port;          /* 0 = 5050 */
     const char* token;       /* shared secret, up to 31 characters; NULL = none (LAN dev use only) */
     int core;                /* server and recovery threads; 0 = core 1 (falls back to core 0) */
     const char* version;     /* the app's version string, for ping */
@@ -64,6 +84,12 @@ typedef struct {
     /* Recovery mode ends the process: relaunch = the chainloader is set.
      * NULL: aptExit() when relaunching, then svcExitProcess(). */
     void (*on_recovery_exit)(bool relaunch, void* user);
+    /* files and queue. files_dir (NULL = no files or queue commands) is the one
+     * folder they may touch; the queue keeps queue.txt, state.txt, results.txt
+     * and out/ in it. The store callbacks get the app's `user` pointer. */
+    const char* files_dir;
+    const DevUpdateStore* store;     /* NULL = stdio */
+    const char* queue_padfile_key;   /* switch word that gets an entry's padfile; NULL = "padfile" */
     /* Informational messages: level 0 error, 1 warning, 2 info. */
     void (*log)(int level, const char* text, void* user);
     void* user;
@@ -102,6 +128,28 @@ bool devupdate_launched(void);
  * recovery ends the process through on_recovery_exit. */
 bool devupdate_enter_recovery(const char* report);
 bool devupdate_in_recovery(void);
+
+/* ---- Queue ----
+ * `queue add` stores entries on the card; `queue start` relaunches the title
+ * for entry 1 with its switches (APT deliver arguments) plus
+ * "<padfile key>=<files_dir>/<padfile>" and "ctrdkq=N". The launch that finds
+ * ctrdkq=N is running entry N, and the library ends it when
+ *   - a log line matches the entry's `until` regular expression (the app feeds
+ *     its log lines to devupdate_queue_log_line), or
+ *   - the entry's frame count is reached (the app calls devupdate_queue_frame
+ *     once per frame), or
+ *   - the app calls devupdate_queue_finish, or
+ *   - the entry's timeout (seconds from process start) runs out, or
+ *   - the app crashes into recovery mode (result "crash", the report is kept).
+ * It then records one line in results.txt, moves the entry's `collect` paths to
+ * out/<N>_<name>/, logs "[QUEUE] entry N <name> done result <result> ..." and
+ * relaunches for entry N+1. After the last entry it logs "[QUEUE] done" and
+ * relaunches with no switches (the title idles, reachable). */
+bool devupdate_queue_active(void);               /* this launch runs a queue entry */
+int devupdate_queue_entry(void);                 /* its number (1-based), 0 if none */
+void devupdate_queue_frame(void);                /* once per app frame */
+void devupdate_queue_log_line(const char* line); /* each log line, no sequence prefix; calls must not overlap */
+void devupdate_queue_finish(const char* result); /* the app ends the entry itself (result: one word) */
 
 #ifdef __cplusplus
 }

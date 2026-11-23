@@ -35,6 +35,14 @@ Order matters: each step proves something the next one relies on.
    - `sdmc:/3ds/ttyd/card` must be unchanged throughout.
 7. **Sleep during a transfer.** Close the lid during a push. Expect `error 16 sleep`, with the install cancelled.
 
+7b. **Console walk (a milestone check only, not routine).** Needs steps 3, 5 and 6 first (relaunch with deliver arguments, recovery, TTYD under devupdate).
+   - Small first: `tools/port3ds/hw_walk.py --name first --maps gor_01,hei_00,gon_02 --frames 400 --shots 1 --yes`. It prints the entry count and estimate, uploads, starts, and follows the live log.
+   - Check: three `[QUEUE] entry N ... done` lines, `[QUEUE] done`, `build/hw-walk/first/results.json`, a PNG for each entry in `build/hw-walk/first/shots/`, and no one touched the console.
+   - A pad file: `--pad gor_01=<file.tpad>`; the entry ends on `[PAD] padfile end`. Check that the same file gives the same play as in Azahar.
+   - A crash in the walk: use a manifest with a `crashtest=fatal crashframe=300` entry between two good ones (see "Console walk" in `PORT_3DS_TESTING.md`). Expect `result crash`, the report in `out/.../crash.txt`, and the next entry running.
+   - Only on the console: that APT keeps the deliver arguments across each self-relaunch (entry switches and `ctrdkq=N` reach the new process), that a relaunch takes about 12 s, and that the live log reconnects each time.
+   - Only then a longer walk (more than 12 entries needs `--yes`; keep these for milestones).
+
 Then the measurement items from `PORT_3DS_BACKLOG.md` lane D, all through `devupdate`:
 
 8. **The probe as a CIA:** QTM vs heap vs linear bandwidth from each core, and GPU reads from QTM.

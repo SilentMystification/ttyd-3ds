@@ -9,6 +9,8 @@
     devupdate.py report [--out report.txt]
     devupdate.py launch 000400000FD88600 [--switches ...]
     devupdate.py bootstrap --cia build/app.cia [--boot devupdate-boot.3dsx] [--switches ...]
+    devupdate.py files put a.tpad b.tpad [--dest sub] | get remote [-o local] | ls [dir] | rm path...
+    devupdate.py queue add manifest.json [files...] | list | clear | start | status | pull DIR
 
 The console runs an app with devupdate_start() (or the bootstrap 3dsx).
 --ip defaults to $N3DS_IP, --port to 5050. Development use only.
@@ -22,11 +24,27 @@ bootstrap sends the bootstrap 3dsx with 3dslink to the Homebrew Launcher
 (which must be waiting: press Y), waits for it to answer, pushes the CIA and
 has it jump into the installed title.
 
+files works in one folder the app chose (e.g. sdmc:/3ds/<app>/queue/), with a CRC32 check.
+
+queue runs a list of test runs on the console without anyone there. The manifest
+is JSON, a list or {"defaults": {...}, "entries": [...]}; an entry is
+  {"name": "gor_01", "switches": "map=gor_01 story=30", "padfile": "walk.tpad",
+   "until": "regex on the app's log", "frames": 0, "timeout_s": 300,
+   "shots": 0, "collect": ["shots"]}
+(padfile: a local file, uploaded with the queue; until: a small regex, no groups or
+counts; shots N needs --shots-switches, e.g. "shots={n} shotmax=40"; collect: app
+paths moved to out/<run>_<N>_<name>/ when the entry ends). `queue start` relaunches
+the title entry by entry; each entry ends on its until pattern, its frame count, or
+its timeout, a crash is recorded and the queue goes on. `queue pull DIR` fetches
+results.txt and the collected files.
+
 Exit status: 0 done, 1 the console reported an error, 2 no connection or
 usage error.
 """
 import argparse
+import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -38,7 +56,7 @@ from pathlib import Path
 
 MAGIC = b"CDU1"
 VERSION = 1
-CMD = {"ping": 1, "push": 2, "restart": 3, "report": 4, "launch": 5}
+CMD = {"ping": 1, "push": 2, "restart": 3, "report": 4, "launch": 5, "files": 6, "queue": 7}
 FLAG_RELAUNCH, FLAG_LAUNCH = 1, 2
 MAX_ARGS = 0x2F0
 THREEDSLINK = ["/opt/devkitpro/tools/bin/3dslink", "3dslink"]
@@ -270,6 +288,291 @@ def cmd_bootstrap(args):
     return finish(last)
 
 
+# ---- files and queue ----
+
+NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
+REL_RE = re.compile(r"^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*$")
+QUEUE_FIELDS = ("name", "switches", "padfile", "until", "frames", "timeout_s", "collect")
+
+
+def request(args, cmd, argtext="", payload=b"", on_line=None, timeout=None):
+    """One files/queue request: the reply lines (all of them) and the last one ("done" or "error ...")."""
+    a = argtext.encode()
+    if len(a) > MAX_ARGS:
+        raise SystemExit("devupdate: argument too long")
+    crc = zlib.crc32(payload) & 0xFFFFFFFF
+    link = Link(args)
+    lines = []
+
+    def collect(line, s, buf):
+        lines.append(line)
+        return on_line(line, s, buf) if on_line else None
+
+    with link.connect(timeout) as s:
+        s.sendall(header(cmd, len(payload), crc, a, token=args.token) + a)
+        if payload:
+            try:
+                s.sendall(payload)
+            except OSError:
+                pass  # the console refused early: its error line is waiting
+        last = link.lines(s, collect)
+    return last, lines
+
+
+def files_put(args, local, remote):
+    data = Path(local).read_bytes()
+    if not REL_RE.match(remote) or ".." in remote.split("/"):
+        raise SystemExit(f"devupdate: bad remote name {remote!r} (letters, digits, . _ - + and /)")
+    last, _ = request(args, "files", f"put {remote}", data)
+    return last, len(data)
+
+
+def files_get(args, remote):
+    """The file's bytes (CRC checked) or raises RuntimeError."""
+    got = {}
+
+    def on_line(line, s, buf):
+        p = line.split()
+        if len(p) == 3 and p[0] == "file" and p[1].isdigit():
+            n = int(p[1])
+            while len(buf) < n + 1:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+            got["data"], got["crc"] = buf[:n], int(p[2], 16)
+            return buf[n:]
+        return None
+
+    last, _ = request(args, "files", f"get {remote}", on_line=on_line)
+    if last != "done" or "data" not in got:
+        raise RuntimeError(last)
+    if zlib.crc32(got["data"]) & 0xFFFFFFFF != got["crc"]:
+        raise RuntimeError("crc mismatch on download")
+    return got["data"]
+
+
+def files_ls(args, remote=""):
+    """[(is_dir, size, name)] or raises RuntimeError."""
+    last, lines = request(args, "files", f"ls {remote}".rstrip())
+    if last != "done":
+        raise RuntimeError(last)
+    out = []
+    for line in lines:
+        p = line.split(" ", 3)
+        if len(p) == 4 and p[0] == "entry":
+            out.append((p[1] == "d", int(p[2]), p[3]))
+    return out
+
+
+def cmd_files(args):
+    act = args.action
+    if act == "put":
+        if not args.paths:
+            raise SystemExit("devupdate: files put <file>... [--dest dir]")
+        status = 0
+        for p in args.paths:
+            remote = (args.dest.rstrip("/") + "/" if args.dest else "") + Path(p).name
+            last, n = files_put(args, p, remote)
+            print(f"devupdate: put {p} -> {remote} ({n} bytes): {last}")
+            status |= 0 if last == "done" else 1
+        return status
+    if act == "get":
+        if not args.paths:
+            raise SystemExit("devupdate: files get <remote> [-o file]")
+        try:
+            data = files_get(args, args.paths[0])
+        except RuntimeError as e:
+            print(f"devupdate: {e}")
+            return 1
+        out = Path(args.out or Path(args.paths[0]).name)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        print(f"devupdate: {args.paths[0]} -> {out} ({len(data)} bytes)")
+        return 0
+    if act == "ls":
+        try:
+            for is_dir, size, name in sorted(files_ls(args, args.paths[0] if args.paths else "")):
+                print(f"{'d' if is_dir else '-'} {size:>9} {name}")
+        except RuntimeError as e:
+            print(f"devupdate: {e}")
+            return 1
+        return 0
+    status = 0
+    for p in args.paths:
+        last, _ = request(args, "files", f"rm {p}")
+        print(f"devupdate: rm {p}: {last}")
+        status |= 0 if last == "done" else 1
+    return status
+
+
+def queue_lines(entries, shots_switches=None, shots_collect="shots", defaults=None):
+    """Entry dicts -> (queue.txt text, local files to upload as {name: path})."""
+    defaults = defaults or {}
+    uploads, rows = {}, []
+    for i, raw in enumerate(entries, 1):
+        e = {**defaults, **raw}
+        name = str(e.get("name", ""))
+        if not NAME_RE.match(name):
+            raise SystemExit(f"devupdate: entry {i}: bad name {name!r} (letters, digits, . _ -, up to 40)")
+        switches = str(e.get("switches", "")).strip()
+        shots = int(e.get("shots", 0) or 0)
+        collect = list(e.get("collect", []) or [])
+        if shots:
+            if not shots_switches:
+                raise SystemExit(f"devupdate: entry {name}: shots needs --shots-switches (the app's switches for a screenshot every N frames)")
+            switches = (switches + " " + shots_switches.format(n=shots)).strip()
+            if shots_collect and shots_collect not in collect:
+                collect.append(shots_collect)
+        pad = str(e.get("padfile", "") or "")
+        if pad:
+            local = Path(pad)
+            if local.is_file():
+                uploads[local.name] = local
+                pad = local.name
+            elif not REL_RE.match(pad):
+                raise SystemExit(f"devupdate: entry {name}: padfile {pad!r} is not a file here or a plain name")
+        until = str(e.get("until", "") or "")
+        if any(ch in until for ch in "(){}"):
+            raise SystemExit(f"devupdate: entry {name}: until may not use groups or counts ( ) {{ }} (the console's matcher is small)")
+        try:
+            re.compile(until)
+        except re.error as err:
+            raise SystemExit(f"devupdate: entry {name}: bad until pattern: {err}")
+        fields = [name, switches, pad, until, str(int(e.get("frames", 0) or 0)), str(int(e.get("timeout_s", 0) or 0)),
+                  ",".join(collect)]
+        for f in fields:
+            if "\t" in f or "\n" in f:
+                raise SystemExit(f"devupdate: entry {name}: tabs and newlines are not allowed")
+        rows.append("\t".join(fields))
+    return "\n".join(rows) + "\n", uploads
+
+
+def queue_add_entries(args, entries, shots_switches=None, shots_collect="shots", defaults=None, extra_files=()):
+    """Uploads the padfiles and adds the entries. Returns 0 or 1."""
+    text, uploads = queue_lines(entries, shots_switches, shots_collect, defaults)
+    for p in extra_files:
+        uploads[Path(p).name] = Path(p)
+    for name, path in uploads.items():
+        last, n = files_put(args, path, name)
+        print(f"devupdate: uploaded {name} ({n} bytes): {last}")
+        if last != "done":
+            return 1
+    last, lines = request(args, "queue", "add", text.encode())
+    print(f"devupdate: queue add: {next((l for l in lines if l.startswith('queued')), last)}")
+    return 0 if last == "done" else 1
+
+
+def load_manifest(path):
+    doc = json.loads(Path(path).read_text())
+    if isinstance(doc, list):
+        doc = {"entries": doc}
+    entries, defaults = doc["entries"], doc.get("defaults", {})
+    base = Path(path).resolve().parent
+    for e in entries:  # a padfile path in the manifest is relative to the manifest
+        p = e.get("padfile")
+        if p and not Path(p).is_absolute() and (base / p).is_file():
+            e["padfile"] = str(base / p)
+    return entries, defaults, doc
+
+
+def queue_status(args, timeout=6):
+    """{'state':..., 'index':..., ...} from `queue status`, or None if the console does not answer."""
+    try:
+        a = argparse.Namespace(**vars(args))
+        a.timeout = timeout
+        last, lines = request(a, "queue", "status", timeout=timeout)
+    except (OSError, socket.timeout):
+        return None
+    for line in lines:
+        if line.startswith("queue "):
+            return dict(kv.split("=", 1) for kv in line.split()[1:] if "=" in kv)
+    return None
+
+
+def parse_results(text):
+    rows = []
+    for line in text.splitlines():
+        f = line.split("\t")
+        if len(f) >= 6:
+            rows.append({"index": int(f[0]), "name": f[1], "result": f[2], "frames": int(f[3]), "ms": int(f[4]),
+                         "outdir": f[5], "detail": f[6] if len(f) > 6 else ""})
+    return rows
+
+
+def queue_pull(args, dest):
+    """results.txt and every collected file under out/ into dest. Returns the parsed rows."""
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        text = files_get(args, "results.txt").decode(errors="replace")
+    except RuntimeError as e:
+        print(f"devupdate: no results.txt ({e})")
+        return []
+    (dest / "results.txt").write_text(text)
+    rows = parse_results(text)
+    for row in rows:
+        row["files"] = []
+        stack = [(f"out/{row['outdir']}", dest / row["outdir"])]
+        while stack:
+            remote, local = stack.pop()
+            try:
+                items = files_ls(args, remote)
+            except (RuntimeError, OSError):
+                continue
+            for is_dir, size, name in items:
+                if is_dir:
+                    stack.append((f"{remote}/{name}", local / name))
+                    continue
+                try:
+                    data = files_get(args, f"{remote}/{name}")
+                except (RuntimeError, OSError) as e:
+                    print(f"devupdate: {remote}/{name}: {e}")
+                    continue
+                local.mkdir(parents=True, exist_ok=True)
+                (local / name).write_bytes(data)
+                row["files"].append(str((local / name).relative_to(dest)))
+    return rows
+
+
+def cmd_queue(args):
+    act = args.action
+    if act == "add":
+        if not args.paths:
+            raise SystemExit("devupdate: queue add <manifest.json> [files...]")
+        entries, defaults, doc = load_manifest(args.paths[0])
+        return queue_add_entries(args, entries, args.shots_switches or doc.get("shots_switches"),
+                                 args.shots_collect or doc.get("shots_collect", "shots"), defaults, args.paths[1:])
+    if act == "list":
+        last, lines = request(args, "queue", "list")
+        for line in lines:
+            if line.startswith("q "):
+                num, _, rest = line[2:].partition("\t")
+                f = rest.split("\t")
+                if len(f) == len(QUEUE_FIELDS):
+                    d = dict(zip(QUEUE_FIELDS, f))
+                    print(f"{num:>3} {d['name']:<24} {d['switches']}" + (f" [pad {d['padfile']}]" if d["padfile"] else "") +
+                          (f" [until /{d['until']}/]" if d["until"] else "") + (f" [{d['frames']} frames]" if d["frames"] != "0" else "") +
+                          f" [timeout {d['timeout_s']} s]" + (f" [collect {d['collect']}]" if d["collect"] else ""))
+            elif line and line != "done":
+                print(f"console: {line}")
+        return 0 if last == "done" else 1
+    if act == "status":
+        st = queue_status(args, args.timeout)
+        print("devupdate: queue " + (" ".join(f"{k}={v}" for k, v in st.items()) if st else "(no answer)"))
+        return 0 if st else 2
+    if act == "pull":
+        rows = queue_pull(args, args.paths[0] if args.paths else "queue-results")
+        for r in rows:
+            print(f"{r['index']:>3} {r['name']:<24} {r['result']:<8} {r['frames']:>6} frames {r['ms'] / 1000:7.1f} s  {len(r['files'])} files  {r['detail']}")
+        return 0
+    last, lines = request(args, "queue", act)  # clear, start
+    for line in lines:
+        if line != "done":
+            print(f"console: {line}")
+    return finish(last)
+
+
 # ---- azahar-session: one long-lived headless Azahar to run the same commands against ----
 
 AZAHAR_APP = "org.azahar_emu.Azahar"
@@ -390,21 +693,73 @@ def installed_app(sdmc, tid):
     return apps[-1] if apps else None
 
 
+EMU_MARKER = "3ds/ctrdk-emulate-relaunch"
+EMU_ARGS = "3ds/ctrdk-launch-args.txt"
+
+
+def az_spawn(profile, target, display, slot):
+    """Starts Azahar on the .app/.3dsx; the slot's fd stays taken as long as it runs."""
+    env = dict(os.environ)
+    if display is not None:
+        env["DISPLAY"] = f":{display}"
+        env.pop("WAYLAND_DISPLAY", None)
+        env["QT_QPA_PLATFORM"] = "xcb"
+    out = open(profile / "devupdate-session-azahar.txt", "a")
+    return subprocess.Popen(az_cmd(profile, [str(target)], x11=display is not None), stdout=out,
+                            stderr=subprocess.STDOUT, env=env, start_new_session=True, pass_fds=(slot,))
+
+
+def az_supervise(args):
+    """Emulates the APT relaunch Azahar cannot do. The library (when EMU_MARKER exists) writes the next
+    launch's deliver arguments to EMU_ARGS right before it ends the process; this loop sees that, ends the
+    instance if it is still around, and starts the title again, which reads (and deletes) the file."""
+    profile, _, _, sdmc, state_file = az_paths(args.profile)
+    argsfile = sdmc / EMU_ARGS
+    pending, since = False, 0.0
+    print(f"supervisor {os.getpid()} up", flush=True)
+    while True:
+        state = json.loads(state_file.read_text()) if state_file.is_file() else None
+        if not state or state.get("supervisor") != os.getpid():
+            print("supervisor: session stopped, leaving", flush=True)
+            return 0
+        if pending:
+            if not argsfile.exists() or time.monotonic() - since > 180:
+                pending = False
+        elif argsfile.exists():
+            end = time.monotonic() + 8
+            while session_pids(state["sid"]) and time.monotonic() < end:
+                time.sleep(0.25)
+            kill_session(state["sid"])
+            proc = az_spawn(profile, state["boot"], state.get("display"), args.slot_fd)
+            state["sid"] = proc.pid
+            state["relaunches"] = state.get("relaunches", 0) + 1
+            state_file.write_text(json.dumps(state))
+            print(f"supervisor: relaunch {state['relaunches']}: Azahar sid {proc.pid} "
+                  f"({argsfile.read_text(errors='replace')[:100]!r})", flush=True)
+            pending, since = True, time.monotonic()
+        time.sleep(0.5)
+
+
 def cmd_azahar_session(args):
-    import json
     profile, config, data, sdmc, state_file = az_paths(args.profile)
+    if args.action == "supervise":
+        return az_supervise(args)
     state = json.loads(state_file.read_text()) if state_file.is_file() else None
-    alive = bool(state and session_pids(state["sid"]))
+    alive = bool(state and (session_pids(state["sid"]) or (state.get("supervisor") and session_pids(state["supervisor"]))))
     if args.action == "status":
         print(f"devupdate: azahar-session {'running' if alive else 'not running'}" +
-              (f" (sid {state['sid']}, display :{state.get('display')})" if alive else ""))
+              (f" (sid {state['sid']}, display :{state.get('display')}, relaunches {state.get('relaunches', 0)})" if alive else ""))
         return 0 if alive else 1
     if args.action == "stop":
         if state:
+            if state.get("supervisor"):
+                kill_session(state["supervisor"])
             kill_session(state["sid"])
             if state.get("xvfb_sid"):
                 kill_session(state["xvfb_sid"])
             state_file.unlink(missing_ok=True)
+        (sdmc / EMU_MARKER).unlink(missing_ok=True)
+        (sdmc / EMU_ARGS).unlink(missing_ok=True)
         print("devupdate: azahar-session stopped" if alive else "devupdate: azahar-session was not running")
         return 0
     # start
@@ -435,7 +790,6 @@ def cmd_azahar_session(args):
             raise SystemExit("devupdate: no installed .app after the CIA install")
     else:
         target = boot
-    env = dict(os.environ)
     xvfb_sid, display = None, None
     if not args.window and subprocess.run(["which", "Xvfb"], capture_output=True).returncode == 0:
         display = free_display()
@@ -446,19 +800,26 @@ def cmd_azahar_session(args):
             if Path(f"/tmp/.X11-unix/X{display}").exists():
                 break
             time.sleep(0.1)
-        env["DISPLAY"] = f":{display}"
-        env.pop("WAYLAND_DISPLAY", None)
-        env["QT_QPA_PLATFORM"] = "xcb"
-    out = open(profile / "devupdate-session-azahar.txt", "w")
+    (profile / "devupdate-session-azahar.txt").write_text("")
+    if args.supervise:
+        # Azahar cannot do the APT relaunch (a restart, a queue's next entry): the library, told by this marker,
+        # leaves the deliver arguments in a file, and the supervisor starts the title again.
+        (sdmc / "3ds").mkdir(parents=True, exist_ok=True)
+        (sdmc / EMU_MARKER).write_text("1\n")
+        (sdmc / EMU_ARGS).unlink(missing_ok=True)
     # The slot's fd goes to Azahar: the slot stays taken exactly as long as this instance runs.
-    proc = subprocess.Popen(az_cmd(profile, [str(target)], x11=display is not None), stdout=out,
-                            stderr=subprocess.STDOUT, env=env,
-                            start_new_session=True, pass_fds=(slot,))
-    os.close(slot)
+    proc = az_spawn(profile, target, display, slot)
     state = {"sid": proc.pid, "xvfb_sid": xvfb_sid, "display": display, "boot": str(target)}
+    if args.supervise:
+        sup = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "azahar-session", "supervise",
+                                "--profile", str(profile), "--slot-fd", str(slot)],
+                               stdout=open(profile / "devupdate-supervisor.txt", "w"), stderr=subprocess.STDOUT,
+                               start_new_session=True, pass_fds=(slot,))
+        state["supervisor"] = sup.pid
     state_file.write_text(json.dumps(state))
-    print(f"devupdate: azahar-session started (sid {proc.pid}{f', Xvfb :{display}' if display else ''}), "
-          f"booted {target.name}")
+    os.close(slot)
+    print(f"devupdate: azahar-session started (sid {proc.pid}{f', Xvfb :{display}' if display else ''}"
+          f"{', supervised' if args.supervise else ''}), booted {target.name}")
     if args.wait:
         args.ip = args.ip or "127.0.0.1"
         pong = wait_ping(args, args.wait)
@@ -491,6 +852,16 @@ def main():
     p = sub.add_parser("launch", help="jump into an installed title")
     p.add_argument("title_id", help="hex, e.g. 000400000FD88600")
     p.add_argument("--switches", default="")
+    p = sub.add_parser("files", help="put/get/ls/rm in the app's files folder on the console")
+    p.add_argument("action", choices=["put", "get", "ls", "rm"])
+    p.add_argument("paths", nargs="*")
+    p.add_argument("--dest", default="", help="put: a folder under the files folder")
+    p.add_argument("-o", "--out", help="get: the local file")
+    p = sub.add_parser("queue", help="a list of test runs the console works through unattended")
+    p.add_argument("action", choices=["add", "list", "clear", "start", "status", "pull"])
+    p.add_argument("paths", nargs="*", help="add: manifest.json and more files to upload; pull: the folder")
+    p.add_argument("--shots-switches", help='add: switches for an entry\'s "shots": N, e.g. "shots={n} shotmax=40"')
+    p.add_argument("--shots-collect", help="add: the app path the screenshots are collected from (default shots)")
     p = sub.add_parser("bootstrap", help="3dslink the bootstrap, push the CIA, jump into it")
     p.add_argument("--cia", required=True)
     p.add_argument("--boot", default=str(HERE.parents[2] / "build/3ds/ctr-devkit/examples/devupdate/devupdate-boot.3dsx"))
@@ -498,7 +869,10 @@ def main():
     p.add_argument("--boot-wait", type=float, default=30, help="seconds to wait for the bootstrap to answer")
     p.add_argument("--no-send", action="store_true", help="the bootstrap already runs")
     p = sub.add_parser("azahar-session", help="one long-lived headless Azahar for the same commands (--ip 127.0.0.1)")
-    p.add_argument("action", choices=["start", "stop", "status"])
+    p.add_argument("action", choices=["start", "stop", "status", "supervise"])
+    p.add_argument("--supervise", action="store_true",
+                   help="start: emulate the APT relaunch (restart, queue entries) by starting the title again")
+    p.add_argument("--slot-fd", type=int, help=argparse.SUPPRESS)
     p.add_argument("--profile", required=True, help="Azahar profile folder (config, NAND, SD card), under $HOME")
     p.add_argument("--boot", help="start: the .cia (installed, then its .app booted) or .3dsx")
     p.add_argument("--wait", type=float, default=120, help="start: wait this long for a devupdate ping (0 = no wait)")
@@ -511,7 +885,7 @@ def main():
         ap.error("give --ip or set N3DS_IP (Azahar: --ip 127.0.0.1)")
     try:
         return {"ping": cmd_ping, "push": cmd_push, "restart": cmd_restart, "report": cmd_report,
-                "launch": cmd_launch, "bootstrap": cmd_bootstrap}[args.cmd](args)
+                "launch": cmd_launch, "bootstrap": cmd_bootstrap, "files": cmd_files, "queue": cmd_queue}[args.cmd](args)
     except OSError as e:
         print(f"devupdate: no connection to {args.ip}:{args.port}: {e}")
         return 2

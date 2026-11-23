@@ -42,6 +42,8 @@ static volatile int s_pause_req, s_paused, s_relaunch;
 static LightEvent s_resume;
 static int (*s_save_busy)(void);
 static char s_token[32];
+static volatile int s_update_failed;
+static char s_build_line[64];
 
 void plat_set_save_busy(int (*fn)(void)) { s_save_busy = fn; }
 /* On when this launch is a devupdate relaunch (which keeps the server on even
@@ -147,6 +149,11 @@ void plat_devupdate_frame(void) {
 
 static void on_begin(void* user) {
     (void)user;
+    plat_updater_screen(1);
+    snprintf(s_build_line, sizeof(s_build_line), "build %s -> %s", plat_build_string(),
+             devupdate_incoming_version()[0] ? devupdate_incoming_version() : "?");
+    PLOG_I("devupdate: %s", s_build_line);
+    plat_updater_draw("Updater", s_build_line, "Starting", 0);
     crash_wd_hold(true); /* no frames while paused: not a hang */
     s_relaunch = 0;
     LightEvent_Clear(&s_resume);
@@ -163,8 +170,47 @@ static void on_begin(void* user) {
     plat_cpu_limit_transfer(1);
 }
 
+static void on_status(DevUpdatePhase phase, uint32_t done, uint32_t total, const char* text, void* user) {
+    (void)user;
+    static uint64_t t0, last_t, last_done;
+    static float kibs;
+    uint64_t now = svcGetSystemTick();
+    if (phase == DEVUPDATE_PH_RECEIVING) {
+        if (done == 0 || t0 == 0 || done < last_done) {
+            t0 = last_t = now;
+            last_done = done;
+            kibs = 0;
+        } else if (now - last_t >= SYSCLOCK_ARM11 / 2 || done == total) {
+            kibs = (float)(done - last_done) / 1024.0f / ((float)(now - last_t) / (float)SYSCLOCK_ARM11);
+            last_t = now;
+            last_done = done;
+        }
+    }
+    char line[48];
+    const char* title = "Updater";
+    switch (phase) {
+    case DEVUPDATE_PH_RECEIVING:
+        snprintf(line, sizeof(line), "Receiving CIA %lu of %lu KiB %.0f KiB/s", (unsigned long)(done / 1024),
+                 (unsigned long)(total / 1024), (double)kibs);
+        break;
+    case DEVUPDATE_PH_CHECKING: snprintf(line, sizeof(line), "Checking CRC"); break;
+    case DEVUPDATE_PH_INSTALLING: snprintf(line, sizeof(line), "Installing and committing"); break;
+    case DEVUPDATE_PH_RELAUNCHING: snprintf(line, sizeof(line), "Relaunching"); done = total = 1; break;
+    default: snprintf(line, sizeof(line), "Error: %s", text != NULL ? text : "update stopped"); s_update_failed = 1; break;
+    }
+    plat_updater_draw(title, s_build_line, line, total ? (int)((uint64_t)done * 100 / total) : 0);
+}
+
 static void on_resume(void* user) {
     (void)user;
+    if (s_update_failed) {
+        for (int i = 0; i < 10; i++) {
+            svcSleepThread(300000000LL); /* the error stays readable before the old screen returns */
+            plat_menu_shot_tick();
+        }
+        s_update_failed = 0;
+    }
+    plat_updater_screen(0);
     plat_cpu_limit_transfer(0);
     if (plat_audio_has_output()) {
         ndspSetMasterVol(1.0f);
@@ -224,6 +270,9 @@ void plat_devupdate_init(void) {
         return;
     }
     LightEvent_Init(&s_resume, RESET_ONESHOT);
+    if (devupdate_launch_from()[0] != '\0') {
+        PLOG_I("updated from %s", devupdate_launch_from());
+    }
     PLOG_I("devupdate: launch args \"%s\"%s", devupdate_launch_args(),
            devupdate_launched() ? " (relaunched by devupdate)" : "");
     DevUpdateConfig cfg;
@@ -238,6 +287,7 @@ void plat_devupdate_init(void) {
     cfg.on_ready = on_ready;
     cfg.on_resume = on_resume;
     cfg.on_relaunch = on_relaunch;
+    cfg.on_status = on_status;
     cfg.on_recovery_exit = on_recovery_exit;
     cfg.log = log_line;
     cfg.files_dir = "queue"; /* sdmc:/3ds/ttyd/queue: uploaded padfiles, queue.txt, results.txt, out/ */

@@ -115,6 +115,8 @@ if [ "${name%%_*}" = game ] && [ -f "$repo/$out/ttyd.elf" ] && [ -f "$repo/$out/
         mkdir -p "$repo/build/elfs"
         cp "$repo/$out/ttyd.elf" "$repo/build/elfs/$id.elf"
         echo "build.sh: ELF archived as build/elfs/$id.elf"
+        # The incoming-build text for devupdate.py push (a sidecar next to the CIA).
+        sed -n 's/.*PORT3DS_BUILD_STRING "\(#[0-9]* [0-9a-f]*\).*/\1/p' "$repo/$out/generated/port3ds_build.h" > "$repo/$out/ttyd.version"
     fi
 fi
 

@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "options_internal.h"
+#include "plat/audio.h"
 #include "plat/input.h"
 #include "plat_internal.h"
 
@@ -72,6 +73,7 @@ void plat_options_menu_open(void) {
 }
 
 int plat_options_menu_is_open(void) { return s_open; }
+void plat_options_menu_redraw(void) { s_redraw = 1; }
 
 static void put(int row, const char* text) {
     plat_console_row(row, text);
@@ -237,6 +239,8 @@ void plat_options_menu_run(void) {
     PLOG_I("options: menu open (game paused)");
     plat_set_phase("options menu");
     plat_wd_hold(1);
+    plat_audio_set_muted(1);
+    plat_pause_grey();
     uint32_t prev = plat_input_modal_poll(); /* the opening key may still be down */
     int rep[4] = {0, 0, 0, 0};
     static const uint32_t rep_keys[4] = {PLAT_KEY_DUP, PLAT_KEY_DDOWN, PLAT_KEY_DLEFT, PLAT_KEY_DRIGHT};
@@ -272,6 +276,8 @@ void plat_options_menu_run(void) {
     }
     plat_options_save();
     plat_input_menu_closed();
+    plat_pause_release();
+    plat_audio_set_muted(0);
     plat_wd_hold(0);
     PLOG_I("options: menu closed");
 }

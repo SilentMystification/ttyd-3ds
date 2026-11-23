@@ -52,6 +52,10 @@ static PrintConsole s_console;
 #define COLS 40
 
 static int s_menu_mode;
+static int s_top = LOG_TOP + 1; /* first row (1-based) of the log window: 3, or below the updater's rows */
+static int s_upd, s_upd_draw, s_upd_prev_menu; /* the updater screen is up; it is drawing; a menu was open under it */
+#define UPD_TOP 8 /* updater rows 1-7, the log below */
+static void draw_menu(void);
 
 /* What the screen should show, kept as text so a menu can cover it and the close can
  * repaint it exactly: the HUD's two lines and the last LOG_ROWS rows of the log
@@ -63,9 +67,10 @@ static int s_log_col; /* characters in the last row */
 static char s_shadow[30][COLS + 1];
 
 static void log_window(void) {
-    consoleSetWindow(&s_console, 1, LOG_TOP + 1, COLS, LOG_ROWS); /* libctru window and cursor coordinates are 1-based */
+    int rows = 31 - s_top;
+    consoleSetWindow(&s_console, 1, s_top, COLS, rows); /* libctru window and cursor coordinates are 1-based */
     s_console.cursorX = s_log_col + 1; /* the next text continues the last row, at the bottom */
-    s_console.cursorY = LOG_ROWS;
+    s_console.cursorY = rows;
 }
 
 void plat_console_init(void) {
@@ -84,6 +89,9 @@ void plat_console_init(void) {
 /* Writes one padded line of the 30-row screen without disturbing the log's
  * window or cursor, unless it is already there. Caller holds the console lock. row is 1-based. */
 static void at(int row, const char* text) {
+    if (s_upd && !s_upd_draw) {
+        return; /* the updater screen owns the rows above its log */
+    }
     char buf[COLS + 1];
     snprintf(buf, sizeof(buf), "%-40.40s", text);
     if (strcmp(buf, s_shadow[row - 1]) == 0) {
@@ -123,9 +131,37 @@ void plat_console_log(const char* s, size_t n) {
     if (!s_menu_mode) {
         fwrite(s, 1, n, stdout);
         fflush(stdout);
-        for (int r = LOG_TOP; r < 30; r++) {
+        for (int r = s_top - 1; r < 30; r++) {
             s_shadow[r][0] = 1; /* the console scrolled: the screen text is no longer known */
         }
+    }
+}
+
+/* Repaints the HUD and the log from the buffers, the log starting at screen row top; changed lines only. */
+static void repaint(int top) {
+    for (int r = 0; r < 2; r++) {
+        at(1 + r, s_hud_line[r]);
+    }
+    for (int r = 3; r < top; r++) {
+        at(r, "");
+    }
+    s_top = top;
+    for (int r = top; r <= 30; r++) {
+        at(r, s_log[LOG_ROWS - 1 - (30 - r)]);
+    }
+    log_window();
+    for (int r = top - 1; r < 30; r++) {
+        s_shadow[r][0] = 1; /* the log scrolls again */
+    }
+}
+
+static void repaint_log_only(void) {
+    for (int r = s_top; r <= 30; r++) {
+        at(r, s_log[LOG_ROWS - 1 - (30 - r)]);
+    }
+    log_window();
+    for (int r = s_top - 1; r < 30; r++) {
+        s_shadow[r][0] = 1;
     }
 }
 
@@ -136,28 +172,91 @@ void plat_console_menu_mode(int on) {
     if (!s_console_up || s_menu_mode == on) {
         return;
     }
+    if (s_upd) {
+        s_upd_prev_menu = on; /* the updater screen stays; the menu state returns with the old screen */
+        return;
+    }
     s_menu_mode = on;
     if (on) {
         return;
     }
-    for (int r = 0; r < 2; r++) {
-        at(1 + r, s_hud_line[r]);
-    }
-    for (int r = 0; r < LOG_ROWS; r++) {
-        at(LOG_TOP + 1 + r, s_log[r]);
-    }
-    log_window();
-    for (int r = LOG_TOP; r < 30; r++) {
-        s_shadow[r][0] = 1; /* the log scrolls again */
-    }
+    repaint(3);
 }
 
 /* A HUD line: remembered, and drawn unless a menu covers the screen. */
 static void hud_line(int row, const char* text) {
     snprintf(s_hud_line[row - 1], sizeof(s_hud_line[0]), "%-40.40s", text);
-    if (!s_menu_mode) {
+    if (!s_menu_mode && !s_upd) {
         at(row, text);
     }
+}
+
+/* The updater screen (devupdate): rows 1-7 are its title, status line and progress bar, the log keeps
+ * scrolling in the rows below. Off puts back exactly what was on the screen before. Called from the
+ * updater thread while the game thread is paused. */
+void plat_updater_screen(int on) {
+    if (!s_console_up) {
+        return;
+    }
+    plat_console_lock();
+    if (on && !s_upd) {
+        s_upd_prev_menu = s_menu_mode;
+        s_menu_mode = 0;
+        s_upd = 1;
+        s_upd_draw = 1;
+        for (int r = 1; r < UPD_TOP; r++) {
+            at(r, "");
+        }
+        at(1, "Updater");
+        at(UPD_TOP - 1, "----------------------------------------");
+        s_top = UPD_TOP;
+        repaint_log_only();
+        s_upd_draw = 0;
+    } else if (!on && s_upd) {
+        s_upd = 0;
+        s_menu_mode = s_upd_prev_menu;
+        if (!s_menu_mode) {
+            repaint(3);
+        } else {
+            for (int r = 0; r < 30; r++) {
+                s_shadow[r][0] = 1; /* the menu draws itself again */
+            }
+        }
+        s_top = 3;
+    }
+    plat_console_unlock();
+    if (!on && s_menu_mode) {
+        plat_options_menu_redraw();
+        if (s_open) {
+            draw_menu();
+        }
+    }
+}
+
+void plat_updater_draw(const char* title, const char* build, const char* line, int percent) {
+    if (!s_console_up || !s_upd) {
+        return;
+    }
+    char bar[COLS + 1];
+    int pc = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+    int fill = pc * 30 / 100;
+    int i = 0;
+    bar[i++] = '[';
+    for (int k = 0; k < 30; k++) {
+        bar[i++] = k < fill ? '#' : '-';
+    }
+    snprintf(bar + i, sizeof(bar) - (size_t)i, "] %3d%%", pc);
+    char head[COLS + 1];
+    snprintf(head, sizeof(head), "%s", title);
+    plat_console_lock();
+    s_upd_draw = 1;
+    at(1, head);
+    at(2, build);
+    at(4, line);
+    at(6, bar);
+    s_upd_draw = 0;
+    plat_console_unlock();
+    plat_menu_shot_tick(); /* test aid: shotbottom=N also counts the updater's redraws */
 }
 
 void plat_console_row(int row, const char* text) { at(row, text); }
@@ -451,5 +550,6 @@ void plat_menu_shot_tick(void) {
     plat_console_unlock();
     fclose(f);
     taken++;
+    plat_pause_dump(ticks);
     PLOG_I("shotbottom: %s menu=%d", path, s_menu_mode);
 }

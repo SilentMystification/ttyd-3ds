@@ -162,6 +162,19 @@ def wait_ping(args, seconds):
     return None
 
 
+FLAG_VERSION = 4
+
+
+def version_text(args, cia_path):
+    """The incoming build's version text: --version-text, else the first line of the sidecar
+    next to the CIA (<name>.version, written by the build), else none (the console shows "?")."""
+    text = getattr(args, "version_text", None)
+    if text is None:
+        side = Path(cia_path).with_suffix(".version")
+        text = side.read_text().splitlines()[0].strip() if side.exists() and side.read_text().strip() else ""
+    return text.encode()[:47]
+
+
 def push(args, cia_path, flags, switches, bad_crc=False):
     data = Path(cia_path).read_bytes()
     tid = cia_title_id(data)
@@ -169,6 +182,10 @@ def push(args, cia_path, flags, switches, bad_crc=False):
     if bad_crc:
         crc ^= 0xDEADBEEF
     sw = switch_bytes(switches)
+    vt = version_text(args, cia_path)
+    if vt:
+        sw = bytes([len(vt)]) + vt + sw
+        flags |= FLAG_VERSION
     print(f"devupdate: pushing {cia_path} ({len(data)} bytes, title {tid:016x}, crc {crc:08x}) to {args.ip}:{args.port}")
     link = Link(args)
     with link.connect() as s:
@@ -844,6 +861,7 @@ def main():
     p.add_argument("--no-relaunch", action="store_true", help="install only")
     p.add_argument("--launch", action="store_true", help="jump to the pushed title (for another title)")
     p.add_argument("--wait", type=float, default=0, help="after the relaunch, wait this long for a ping answer")
+    p.add_argument("--version-text", help="the build's version text shown on the console (default: the CIA's .version sidecar)")
     p.add_argument("--bad-crc", action="store_true", help="send a wrong CRC (test: the install must be refused)")
     p = sub.add_parser("restart", help="relaunch with switches")
     p.add_argument("switches", nargs="*")

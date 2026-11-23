@@ -14,6 +14,9 @@
 #include "plat/plat.h"
 
 GxState gx;
+/* bumped by every write to what the display-list cache's same_state compares (vertex description and formats,
+ * arrays, current matrices): an entry that matched at this version still matches */
+u32 gx_vtx_version = 1;
 
 /* ---- Recording ---- */
 
@@ -145,6 +148,7 @@ void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
     GX_CLOSE_PRIMITIVE();
     REC(SetVtxDesc, attr, type);
     vtx_desc_set(&gx, (u32)attr, (u32)type);
+    gx_vtx_version++;
 }
 
 void GXSetVtxDescv(const GXVtxDescList* list) {
@@ -190,12 +194,14 @@ void GXClearVtxDesc(void) {
     GX_CLOSE_PRIMITIVE();
     REC0(ClearVtxDesc);
     vtx_desc_clear(&gx);
+    gx_vtx_version++;
 }
 
 void GXSetVtxAttrFmt(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
     GX_CLOSE_PRIMITIVE();
     REC(SetVtxAttrFmt, vtxfmt, attr, cnt, type, frac);
     vat_set(&gx, (u32)vtxfmt, (u32)attr, (u32)cnt, (u32)type, frac);
+    gx_vtx_version++;
 }
 
 void GXSetVtxAttrFmtv(GXVtxFmt vtxfmt, const GXVtxAttrFmtList* list) {
@@ -213,6 +219,7 @@ void GXSetArray(GXAttr attr, void* base_ptr, u8 stride) {
     }
     if ((u32)attr < GX_VA_MAX_ATTR) {
         gx.array_base[attr] = base_ptr;
+        gx_vtx_version++;
         gx.array_stride[attr] = stride;
     }
 }
@@ -288,6 +295,7 @@ void GXSetCurrentMtx(u32 id) {
     GX_CLOSE_PRIMITIVE();
     REC(SetCurrentMtx, id);
     gx.cur_pnmtx = id / 3;
+    gx_vtx_version++;
     gx_xf_version++;
 }
 
@@ -395,6 +403,7 @@ void GXSetTexCoordGen2(GXTexCoordID dst_coord, GXTexGenType func, GXTexGenSrc sr
     gx.texgen[dst_coord].normalize = normalize;
     gx.texgen[dst_coord].pt_mtx = pt_texmtx;
     gx.cur_texmtx[dst_coord] = (u8)mtx;
+    gx_vtx_version++;
     touch();
 }
 

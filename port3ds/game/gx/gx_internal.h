@@ -177,6 +177,7 @@ typedef struct {
 } GxState;
 
 extern GxState gx;
+extern u32 gx_vtx_version; /* gx_state.c: the vertex state same_state compares changed */
 
 /* ---- GX calls by value ----
  * One id per state call. Display lists the game records hold them as port
@@ -531,6 +532,7 @@ const void* gx_vsh_stream_base(const GxVshStream* s);
 /* Routes one draw under position matrix `pnmtx`: `reasons` 0 for a shader-eligible
  * cached list (`list`, `nbytes`), else why not. Returns 1 for the shader path. */
 int gx_vsh_route(u32 pnmtx, u32 reasons, const void* list, u32 nbytes, u32 nverts, int imm);
+extern u32* gx_vsh_rec_hint; /* set before gx_draw_vsh: where the list's pass-group record index is remembered */
 /* Immediate mode: a draw's vertices in this frame's ring (gx_vsh.c). */
 typedef struct {
     const void* base; /* stream base (a ring chunk) */

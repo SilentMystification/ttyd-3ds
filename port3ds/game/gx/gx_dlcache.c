@@ -85,6 +85,8 @@ typedef struct {
     u32 last_frame;
     u32 trust_gen;   /* gxtrust: the registry's generation the contents are trusted at (0: not trusted) */
     u32 trust_epoch; /* the registry epoch of the last trust request that failed */
+    u32 vs_ok;       /* gx_vtx_version at which same_state last matched (0: never) */
+    u32 vsh_rec;     /* the list's pass-group record index (gx_vsh.c), a hint checked on use */
     u8 vtx_desc[GX_VA_MAX_ATTR];
     u8 cur_pnmtx;
     u8 cur_texmtx[8];
@@ -301,7 +303,7 @@ static u32 gather_hash(const DlcRange* r, u32 nr, const u16* idx, u32 nverts) {
 }
 
 /* The decode's inputs other than memory contents: the same as when the entry was made? */
-static int same_state(const GxState* st, const DlcEntry* e) {
+static int same_state_full(const GxState* st, const DlcEntry* e) {
     if (!gx_mem_equal(e->vtx_desc, st->vtx_desc, sizeof(e->vtx_desc)) || e->cur_pnmtx != (u8)st->cur_pnmtx ||
         !gx_mem_equal(e->cur_texmtx, st->cur_texmtx, sizeof(e->cur_texmtx))) {
         return 0;
@@ -324,6 +326,18 @@ static int same_state(const GxState* st, const DlcEntry* e) {
             return 0;
         }
     }
+    return 1;
+}
+
+/* The full compare only when the vertex state changed since this entry last matched (st is always &gx). */
+static int same_state(const GxState* st, DlcEntry* e) {
+    if (e->vs_ok == gx_vtx_version && st == &gx) {
+        return 1;
+    }
+    if (!same_state_full(st, e)) {
+        return 0;
+    }
+    e->vs_ok = st == &gx ? gx_vtx_version : 0;
     return 1;
 }
 
@@ -465,6 +479,7 @@ int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
             }
             if (gx_vsh_on) {
                 /* the pass group decides: the shader draws the stream, or the CPU replays as before */
+                gx_vsh_rec_hint = &e->vsh_rec;
                 if (gx_draw_vsh(e->vsh, e->vsh_reason, e->list, e->nbytes, e->nverts, e_verts(e), e_draws(e), e->ndraws)) {
                     if (gx_perf_on > 0) {
                         gx_perf.dl_verts += e->nverts;
@@ -747,7 +762,7 @@ void gx_dlc_cap_finish(const GxState* st, u32 kind) {
             /* remembered so the next call skips the capture (and its state is not checked) */
             e->state = E_NOCACHE;
             e->dl_hash = s_cap_hash;
-            memcpy(e->vtx_desc, st->vtx_desc, sizeof(e->vtx_desc));
+            memcpy(e->vtx_desc, st->vtx_desc, sizeof(e->vtx_desc)); e->vs_ok = 0;
             e->cur_pnmtx = (u8)st->cur_pnmtx;
             memcpy(e->cur_texmtx, st->cur_texmtx, sizeof(e->cur_texmtx));
             e->last_frame = frame;
@@ -804,7 +819,7 @@ void gx_dlc_cap_finish(const GxState* st, u32 kind) {
     e->fmt_mask = s_cap_fmt_mask;
     e->nverts = s_cap_nv;
     e->last_frame = frame;
-    memcpy(e->vtx_desc, st->vtx_desc, sizeof(e->vtx_desc));
+    memcpy(e->vtx_desc, st->vtx_desc, sizeof(e->vtx_desc)); e->vs_ok = 0;
     e->cur_pnmtx = (u8)st->cur_pnmtx;
     memcpy(e->cur_texmtx, st->cur_texmtx, sizeof(e->cur_texmtx));
     memcpy(e_draws(e), s_cap_d, s_cap_nd * sizeof(DlcDraw));

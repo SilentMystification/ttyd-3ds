@@ -72,6 +72,20 @@ How we get there:
 - Extra latency: one frame between a frame's logic and its display when pipelined (the GameCube's own CPU/GPU overlap).
 - What would flip it: less translation on core 2. The translator takes 0.9-1.0 times what the game thread spent on GX before; the replay of the frame before shares core 2. Next candidates: the display-list hit path and the immediate-mode ring (the largest translator stages), and moving the replay's CPU work (citro3d command building) down.
 
+**Core 2 is the wall: round 1 of cutting it (2026-11-23).** A PC-sample profile of gor_01 pipelined (`gxthread=2 gxthreadsplit=0 gxpipeline=1`, 264 stops): the translator thread is 90% busy: `gx_dlcache_call` 13.6% self, `memcpy` 9.8%, waiting for the replay 9.5%, `gx_vsh_frame` 8.0%, `draw_from_reader` 6.1%, `consume` 4.9%, `hash_span` (texture checks) 4.5%, `gx_vsh_route` 3.8%, `plat_gpu_vsh_draw` 3.4%, `rec_for` 2.3%; the render thread 22% busy (`GPUCMD_Add`, `C3D_UpdateUniforms`, GSP requests). Built, each pixel-identical under `determ` (gor_01 both modes, usu_00):
+
+- cache hits skip the vertex-state compare when nothing it reads changed (`gx_vtx_version`), and remember their pass-group record (no hash probe);
+- the replay sets a shader uniform row only when its bits change (`vunif`), so citro3d uploads changed rows only;
+- (e) stream flushes move to the render thread (`gxflushrender=1`), off the recording thread's submit;
+- (f) states that differ in few words are recorded as deltas (`gxstatedelta=1`): gor_01's record 486 -> 178 KB a frame, usu_00 497 -> 253 KB of the 512 KB (no segments; the stereo split keeps a copy of the state and the light block for the second eye).
+
+Same-build A/B of (e)+(f) on and off (pipelined; translator / render ms): gor_01 73.7 / 21.3 against 69.5 / 29.6, hei_01 32.0 / 20.7 against 30.7 / 23.4, pik_00 89.4 / 16.0 against 82.9 / 18.9. The replay gets cheaper, the translator (which waits for the replay at submit, counted in its wall time) does not, and core 2's total moves by -4 to +4 ms, within run-to-run noise. **Frames are unchanged**; hei_01 pipelined is still slower than `gxthread=0` (41.5 against 36.8 ms on this merge). The ten-scene table after the port3ds merge of 2026-11-23 (60 fps step 1, tooling at nice 10) shows the same picture (core 2 47-115 ms; gor_01 93.5, pik_00 115.4).
+
+Not done, and why:
+- (b) immediate ring and (d) the battle's array snapshots: the snapshot is the only safe copy (the overwrite comes before any report), and pipelining makes every CPU-skinned array need it (the next frame re-skins before the translator reads); the copy itself is a `memcpy` of the index span.
+- `gx_vsh_frame` (8%): the per-frame streak pass over every touched list record; a lazy commit would halve it, at the cost of more state per record.
+- The texture checks (`hash_span`) are `gx_tex.c`, now another agent's.
+
 Core 1 keeps the light, latency-tolerant work and **all SD card access** (disc reads, saves, log, options, test output), so cores 0 and 2 never block on SD I/O.
 
 ## Splits, ranked

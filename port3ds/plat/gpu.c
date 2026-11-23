@@ -42,7 +42,7 @@
 #define INDEX_ARENA (192 * 1024) /* u16 indices of shader-path draws per record */
 #define STREAM_PENDING 4096       /* stream frees waiting for the frames in flight */
 
-enum { CMD_STATE = 1, CMD_FOG, CMD_DRAW, CMD_CLEAR, CMD_COPY, CMD_FRAME_END, CMD_SEGMENT_END, CMD_VSH_CONST, CMD_VSH_DRAW,
+enum { CMD_STATE_DELTA = 0x20, CMD_STATE = 1, CMD_FOG, CMD_DRAW, CMD_CLEAR, CMD_COPY, CMD_FRAME_END, CMD_SEGMENT_END, CMD_VSH_CONST, CMD_VSH_DRAW,
        CMD_VSH_LIGHT };
 
 /* CMD_VSH_DRAW body */
@@ -65,6 +65,12 @@ typedef struct {
     u16* idx; /* index arena (linear) of the shader-path draws */
     u32 nidx;
     int present;
+    /* stream ranges the CPU wrote for this record: flushed by the render thread before it replays (a flush is a
+     * blocking GSP request; on the recording thread it cost 5-8% of its time) */
+    struct {
+        uintptr_t lo, hi;
+    } dirty[32];
+    u32 ndirty;
 } Record;
 
 typedef struct {
@@ -205,11 +211,12 @@ static void wait_idle(void) {
 static void render_record(Record* r);
 
 static void stream_flush_dirty(void);
+static void stream_take_dirty(Record* r);
 
 static void submit(int present) {
     Record* r = &s_rec[s_cur];
     r->present = present;
-    stream_flush_dirty(); /* the streams this record draws */
+    stream_take_dirty(r); /* the streams this record draws: the render thread flushes them */
     wait_idle(); /* the render thread finished the previous record */
     if (s_threaded) {
         /* hand over the record explicitly: s_cur flips below, and the render
@@ -292,6 +299,9 @@ static u32 fog_hash(const PlatGpuState* st) {
     return h | 1u;
 }
 
+static int s_state_delta = 1; /* switch gxstatedelta (default 1): CMD_STATE_DELTA records */
+static PlatGpuState s_rstate; /* render thread: the state the record's last CMD_STATE and deltas give */
+
 void plat_gpu_set_state(const PlatGpuState* state) {
     if (state->fog_enable) {
         /* the front end's LUT id when it gives one (no hashing), else a hash of the LUT */
@@ -313,6 +323,33 @@ void plat_gpu_set_state(const PlatGpuState* state) {
                (const u8*)state + offsetof(PlatGpuState, scissor_x0),
                sizeof(PlatGpuState) - offsetof(PlatGpuState, scissor_x0)) == 0) {
         return;
+    }
+    if (s_last_state_valid && s_state_delta) {
+        /* the words that changed since the last state of this record (gxstatedelta): most states differ from
+         * the one before in a few words of their ~700 bytes */
+        const u32* a = (const u32*)&s_last_state;
+        const u32* b = (const u32*)state;
+        u32 n = 0;
+        const u32 nw = (u32)(sizeof(PlatGpuState) / 4);
+        for (u32 i = 0; i < nw && n * 2 + 1 < nw / 2; i++) {
+            n += a[i] != b[i];
+        }
+        if (n * 2 + 1 < nw / 2) {
+            u32* d = rec_put(CMD_STATE_DELTA, 4 + n * 8);
+            if (d != NULL) {
+                d[0] = n;
+                u32 k = 1;
+                for (u32 i = 0; i < nw; i++) {
+                    if (a[i] != b[i]) {
+                        d[k++] = i;
+                        d[k++] = b[i];
+                    }
+                }
+                s_last_state = *state;
+                s_stats_frame.state_changes++;
+            }
+            return;
+        }
     }
     PlatGpuState* dst = rec_put(CMD_STATE, sizeof(PlatGpuState));
     if (dst != NULL) {
@@ -390,6 +427,21 @@ static void stream_flush_dirty(void) {
     for (u32 i = 0; i < s_ndirty; i++) {
         GSPGPU_FlushDataCache((const void*)s_dirty[i].lo, (u32)(s_dirty[i].hi - s_dirty[i].lo));
     }
+    s_ndirty = 0;
+}
+
+/* Switch gxflushrender (default 1): the record's stream flushes are made by the render thread before it replays
+ * the record; 0 flushes on the recording thread at submit, as before. */
+static int s_flush_on_render = 1;
+
+static void stream_take_dirty(Record* r) {
+    r->ndirty = 0;
+    if (!s_flush_on_render || !s_threaded) {
+        stream_flush_dirty();
+        return;
+    }
+    memcpy(r->dirty, s_dirty, s_ndirty * sizeof(s_dirty[0]));
+    r->ndirty = s_ndirty;
     s_ndirty = 0;
 }
 
@@ -1081,6 +1133,23 @@ static void rot_rows(float r0[4], float r1[4]) {
     memcpy(r1, rows[s_rot][1], 16);
 }
 
+/* The shader-path uniforms as last set in this record's replay (bit patterns): a value equal to the one in
+ * force is not set again, so citro3d uploads only the rows that changed. Only vsh_apply_* write these rows;
+ * the cache is cleared at the start of every record. */
+static u32 s_vunif[96][4];
+static void vunif_reset(void) { memset(s_vunif, 0xFF, sizeof(s_vunif)); }
+static inline void vunif(int id, float x, float y, float z, float w) {
+    if (id < 0 || id >= 96) {
+        return;
+    }
+    float v[4] = {x, y, z, w};
+    if (memcmp(s_vunif[id], v, 16) == 0) {
+        return;
+    }
+    memcpy(s_vunif[id], v, 16);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, id, x, y, z, w);
+}
+
 /* Uniforms of a CMD_VSH_CONST. The clip rows come unrotated; the rotation
  * rows hold only 0 and +-1, so composing them on the CPU is exact (a row is
  * picked and maybe negated). A second eye pass would compose its clip-space
@@ -1098,19 +1167,19 @@ static void vsh_apply_const(const PlatGpuVshConst* c) {
                 }
             }
         }
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clip + k, row[0], row[1], row[2], row[3]);
+        vunif(s_uloc_clip + k, row[0], row[1], row[2], row[3]);
     }
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clip + 2, c->clip[2][0], c->clip[2][1], c->clip[2][2], c->clip[2][3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clip + 3, c->clip[3][0], c->clip[3][1], c->clip[3][2], c->clip[3][3]);
+    vunif(s_uloc_clip + 2, c->clip[2][0], c->clip[2][1], c->clip[2][2], c->clip[2][3]);
+    vunif(s_uloc_clip + 3, c->clip[3][0], c->clip[3][1], c->clip[3][2], c->clip[3][3]);
     for (int i = 0; i < 9; i++) {
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_texrow + i, c->tex[i][0], c->tex[i][1], c->tex[i][2], c->tex[i][3]);
+        vunif(s_uloc_texrow + i, c->tex[i][0], c->tex[i][1], c->tex[i][2], c->tex[i][3]);
     }
     for (int i = 0; i < 3; i++) {
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_tgsrc + i, c->tgsrc[i][0], c->tgsrc[i][1], c->tgsrc[i][2],
+        vunif(s_uloc_tgsrc + i, c->tgsrc[i][0], c->tgsrc[i][1], c->tgsrc[i][2],
                       c->tgsrc[i][3]);
     }
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clrmix, c->clrmix[0], c->clrmix[1], c->clrmix[2], c->clrmix[3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_matclr, c->matclr[0], c->matclr[1], c->matclr[2], c->matclr[3]);
+    vunif(s_uloc_clrmix, c->clrmix[0], c->clrmix[1], c->clrmix[2], c->clrmix[3]);
+    vunif(s_uloc_matclr, c->matclr[0], c->matclr[1], c->matclr[2], c->matclr[3]);
     if (s_uloc_lit >= 0) {
         C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_lit, (c->flags & PLAT_VSH_LIT) != 0);
     }
@@ -1121,20 +1190,20 @@ static void vsh_apply_light(const PlatGpuVshLight* l) {
         return;
     }
     for (int i = 0; i < 3; i++) {
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_eyerow + i, l->eye[i][0], l->eye[i][1], l->eye[i][2], l->eye[i][3]);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_nrmrow + i, l->nrm[i][0], l->nrm[i][1], l->nrm[i][2], l->nrm[i][3]);
+        vunif(s_uloc_eyerow + i, l->eye[i][0], l->eye[i][1], l->eye[i][2], l->eye[i][3]);
+        vunif(s_uloc_nrmrow + i, l->nrm[i][0], l->nrm[i][1], l->nrm[i][2], l->nrm[i][3]);
     }
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_amb, l->amb[0], l->amb[1], l->amb[2], l->amb[3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_dmode, l->dmode[0], l->dmode[1], l->dmode[2], l->dmode[3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_amode, l->amode[0], l->amode[1], l->amode[2], l->amode[3]);
+    vunif(s_uloc_amb, l->amb[0], l->amb[1], l->amb[2], l->amb[3]);
+    vunif(s_uloc_dmode, l->dmode[0], l->dmode[1], l->dmode[2], l->dmode[3]);
+    vunif(s_uloc_amode, l->amode[0], l->amode[1], l->amode[2], l->amode[3]);
     u32 n = l->count > PLAT_VSH_LIGHTS ? PLAT_VSH_LIGHTS : l->count;
     for (u32 i = 0; i < (n ? n : 1); i++) {
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_lpos + i, l->light[i].pos[0], l->light[i].pos[1], l->light[i].pos[2], 0);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_ldir + i, l->light[i].dir[0], l->light[i].dir[1], l->light[i].dir[2], 0);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_lcol + i, l->light[i].color[0], l->light[i].color[1],
+        vunif(s_uloc_lpos + i, l->light[i].pos[0], l->light[i].pos[1], l->light[i].pos[2], 0);
+        vunif(s_uloc_ldir + i, l->light[i].dir[0], l->light[i].dir[1], l->light[i].dir[2], 0);
+        vunif(s_uloc_lcol + i, l->light[i].color[0], l->light[i].color[1],
                       l->light[i].color[2], 0);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_lka + i, l->light[i].a[0], l->light[i].a[1], l->light[i].a[2], 0);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_lkk + i, l->light[i].k[0], l->light[i].k[1], l->light[i].k[2], 0);
+        vunif(s_uloc_lka + i, l->light[i].a[0], l->light[i].a[1], l->light[i].a[2], 0);
+        vunif(s_uloc_lkk + i, l->light[i].k[0], l->light[i].k[1], l->light[i].k[2], 0);
     }
     /* the loop runs count + 1 times; with no light it runs once over light 0, which the front end zeroes */
     C3D_IVUnifSet(GPU_VERTEX_SHADER, s_uloc_lcount, n ? (int)n - 1 : 0, 0, 1, 0);
@@ -1150,12 +1219,12 @@ static float pow2_neg(u32 k) {
 
 static void vsh_apply_scales(u32 scales) {
     float s = pow2_neg(scales & 0xFF);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_vscale, s, s, s, 1.0f);
+    vunif(s_uloc_vscale, s, s, s, 1.0f);
     for (int u = 0; u < 3; u++) {
         u32 b = scales >> (8 + 8 * u) & 0xFF;
         u32 slot = b & 3;
         float w = pow2_neg(b >> 2);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_texsel + u, slot == 0 ? w : 0.0f, slot == 1 ? w : 0.0f,
+        vunif(s_uloc_texsel + u, slot == 0 ? w : 0.0f, slot == 1 ? w : 0.0f,
                       slot == 2 ? w : 0.0f, 0.0f);
     }
 }
@@ -1240,6 +1309,7 @@ static u8* stereo_split(const Record* r, u32* tail_cmds, u32* tail_zwrites) {
     u8 *p = r->data, *end = r->data + r->used, *split = NULL;
     int scene = 0;
     const PlatGpuState* st = NULL;
+    static PlatGpuState ss; /* the state the record's CMD_STATE and deltas give */
     *tail_cmds = *tail_zwrites = 0;
     /* switch stereolog=N: the record's draw order at stereo frames N and N + 300 (S/s scene draw on the CPU/shader
      * path, L/l screen layer draw, C copy, X clear; runs counted) */
@@ -1277,7 +1347,18 @@ static u8* stereo_split(const Record* r, u32* tail_cmds, u32* tail_zwrites) {
             SEQ('X');
         }
         switch (h->type) {
-        case CMD_STATE: st = (const PlatGpuState*)body; break;
+        case CMD_STATE:
+            ss = *(const PlatGpuState*)body;
+            st = &ss;
+            break;
+        case CMD_STATE_DELTA:
+            if (st != NULL) {
+                const u32* d = (const u32*)body;
+                for (u32 i = 0; i < d[0]; i++) {
+                    ((u32*)&ss)[d[1 + 2 * i]] = d[2 + 2 * i];
+                }
+            }
+            break;
         case CMD_COPY: split = p; *tail_cmds = *tail_zwrites = 0; SEQ('C'); break;
         case CMD_DRAW:
         case CMD_VSH_DRAW:
@@ -1317,6 +1398,7 @@ static u32 s_begin_records;
 
 static void render_record(Record* r) {
     u64 t0 = svcGetSystemTick();
+    vunif_reset();
     reap_targets();
     /* stereo (stereo.h): 0 mono, else the 2D tail's start; the 3D part is replayed once */
     u32 tail_cmds = 0, tail_zwrites = 0;
@@ -1343,6 +1425,10 @@ static void render_record(Record* r) {
     BufInfo_Init(&bi);
     BufInfo_Add(&bi, r->verts, sizeof(PlatGpuVertex), 5, 0x43210);
     C3D_SetBufInfo(&bi);
+    for (u32 i = 0; i < r->ndirty; i++) {
+        GSPGPU_FlushDataCache((const void*)r->dirty[i].lo, (u32)(r->dirty[i].hi - r->dirty[i].lo));
+    }
+    r->ndirty = 0;
     GSPGPU_FlushDataCache(r->verts, r->nverts * sizeof(PlatGpuVertex));
     if (r->nidx > 0) {
         GSPGPU_FlushDataCache(r->idx, r->nidx * sizeof(u16));
@@ -1378,6 +1464,8 @@ static void render_record(Record* r) {
     const void *fog_now = NULL, *split_fog = NULL;
     const PlatGpuVshConst *vc_now = NULL, *split_vc = NULL;
     const PlatGpuState* split_state = NULL;
+    static PlatGpuState split_rstate; /* s_rstate at the split (deltas change s_rstate after it) */
+    const PlatGpuVshLight *vl_now = NULL, *split_vl = NULL;
     u8* tail = NULL;
     int eye = 0;
 #define STEREO_SPLIT()                       \
@@ -1391,8 +1479,12 @@ static void render_record(Record* r) {
         restore = 1;                         \
         tail = split;                        \
         split_state = cur_state;             \
+        if (cur_state != NULL) {             \
+            split_rstate = s_rstate;         \
+        }                                    \
         split_fog = fog_now;                 \
         split_vc = vc_now;                   \
+        split_vl = vl_now;                   \
         split = NULL;                        \
     } while (0)
 eye_again:
@@ -1404,8 +1496,23 @@ eye_again:
         u8* body = p + sizeof(CmdHead);
         p = body + h->size;
         switch (h->type) {
+        case CMD_STATE_DELTA: {
+            if (cur_state == NULL) {
+                break; /* never: a delta follows a full state in its record */
+            }
+            const u32* d = (const u32*)body;
+            u32* w = (u32*)&s_rstate;
+            for (u32 i = 0; i < d[0]; i++) {
+                w[d[1 + 2 * i]] = d[2 + 2 * i];
+            }
+            apply_state(cur_state); /* cull none */
+            restore = 0;
+            v_cull = 0;
+            break;
+        }
         case CMD_STATE:
-            cur_state = (const PlatGpuState*)body;
+            s_rstate = *(const PlatGpuState*)body;
+            cur_state = &s_rstate;
             apply_state(cur_state); /* cull none */
             restore = 0;
             v_cull = 0;
@@ -1433,6 +1540,7 @@ eye_again:
         }
         case CMD_VSH_LIGHT:
             vsh_apply_light((const PlatGpuVshLight*)body);
+            vl_now = (const PlatGpuVshLight*)body;
             break;
         case CMD_VSH_CONST:
             vsh_apply_const((const PlatGpuVshConst*)body);
@@ -1515,6 +1623,10 @@ eye_again:
             C3D_SetAttrInfo(&s_attr);
             C3D_SetBufInfo(&bi);
             rot_uniforms();
+            vunif_reset(); /* the warp set uniforms of its own */
+            if (split_state != NULL) {
+                s_rstate = split_rstate;
+            }
             cur_state = split_state;
             restore = 1;
             v_stream = NULL;
@@ -1522,6 +1634,9 @@ eye_again:
             v_cull = 0;
             if (split_fog != NULL) {
                 fog_bind(split_fog);
+            }
+            if (split_vl != NULL) {
+                vsh_apply_light(split_vl);
             }
             if (split_vc != NULL) {
                 vsh_apply_const(split_vc);
@@ -2002,6 +2117,8 @@ void plat_gpu_init(void) {
         plat_sd_mkdir("shots");
     }
     s_threaded = !plat_switch_has("gxsync");
+    s_flush_on_render = plat_switch_int("gxflushrender", 1) != 0;
+    s_state_delta = plat_switch_int("gxstatedelta", 1) != 0;
     /* Switch gpucore=N: the render thread's core (default 2 on the New 3DS, 1 on the old one). */
     int core = plat_switch_int("gpucore", plat_is_new3ds() ? 2 : 1);
     if (s_threaded) {

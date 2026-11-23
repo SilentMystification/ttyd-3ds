@@ -790,7 +790,16 @@ static Group* group_for(u32 pnmtx) {
     return NULL;
 }
 
+u32* gx_vsh_rec_hint; /* the caller's remembered record index for the next rec_for (a cache entry's), or NULL */
+
 static u32 rec_for(const void* list, u32 nbytes) {
+    u32* hint = gx_vsh_rec_hint;
+    gx_vsh_rec_hint = NULL;
+    if (hint != NULL && *hint != 0 && s_rec[*hint - 1].list == list && s_rec[*hint - 1].nbytes == nbytes) {
+        s_rec[*hint - 1].last_frame = gx_perf_frame_no();
+        return *hint;
+    }
+    u32 got = 0;
     u32 h = ((u32)(uintptr_t)list * 0x9E3779B1u ^ nbytes * 0x85EBCA77u) >> 7;
     u32 now = gx_perf_frame_no();
     u32 victim = ~0u, oldest = 0;
@@ -799,7 +808,11 @@ static u32 rec_for(const void* list, u32 nbytes) {
         Rec* r = &s_rec[i];
         if (r->list == list && r->nbytes == nbytes) {
             r->last_frame = now;
-            return i + 1;
+            got = i + 1;
+            if (hint != NULL) {
+                *hint = got;
+            }
+            return got;
         }
         u32 age = r->list == NULL ? ~0u : now - r->last_frame;
         if (age > 2 && age >= oldest && !r->touched) {
@@ -816,6 +829,9 @@ static u32 rec_for(const void* list, u32 nbytes) {
     r->list = list;
     r->nbytes = nbytes;
     r->last_frame = now;
+    if (hint != NULL) {
+        *hint = victim + 1;
+    }
     return victim + 1;
 }
 

@@ -65,6 +65,12 @@ void plat_options_save(void);
 #define PLAT_OPT_QUALITY_AUTO 0
 #define PLAT_OPT_QUALITY_HIGH 1
 #define PLAT_OPT_QUALITY_FAST 2
+/* Texture filtering (key "texfilter"): GX's own filters as the game sets them, bilinear forced,
+ * bilinear plus mip levels (GX's own, else generated at upload), or point sampling. */
+#define PLAT_OPT_TEXFILTER_GAME 0
+#define PLAT_OPT_TEXFILTER_LINEAR 1
+#define PLAT_OPT_TEXFILTER_MIP 2
+#define PLAT_OPT_TEXFILTER_NEAREST 3
 
 /* Keys the platform itself acts on or that library users read. A game's list
  * should use them for these settings. */
@@ -73,6 +79,7 @@ void plat_options_save(void);
 #define PLAT_OPT_KEY_VOLUME "volume"
 #define PLAT_OPT_KEY_QUALITY "quality"
 #define PLAT_OPT_KEY_LANGUAGE "language"
+#define PLAT_OPT_KEY_TEXFILTER "texfilter"
 
 /* 1 when the player wants stereoscopic 3D (default 1; the 3D slider still
  * decides the depth). */
@@ -85,6 +92,8 @@ int opt_get_volume(void);
 int opt_get_quality(void);
 /* Language index, PAL only (default 0). The game side maps it to its languages. */
 int opt_get_language(void);
+/* PLAT_OPT_TEXFILTER_* (default game). The debug switch texfilter= overrides it in the GX texture code. */
+int opt_get_texfilter(void);
 
 #ifdef __cplusplus
 }

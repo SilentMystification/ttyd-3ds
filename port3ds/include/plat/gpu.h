@@ -58,6 +58,13 @@ enum {
 
 /* Returns a handle, or 0 when out of texture memory. `pixels` is copied. */
 uint32_t plat_gpu_tex_create(uint32_t width, uint32_t height, uint32_t fmt, const void* pixels, uint32_t bytes);
+/* As plat_gpu_tex_create, with a mip chain: `pixels` is level 0 (`bytes`), `mip_pixels` the levels
+ * 1..levels in order (`mip_bytes`), every level Morton tiled in the same format, each half the size of the
+ * one before (a level is at least 8x8). `levels` is the number of levels after level 0. */
+uint32_t plat_gpu_tex_create_mip(uint32_t width, uint32_t height, uint32_t fmt, const void* pixels, uint32_t bytes,
+                                 const void* mip_pixels, uint32_t mip_bytes, uint32_t levels);
+/* The most levels after level 0 a texture of this size can have (0 when a side is 8). */
+uint32_t plat_gpu_tex_max_levels(uint32_t width, uint32_t height);
 /* An empty texture a copy will fill (render-to-texture). */
 uint32_t plat_gpu_tex_create_target(uint32_t width, uint32_t height, uint32_t fmt);
 /* Freed once the render thread no longer uses it. */
@@ -79,9 +86,9 @@ typedef struct {
 typedef struct {
     uint32_t handle;
     uint8_t wrap_s, wrap_t;  /* GPU_TEXTURE_WRAP_PARAM */
-    uint8_t min_linear, mag_linear, mip_linear;
+    uint8_t min_linear, mag_linear, mip_linear; /* mip_linear: linear filter between the levels (only used when the texture has levels) */
     uint8_t pad[3];
-    float lod_bias;
+    float lod_bias;              /* added to the hardware's level of detail, in levels */
 } PlatGpuTexUnit;
 
 typedef struct {

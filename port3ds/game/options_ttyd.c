@@ -4,7 +4,7 @@
  * game data: the labels, the defaults, and the button mapping.
  *
  * Pages: Controls (GameCube button remap, C-stick source), Display (3D, bottom
- * screen HUD), Audio (master volume), Performance (quality: stored only),
+ * screen HUD, texture filter), Audio (master volume), Performance (quality: stored only),
  * Language (PAL builds only: stored only).
  *
  * The settings that only other code reads (3D, quality, language) have their
@@ -28,6 +28,7 @@ enum { SRC_A, SRC_B, SRC_X, SRC_Y, SRC_L, SRC_R, SRC_ZL, SRC_ZR, SRC_START, SRC_
 static const char* const k_cstick_names[] = {"C-stick nub", "D-pad", NULL};
 static const char* const k_onoff_names[] = {"off", "on", NULL};
 static const char* const k_hud_names[] = {"off", "FPS only", "full", NULL};
+static const char* const k_texfilter_names[] = {"game", "linear", "mip", "nearest", NULL};
 static const char* const k_quality_names[] = {"auto", "high", "fast", NULL};
 #ifdef VERSION_G8MP01
 static const char* const k_lang_names[] = {"English", "Deutsch", "Francais", "Espanol", "Italiano", NULL};
@@ -60,6 +61,9 @@ static const PlatOptItem k_items[] = {
 
     {PLAT_OPT_KEY_STEREO3D, "3D effect", PLAT_OPT_CHOICE, PAGE_DISPLAY, 1, 0, 0, 0, k_onoff_names, NULL},
     {PLAT_OPT_KEY_HUD, "Bottom screen HUD", PLAT_OPT_CHOICE, PAGE_DISPLAY, PLAT_OPT_HUD_FULL, 0, 0, 0, k_hud_names, NULL},
+
+    {PLAT_OPT_KEY_TEXFILTER, "Texture filter", PLAT_OPT_CHOICE, PAGE_DISPLAY, PLAT_OPT_TEXFILTER_GAME, 0, 0, 0,
+     k_texfilter_names, NULL},
 
     {PLAT_OPT_KEY_VOLUME, "Master volume", PLAT_OPT_RANGE, PAGE_AUDIO, 100, 0, 100, 10, NULL, "%"},
 

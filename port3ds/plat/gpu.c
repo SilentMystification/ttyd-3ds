@@ -582,6 +582,39 @@ uint32_t plat_gpu_tex_create(uint32_t width, uint32_t height, uint32_t fmt, cons
     return h;
 }
 
+uint32_t plat_gpu_tex_max_levels(uint32_t width, uint32_t height) {
+    if (width < 8 || height < 8 || width > 1024 || height > 1024) {
+        return 0;
+    }
+    return (uint32_t)C3D_TexCalcMaxLevel(width, height);
+}
+
+uint32_t plat_gpu_tex_create_mip(uint32_t width, uint32_t height, uint32_t fmt, const void* pixels, uint32_t bytes,
+                                 const void* mip_pixels, uint32_t mip_bytes, uint32_t levels) {
+    if (levels == 0 || levels > plat_gpu_tex_max_levels(width, height)) {
+        return plat_gpu_tex_create(width, height, fmt, pixels, bytes);
+    }
+    u32 h = tex_alloc_slot();
+    if (h == 0) {
+        return 0;
+    }
+    TexSlot* t = &s_tex[h];
+    if (!C3D_TexInitWithParams(&t->tex, NULL,
+                               (C3D_TexInitParams){(u16)width, (u16)height, (u8)levels, (GPU_TEXCOLOR)fmt, GPU_TEX_2D, false})) {
+        t->live = 0;
+        return 0;
+    }
+    /* level 0 first, then the levels in order: citro3d's layout (C3D_TexGetImagePtr) */
+    u32 total = C3D_TexCalcTotalSize(t->tex.size, levels);
+    memcpy(t->tex.data, pixels, bytes < t->tex.size ? bytes : t->tex.size);
+    if (mip_bytes > total - t->tex.size) {
+        mip_bytes = total - t->tex.size;
+    }
+    memcpy((u8*)t->tex.data + t->tex.size, mip_pixels, mip_bytes);
+    GSPGPU_FlushDataCache(t->tex.data, total);
+    return h;
+}
+
 /* VRAM budget helpers (copy targets): the largest block vramAlloc can still give. */
 static u32 vram_largest_kb(void) {
     for (u32 kb = 3072; kb >= 64; kb -= 64) {
@@ -718,6 +751,8 @@ static void apply_state(const PlatGpuState* st) {
         }
         C3D_Tex* t = &s_tex[tu->handle].tex;
         C3D_TexSetFilter(t, tu->mag_linear ? GPU_LINEAR : GPU_NEAREST, tu->min_linear ? GPU_LINEAR : GPU_NEAREST);
+        C3D_TexSetFilterMipmap(t, tu->mip_linear && t->maxLevel != 0 ? GPU_LINEAR : GPU_NEAREST);
+        C3D_TexSetLodBias(t, tu->lod_bias);
         C3D_TexSetWrap(t, (GPU_TEXTURE_WRAP_PARAM)tu->wrap_s, (GPU_TEXTURE_WRAP_PARAM)tu->wrap_t);
         C3D_TexBind(u, t);
     }

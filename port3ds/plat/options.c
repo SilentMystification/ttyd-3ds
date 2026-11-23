@@ -303,6 +303,10 @@ int opt_get_quality(void) {
     int v = plat_opt_get(PLAT_OPT_KEY_QUALITY, PLAT_OPT_QUALITY_AUTO);
     return v < PLAT_OPT_QUALITY_AUTO || v > PLAT_OPT_QUALITY_FAST ? PLAT_OPT_QUALITY_AUTO : v;
 }
+int opt_get_texfilter(void) {
+    int v = plat_opt_get(PLAT_OPT_KEY_TEXFILTER, PLAT_OPT_TEXFILTER_GAME);
+    return v < PLAT_OPT_TEXFILTER_GAME || v > PLAT_OPT_TEXFILTER_NEAREST ? PLAT_OPT_TEXFILTER_GAME : v;
+}
 int opt_get_language(void) {
     int v = plat_opt_get(PLAT_OPT_KEY_LANGUAGE, 0);
     return v < 0 ? 0 : v;

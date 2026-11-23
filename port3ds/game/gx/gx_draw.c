@@ -257,9 +257,7 @@ static void build_state(void) {
         static const u8 wrap[3] = {0 /*CLAMP_TO_EDGE*/, 2 /*REPEAT*/, 3 /*MIRRORED_REPEAT*/};
         tu->wrap_s = wrap[t->wrap_s % 3];
         tu->wrap_t = wrap[t->wrap_t % 3];
-        tu->mag_linear = t->mag_filter != GX_NEAR;
-        tu->min_linear = t->min_filter == GX_LINEAR || t->min_filter == GX_LIN_MIP_NEAR || t->min_filter == GX_LIN_MIP_LIN;
-        tu->lod_bias = (f32)t->lod_bias_q / 32.0f;
+        gx_tex_unit_sampler(tu, t, map); /* min/mag filter, mip filter, LOD bias (the texfilter option) */
     }
     gx_tev_compile(st);
 

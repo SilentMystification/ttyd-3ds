@@ -81,6 +81,7 @@ The game pauses while the menu is open and receives no input.
 | Controls | Reset to defaults | puts the page back to A, B, X, Y, ZR = Z, L, R, START and the C-stick nub |
 | Display | 3D effect | off or on (default on). Stereoscopic 3D is not in the port yet; the setting is stored for when it is |
 | Display | Bottom screen HUD | off, FPS only, or full (default). The log below it stays |
+| Display | Texture filter | game (default), linear, mip or nearest. game: the filtering the game itself asks for. linear: smooth (bilinear) textures everywhere. mip: smooth textures plus smaller pre-shrunk copies (mipmaps) of each texture, which calms the shimmer of distant floors and walls on the small top screen; uses about a third more texture memory and makes a texture's first appearance a little slower. nearest: sharp blocky texels, for comparison. Screen effects, text-sized strips and lookup textures always keep the game's own filtering |
 | Audio | Master volume | 0 to 100 percent in steps of 10 (default 100) |
 | Performance | Quality | auto (default), high or fast. Stored only; later speed features will read it |
 | Language | Game language | PAL version only: English, Deutsch, Francais, Espanol, Italiano. Stored only for now |

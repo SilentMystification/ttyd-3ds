@@ -14,9 +14,11 @@
  */
 #include <malloc.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "gx_internal.h"
+#include "plat/options.h"
 #include "plat/plat.h"
 
 _Static_assert(sizeof(GxTexObj) <= sizeof(GXTexObj), "GxTexObj must fit GXTexObj");
@@ -39,11 +41,51 @@ typedef struct {
     u32 checked_frame;/* frame of the last hash check */
 } CacheEntry;
 
+/* Per cache entry, parallel to s_cache but on the heap (the exe's static data must stay under 16 MB). */
+typedef struct {
+    u8 levels;             /* mip levels after level 0 that the PICA texture has (texfilter=mip) */
+    u32 bytes0, bytes_mip; /* PICA texture memory: level 0, and the levels after it */
+} CacheExtra;
+static CacheExtra* s_x;
+
 static CacheEntry s_cache[CACHE_SIZE];
 static u32 s_frame = 1;
 static u32 s_uploads;
 static u8* s_rgba;      /* decode scratch (1024x1024 RGBA8) */
 static u8* s_tiled;
+
+/* ---- texfilter: the sampling mode (option "texfilter", switch texfilter=, texlodbias=) ----
+ * game: GX's filters as the game sets them; linear / nearest: forced; mip: bilinear plus a mip chain
+ * (GX's own levels where the texture has them, else a box filter at upload) with a linear level filter.
+ * Never applied (always "game"): GXCopyTex targets (screen effects, render to texture), textures that
+ * a TEV stage reads as an indirect offset map, and textures with a side of 4 texels or less (ramps and
+ * lookup strips, where filtering changes what the value means). A texture that GX gave as CI
+ * (palette indexed) is decoded through its TLUT at upload, so what the unit samples is colour and
+ * filtering it matches what GX's own bilinear did after the palette lookup. */
+enum { TF_GAME, TF_LINEAR, TF_MIP, TF_NEAREST };
+static u8 s_mode = TF_GAME;
+static int s_mode_forced;      /* texfilter= switch given: the option is ignored */
+static float s_lod_bias;       /* texlodbias= */
+static u32 s_mip_extra_made;   /* uploads in mip mode, whose texture got a chain */
+static u32 s_live_n, s_live_bytes, s_live_mip;
+static u8 *s_mip_out, *s_mip_a, *s_mip_b; /* mip chain scratch, allocated on the first use of mip mode */
+
+/* what gx_tex_handle_for found for the lookup in progress, read by gx_tex_unit_sampler */
+static struct {
+    u8 copy, levels;
+} s_last;
+
+/* texcensus=N: what TTYD asks for. Per distinct texture at upload and per sampler setup. */
+static int s_census_every;
+static u32 s_census_frames;
+typedef struct {
+    u32 up[6][3][2];   /* uploads: min filter (GX_NEAR..GX_LIN_MIP_LIN), mag (near/linear/other), has GX mips */
+    u32 use[6][3][2];  /* sampler setups (a draw's state build) */
+    u32 copy_use, ind_use, tiny_use, up_total, use_total;
+    u32 fmt[16], fmt_mip[16];
+    u32 bias_nz, edge;
+} Census;
+static Census* s_cen; /* heap, only with texcensus */
 
 /* Copies made by GXCopyTex: destination address -> render-target texture. */
 typedef struct {
@@ -502,8 +544,8 @@ static u32 morton8(u32 x, u32 y) {
     return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3);
 }
 
-/* RGBA8 rows (row 0 = GX t 0) -> PICA texture. Returns the handle. */
-static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h) {
+/* Level 0 of a texture in this PICA format: gray, opaque, one-bit alpha or full. */
+static u32 pick_format(const u8* px, u32 w, u32 h) {
     int gray = 1, opaque = 1, binary = 1;
     for (u32 i = 0; i < w * h; i++) {
         const u8* p = px + i * 4;
@@ -511,9 +553,11 @@ static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h) {
         opaque &= p[3] == 255;
         binary &= p[3] == 0 || p[3] == 255;
     }
-    u32 fmt = gray ? PLAT_TEXFMT_LA8 : opaque ? PLAT_TEXFMT_RGB565 : binary ? PLAT_TEXFMT_RGBA5551 : PLAT_TEXFMT_RGBA8;
-    u32 bpp = fmt == PLAT_TEXFMT_RGBA8 ? 4 : 2;
-    u32 pw = pow2(w), ph = pow2(h);
+    return gray ? PLAT_TEXFMT_LA8 : opaque ? PLAT_TEXFMT_RGB565 : binary ? PLAT_TEXFMT_RGBA5551 : PLAT_TEXFMT_RGBA8;
+}
+
+/* RGBA8 rows (row 0 = GX t 0), w x h, resampled (nearest) to pw x ph and Morton tiled into `out`. */
+static void tile_level(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u32 fmt, u8* out) {
     u32 tiles_w = pw >> 3;
     for (u32 my = 0; my < ph; my++) {
         /* PICA samples t = 0 at the last row in memory */
@@ -523,24 +567,139 @@ static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h) {
             u32 idx = ((my >> 3) * tiles_w + (mx >> 3)) * 64 + morton8(mx & 7, my & 7);
             switch (fmt) {
             case PLAT_TEXFMT_LA8:
-                s_tiled[idx * 2] = p[3];
-                s_tiled[idx * 2 + 1] = p[0];
+                out[idx * 2] = p[3];
+                out[idx * 2 + 1] = p[0];
                 break;
             case PLAT_TEXFMT_RGB565:
-                ((u16*)s_tiled)[idx] = (u16)(((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3));
+                ((u16*)out)[idx] = (u16)(((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3));
                 break;
             case PLAT_TEXFMT_RGBA5551:
-                ((u16*)s_tiled)[idx] =
+                ((u16*)out)[idx] =
                     (u16)(((p[0] >> 3) << 11) | ((p[1] >> 3) << 6) | ((p[2] >> 3) << 1) | (p[3] >> 7));
                 break;
-            default: ((u32*)s_tiled)[idx] = (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; break;
+            default: ((u32*)out)[idx] = (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; break;
             }
         }
     }
+}
+
+static u32 level_bytes(u32 fmt, u32 pw, u32 ph) { return pw * ph * (fmt == PLAT_TEXFMT_RGBA8 ? 4 : 2); }
+
+/* Box filter of a 2x2 block, colour weighted by alpha (so a transparent texel's colour does not bleed in). */
+static inline void box4(const u8* a, const u8* b, const u8* c, const u8* d, u8* o) {
+    u32 wa = a[3], wb = b[3], wc = c[3], wd = d[3], sw = wa + wb + wc + wd;
+    for (int k = 0; k < 3; k++) {
+        o[k] = (u8)(sw != 0 ? (a[k] * wa + b[k] * wb + c[k] * wc + d[k] * wd + sw / 2) / sw
+                            : (u32)(a[k] + b[k] + c[k] + d[k] + 2) >> 2);
+    }
+    o[3] = (u8)((sw + 2) >> 2);
+}
+
+/* Level 1 from level 0 (w x h, resampled as tile_level does to pw x ph): (pw/2) x (ph/2) rows into dst. */
+static void box_first(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u8* dst) {
+    u32 qw = pw >> 1, qh = ph >> 1;
+    for (u32 y = 0; y < qh; y++) {
+        const u8* r0 = px + (size_t)(((2 * y) * h / ph) * w) * 4;
+        const u8* r1 = px + (size_t)(((2 * y + 1) * h / ph) * w) * 4;
+        for (u32 x = 0; x < qw; x++) {
+            u32 x0 = (2 * x) * w / pw, x1 = (2 * x + 1) * w / pw;
+            box4(r0 + x0 * 4, r0 + x1 * 4, r1 + x0 * 4, r1 + x1 * 4, dst + ((size_t)y * qw + x) * 4);
+        }
+    }
+}
+
+/* The next level of a linear RGBA8 level (sw x sh, even sides). */
+static void box_next(const u8* src, u32 sw, u32 sh, u8* dst) {
+    u32 qw = sw >> 1, qh = sh >> 1;
+    for (u32 y = 0; y < qh; y++) {
+        const u8* r0 = src + (size_t)(2 * y) * sw * 4;
+        const u8* r1 = r0 + (size_t)sw * 4;
+        for (u32 x = 0; x < qw; x++) {
+            box4(r0 + x * 8, r0 + x * 8 + 4, r1 + x * 8, r1 + x * 8 + 4, dst + ((size_t)y * qw + x) * 4);
+        }
+    }
+}
+
+/* Bytes of GX texture data before mip level `lvl` of a w x h image. */
+static u32 gx_level_offset(u32 w, u32 h, u32 fmt, u32 lvl) {
+    u32 off = 0;
+    for (u32 l = 0; l < lvl; l++) {
+        off += GXGetTexBufferSize((u16)(w > 1 ? w : 1), (u16)(h > 1 ? h : 1), fmt, GX_FALSE, 0);
+        w >>= 1;
+        h >>= 1;
+    }
+    return off;
+}
+
+static int mip_scratch(void) {
+    if (s_mip_out == NULL) {
+        s_mip_out = memalign(64, 1024 * 1024 * 4 / 3 + 4096);
+        s_mip_a = memalign(64, 512 * 512 * 4);
+        s_mip_b = memalign(64, 256 * 256 * 4);
+        if (s_mip_out == NULL || s_mip_a == NULL || s_mip_b == NULL) {
+            PLOG_W("texfilter: no memory for the mip scratch; mip levels off");
+            free(s_mip_out);
+            free(s_mip_a);
+            free(s_mip_b);
+            s_mip_out = s_mip_a = s_mip_b = NULL;
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* RGBA8 rows (row 0 = GX t 0) -> PICA texture. Returns the handle. `gxt` is the GX texture when the mip
+ * chain may use the game's own levels (its data at gxt->image); `want_mips` asks for a chain at all. */
+static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h, const GxTexObj* gxt, const GxTlutObj* tl,
+                        int want_mips, u8* out_levels, u32* out_bytes0, u32* out_mip_bytes) {
+    u32 fmt = pick_format(px, w, h);
+    u32 bpp = fmt == PLAT_TEXFMT_RGBA8 ? 4 : 2;
+    u32 pw = pow2(w), ph = pow2(h);
+    *out_levels = 0;
+    *out_mip_bytes = 0;
+    *out_bytes0 = pw * ph * bpp;
     *out_w = (u16)pw;
     *out_h = (u16)ph;
     s_uploads++;
-    return plat_gpu_tex_create(pw, ph, fmt, s_tiled, pw * ph * bpp);
+    /* a one-bit alpha texture keeps no chain (a cut-out: a filtered alpha would thin it, and RGBA5551
+     * cannot hold the in-between alphas; the next format up is twice the memory) */
+    u32 levels = want_mips && fmt != PLAT_TEXFMT_RGBA5551 ? plat_gpu_tex_max_levels(pw, ph) : 0;
+    if (levels != 0 && !mip_scratch()) {
+        levels = 0;
+    }
+    if (levels == 0) {
+        tile_level(px, w, h, pw, ph, fmt, s_tiled);
+        return plat_gpu_tex_create(pw, ph, fmt, s_tiled, pw * ph * bpp);
+    }
+    int from_gx = gxt != NULL && gxt->mipmap;
+    const u8* lin = NULL; /* the level being tiled and filtered, linear rows, lw x lh */
+    u32 lw = pw >> 1, lh = ph >> 1, off = 0;
+    if (!from_gx) {
+        box_first(px, w, h, pw, ph, s_mip_a);
+        lin = s_mip_a;
+    }
+    tile_level(px, w, h, pw, ph, fmt, s_tiled); /* level 0; s_rgba is free after this */
+    for (u32 l = 1; l <= levels; l++, lw >>= 1, lh >>= 1) {
+        if (from_gx) {
+            /* the game's own level l: decode, resample to the padded size */
+            u32 gw = (w >> l) ? (w >> l) : 1, gh = (h >> l) ? (h >> l) : 1;
+            const u8* src = (const u8*)gxt->image + gx_level_offset(w, h, gxt->format, l);
+            gx_tex_decode_rgba8(src, gw, gh, gxt->format, tl ? tl->data : NULL, tl ? tl->format : 0, s_rgba);
+            tile_level(s_rgba, gw, gh, lw, lh, fmt, s_mip_out + off);
+        } else {
+            tile_level(lin, lw, lh, lw, lh, fmt, s_mip_out + off);
+            if (l < levels) {
+                u8* nxt = lin == s_mip_a ? s_mip_b : s_mip_a;
+                box_next(lin, lw, lh, nxt);
+                lin = nxt;
+            }
+        }
+        off += level_bytes(fmt, lw, lh);
+    }
+    *out_levels = (u8)levels;
+    *out_mip_bytes = off;
+    s_mip_extra_made++;
+    return plat_gpu_tex_create_mip(pw, ph, fmt, s_tiled, pw * ph * bpp, s_mip_out, off, levels);
 }
 
 typedef u32 __attribute__((may_alias)) u32_alias;
@@ -595,12 +754,24 @@ static u32 hash_bytes(const u8* p, u32 n) {
 static void entry_free(CacheEntry* e) {
     if (e->handle != 0) {
         plat_gpu_tex_free(e->handle);
+        CacheExtra* x = &s_x[e - s_cache];
+        s_live_n--;
+        s_live_bytes -= x->bytes0 + x->bytes_mip;
+        s_live_mip -= x->bytes_mip;
+        memset(x, 0, sizeof(*x));
     }
     memset(e, 0, sizeof(*e));
 }
 
+/* Whether a texture of this GX size gets a chain in mip mode (the sampler exempts the tiny ones anyway). */
+static int wants_mips(const GxTexObj* t) { return s_mode == TF_MIP && t->width > 4 && t->height > 4; }
+
+
+
 /* Converts (or finds) the texture of texture map slot `map`. */
 u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
+    s_last.copy = 0;
+    s_last.levels = 0;
     if (map < 0 || map >= GX_MAX_TEXMAP || !gx.tex_map_valid[map]) {
         return 0;
     }
@@ -612,6 +783,7 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
         if (s_copies[i].addr == t->image && s_copies[i].handle != 0) {
             *out_w = s_copies[i].w;
             *out_h = s_copies[i].h;
+            s_last.copy = 1;
             return s_copies[i].handle;
         }
     }
@@ -651,6 +823,7 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
             e->last_frame = s_frame;
             *out_w = e->tex_w;
             *out_h = e->tex_h;
+            s_last.levels = s_x[e - s_cache].levels;
             return e->handle;
         }
     }
@@ -669,7 +842,9 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
     gx_tex_decode_rgba8(t->image, t->width, t->height, t->format, tl ? tl->data : NULL, tl ? tl->format : 0,
                         s_rgba);
     CacheEntry* e = free_e;
-    e->handle = upload_rgba8(s_rgba, t->width, t->height, &e->tex_w, &e->tex_h);
+    int mips = wants_mips(t);
+    CacheExtra* xe = &s_x[free_e - s_cache];
+    e->handle = upload_rgba8(s_rgba, t->width, t->height, &e->tex_w, &e->tex_h, t, tl, mips, &xe->levels, &xe->bytes0, &xe->bytes_mip);
     if (e->handle == 0) {
         /* texture memory full: free everything not used this frame, retry */
         for (int i = 0; i < CACHE_SIZE; i++) {
@@ -677,11 +852,25 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
                 entry_free(&s_cache[i]);
             }
         }
-        e->handle = upload_rgba8(s_rgba, t->width, t->height, &e->tex_w, &e->tex_h);
+        e->handle = upload_rgba8(s_rgba, t->width, t->height, &e->tex_w, &e->tex_h, t, tl, mips, &xe->levels,
+                                 &xe->bytes0, &xe->bytes_mip);
         if (e->handle == 0) {
             plat_fatal("GX: no texture memory for a %ux%u texture", t->width, t->height);
         }
     }
+    if (s_census_every) {
+        u32 mn = t->min_filter < 6 ? t->min_filter : 0, mg = t->mag_filter < 2 ? t->mag_filter : 2;
+        s_cen->up[mn][mg][t->mipmap != 0]++;
+        s_cen->up_total++;
+        s_cen->fmt[t->format & 15]++;
+        s_cen->fmt_mip[t->format & 15] += t->mipmap != 0;
+        s_cen->bias_nz += t->lod_bias_q != 0;
+        s_cen->edge += t->edge_lod != 0;
+    }
+    s_live_n++;
+    s_live_bytes += xe->bytes0 + xe->bytes_mip;
+    s_live_mip += xe->bytes_mip;
+    s_last.levels = xe->levels;
     e->image = t->image;
     e->w = t->width;
     e->h = t->height;
@@ -699,6 +888,130 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
     return e->handle;
 }
 
+/* A TEV stage of the current setup reads `map` as an indirect offset texture. */
+static int map_is_indirect(int map) {
+    int num = gx.num_tev ? gx.num_tev : 1;
+    for (int s = 0; s < num && s < GX_MAX_TEV; s++) {
+        if (gx.tev[s].ind_enabled && gx.tev[s].ind_stage < 4 && gx.ind[gx.tev[s].ind_stage].map == map) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void census_sample(const GxTexObj* t, int copy, int ind, int tiny) {
+    u32 mn = t->min_filter < 6 ? t->min_filter : 0, mg = t->mag_filter < 2 ? t->mag_filter : 2;
+    s_cen->use[mn][mg][t->mipmap != 0]++;
+    s_cen->use_total++;
+    s_cen->copy_use += copy;
+    s_cen->ind_use += ind;
+    s_cen->tiny_use += tiny;
+}
+
+/* The filter fields of texture unit `tu` for map `map` (texture `t`), after gx_tex_handle_for(map). */
+void gx_tex_unit_sampler(PlatGpuTexUnit* tu, const GxTexObj* t, int map) {
+    int copy = s_last.copy, ind = 0, tiny = t->width <= 4 || t->height <= 4;
+    if (s_mode != TF_GAME || s_census_every) {
+        ind = map_is_indirect(map);
+    }
+    if (s_census_every) {
+        census_sample(t, copy, ind, tiny);
+    }
+    /* what GX asks for */
+    tu->mag_linear = t->mag_filter != GX_NEAR;
+    tu->min_linear = t->min_filter == GX_LINEAR || t->min_filter == GX_LIN_MIP_NEAR || t->min_filter == GX_LIN_MIP_LIN;
+    tu->mip_linear = 0;
+    tu->lod_bias = 0.0f;
+    if (s_mode == TF_GAME || copy || ind || tiny) {
+        return; /* see the rule above s_mode */
+    }
+    switch (s_mode) {
+    case TF_NEAREST:
+        tu->mag_linear = tu->min_linear = 0;
+        break;
+    case TF_MIP:
+        tu->mag_linear = tu->min_linear = 1;
+        tu->mip_linear = s_last.levels != 0;
+        tu->lod_bias = (f32)t->lod_bias_q / 32.0f + s_lod_bias;
+        break;
+    default: /* TF_LINEAR */
+        tu->mag_linear = tu->min_linear = 1;
+        break;
+    }
+    if (s_mode != TF_MIP) {
+        tu->lod_bias = s_lod_bias;
+    }
+}
+
+static const char* const k_mode_names[] = {"game", "linear", "mip", "nearest"};
+
+/* Once per frame: the option (or the switch) -> mode; a change drops every converted texture. */
+static void mode_refresh(void) {
+    if (s_mode_forced) {
+        return;
+    }
+    int v = opt_get_texfilter();
+    if (v != s_mode) {
+        PLOG_I("texfilter: %s -> %s", k_mode_names[s_mode], k_mode_names[v]);
+        s_mode = (u8)v;
+        gx_tex_invalidate_all();
+    }
+}
+
+static void mode_init(void) {
+    char v[24];
+    s_lod_bias = 0.0f;
+    if (plat_switch_value("texlodbias", v, sizeof(v))) {
+        s_lod_bias = (float)atof(v);
+    }
+    if (plat_switch_value("texfilter", v, sizeof(v))) {
+        for (int i = 0; i < 4; i++) {
+            if (strcmp(v, k_mode_names[i]) == 0 || v[0] == (char)('0' + i)) {
+                s_mode = (u8)i;
+                s_mode_forced = 1;
+            }
+        }
+        if (!s_mode_forced) {
+            PLOG_W("texfilter: unknown mode \"%s\" (game, linear, mip, nearest)", v);
+        }
+    }
+    s_census_every = plat_switch_int("texcensus", 0);
+    if (!s_mode_forced) {
+        s_mode = (u8)opt_get_texfilter();
+    }
+    PLOG_I("texfilter: %s%s, lod bias %d/100", k_mode_names[s_mode], s_mode_forced ? " (switch)" : "",
+           (int)(s_lod_bias * 100.0f));
+}
+
+static void census_report(void) {
+    static const char* const mn[6] = {"NEAR", "LINEAR", "NEAR_MIP_NEAR", "LIN_MIP_NEAR", "NEAR_MIP_LIN", "LIN_MIP_LIN"};
+    static const char* const gn[3] = {"NEAR", "LINEAR", "other"};
+    PLOG_I("texcensus: frame %u: %u distinct uploads, %u sampler setups (copy targets %u, indirect %u, tiny %u)",
+           (unsigned)s_frame, (unsigned)s_cen->up_total, (unsigned)s_cen->use_total, (unsigned)s_cen->copy_use,
+           (unsigned)s_cen->ind_use, (unsigned)s_cen->tiny_use);
+    for (int a = 0; a < 6; a++) {
+        for (int b = 0; b < 3; b++) {
+            for (int m = 0; m < 2; m++) {
+                if (s_cen->up[a][b][m] || s_cen->use[a][b][m]) {
+                    PLOG_I("texcensus:   min %-13s mag %-6s gxmip %d: uploads %u, setups %u", mn[a], gn[b], m,
+                           (unsigned)s_cen->up[a][b][m], (unsigned)s_cen->use[a][b][m]);
+                }
+            }
+        }
+    }
+    for (int f = 0; f < 16; f++) {
+        if (s_cen->fmt[f]) {
+            PLOG_I("texcensus:   gx format %d: %u uploads, %u with mip levels", f, (unsigned)s_cen->fmt[f],
+                   (unsigned)s_cen->fmt_mip[f]);
+        }
+    }
+    PLOG_I("texcensus:   uploads with LOD bias != 0: %u, with edge LOD: %u", (unsigned)s_cen->bias_nz,
+           (unsigned)s_cen->edge);
+    PLOG_I("texmem: %s: %u textures live, %u KB (of which mip levels %u KB), %u mip chains built", k_mode_names[s_mode],
+           (unsigned)s_live_n, (unsigned)(s_live_bytes >> 10), (unsigned)(s_live_mip >> 10),
+           (unsigned)s_mip_extra_made);
+}
+
 void gx_tex_invalidate_all(void) {
     for (int i = 0; i < CACHE_SIZE; i++) {
         if (s_cache[i].handle) {
@@ -709,6 +1022,14 @@ void gx_tex_invalidate_all(void) {
 
 void gx_tex_frame_end(void) {
     stat_frame_end();
+    mode_refresh();
+    if (s_census_every && ++s_census_frames % (u32)s_census_every == 0) {
+        census_report();
+    } else if (s_stats_every && s_census_frames++ % (u32)s_stats_every == 0) {
+        PLOG_I("texmem: %s: %u textures live, %u KB (of which mip levels %u KB), %u mip chains built",
+               k_mode_names[s_mode], (unsigned)s_live_n, (unsigned)(s_live_bytes >> 10), (unsigned)(s_live_mip >> 10),
+               (unsigned)s_mip_extra_made);
+    }
     s_frame++;
     for (int i = 0; i < CACHE_SIZE; i++) {
         if (s_cache[i].handle && s_frame - s_cache[i].last_frame > EVICT_FRAMES) {
@@ -759,6 +1080,17 @@ u32 gx_tex_copy_target(const void* addr, u16 w, u16 h, u8 fmt) {
 
 void gx_tex_init(void) {
     s_stats_every = plat_switch_int("texstats", 0);
+    mode_init();
+    s_x = calloc(CACHE_SIZE, sizeof(CacheExtra));
+    if (s_x == NULL) {
+        plat_fatal("GX: no memory for the texture cache");
+    }
+    if (s_census_every) {
+        s_cen = calloc(1, sizeof(Census));
+        if (s_cen == NULL) {
+            s_census_every = 0;
+        }
+    }
     s_arena_hi = (u32)OSGetArenaHi();
     s_arena_lo = s_arena_hi - ARENA_BYTES;
     if (s_stats_every) {

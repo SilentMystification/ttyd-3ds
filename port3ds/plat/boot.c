@@ -225,7 +225,7 @@ static void message_screen(const char* text) {
     }
     gfxInitDefault();
     consoleInit(GFX_TOP, NULL);
-    printf("\n  Paper Mario: The Thousand-Year Door\n  (3DS port, build %s)\n\n", PORT3DS_BUILD_STRING);
+    printf("\n  Paper Mario: The Thousand-Year Door\n  (3DS port v%s, build %s)\n\n", PORT3DS_VERSION, PORT3DS_BUILD_STRING);
     printf("%s\n\n  Press START to exit.\n", text);
     while (aptMainLoop()) {
         hidScanInput();
@@ -287,7 +287,7 @@ int main(int argc, char** argv) {
     plat_log_init(s_netload || plat_switch_has("livelog"));
     plat_crash_setup();
     plat_stack_register(0, "main", __stacksize__);
-    PLOG_I("TTYD 3DS build %s, switches \"%s\"", PORT3DS_BUILD_STRING, plat_switches_text());
+    PLOG_I("TTYD 3DS v%s build %s, switches \"%s\"", PORT3DS_VERSION, PORT3DS_BUILD_STRING, plat_switches_text());
     PLOG_I("boot: argc %d argv[0] \"%s\" 3dslink_host 0x%08lx netload %d", argc,
            (argc > 0 && argv[0] != NULL) ? argv[0] : "(null)", (unsigned long)__3dslink_host.s_addr, s_netload);
 

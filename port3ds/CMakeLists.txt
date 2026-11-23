@@ -120,17 +120,19 @@ ttyd_game_objects(ttyd_musyx ${TTYD_MUSYX_SOURCES})
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/TtydCia.cmake")
 
-# Build number: commits on the branch and the short hash, shown in the log,
+# Version (port3ds/VERSION, the single source of truth; docs/RELEASE.md) and
+# build number (commits on the branch and the short hash): shown in the log,
 # the HUD and crash reports.
 find_package(Git QUIET)
-set(TTYD_BUILD_COUNT 0)
-set(TTYD_BUILD_HASH unknown)
-if(GIT_FOUND)
-    execute_process(COMMAND "${GIT_EXECUTABLE}" rev-list --count HEAD WORKING_DIRECTORY "${TTYD_REPO_DIR}"
-        OUTPUT_VARIABLE TTYD_BUILD_COUNT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD WORKING_DIRECTORY "${TTYD_REPO_DIR}"
-        OUTPUT_VARIABLE TTYD_BUILD_HASH OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/VERSION" TTYD_VERSION_CORE LIMIT_COUNT 1)
+string(STRIP "${TTYD_VERSION_CORE}" TTYD_VERSION_CORE)
+if(NOT TTYD_VERSION_CORE MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+    message(FATAL_ERROR "port3ds/VERSION must be MAJOR.MINOR.MICRO (got '${TTYD_VERSION_CORE}')")
 endif()
+set(TTYD_VERSION_MAJOR ${CMAKE_MATCH_1})
+set(TTYD_VERSION_MINOR ${CMAKE_MATCH_2})
+set(TTYD_VERSION_MICRO ${CMAKE_MATCH_3})
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/VERSION")
 set(TTYD_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(TTYD_REL_OBJECTS)
 set(_rel_decls "")
@@ -189,13 +191,12 @@ if(NOT _gen_rc EQUAL 0)
     message(FATAL_ERROR "gen_disc_data.py failed")
 endif()
 configure_file("${TTYD_GEN_DIR}/port_disc_data_gen.h.tmp" "${TTYD_GEN_DIR}/port_disc_data_gen.h" COPYONLY)
-file(WRITE "${TTYD_GEN_DIR}/port3ds_build.h.tmp"
-    "#define PORT3DS_BUILD_STRING \"#${TTYD_BUILD_COUNT} ${TTYD_BUILD_HASH}\"\n")
-configure_file("${TTYD_GEN_DIR}/port3ds_build.h.tmp" "${TTYD_GEN_DIR}/port3ds_build.h" COPYONLY)
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/BuildStamp.cmake")
 # Refreshes port3ds_build.h on every build (see cmake/BuildStamp.cmake).
 add_custom_target(ttyd_build_stamp
     COMMAND "${CMAKE_COMMAND}" "-DTTYD_REPO_DIR=${TTYD_REPO_DIR}" "-DTTYD_GEN_DIR=${TTYD_GEN_DIR}"
-            "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}" -P "${CMAKE_CURRENT_LIST_DIR}/cmake/BuildStamp.cmake"
+            "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
+            "-DTTYD_VERSION_CORE=${TTYD_VERSION_CORE}" -P "${CMAKE_CURRENT_LIST_DIR}/cmake/BuildStamp.cmake"
     VERBATIM)
 add_custom_target(ttyd_rels DEPENDS ${TTYD_REL_OBJECTS})
 
@@ -345,4 +346,6 @@ ttyd_add_cia(ttyd
     SUBTITLE "${_subtitle}"
     SHORT_DESC "${_desc}"
     UNIQUE_ID ${TTYD_UNIQUE_ID}
-    PRODUCT_CODE ${TTYD_PRODUCT_CODE})
+    PRODUCT_CODE ${TTYD_PRODUCT_CODE}
+    VERSION_MAJOR ${TTYD_VERSION_MAJOR} VERSION_MINOR ${TTYD_VERSION_MINOR} VERSION_MICRO ${TTYD_VERSION_MICRO}
+    VERSION_TEXT "${TTYD_VERSION_CORE}")

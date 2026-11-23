@@ -1,5 +1,6 @@
 # ttyd_add_cia(<target>
 #     TITLE <text> [NAME <text>] SUBTITLE <text> UNIQUE_ID <0x...> PRODUCT_CODE <KTR-N-XXXX>
+#     [VERSION_MAJOR <n> VERSION_MINOR <n> VERSION_MICRO <n> VERSION_TEXT <x.y.z>]
 #     [SHORT_DESC <text>] [AUTHOR <text>])
 #
 # TITLE is the short name the rsf takes (makerom limits it to 8 characters).
@@ -25,7 +26,7 @@ get_filename_component(TTYD_PORT3DS_DIR "${TTYD_PORT3DS_DIR}" ABSOLUTE)
 get_filename_component(TTYD_REPO_DIR "${TTYD_PORT3DS_DIR}/.." ABSOLUTE)
 
 function(ttyd_add_cia target)
-    cmake_parse_arguments(ARG "" "TITLE;NAME;SUBTITLE;UNIQUE_ID;PRODUCT_CODE;SHORT_DESC;AUTHOR" "" ${ARGN})
+    cmake_parse_arguments(ARG "" "TITLE;NAME;SUBTITLE;UNIQUE_ID;PRODUCT_CODE;SHORT_DESC;AUTHOR;VERSION_MAJOR;VERSION_MINOR;VERSION_MICRO;VERSION_TEXT" "" ${ARGN})
     foreach(req TITLE UNIQUE_ID PRODUCT_CODE)
         if(NOT ARG_${req})
             message(FATAL_ERROR "ttyd_add_cia(${target}): ${req} is required")
@@ -36,6 +37,15 @@ function(ttyd_add_cia target)
     endif()
     if(NOT ARG_SHORT_DESC)
         set(ARG_SHORT_DESC "${ARG_NAME}")
+    endif()
+    # The CIA title version (makerom -major/-minor/-micro) and the version in
+    # the SMDH description (the SMDH has no version field).
+    set(version_args)
+    if(DEFINED ARG_VERSION_MAJOR)
+        set(version_args -major ${ARG_VERSION_MAJOR} -minor ${ARG_VERSION_MINOR} -micro ${ARG_VERSION_MICRO})
+    endif()
+    if(ARG_VERSION_TEXT)
+        set(ARG_SHORT_DESC "${ARG_SHORT_DESC} v${ARG_VERSION_TEXT}")
     endif()
     if(NOT ARG_AUTHOR)
         set(ARG_AUTHOR "ttyd-3ds")
@@ -83,6 +93,7 @@ function(ttyd_add_cia target)
         OUTPUT "${out_dir}/${target}.cia"
         COMMAND "${MAKEROM}" -f cia -o "${out_dir}/${target}.cia" -target t -exefslogo
                 -elf "$<TARGET_FILE:${target}>" -rsf "${rsf}"
+                ${version_args}
                 -icon "${art}/icon.smdh" -banner "${art}/banner.bnr"
                 "-DAPP_TITLE=${ARG_TITLE}" "-DAPP_PRODUCT_CODE=${ARG_PRODUCT_CODE}"
                 "-DAPP_UNIQUE_ID=${ARG_UNIQUE_ID}"

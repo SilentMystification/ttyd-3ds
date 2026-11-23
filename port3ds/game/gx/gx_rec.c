@@ -799,7 +799,7 @@ void gx_rec_init(void) {
     if (mode == 0) {
         return;
     }
-    u32 kb = (u32)plat_switch_int("gxthreadkb", 1024);
+    u32 kb = (u32)plat_switch_int("gxthreadkb", 4096);
     u32 words = 1u << 16;
     while (words < kb * 256u && words < (1u << 22)) {
         words <<= 1;

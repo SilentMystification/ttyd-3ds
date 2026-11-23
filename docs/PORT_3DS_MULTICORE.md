@@ -73,7 +73,7 @@ Code: `port3ds/game/gx/gx_rec.c` (the record, the translator thread, the fences,
 
 GX translation is three quarters of the game thread in all three scenes, well above the 25% threshold, so A was built. What the measurements also showed, and the results below confirm: the game's own work outside GX is small (with `gxthread=1` the game thread's busy time is 24.1 ms in gor_01 and 9-10 ms in the battle and aaa_00, recording included), so moving translation can at most overlap that much.
 
-**The record** (a ring of 32-bit words in the regular heap, 1 MB, `gxthreadkb`):
+**The record** (a ring of 32-bit words in the regular heap, 4 MB, `gxthreadkb`):
 
 | Command | Words | Source |
 |---|---|---|
@@ -129,21 +129,33 @@ So the memstable registry plus the fences make display lists, textures and TLUTs
 
 **The split (`gxthread=2`).** The first build recorded everything and translated it on core 2. That moved the game thread from 73.5 to 28.3 ms busy in gor_01, but the frame stayed at 83.6 ms: core 2 then carried the translation (about 67 ms, about 14 ms more than on core 0: recording and replaying the calls costs about 0.4 µs each way per call in Azahar, 25 K calls per frame) plus the replay of the frame before (18-31 ms). Moving the replay to core 0 (`gpucore=0`) was worse (87.8 ms). So the game thread now translates the start of each frame itself, while core 2 replays the frame before, and records the rest from a split point, counted in display-list calls; the split moves by hill climbing on the frame's work time (start to the frame's fence), 8 frames per step (`gxthreadsplit=0` records everything, `gxthreadsplitat=N` fixes it). In gor_01, fixed splits gave a work time of 81.8 ms (0 lists direct), 68.9 (2000), 69.0 (3000), 69.3 (4000), 69.5 (5000) and 74.7 (5440), against 73.5 with `gxthread=0`: the translation is one serial chain, and only the game's own work (about 10-15 ms here) and the replay can overlap it.
 
-**Results** (`gxthreadstats=60`, frames 1201-1261, adaptive split):
+**Frame times** (`gxthreadstats=60`, the window ending at frame 1261, adaptive split; `gxthread=2` with the array snapshots, `gxthread=1` before them, which only adds the copies):
 
 | | gor_01 | gon_02 (battle) | aaa_00 |
 |---|---|---|---|
 | `gxthread=0`: frame / game busy | 83.6 / 73.5 ms | 48.7 / 33.9 ms | 50.2 / 34.5 ms |
 | `gxthread=1`: frame / busy / inline translation at the fence | 100.3 / 24.1 / 67.9 ms | 50.1 / 9.1 / 33.3 ms | 50.2 / 9.9 / 32.3 ms |
-| `gxthread=2`: frame / busy / fence wait | 83.6 / 36.8 / 32.6 ms | 49.9 / 13.8 / 20.9 ms | **44.0** / 18.7 / 14.5 ms |
-| `gxthread=2`: lists translated directly (split) | 1302 of 5427 | 519 of 2698 | 1021 of 2814 |
-| `gxthread=2`: translator busy / render (core 2) | 52.1 / 30.9 ms (99%) | 27.9 / 23.5 ms (103%) | 21.4 / 8.9 ms (68%) |
+| `gxthread=2`: frame / busy / fence wait | 83.6 / 43.9 / 26.1 ms | 49.9 / 25.5 / 12.8 ms | **45.4** / 17.1 / 16.1 ms |
+| `gxthread=2`: lists translated directly (split) | 1959 of 5427 | 1698 of 2698 | 692 of 2814 |
+| `gxthread=2`: translator busy / render (core 2) | 47.6 / 30.2 ms (93%) | 16.6 / 23.6 ms (80%) | 24.7 / 8.6 ms (73%) |
 | record per frame (`gxthread=1`) | 24.8 K commands, 494 KB | 11.3 K commands, 226 KB | 10.5 K commands, 198 KB |
+| before the snapshots, `gxthread=2`: frame / busy / fence | 83.6 / 36.8 / 32.6 | 49.9 / 13.8 / 20.9 | 44.0 / 18.7 / 14.5 |
 
-The game thread's busy time drops by 50-60% in every scene, but the frame does not follow: gor_01 is unchanged, the battle is 1.2 ms slower, aaa_00 6 ms faster. Core 2 is full in gor_01 and the battle. (Core-2 utilisation adds the translator's and the render thread's busy times, both wall-clock while running, so preemption between them counts twice; above 100% means saturated.)
+The game thread's busy time drops by 40-70%, but the frame does not follow: gor_01 is unchanged (both 5 vblanks), the battle's frame work (busy + fence) is 38.2 against 33.9 ms (the same 3 vblanks), aaa_00's 33.2 against 34.5 ms and its frame 45.4 against 50.2 ms. Core 2 is nearly full in gor_01. (Core-2 utilisation adds the translator's and the render thread's busy times, both wall-clock while running, so preemption between them counts twice.)
 
-**Default: `gxthread=0`.** `gxthread=2` is not faster everywhere tested (gon_02 is slower), so it stays opt-in. What would change that:
+**Verification** (all in Azahar, build of this branch):
+
+| Test | Result |
+|---|---|
+| Images, `vsh_accept.py` method, 24 consecutive shots from frame 1140, `gxthread=0` vs 1 vs 2 (gor_01, gon_02, aaa_00) | static pixels: depth identical everywhere, colour within 2 (gor_01) and 1 (gon_02), identical in aaa_00 (every pixel of every shot); no seam, no flicker at static pixels. The game is not deterministic between runs, so the whole-frame differences were on animated content, as between two `gxthread=0` runs |
+| The same under `determ` (one retrace per frame, so frame N is the same game state in every run) | two `gxthread=0` runs: every pixel of 24 shots identical (the noise floor is zero). `gxthread=1` and `2` first differed in gor_01 at Goombella (animdrv's shared skinning scratch read late, see the audit); with the array snapshots **every pixel of every shot is identical to `gxthread=0`**: gor_01 (modes 1 and 2), gon_02 (2), aaa_00 (2) |
+| Game state: `determ gwdump=10` and the 1600-frame padscript of PORT_3DS_TEST_INFRA.md (gor_01, walking, A and B), `gw_diff.py --logs` | `gxthread=1` and `2` against `0`: **160 records equal**, frames 10-1600, all 23 fields including the raw `GlobalWork` hash; again after the snapshots |
+| `gxthread=3 gxcache=2` over `map_sweep.py --maps gor_01,tik_01,gor_01,hei_01,gon_02 --story 30 --frames 300` | 4 of 4 maps ok (gor_01, tik_01, hei_01, gon_02 with its battle; the REL relinks `tik`, `hei`, `gon`): every cache hit decoded again and compared, **0 mismatched, 0 stale**, 6 trust revocations; verify counters **0** lists changed between call and translation, **0** getter mismatches, **0** reads after a later fill, write or release report. Release fences 0.05-0.08 per frame at the map changes. In verify mode every getter is a fence (66-194 per frame here, `winmgr.c`'s scissor reads), which keeps its late-read window short; the `determ` image runs above cover the full window of `gxthread=1` and `2` |
+| `gxthread=2 gxcache=2`, the same sweep | 4 of 4 maps ok, **0 mismatched, 0 stale**, same revocations: the cache, trust and pass groups owned by the translator thread and the split's direct part. In the battle the array snapshots reach 1.4 MB per frame (every character is skinned on the CPU), which filled the 1 MB ring (a full fence a frame); the ring's default is now 4 MB |
+
+**Default: `gxthread=0`.** `gxthread=2` is identical, but not faster everywhere tested (the battle's frame work is slower, gor_01 unchanged), so it stays opt-in. What would change that:
 - the per-call cost of the record (a third of the translator's extra time): record state as deltas at draws, as Star3D does, instead of call by call;
+- the array snapshots of `GXBegin` primitives: 56 KB a frame in gor_01 but 1.4 MB in a battle. Copying only what the game rewrites within the frame needs a signal before the rewrite (the flush report comes after it), so it stays a copy of every indexed span;
 - hardware numbers: the replay's cost and the cores' relative speed are Azahar's here; the split adapts to whatever they are on the console, and `gxthreadstats` measures it there;
 - less translation work in total (the shader path already removed the CPU transform; the display-list hit path and immediate mode are what is left).
 

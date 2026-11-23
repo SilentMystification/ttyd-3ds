@@ -35,6 +35,16 @@ Order matters: each step proves something the next one relies on.
    - `sdmc:/3ds/ttyd/card` must be unchanged throughout.
 7. **Sleep during a transfer.** Close the lid during a push. Expect `error 16 sleep`, with the install cancelled.
 
+6b. **Push during each game state (owner requirement: no state of the running game may prevent an update).** Run `$D selftest` first (no console; the request framing against a host build of the device's decoder). Then, with TTYD running under devupdate and `tools/port3ds/run_hw.py --no-send` attached for the log, push `build/3ds/game/ttyd.cia --wait 120` (the build's `ttyd.version` sidecar goes along as the version text) in each of these states, and check the bottom screen shows `build #N -> #M`, the push installs, and the new build starts:
+   - Options menu open (greyed top screen); Select menu open;
+   - during a map change (door, pipe, `warp`), and while Rogueport loads;
+   - at a battle start and in the middle of a battle;
+   - during a save (the save-point menu, or a card write in the log);
+   - with the 3D slider up (stereo on), and in the pause-grey screen;
+   - after a crash, in recovery mode;
+   - with the console on a slow link (far from the access point): the push may fail direct. The PC must then retry by itself through the SD card (`--stage`); also try `--stage` on its own.
+   For each: the log has `devupdate: the game thread paused after N ms (phase ...)`, or the warning `did not reach a frame boundary in 2000 ms; going on (phase ..., map ..., options menu ., save busy ., stereo ., ...)` followed by the install and the relaunch (`relaunching`, or `the relaunch did not end the process in 8 s; ending it`). Note any state that took the warning path and what the phase line said. A refused or failed push (`error 13..18 ...: stage=... rc=...`) must leave the old build installed and the game running; copy the `rc=` value (AM's result code) into the notes. If the console refuses a direct push (the old `error 17 write failed at ~8 KiB` pattern), record `rc` and whether `--stage` succeeded.
+
 7b. **Console walk (a milestone check only, not routine).** Needs steps 3, 5 and 6 first (relaunch with deliver arguments, recovery, TTYD under devupdate).
    - Small first: `tools/port3ds/hw_walk.py --name first --maps gor_01,hei_00,gon_02 --frames 400 --shots 1 --yes`. It prints the entry count and estimate, uploads, starts, and follows the live log.
    - Check: three `[QUEUE] entry N ... done` lines, `[QUEUE] done`, `build/hw-walk/first/results.json`, a PNG for each entry in `build/hw-walk/first/shots/`, and no one touched the console.

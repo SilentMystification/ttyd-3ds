@@ -20,7 +20,9 @@
  *   8  u32 flags: bit 0 relaunch this title after a push, bit 1 jump to the
  *      pushed (or given) title after a push
  *      bit 2: the argument area starts with a version text for the incoming build
- *      (one length byte, then that many characters; args_len counts it)
+ *      (one length byte, then that many characters; args_len counts it; see proto.c)
+ *      bit 3: push through the SD card: the CIA is written to files_dir/stage.cia first
+ *      (through the app's store), read back and CRC-checked, then installed from there
  *  12  u32 payload size (the CIA)
  *  16  u32 payload CRC32 (zlib's)
  *  20  u32 argument length (switch text for the next launch)
@@ -48,6 +50,7 @@
 
 #include "ctrdk/devupdate.h"
 #include "internal.h"
+#include "proto.h"
 
 /* Azahar cannot do an APT application jump. A test harness that wants to
  * emulate the relaunch creates EMU_MARKER; the library then also writes the
@@ -57,8 +60,6 @@
 #define EMU_MARKER "sdmc:/3ds/ctrdk-emulate-relaunch"
 #define EMU_ARGS "sdmc:/3ds/ctrdk-launch-args.txt"
 
-#define MAGIC "CDU1"
-#define PROTO_VERSION 1
 #define ARG_PREFIX "ctrdk:"
 #define ARG_PREFIX_LEN 6
 #define DELIVER_BYTES 0x300
@@ -66,22 +67,20 @@
 #define LOG_TAIL 8192
 #define THREAD_STACK 0x6000
 #define THREAD_PRIO 0x30
+#define RELAUNCH_GRACE_S 8 /* a relaunch must have ended the process this soon, or the server thread ends it */
 
-enum { CMD_PING = 1, CMD_PUSH, CMD_RESTART, CMD_REPORT, CMD_LAUNCH, CMD_FILES, CMD_QUEUE };
-enum { FLAG_RELAUNCH = 1u << 0, FLAG_LAUNCH = 1u << 1, FLAG_VERSION = 1u << 2 };
-
-typedef struct __attribute__((packed)) {
-    char magic[4];
-    u16 version;
-    u16 cmd;
-    u32 flags;
-    u32 size;
-    u32 crc;
-    u32 args_len;
-    u64 title_id;
-    char token[32];
-} Header;
-_Static_assert(sizeof(Header) == 64, "protocol header is 64 bytes");
+typedef DuHeader Header;
+#define CMD_PING DU_CMD_PING
+#define CMD_PUSH DU_CMD_PUSH
+#define CMD_RESTART DU_CMD_RESTART
+#define CMD_REPORT DU_CMD_REPORT
+#define CMD_LAUNCH DU_CMD_LAUNCH
+#define CMD_FILES DU_CMD_FILES
+#define CMD_QUEUE DU_CMD_QUEUE
+#define FLAG_RELAUNCH DU_FLAG_RELAUNCH
+#define FLAG_LAUNCH DU_FLAG_LAUNCH
+#define FLAG_VERSION DU_FLAG_VERSION
+#define FLAG_STAGE DU_FLAG_STAGE
 
 static DevUpdateConfig s_cfg;
 static bool s_running;
@@ -96,7 +95,7 @@ static Result s_am_rc;
 static u64 s_title_id;
 static aptHookCookie s_cookie;
 static const char* s_report;
-static char s_incoming[48]; /* the PC tool's version text of the build being pushed ("" = none) */
+static char s_incoming[DU_VERSION_MAX + 1]; /* the PC tool's version text of the build being pushed ("" = none) */
 static char s_from[48];     /* the build that relaunched us (deliver argument ctrdk_from=) */
 
 static u8 s_buf[CHUNK] __attribute__((aligned(64)));
@@ -426,10 +425,12 @@ static void hand_over(int fd, bool self, u64 tid, const char* args, bool recover
         }
         send_line(fd, "done");
         shutdown(fd, SHUT_RDWR);
-    } else {
-        /* A queue relaunch has no PC waiting: if the app's exit path does not end the process in
-         * time (its game thread is stuck), the server thread ends it. */
-        s_relaunch_deadline = svcGetSystemTick() + 8ull * SYSCLOCK_ARM11;
+    }
+    if (fd < 0 || s_cfg.on_relaunch != NULL) {
+        /* No state of the app may prevent an update: if the app's exit path does not end the process
+         * in time (its game thread is stuck in a load, a menu loop that does not poll), the server
+         * thread ends it. */
+        s_relaunch_deadline = svcGetSystemTick() + (u64)RELAUNCH_GRACE_S * SYSCLOCK_ARM11;
     }
     log_msg(2, "devupdate: relaunch requested (%s, args \"%s\")", self ? "this title" : "another title",
             s_next_args + ARG_PREFIX_LEN);
@@ -441,6 +442,189 @@ static void hand_over(int fd, bool self, u64 tid, const char* args, bool recover
         }
         s_cfg.on_relaunch(s_cfg.user);
     }
+}
+
+/* Where a chunk of the CIA goes: AM's install handle, or the staging file on the card. */
+typedef struct {
+    Handle cia;       /* AM */
+    const char* part; /* staging: the .part file (through the app's store) */
+    Result rc;        /* the last AM or store result */
+} Sink;
+
+static bool sink_am(Sink* k, u32 off, const u8* p, u32 n) {
+    u32 written = 0;
+    k->rc = FSFILE_Write(k->cia, &written, off, p, n, 0);
+    if (R_SUCCEEDED(k->rc) && written != n) {
+        k->rc = 0xE0000000u | written; /* a short write: report the length that went in */
+    }
+    return R_SUCCEEDED(k->rc);
+}
+
+static bool sink_store(Sink* k, u32 off, const u8* p, u32 n) {
+    k->rc = (Result)du_store_write(k->part, off, p, n);
+    return k->rc == 0;
+}
+
+/* Exactly n bytes from the socket into buf: 0, or the failure of recv_some (0 = closed -> -4). */
+static int recv_fill(int fd, u8* buf, u32 n) {
+    u32 got = 0;
+    while (got < n) {
+        int r = recv_some(fd, buf + got, n - got, 15000);
+        if (r <= 0) {
+            return r == 0 ? -4 : r;
+        }
+        got += (u32)r;
+    }
+    return 0;
+}
+
+enum { PUMP_OK = 0, PUMP_SLEEP = -2, PUMP_CLOSED = -4, PUMP_TIMEOUT = -1, PUMP_SINK = -5 };
+
+/* Receives the payload into the sink. Every write is a full CHUNK (64 KiB) except the last: AM sees a
+ * fixed, aligned write pattern whatever the network's segments do. Returns a PUMP_ code; *done is the
+ * offset reached, *crc the running CRC. */
+static int pump_socket(int fd, u32 size, Sink* k, bool (*sink)(Sink*, u32, const u8*, u32), u32* done, u32* crc) {
+    u32 next_report = 1u << 20;
+    u64 last_status = 0;
+    *done = 0;
+    *crc = 0xFFFFFFFFu;
+    status(DEVUPDATE_PH_RECEIVING, 0, size, NULL);
+    while (*done < size) {
+        u32 want = size - *done < CHUNK ? size - *done : CHUNK;
+        int r = recv_fill(fd, s_buf, want);
+        if (r != 0) {
+            return r;
+        }
+        *crc = crc_update(*crc, s_buf, want);
+        if (!sink(k, *done, s_buf, want)) {
+            return PUMP_SINK;
+        }
+        *done += want;
+        if (*done >= next_report || *done == size) {
+            send_line(fd, "progress %lu %lu", (unsigned long)*done, (unsigned long)size);
+            next_report = *done + (1u << 20);
+        }
+        if (s_cfg.on_progress != NULL) {
+            s_cfg.on_progress(*done, size, s_cfg.user);
+        }
+        u64 now = svcGetSystemTick();
+        if (*done == size || now - last_status >= SYSCLOCK_ARM11 / 10) {
+            last_status = now;
+            status(DEVUPDATE_PH_RECEIVING, *done, size, NULL);
+        }
+    }
+    return PUMP_OK;
+}
+
+/* Staged CIA: reads the file in chunks, into the sink (AM) or just for the CRC (sink NULL). */
+static int pump_file(FILE* f, u32 size, Sink* k, u32* done, u32* crc, DevUpdatePhase phase) {
+    u64 last_status = 0;
+    *done = 0;
+    *crc = 0xFFFFFFFFu;
+    while (*done < size) {
+        u32 want = size - *done < CHUNK ? size - *done : CHUNK;
+        if (fread(s_buf, 1, want, f) != want) {
+            return PUMP_CLOSED;
+        }
+        *crc = crc_update(*crc, s_buf, want);
+        if (k != NULL && !sink_am(k, *done, s_buf, want)) {
+            return PUMP_SINK;
+        }
+        *done += want;
+        u64 now = svcGetSystemTick();
+        if (*done == size || now - last_status >= SYSCLOCK_ARM11 / 10) {
+            last_status = now;
+            status(phase, *done, size, NULL);
+        }
+    }
+    return PUMP_OK;
+}
+
+/* One failed push: the status screen, the reply line (error code, what failed, the AM or store result
+ * and the stage), and the log. The install is already cancelled and the old install is untouched. */
+static void push_fail(int fd, int code, const char* stage, u32 at, Result rc, const char* what) {
+    status(DEVUPDATE_PH_ERROR, at, 0, what);
+    send_line(fd, "error %d %s: stage=%s at=%lu rc=%08lx (install cancelled, old install kept)", code, what, stage,
+              (unsigned long)at, (unsigned long)rc);
+    log_msg(0, "devupdate: push failed: %s, stage %s, at %lu, rc %08lx", what, stage, (unsigned long)at,
+            (unsigned long)rc);
+}
+
+static void crc_fail(int fd, const char* stage, u32 done, u32 got, u32 want) {
+    char what[64];
+    snprintf(what, sizeof(what), "crc mismatch, received %08lx header %08lx", (unsigned long)got, (unsigned long)want);
+    push_fail(fd, 5, stage, done, 0, what);
+}
+
+/* The error for a PUMP_ code from the receiving stage. */
+static void pump_fail(int fd, int pr, const char* stage, u32 done, Result rc) {
+    switch (pr) {
+    case PUMP_SLEEP: push_fail(fd, 16, stage, done, rc, "sleep"); break;
+    case PUMP_CLOSED: push_fail(fd, 14, stage, done, rc, "connection closed"); break;
+    case PUMP_TIMEOUT: push_fail(fd, 15, stage, done, rc, "receive timeout"); break;
+    default: push_fail(fd, 17, stage, done, rc, "write failed"); break;
+    }
+}
+
+static void stage_path(char* path, size_t n, const char* suffix) {
+    char rel[24];
+    snprintf(rel, sizeof(rel), "stage.cia%s", suffix);
+    du_files_path(path, n, rel);
+}
+
+/* Stage: the CIA goes to files_dir/stage.cia on the card, is read back and CRC-checked, and only then
+ * is AM fed from the file. A slow or broken network can then not break AM's stream. Returns the open
+ * file (or NULL after an error reply). */
+static FILE* stage_receive(int fd, const Header* h, char* path, size_t path_n) {
+    char part[200];
+    stage_path(path, path_n, "");
+    stage_path(part, sizeof(part), ".part");
+    du_files_mkdirs("stage.cia");
+    Sink k = {0, part, 0};
+    send_line(fd, "staging %lu", (unsigned long)h->size);
+    if (!sink_store(&k, 0, s_buf, 0)) { /* creates or empties it */
+        push_fail(fd, 17, "stage-create", 0, k.rc, "cannot create the staging file");
+        return NULL;
+    }
+    u32 done, crc;
+    int pr = pump_socket(fd, h->size, &k, sink_store, &done, &crc);
+    if (pr != PUMP_OK) {
+        du_store_remove(part);
+        pump_fail(fd, pr, "stage-receive", done, k.rc);
+        return NULL;
+    }
+    crc = ~crc;
+    if (crc != h->crc) {
+        du_store_remove(part);
+        crc_fail(fd, "stage-receive", done, crc, h->crc);
+        return NULL;
+    }
+    du_store_flush();
+    if (du_store_rename(part, path) != 0) {
+        du_store_remove(part);
+        push_fail(fd, 17, "stage-rename", done, 0, "cannot rename the staging file");
+        return NULL;
+    }
+    du_store_flush();
+    status(DEVUPDATE_PH_CHECKING, 0, h->size, NULL);
+    FILE* f = fopen(path, "rb");
+    if (f == NULL) {
+        push_fail(fd, 17, "stage-open", 0, (Result)errno, "cannot read the staging file back");
+        return NULL;
+    }
+    pr = pump_file(f, h->size, NULL, &done, &crc, DEVUPDATE_PH_CHECKING);
+    crc = ~crc;
+    if (pr != PUMP_OK || crc != h->crc) {
+        fclose(f);
+        du_store_remove(path);
+        du_store_flush();
+        crc_fail(fd, "stage-verify", done, crc, h->crc);
+        return NULL;
+    }
+    fseek(f, 0, SEEK_SET);
+    send_line(fd, "staged %lu crc %08lx", (unsigned long)h->size, (unsigned long)crc);
+    log_msg(2, "devupdate: staged %lu bytes on the card, crc ok", (unsigned long)h->size);
+    return f;
 }
 
 static void do_push(int fd, const Header* h, const char* args, bool recovery) {
@@ -460,79 +644,65 @@ static void do_push(int fd, const Header* h, const char* args, bool recovery) {
         send_line(fd, "error 3 launch after push needs the title ID");
         return;
     }
-    send_line(fd, "ok receiving %lu", (unsigned long)h->size);
-    log_msg(2, "devupdate: receiving %lu bytes for %016llx", (unsigned long)h->size, (unsigned long long)h->title_id);
-    begin(recovery);
-    Handle cia = 0;
-    Result rc = AM_StartCiaInstall(MEDIATYPE_SD, &cia);
-    if (R_FAILED(rc)) {
-        status(DEVUPDATE_PH_ERROR, 0, 0, "AM_StartCiaInstall failed");
-        send_line(fd, "error 13 AM_StartCiaInstall %08lx", (unsigned long)rc);
-        resume(recovery);
+    bool stage = (h->flags & FLAG_STAGE) != 0;
+    if (stage && !du_files_enabled()) {
+        send_line(fd, "error 19 this app has no files folder: --stage needs one");
         return;
     }
-    u32 crc = 0xFFFFFFFFu, done = 0, next_report = 1u << 20;
-    u64 last_status = 0;
-    status(DEVUPDATE_PH_RECEIVING, 0, h->size, NULL);
-    while (done < h->size) {
-        u32 want = h->size - done < CHUNK ? h->size - done : CHUNK;
-        int r = recv_some(fd, s_buf, want, 15000);
-        if (r <= 0) {
-            status(DEVUPDATE_PH_ERROR, done, h->size, r == -2 ? "sleep, install cancelled" : "transfer broke, install cancelled");
-            AM_CancelCIAInstall(cia);
-            send_line(fd, r == -2 ? "error 16 sleep (install cancelled)"
-                        : r == 0 ? "error 14 connection closed after %lu bytes (install cancelled)"
-                                 : "error 15 receive timeout after %lu bytes (install cancelled)",
-                      (unsigned long)done);
-            log_msg(0, "devupdate: receive failed (%d) after %lu bytes, install cancelled", r, (unsigned long)done);
+    send_line(fd, "ok receiving %lu", (unsigned long)h->size);
+    log_msg(2, "devupdate: receiving %lu bytes for %016llx%s", (unsigned long)h->size, (unsigned long long)h->title_id,
+            stage ? " (staged on the card)" : "");
+    begin(recovery);
+    FILE* sf = NULL;
+    char spath[200] = "";
+    if (stage) {
+        sf = stage_receive(fd, h, spath, sizeof(spath));
+        if (sf == NULL) {
             resume(recovery);
             return;
         }
-        crc = crc_update(crc, s_buf, (u32)r);
-        u32 written = 0;
-        rc = FSFILE_Write(cia, &written, done, s_buf, (u32)r, 0);
-        if (R_FAILED(rc) || written != (u32)r) {
-            status(DEVUPDATE_PH_ERROR, done, h->size, "write to AM failed");
-            AM_CancelCIAInstall(cia);
-            send_line(fd, "error 17 write failed at %lu: %08lx (install cancelled)", (unsigned long)done,
-                      (unsigned long)rc);
-            resume(recovery);
-            return;
-        }
-        done += (u32)r;
-        if (done >= next_report || done == h->size) {
-            send_line(fd, "progress %lu %lu", (unsigned long)done, (unsigned long)h->size);
-            next_report = done + (1u << 20);
-        }
-        if (s_cfg.on_progress != NULL) {
-            s_cfg.on_progress(done, h->size, s_cfg.user);
-        }
-        u64 now = svcGetSystemTick();
-        if (done == h->size || now - last_status >= SYSCLOCK_ARM11 / 10) {
-            last_status = now;
-            status(DEVUPDATE_PH_RECEIVING, done, h->size, NULL);
-        }
+    }
+    Handle cia = 0;
+    Sink k = {0, NULL, 0};
+    u32 done = 0, crc = 0;
+    int pr;
+    Result rc = AM_StartCiaInstall(MEDIATYPE_SD, &cia);
+    if (R_FAILED(rc)) {
+        push_fail(fd, 13, "am-start", 0, rc, "AM_StartCiaInstall failed");
+        goto fail_cleanup;
+    }
+    k.cia = cia;
+    if (stage) {
+        status(DEVUPDATE_PH_INSTALLING, 0, h->size, NULL);
+        pr = pump_file(sf, h->size, &k, &done, &crc, DEVUPDATE_PH_INSTALLING);
+        fclose(sf);
+        sf = NULL;
+    } else {
+        pr = pump_socket(fd, h->size, &k, sink_am, &done, &crc);
+    }
+    if (pr != PUMP_OK) {
+        AM_CancelCIAInstall(cia);
+        pump_fail(fd, pr, stage ? "am-write-staged" : "am-write", done, k.rc);
+        log_msg(0, "devupdate: transfer failed (%d) after %lu bytes, install cancelled", pr, (unsigned long)done);
+        goto fail_cleanup;
     }
     crc = ~crc;
     status(DEVUPDATE_PH_CHECKING, done, h->size, NULL);
     if (crc != h->crc) {
-        status(DEVUPDATE_PH_ERROR, done, h->size, "CRC mismatch, install cancelled");
         AM_CancelCIAInstall(cia);
-        send_line(fd, "error 5 crc mismatch: received %08lx, header %08lx (install cancelled)", (unsigned long)crc,
-                  (unsigned long)h->crc);
-        log_msg(0, "devupdate: CRC mismatch, install cancelled");
-        resume(recovery);
-        return;
+        crc_fail(fd, "crc", done, crc, h->crc);
+        goto fail_cleanup;
     }
     send_line(fd, "installing");
     status(DEVUPDATE_PH_INSTALLING, done, h->size, NULL);
-    rc = AM_FinishCiaInstall(cia);
+    rc = AM_FinishCiaInstall(cia); /* moves the handle to AM: nothing to cancel after this, a failed commit leaves the old install */
     if (R_FAILED(rc)) {
-        status(DEVUPDATE_PH_ERROR, done, h->size, "AM_FinishCiaInstall failed");
-        send_line(fd, "error 18 AM_FinishCiaInstall %08lx", (unsigned long)rc);
-        log_msg(0, "devupdate: AM_FinishCiaInstall %08lx", (unsigned long)rc);
-        resume(recovery);
-        return;
+        push_fail(fd, 18, "am-commit", done, rc, "AM_FinishCiaInstall failed");
+        goto fail_cleanup;
+    }
+    if (stage) {
+        du_store_remove(spath);
+        du_store_flush();
     }
     send_line(fd, "installed %016llx", (unsigned long long)h->title_id);
     log_msg(2, "devupdate: installed %016llx", (unsigned long long)h->title_id);
@@ -548,6 +718,17 @@ static void do_push(int fd, const Header* h, const char* args, bool recovery) {
         resume(recovery);
         send_line(fd, "done");
     }
+    return;
+
+fail_cleanup:
+    if (sf != NULL) {
+        fclose(sf);
+    }
+    if (stage && spath[0] != '\0') {
+        du_store_remove(spath);
+        du_store_flush();
+    }
+    resume(recovery);
 }
 
 static void send_file_tail(int fd, const char* path) {
@@ -604,8 +785,9 @@ static void handle_client(int fd, bool recovery) {
     if (recv_all(fd, &h, sizeof(h), 10000) != 0) {
         return;
     }
-    if (memcmp(h.magic, MAGIC, 4) != 0 || h.version != PROTO_VERSION) {
-        send_line(fd, "error 1 bad header (protocol version %d expected)", PROTO_VERSION);
+    int bad = du_proto_check_header(&h, DEVUPDATE_MAX_ARGS);
+    if (bad == 1) {
+        send_line(fd, "error 1 bad header (protocol version %d expected)", DU_PROTO_VERSION);
         return;
     }
     if (!token_ok(h.token)) {
@@ -613,7 +795,7 @@ static void handle_client(int fd, bool recovery) {
         log_msg(1, "devupdate: request with a bad token refused");
         return;
     }
-    if (h.args_len > DEVUPDATE_MAX_ARGS) {
+    if (bad == 3) {
         send_line(fd, "error 3 arguments longer than %d bytes", DEVUPDATE_MAX_ARGS);
         return;
     }
@@ -621,13 +803,9 @@ static void handle_client(int fd, bool recovery) {
     if (h.args_len && recv_all(fd, args, h.args_len, 10000) != 0) {
         return;
     }
-    args[h.args_len] = '\0';
-    s_incoming[0] = '\0';
-    if ((h.flags & FLAG_VERSION) && h.args_len >= 1 && (u8)args[0] < sizeof(s_incoming) && h.args_len >= 1u + (u8)args[0]) {
-        u32 n = (u8)args[0];
-        memcpy(s_incoming, args + 1, n);
-        s_incoming[n] = '\0';
-        memmove(args, args + 1 + n, h.args_len - 1 - n + 1); /* the switches follow, NUL included */
+    if (du_proto_split_args(args, h.args_len, h.flags, s_incoming, sizeof(s_incoming)) < 0) {
+        log_msg(1, "devupdate: the version text is longer than the argument area (%lu bytes); ignored",
+                (unsigned long)h.args_len);
     }
     switch (h.cmd) {
     case CMD_PING: do_ping(fd); break;
@@ -675,7 +853,7 @@ static void serve(bool recovery) {
             du_queue_tick();
             if (s_relaunch_deadline != 0 && svcGetSystemTick() > s_relaunch_deadline) {
                 s_relaunch_deadline = 0;
-                log_msg(0, "devupdate: the relaunch did not end the process in 8 s; ending it");
+                log_msg(0, "devupdate: the relaunch did not end the process in %d s; ending it", RELAUNCH_GRACE_S);
                 recovery_exit(true);
             }
         }

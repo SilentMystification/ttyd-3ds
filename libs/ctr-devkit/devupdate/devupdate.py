@@ -60,7 +60,11 @@ from pathlib import Path
 MAGIC = b"CDU1"
 VERSION = 1
 CMD = {"ping": 1, "push": 2, "restart": 3, "report": 4, "launch": 5, "files": 6, "queue": 7}
-FLAG_RELAUNCH, FLAG_LAUNCH = 1, 2
+FLAG_RELAUNCH, FLAG_LAUNCH, FLAG_VERSION, FLAG_STAGE = 1, 2, 4, 8
+VERSION_MAX = 47  # the console keeps at most this many characters of the incoming version text
+# Console errors after which a direct install is worth retrying through the SD card (--stage):
+# crc mismatch, AM start, connection closed, receive timeout, AM write, AM commit.
+STAGE_RETRY_CODES = {5, 13, 14, 15, 17, 18}
 MAX_ARGS = 0x2F0
 THREEDSLINK = ["/opt/devkitpro/tools/bin/3dslink", "3dslink"]
 HERE = Path(__file__).resolve().parent
@@ -165,9 +169,6 @@ def wait_ping(args, seconds):
     return None
 
 
-FLAG_VERSION = 4
-
-
 def version_text(args, cia_path):
     """The incoming build's version text: --version-text, else the first line of the sidecar
     next to the CIA (<name>.version, written by the build), else none (the console shows "?")."""
@@ -175,10 +176,20 @@ def version_text(args, cia_path):
     if text is None:
         side = Path(cia_path).with_suffix(".version")
         text = side.read_text().splitlines()[0].strip() if side.exists() and side.read_text().strip() else ""
-    return text.encode()[:47]
+    return text.encode()[:VERSION_MAX]
 
 
-def push(args, cia_path, flags, switches, bad_crc=False):
+def request_prefix(cmd, flags, switches, vt, size=0, crc=0, tid=0, token=""):
+    """Header plus argument area, exactly as sent: with a version text the argument area is
+    one length byte, the text, then the switch text, and the FLAG_VERSION bit is set."""
+    sw = switches
+    if vt:
+        sw = bytes([len(vt)]) + vt + sw
+        flags |= FLAG_VERSION
+    return header(cmd, size, crc, sw, tid, flags, token) + sw
+
+
+def push(args, cia_path, flags, switches, bad_crc=False, stage=False):
     data = Path(cia_path).read_bytes()
     tid = cia_title_id(data)
     crc = zlib.crc32(data) & 0xFFFFFFFF
@@ -186,13 +197,13 @@ def push(args, cia_path, flags, switches, bad_crc=False):
         crc ^= 0xDEADBEEF
     sw = switch_bytes(switches)
     vt = version_text(args, cia_path)
-    if vt:
-        sw = bytes([len(vt)]) + vt + sw
-        flags |= FLAG_VERSION
-    print(f"devupdate: pushing {cia_path} ({len(data)} bytes, title {tid:016x}, crc {crc:08x}) to {args.ip}:{args.port}")
+    if stage:
+        flags |= FLAG_STAGE
+    print(f"devupdate: pushing {cia_path} ({len(data)} bytes, title {tid:016x}, crc {crc:08x}) to {args.ip}:{args.port}"
+          + (" via the SD card (--stage)" if stage else ""))
     link = Link(args)
     with link.connect() as s:
-        s.sendall(header("push", len(data), crc, sw, tid, flags, args.token) + sw)
+        s.sendall(request_prefix("push", flags, sw, vt, len(data), crc, tid, args.token))
         result = {}
 
         def reader():
@@ -206,6 +217,11 @@ def push(args, cia_path, flags, switches, bad_crc=False):
             for off in range(0, len(data), 65536):
                 if not t.is_alive():
                     break  # the console answered early (an error)
+                if not stage and getattr(args, "break_after", 0) and off >= args.break_after * 1024:
+                    # test aid: a network that breaks mid-stream (the console must cancel and resume)
+                    s.shutdown(socket.SHUT_RDWR)
+                    t.join(5)
+                    return "error 14 connection closed by this tool (--break-after)", tid
                 s.sendall(view[off:off + 65536])
         except OSError as e:
             t.join(5)
@@ -274,12 +290,33 @@ def preflight_report(args):
     print(f"devupdate: the console is in recovery mode; crash report saved to {path}")
 
 
+def error_code(last):
+    m = re.match(r"error (\d+)", last or "")
+    return int(m.group(1)) if m else None
+
+
+def push_with_fallback(args, cia, flags, switches):
+    """A direct install (the CIA streams into AM as it arrives); if the console reports a failure of
+    that kind (AM write or commit, a broken connection, a CRC mismatch), the same CIA goes through the
+    SD card (--stage) once. The console cancels each failed install and resumes the game, so the retry
+    needs nothing else. --stage starts staged; --no-stage-fallback and --bad-crc never retry."""
+    stage = getattr(args, "stage", False)
+    last, tid = push(args, cia, flags, switches, args.bad_crc, stage)
+    if (last != "done" and not stage and not args.bad_crc and not getattr(args, "no_stage_fallback", False)
+            and (error_code(last) in STAGE_RETRY_CODES or last.startswith("error timeout")
+                 or last.startswith("error connection closed") or last.startswith("error send failed"))):
+        print(f"devupdate: the direct install failed ({last}); retrying through the SD card (--stage)")
+        time.sleep(4)  # the console shows the error for 3 s before it resumes the game
+        last, tid = push(args, cia, flags, switches, args.bad_crc, True)
+    return last, tid
+
+
 def cmd_push(args):
     preflight_report(args)
     flags = 0 if args.no_relaunch else FLAG_RELAUNCH
     if args.launch:
         flags = FLAG_LAUNCH
-    last, tid = push(args, args.cia, flags, args.switches, args.bad_crc)
+    last, tid = push_with_fallback(args, args.cia, flags, args.switches)
     status = finish(last)
     if status == 0 and args.wait and not args.no_relaunch:
         print(f"devupdate: waiting up to {args.wait} s for the title to answer again")
@@ -364,7 +401,7 @@ def cmd_bootstrap(args):
             print(f"devupdate: the bootstrap did not answer on {args.ip}:{args.port}")
             return 2
     print(f"devupdate: bootstrap up: {pong}")
-    last, tid = push(args, args.cia, FLAG_LAUNCH, args.switches)
+    last, tid = push(args, args.cia, FLAG_LAUNCH, args.switches, False, getattr(args, "stage", False))
     return finish(last)
 
 
@@ -931,6 +968,86 @@ def cmd_azahar_session(args):
     return 0
 
 
+def cmd_selftest(args):
+    """Builds devupdate/selftest_host.c (the device's decoder, proto.c) with gcc and feeds it the
+    requests this tool sends: version text of length 0, 1, 14, 47 and (raw) 255, with and without
+    switches, with --bad-crc, with and without --stage. The decoded header, version, switches and the
+    offset where the payload starts must equal what was meant, so the CIA bytes that follow are not shifted."""
+    import tempfile
+    exe = Path(tempfile.mkdtemp(prefix="cdu-selftest-")) / "selftest_host"
+    cc = subprocess.run(["gcc", "-O1", "-Wall", "-Werror", "-o", str(exe), str(HERE / "selftest_host.c"),
+                         str(HERE / "proto.c")], capture_output=True, text=True)
+    if cc.returncode != 0:
+        print(cc.stderr)
+        print("devupdate selftest: cannot build the host decoder")
+        return 2
+    cia = bytes(range(256)) * 40  # a stand-in payload: framing only, no CIA parsing
+    crc_ok = zlib.crc32(cia) & 0xFFFFFFFF
+    fails = 0
+    count = 0
+
+    def decode(pkt):
+        r = subprocess.run([str(exe)], input=pkt, capture_output=True)
+        return dict(line.split("=", 1) for line in r.stdout.decode().splitlines() if "=" in line)
+
+    def check(name, pkt, cmd, flags_expect, vt, sw, crc, payload_follows=True):
+        nonlocal fails, count
+        count += 1
+        d = decode(pkt)
+        got = {"cmd": d.get("cmd"), "flags": d.get("flags"), "crc": d.get("crc"),
+               "version": bytes.fromhex(d.get("version_hex", "")), "switches": bytes.fromhex(d.get("switches_hex", "")),
+               "payload_offset": d.get("payload_offset"), "malformed": d.get("malformed")}
+        want = {"cmd": str(CMD[cmd]), "flags": str(flags_expect), "crc": f"{crc:08x}", "version": vt[:VERSION_MAX],
+                "switches": sw, "payload_offset": str(len(pkt) - len(cia) if payload_follows else len(pkt)), "malformed": "0"}
+        ok = got == want
+        fails += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} {name}: flags={d.get('flags')} version={got['version']!r} switches={got['switches']!r} "
+              f"payload@{d.get('payload_offset')}")
+        if not ok:
+            print(f"       want {want}\n       got  {got}")
+
+    print("devupdate selftest: the PC's push packets through the device's decoder (proto.c, host build)")
+    for vlen in (0, 1, 14, 47):
+        for sw in (b"", b"map=gor_01 wdog=9"):
+            for bad in (False, True):
+                for stage in (False, True):
+                    vt = b"#465 0123abc12"[:14] if vlen == 14 else b"V" * vlen
+                    crc = crc_ok ^ 0xDEADBEEF if bad else crc_ok
+                    flags = FLAG_RELAUNCH | (FLAG_STAGE if stage else 0)
+                    pkt = request_prefix("push", flags, sw, vt, len(cia), crc, 0x0004000000ABCD00, "") + cia
+                    check(f"push vt={vlen}{' sw' if sw else ''}{' bad-crc' if bad else ''}{' stage' if stage else ''}",
+                          pkt, "push", flags | (FLAG_VERSION if vt else 0), vt, sw, crc)
+    # What the PC tool really sends for a 255-character version text: it clamps to 47 itself.
+    class A:
+        version_text = "X" * 255
+    vt = version_text(A, "unused.cia")
+    pkt = request_prefix("push", FLAG_RELAUNCH, b"a=1", vt, len(cia), crc_ok, 1, "") + cia
+    check("PC tool with a 255-character version text (clamped to 47)", pkt, "push", FLAG_RELAUNCH | FLAG_VERSION, vt, b"a=1", crc_ok)
+    # A length byte of 255 in the packet (another client): the device consumes all 255 and keeps 47.
+    for sw in (b"", b"a=1"):
+        raw = bytes([255]) + b"X" * 255 + sw
+        pkt = header("push", len(cia), crc_ok, raw, 1, FLAG_RELAUNCH | FLAG_VERSION) + raw + cia
+        count += 1
+        d = decode(pkt)
+        ok = (bytes.fromhex(d.get("version_hex", "")) == b"X" * VERSION_MAX and bytes.fromhex(d.get("switches_hex", "")) == sw
+              and d.get("payload_offset") == str(64 + len(raw)))
+        fails += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} raw version length byte 255{' sw' if sw else ''}: keeps {VERSION_MAX}, switches {sw!r}, "
+              f"payload@{d.get('payload_offset')}")
+    # restart with a version text too: the decoder must cope with it on any command.
+    pkt = request_prefix("restart", 0, b"hello=1", b"#1 abc")
+    check("restart with a version text", pkt, "restart", FLAG_VERSION, b"#1 abc", b"hello=1", 0, False)
+    # A malformed area: the length byte promises more than the area holds: kept as switch text, flagged.
+    count += 1
+    area = b"\x20abc"
+    d = decode(header("push", 1, 1, area, 1, FLAG_VERSION) + area)
+    ok = d.get("malformed") == "1" and d.get("switches_hex") == area.hex()
+    fails += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} malformed version area kept as switch text, flagged malformed={d.get('malformed')}")
+    print(f"devupdate selftest: {count - fails} of {count} passed")
+    return 1 if fails else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ip", default=os.environ.get("N3DS_IP"), help="console address (default $N3DS_IP)")
@@ -946,8 +1063,14 @@ def main():
     p.add_argument("--launch", action="store_true", help="jump to the pushed title (for another title)")
     p.add_argument("--wait", type=float, default=0, help="after the relaunch, wait this long for a ping answer")
     p.add_argument("--version-text", help="the build's version text shown on the console (default: the CIA's .version sidecar)")
+    p.add_argument("--stage", action="store_true",
+                   help="write the CIA to the SD card first, check it there, then install from the file "
+                        "(a slow or broken network cannot break AM's stream); a failed direct install retries this way by itself")
+    p.add_argument("--break-after", type=int, default=0, help=argparse.SUPPRESS)  # test: break a direct push after N KiB
+    p.add_argument("--no-stage-fallback", action="store_true", help="do not retry with --stage after a failed direct install")
     p.add_argument("--bad-crc", action="store_true", help="send a wrong CRC (test: the install must be refused)")
     p.add_argument("--no-report", action="store_true", help="do not save the crash report first (when the console is in recovery)")
+    sub.add_parser("selftest", help="check the request framing against a host build of the device's decoder (no console)")
     p = sub.add_parser("restart", help="relaunch with switches")
     p.add_argument("switches", nargs="*")
     p.add_argument("--no-report", action="store_true", help="do not save the crash report first (when the console is in recovery)")
@@ -990,6 +1113,8 @@ def main():
     args = ap.parse_args()
     if args.cmd == "azahar-session":
         return cmd_azahar_session(args)
+    if args.cmd == "selftest":
+        return cmd_selftest(args)
     if not args.ip:
         ap.error("give --ip or set N3DS_IP (Azahar: --ip 127.0.0.1)")
     try:

@@ -177,6 +177,7 @@ typedef struct {
 } GxState;
 
 extern GxState gx;
+extern u32 gx_vtx_version; /* gx_state.c: the vertex state same_state compares changed */
 
 /* ---- GX calls by value ----
  * One id per state call. Display lists the game records hold them as port

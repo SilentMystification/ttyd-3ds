@@ -1080,6 +1080,23 @@ static void rot_rows(float r0[4], float r1[4]) {
     memcpy(r1, rows[s_rot][1], 16);
 }
 
+/* The shader-path uniforms as last set in this record's replay (bit patterns): a value equal to the one in
+ * force is not set again, so citro3d uploads only the rows that changed. Only vsh_apply_* write these rows;
+ * the cache is cleared at the start of every record. */
+static u32 s_vunif[96][4];
+static void vunif_reset(void) { memset(s_vunif, 0xFF, sizeof(s_vunif)); }
+static inline void vunif(int id, float x, float y, float z, float w) {
+    if (id < 0 || id >= 96) {
+        return;
+    }
+    float v[4] = {x, y, z, w};
+    if (memcmp(s_vunif[id], v, 16) == 0) {
+        return;
+    }
+    memcpy(s_vunif[id], v, 16);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, id, x, y, z, w);
+}
+
 /* Uniforms of a CMD_VSH_CONST. The clip rows come unrotated; the rotation
  * rows hold only 0 and +-1, so composing them on the CPU is exact (a row is
  * picked and maybe negated). A second eye pass would compose its clip-space
@@ -1097,19 +1114,19 @@ static void vsh_apply_const(const PlatGpuVshConst* c) {
                 }
             }
         }
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clip + k, row[0], row[1], row[2], row[3]);
+        vunif(s_uloc_clip + k, row[0], row[1], row[2], row[3]);
     }
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clip + 2, c->clip[2][0], c->clip[2][1], c->clip[2][2], c->clip[2][3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clip + 3, c->clip[3][0], c->clip[3][1], c->clip[3][2], c->clip[3][3]);
+    vunif(s_uloc_clip + 2, c->clip[2][0], c->clip[2][1], c->clip[2][2], c->clip[2][3]);
+    vunif(s_uloc_clip + 3, c->clip[3][0], c->clip[3][1], c->clip[3][2], c->clip[3][3]);
     for (int i = 0; i < 9; i++) {
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_texrow + i, c->tex[i][0], c->tex[i][1], c->tex[i][2], c->tex[i][3]);
+        vunif(s_uloc_texrow + i, c->tex[i][0], c->tex[i][1], c->tex[i][2], c->tex[i][3]);
     }
     for (int i = 0; i < 3; i++) {
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_tgsrc + i, c->tgsrc[i][0], c->tgsrc[i][1], c->tgsrc[i][2],
+        vunif(s_uloc_tgsrc + i, c->tgsrc[i][0], c->tgsrc[i][1], c->tgsrc[i][2],
                       c->tgsrc[i][3]);
     }
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clrmix, c->clrmix[0], c->clrmix[1], c->clrmix[2], c->clrmix[3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_matclr, c->matclr[0], c->matclr[1], c->matclr[2], c->matclr[3]);
+    vunif(s_uloc_clrmix, c->clrmix[0], c->clrmix[1], c->clrmix[2], c->clrmix[3]);
+    vunif(s_uloc_matclr, c->matclr[0], c->matclr[1], c->matclr[2], c->matclr[3]);
     if (s_uloc_lit >= 0) {
         C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_lit, (c->flags & PLAT_VSH_LIT) != 0);
     }
@@ -1120,20 +1137,20 @@ static void vsh_apply_light(const PlatGpuVshLight* l) {
         return;
     }
     for (int i = 0; i < 3; i++) {
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_eyerow + i, l->eye[i][0], l->eye[i][1], l->eye[i][2], l->eye[i][3]);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_nrmrow + i, l->nrm[i][0], l->nrm[i][1], l->nrm[i][2], l->nrm[i][3]);
+        vunif(s_uloc_eyerow + i, l->eye[i][0], l->eye[i][1], l->eye[i][2], l->eye[i][3]);
+        vunif(s_uloc_nrmrow + i, l->nrm[i][0], l->nrm[i][1], l->nrm[i][2], l->nrm[i][3]);
     }
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_amb, l->amb[0], l->amb[1], l->amb[2], l->amb[3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_dmode, l->dmode[0], l->dmode[1], l->dmode[2], l->dmode[3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_amode, l->amode[0], l->amode[1], l->amode[2], l->amode[3]);
+    vunif(s_uloc_amb, l->amb[0], l->amb[1], l->amb[2], l->amb[3]);
+    vunif(s_uloc_dmode, l->dmode[0], l->dmode[1], l->dmode[2], l->dmode[3]);
+    vunif(s_uloc_amode, l->amode[0], l->amode[1], l->amode[2], l->amode[3]);
     u32 n = l->count > PLAT_VSH_LIGHTS ? PLAT_VSH_LIGHTS : l->count;
     for (u32 i = 0; i < (n ? n : 1); i++) {
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_lpos + i, l->light[i].pos[0], l->light[i].pos[1], l->light[i].pos[2], 0);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_ldir + i, l->light[i].dir[0], l->light[i].dir[1], l->light[i].dir[2], 0);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_lcol + i, l->light[i].color[0], l->light[i].color[1],
+        vunif(s_uloc_lpos + i, l->light[i].pos[0], l->light[i].pos[1], l->light[i].pos[2], 0);
+        vunif(s_uloc_ldir + i, l->light[i].dir[0], l->light[i].dir[1], l->light[i].dir[2], 0);
+        vunif(s_uloc_lcol + i, l->light[i].color[0], l->light[i].color[1],
                       l->light[i].color[2], 0);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_lka + i, l->light[i].a[0], l->light[i].a[1], l->light[i].a[2], 0);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_lkk + i, l->light[i].k[0], l->light[i].k[1], l->light[i].k[2], 0);
+        vunif(s_uloc_lka + i, l->light[i].a[0], l->light[i].a[1], l->light[i].a[2], 0);
+        vunif(s_uloc_lkk + i, l->light[i].k[0], l->light[i].k[1], l->light[i].k[2], 0);
     }
     /* the loop runs count + 1 times; with no light it runs once over light 0, which the front end zeroes */
     C3D_IVUnifSet(GPU_VERTEX_SHADER, s_uloc_lcount, n ? (int)n - 1 : 0, 0, 1, 0);
@@ -1149,12 +1166,12 @@ static float pow2_neg(u32 k) {
 
 static void vsh_apply_scales(u32 scales) {
     float s = pow2_neg(scales & 0xFF);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_vscale, s, s, s, 1.0f);
+    vunif(s_uloc_vscale, s, s, s, 1.0f);
     for (int u = 0; u < 3; u++) {
         u32 b = scales >> (8 + 8 * u) & 0xFF;
         u32 slot = b & 3;
         float w = pow2_neg(b >> 2);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_texsel + u, slot == 0 ? w : 0.0f, slot == 1 ? w : 0.0f,
+        vunif(s_uloc_texsel + u, slot == 0 ? w : 0.0f, slot == 1 ? w : 0.0f,
                       slot == 2 ? w : 0.0f, 0.0f);
     }
 }
@@ -1313,6 +1330,7 @@ static void fog_bind(const void* body) {
 
 static void render_record(Record* r) {
     u64 t0 = svcGetSystemTick();
+    vunif_reset();
     reap_targets();
     /* stereo (stereo.h): 0 mono, else the 2D tail's start; the 3D part is replayed once */
     u32 tail_cmds = 0, tail_zwrites = 0;

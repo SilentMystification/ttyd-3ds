@@ -32,6 +32,19 @@ Azahar sampling (`gor_01`, shares of all busy time):
 
 **Core 0 is the wall, and core 2 has room.** Star3D found the same in its first hardware run: everything costly ran on core 0.
 
+## Target architecture (owner decision 2026-11-22)
+
+Core 0 runs **game logic only**, at full speed, the way the GameCube CPU did. All GPU-like work (GX translation: display-list decode, vertex work, texture and TEV handling) leaves core 0 for core 2 and the PICA. The ARM11 is faster than the Gekko for this work, so with GX off it the game thread should have headroom.
+
+How we get there:
+1. **Shader path** takes per-vertex work off the CPU entirely: lighting, the matrix palette, `MTX3x4` texgen, and bounding-box draws (bbox computed on the CPU from positions only). In progress.
+2. **`gxthread=2`**: core 0 records, core 2 translates. Built; default off because translation is one serial chain that saturates core 2 and the frame-end fence serialises it with the next frame.
+3. **Pipelined frame end (`gxpipeline`)**: the routine frame-end fence is answered when the frame is recorded, so core 2 translates frame N while core 0 runs frame N+1 (as the GameCube overlaps CPU and GPU). Memory-release fences, array snapshots and verify mode keep it safe. At most one frame of extra display latency.
+4. **Cheaper recording**: state recorded as deltas at draws instead of every setter.
+5. The default becomes `gxthread=2 gxthreadsplit=0 gxpipeline=1` only with identical output and faster frames in every scene, in Azahar and then on hardware.
+
+Core 1 keeps the light, latency-tolerant work and **all SD card access** (disc reads, saves, log, options, test output), so cores 0 and 2 never block on SD I/O.
+
 ## Splits, ranked
 
 ### A. Move GX translation from core 0 to core 2 (the big one)

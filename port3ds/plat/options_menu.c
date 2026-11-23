@@ -1,9 +1,10 @@
 /* Player options menu: the generic list UI (see include/plat/options.h).
  *
- * Bottom console rows (1-based, 40 columns):
+ * Bottom console rows (1-based, 40 columns; the HUD keeps rows 1-2 and the
+ * log shrinks to rows 16-30 while the menu is open, see plat/menu.c):
  *   3        title, page number, [Close] button
- *   4-15     the page's items (scrolls when there are more than 12)
- *   16       key help
+ *   4-13     the page's items (scrolls when there are more than 10)
+ *   14       key help
  * Keys: L/R page, Up/Down move, Left/Right change a value, A changes it too
  * (or runs a reset), B or SELECT closes. Touch: tap an item to select and
  * change it, tap the title to turn the page, tap [Close] to close.
@@ -20,7 +21,7 @@
 #include "plat_internal.h"
 
 #define FIRST_ROW 4
-#define VISIBLE 12
+#define VISIBLE 10
 #define MAX_PAGE_ITEMS 24
 
 static int s_open;
@@ -84,6 +85,7 @@ static void draw(const PlatOptMenu* m) {
         return; /* try again next loop */
     }
     s_redraw = 0;
+    plat_console_menu_mode(1);
     char line[48], buf[48];
     int pages = page_count(m);
     memset(line, ' ', 40);
@@ -111,7 +113,7 @@ static void draw(const PlatOptMenu* m) {
         snprintf(line, sizeof(line), "%c %-18.18s %-19.19s", k == s_sel ? '>' : ' ', it->label, val);
         put(FIRST_ROW + r, line);
     }
-    put(16, "L/R page Up/Dn move </> change B close");
+    put(14, "L/R page Up/Dn move </> change B close");
     plat_console_unlock();
 }
 
@@ -205,7 +207,7 @@ static void handle_touch(const PlatOptMenu* m) {
     touchPosition tp;
     hidTouchRead(&tp);
     int row = tp.py / 8 + 1; /* console row, 1-based */
-    if (row <= 3) {
+    if (row <= 3) { /* the HUD rows and the title row */
         if (tp.px >= 240) {
             s_open = 0;
         } else {

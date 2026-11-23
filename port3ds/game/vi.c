@@ -48,6 +48,7 @@ static int s_black = 1;
 static void* s_next_fb;
 static u32 s_frames;
 static u64 s_frame_start;
+static u64 s_pause_base; /* plat_paused_ticks() when the frame began: a menu or update pause is not frame time */
 
 static void retrace(void) {
     port_irq_enter();
@@ -500,7 +501,7 @@ static void frame_hooks(void) {
         int seq = gp != NULL ? seqGetSeq() : SEQ_UNDEFINED;
         int ready = (seq == SEQ_BATTLE && _battleWorkPointer != NULL && gp->inBattle);
         port_lp_frame(s_frames, seq, ready, gp != NULL ? gp->currentMapName : NULL,
-                      s_frame_start ? plat_ticks() - s_frame_start : 0);
+                      s_frame_start ? plat_ticks() - s_frame_start - (plat_paused_ticks() - s_pause_base) : 0);
     }
     fastboot_frame(s_sweep_state > 1 || s_warp_switch_done);
     if (s_frames % 1800 == 0) {
@@ -512,7 +513,7 @@ static void frame_hooks(void) {
     plat_gpu_stats(&g);
     u64 now = plat_ticks();
     st.frames = s_frames;
-    st.frame_us = s_frame_start ? (u32)((now - s_frame_start) / (PLAT_TICKS_PER_SEC / 1000000u)) : 0;
+    st.frame_us = s_frame_start ? (u32)((now - s_frame_start - (plat_paused_ticks() - s_pause_base)) / (PLAT_TICKS_PER_SEC / 1000000u)) : 0;
     if (st.frame_us > 2000000u) {
         PLOG_W("slow frame %lu: %lu ms (map %s)", (unsigned long)s_frames, (unsigned long)(st.frame_us / 1000u),
                gp != NULL ? gp->currentMapName : "-");
@@ -621,5 +622,6 @@ void VIWaitForRetrace(void) {
         dvd_settle();
     }
     s_frame_start = plat_ticks();
+    s_pause_base = plat_paused_ticks();
     plat_set_phase("game frame");
 }

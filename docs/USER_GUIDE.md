@@ -40,7 +40,9 @@ install the CIA.
 - There is **no separate conversion step** and no progress bar. The port converts models, maps and textures
   from the disc while you play, as the game loads them.
 - You see the game's own logos, then the title screen.
-- The bottom screen shows two status lines at the top (rows 1-2) and a scrolling log below them. This is normal.
+- The bottom screen shows, from the top: five HUD lines (frame rate and frame time; CPU, GPU and render times; RAM use; video RAM use;
+  the New 3DS extra RAM "QTM"), a separator, the scrolling log, another separator and, on the last row, the version and build number.
+  This is normal.
 - How long the start takes on a real console is unverified. In Azahar the title screen appears
   after about 800 game frames.
 - If something is wrong with the disc image or the SD card, you see a black text screen. See Troubleshooting.
@@ -67,7 +69,7 @@ The game sees one GameCube controller. The 3DS maps to it like this:
 
 ### Options menu
 
-Press **SELECT**, or touch the two status lines at the top of the bottom screen (outside the menu) (with the HUD on FPS only or off they show an **[Options]** label on the right).
+Press **SELECT**, or touch the HUD lines at the top of the bottom screen (the first line shows an **[Options]** label on the right when it has room).
 The game pauses while the menu is open and receives no input. The top screen shows the last frame, greyed and darker, and all sound is muted
 (it fades out over a few milliseconds); both come back when you close the menu.
 
@@ -84,7 +86,7 @@ background; when you close the menu the status lines and the last 28 log lines a
 | Controls | C-stick is | C-stick nub (default), or D-pad. With the D-pad as the C-stick the D-pad no longer sends GameCube D-pad presses, and the C-stick nub does nothing |
 | Controls | Reset to defaults | puts the page back to A, B, X, Y, ZR = Z, L, R, START and the C-stick nub |
 | Display | 3D effect | off or on (default on). Stereoscopic 3D is not in the port yet; the setting is stored for when it is |
-| Display | Bottom screen HUD | off, FPS only, or full (default). Only the two status lines change; the log stays |
+| Display | Bottom screen HUD | off, FPS only (first line only), or full (default). Only the five HUD lines change; the separators, the log and the build row stay |
 | Display | Texture filter | game (default), linear, mip or nearest. game: the filtering the game itself asks for. linear: smooth (bilinear) textures everywhere. mip: smooth textures plus smaller pre-shrunk copies (mipmaps) of each texture, which calms the shimmer of distant floors and walls on the small top screen; uses about a third more texture memory and makes a texture's first appearance a little slower. nearest: sharp blocky texels, for comparison. Screen effects, text-sized strips and lookup textures always keep the game's own filtering |
 | Audio | Master volume | 0 to 100 percent in steps of 10 (default 100) |
 | Performance | Quality | auto (default), high or fast. Stored only; later speed features will read it |
@@ -167,7 +169,7 @@ Please include:
 1. What you did, and what you expected.
 2. The build string. It is the first line of `latest.log`, like `TTYD 3DS build #240 f4b3cc42`, and it is shown on the error screens.
 3. Your console model (New 3DS, New 3DS XL, New 2DS XL) and your Luma3DS version.
-4. Where in the game it happened (the map name is in the status line on the bottom screen).
+4. Where in the game it happened (say what you were doing or where; the build number is on the last row of the bottom screen).
 5. The files `sdmc:/3ds/ttyd/crash.txt` and `sdmc:/3ds/ttyd/latest.log`.
 6. Do not send your disc image or your save files unless asked. They contain nothing the port needs for a bug report
    except when the bug is about saves.

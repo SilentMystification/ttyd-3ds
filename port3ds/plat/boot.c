@@ -184,6 +184,7 @@ int plat_frame_poll(void) {
     s_last_poll = nowt;
     plat_wd_progress();
     plat_devupdate_frame();
+    s_last_poll = svcGetSystemTick(); /* an update pause (or a menu) inside the frame hook is not a hang: no gap warning */
     return aptMainLoop() ? 1 : 0;
 }
 

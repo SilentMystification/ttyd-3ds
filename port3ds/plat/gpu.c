@@ -755,6 +755,8 @@ static u32 vram_largest_kb(void) {
     return 0;
 }
 
+uint32_t plat_gpu_vram_largest_kb(void) { return vram_largest_kb(); }
+
 static void* s_scratch_mem; /* VRAM for the strip copies (scratch_get); NULL: none */
 #define SCRATCH_BYTES (256 * 1024)
 

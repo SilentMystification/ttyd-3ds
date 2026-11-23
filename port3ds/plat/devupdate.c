@@ -154,7 +154,6 @@ static void on_begin(void* user) {
              devupdate_incoming_version()[0] ? devupdate_incoming_version() : "?");
     PLOG_I("devupdate: %s", s_build_line);
     plat_updater_draw("Updater", s_build_line, "Starting", 0);
-    crash_wd_hold(true); /* no frames while paused: not a hang */
     s_relaunch = 0;
     LightEvent_Clear(&s_resume);
     s_pause_req = 1;
@@ -164,9 +163,7 @@ static void on_begin(void* user) {
     if (!s_paused) {
         PLOG_W("devupdate: the game thread did not reach a frame boundary in 3 s; going on");
     }
-    if (plat_audio_has_output()) {
-        ndspSetMasterVol(0.0f);
-    }
+    plat_pause_begin(); /* the shared debug pause: watchdog held (no frames is not a hang), sound muted, top screen greyed */
     plat_cpu_limit_transfer(1);
 }
 
@@ -212,12 +209,9 @@ static void on_resume(void* user) {
     }
     plat_updater_screen(0);
     plat_cpu_limit_transfer(0);
-    if (plat_audio_has_output()) {
-        ndspSetMasterVol(1.0f);
-    }
     s_pause_req = 0;
     LightEvent_Signal(&s_resume);
-    crash_wd_hold(false);
+    plat_pause_end(); /* un-grey, un-mute, release the watchdog, count the pause */
 }
 
 /* Before a relaunch. This only waits for a save write in progress to finish:

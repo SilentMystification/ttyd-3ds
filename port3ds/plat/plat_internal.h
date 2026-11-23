@@ -33,6 +33,7 @@ void plat_crash_setup(void);         /* config and the main thread's handler, as
 void plat_crash_init(void);          /* watchdog thread, boot crash tests */
 void plat_stack_register(int slot, const char* name, unsigned size);
 void plat_thread_register(const char* name, unsigned stack_bytes); /* call at a thread's entry (installs the handler) */
+Result plat_thread_refusal(int priority, int core); /* thread.c: the Result of a refused threadCreate */
 void plat_set_audio_abort(void (*fn)(void)); /* DSP release for the crash exit (no waiting on the audio thread) */
 void plat_wd_quiesce(void);
 uint32_t plat_wd_frames(void);       /* plat_wd_progress calls so far */

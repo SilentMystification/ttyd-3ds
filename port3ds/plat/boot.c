@@ -305,13 +305,14 @@ int main(int argc, char** argv) {
     plat_switches_load(argc, argv);
     plat_log_init(s_netload || plat_switch_has("livelog"));
     plat_crash_setup();
-    plat_sd_start(); /* all run-time SD access goes through its core 1 worker (include/plat/sdio.h) */
     plat_stack_register(0, "main", __stacksize__);
     PLOG_I("TTYD 3DS v%s build %s, switches \"%s\"", PORT3DS_VERSION, PORT3DS_BUILD_STRING, plat_switches_text());
     PLOG_I("boot: argc %d argv[0] \"%s\" 3dslink_host 0x%08lx netload %d", argc,
            (argc > 0 && argv[0] != NULL) ? argv[0] : "(null)", (unsigned long)__3dslink_host.s_addr, s_netload);
 
     plat_cpu_limit_init();
+    /* After the core-1 limit: the SD worker is a thread on core 1 (include/plat/sdio.h). */
+    plat_sd_start();
     plat_memplace_init();
     plat_log_start_writer();
     plat_crash_init();

@@ -68,7 +68,8 @@ The game sees one GameCube controller. The 3DS maps to it like this:
 ### Options menu
 
 Press **SELECT**, or touch the two status lines at the top of the bottom screen (outside the menu) (with the HUD on FPS only or off they show an **[Options]** label on the right).
-The game pauses while the menu is open and receives no input.
+The game pauses while the menu is open and receives no input. The top screen shows the last frame, greyed and darker, and all sound is muted
+(it fades out over a few milliseconds); both come back when you close the menu.
 
 While the menu is open it covers the whole bottom screen (the status lines and the log are hidden). The log keeps collecting in the
 background; when you close the menu the status lines and the last 28 log lines are painted back exactly as they would have been.

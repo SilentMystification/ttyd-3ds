@@ -55,6 +55,15 @@ typedef struct {
     void* (*read)(const char* path, size_t* n, void* user);
 } DevUpdateStore;
 
+/* What an update is doing, for a progress screen (DevUpdateConfig.on_status). */
+typedef enum {
+    DEVUPDATE_PH_RECEIVING = 1, /* a CIA is arriving: done and total are bytes */
+    DEVUPDATE_PH_CHECKING,      /* the CRC32 of the whole payload */
+    DEVUPDATE_PH_INSTALLING,    /* AM_FinishCiaInstall (the commit) */
+    DEVUPDATE_PH_RELAUNCHING,   /* the next launch is set; the process ends next. text: its switches */
+    DEVUPDATE_PH_ERROR          /* the update stopped; text says why; on_resume follows */
+} DevUpdatePhase;
+
 typedef struct {
     uint16_t port;          /* 0 = 5050 */
     const char* token;       /* shared secret, up to 31 characters; NULL = none (LAN dev use only) */
@@ -70,6 +79,10 @@ typedef struct {
     /* A push or restart begins: pause the app at a safe point, quiet audio. */
     void (*on_begin)(void* user);
     void (*on_progress)(uint32_t done, uint32_t total, void* user);
+    /* Phase changes, and during RECEIVING about every 64 KiB or 100 ms. Called on the server thread
+     * between on_begin and on_resume (or the relaunch), so an app may draw a progress screen there.
+     * text is NULL or a short message that is only valid during the call. NULL: not called. */
+    void (*on_status)(DevUpdatePhase phase, uint32_t done, uint32_t total, const char* text, void* user);
     /* Installed (or restart): let running saves finish, close files. true =
      * relaunch now; false = the app calls devupdate_relaunch() later. */
     bool (*on_ready)(void* user);
@@ -124,6 +137,10 @@ const char* devupdate_launch_args(void);
 /* This launch was started by devupdate (a restart, a push's relaunch, the
  * bootstrap's jump), even with no switches. */
 bool devupdate_launched(void);
+/* The version text the PC tool sent with the push being handled ("" if none): valid from on_begin on. */
+const char* devupdate_incoming_version(void);
+/* The running build's version (DevUpdateConfig.version) that relaunched this launch ("" if none or a cold start). */
+const char* devupdate_launch_from(void);
 
 /* From the app's crash handler, after its report and crash screen: wakes
  * the recovery thread prepared by devupdate_start and returns true (false

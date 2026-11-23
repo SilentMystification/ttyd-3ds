@@ -9,6 +9,7 @@
 /* options.c */
 const PlatOptMenu* plat_options_menu(void);
 void plat_options_tick(void);        /* once per frame: volume to NDSP */
+void plat_options_menu_redraw(void); /* paint the open menu again (the screen was used by something else) */
 
 /* options_menu.c: the list UI on the bottom console (rows 3-16). */
 void plat_options_menu_open(void);

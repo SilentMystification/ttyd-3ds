@@ -50,6 +50,11 @@ PlatRecoveryHook plat_devupdate_recovery_hook(void); /* for the crash handler; N
 
 /* menu.c: returns 1 while the Select menu is open (it consumed the input). */
 int plat_menu_input(uint32_t held, uint32_t down);
+void plat_pause_grey(void);          /* pause look: the top screen's last frame, greyed and darker (both eyes); the game's next frame replaces it */
+void plat_pause_release(void);
+void plat_pause_dump(int tick);      /* test aid: the frozen top screen as shots/pNNNNN.ppm */
+void plat_updater_screen(int on);    /* the updater screen (devupdate) replaces the bottom screen (on) or the previous screen returns (off) */
+void plat_updater_draw(const char* title, const char* build, const char* line, int percent); /* title row, build line, one status line, progress bar; the log below keeps scrolling */
 void plat_console_menu_mode(int on); /* on: a menu covers the whole screen and the log goes to a buffer only; off: HUD and log are repainted from the buffers. Caller holds the console lock */
 void plat_console_log(const char* s, size_t n); /* the console writer's text, under the console lock: buffered, and shown unless a menu covers the screen */
 void plat_menu_shot_tick(void);      /* switch shotbottom=N: bottom screen to shots/bNNNNN.ppm */

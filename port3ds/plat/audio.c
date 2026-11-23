@@ -38,6 +38,29 @@ static volatile int s_output;
 static volatile uint32_t s_frames, s_underruns;
 
 int plat_audio_has_output(void) { return s_output; }
+
+/* Pause mute: a gain on the mix that ramps over one buffer, so there is no click (and a wavdump
+ * of the output shows the silence). */
+static volatile int s_muted;
+static float s_gain = 1.0f;
+void plat_audio_set_muted(int on) { s_muted = on != 0; }
+int plat_audio_muted(void) { return s_muted; }
+static void apply_gain(int16_t* out, uint32_t frames) {
+    float target = s_muted ? 0.0f : 1.0f;
+    if (s_gain == target) {
+        if (target == 0.0f) {
+            memset(out, 0, frames * 4);
+        }
+        return;
+    }
+    float step = (target - s_gain) / (float)frames;
+    for (uint32_t i = 0; i < frames; i++) {
+        s_gain += step;
+        out[i * 2] = (int16_t)((float)out[i * 2] * s_gain);
+        out[i * 2 + 1] = (int16_t)((float)out[i * 2 + 1] * s_gain);
+    }
+    s_gain = target;
+}
 uint32_t plat_audio_frames(void) { return s_frames; }
 uint32_t plat_audio_underruns(void) { return s_underruns; }
 
@@ -112,6 +135,7 @@ static void fill_block(int16_t* out) {
         s_busy_ticks += svcGetSystemTick() - t0;
     }
     s_frames += s_buf_frames;
+    apply_gain(out, s_buf_frames);
     /* the output's peak level, logged every 10 s: a sound check without ears */
     static int peak;
     static uint64_t since;

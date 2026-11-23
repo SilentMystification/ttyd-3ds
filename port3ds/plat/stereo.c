@@ -421,11 +421,11 @@ static void shot_target(C3D_RenderTarget* t, const char* path) {
                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB8) |
                                 GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
     GSPGPU_InvalidateDataCache(buf, bytes);
-    FILE* f = fopen(path, "wb");
-    if (f == NULL) {
+    u8* out = malloc(16 + 400 * 240 * 3); /* queued to the SD service (core 1); no SD call here */
+    if (out == NULL) {
         return;
     }
-    fprintf(f, "P6\n400 240\n255\n");
+    size_t out_n = (size_t)sprintf((char*)out, "P6\n400 240\n255\n");
     static u8 row[400 * 3];
     for (int y = 0; y < 240; y++) {
         for (int x = 0; x < 400; x++) {
@@ -434,9 +434,10 @@ static void shot_target(C3D_RenderTarget* t, const char* path) {
             row[x * 3 + 1] = p[1];
             row[x * 3 + 2] = p[0];
         }
-        fwrite(row, 1, sizeof(row), f);
+        memcpy(out + out_n, row, sizeof(row));
+        out_n += sizeof(row);
     }
-    fclose(f);
+    plat_sd_write_file_own(path, out, out_n, 0);
 }
 
 void stereo_shot(const char* path, int stereo) {

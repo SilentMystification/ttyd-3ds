@@ -7,9 +7,9 @@
  *   #end
  * The "#end" line says the write finished. A file without it (cut off) or with
  * lines that are not "key=value" is ignored as a whole, with a log line, and
- * the defaults apply. The file is written to options.tmp and renamed over
+ * the defaults apply. The file is written (by the SD service, plat/sdio.c) to options.txt.tmp and renamed over
  * options.txt; the FAT file system cannot rename onto an existing file, so the
- * old one is removed first, and a leftover options.tmp that is complete is read
+ * old one is removed first, and a leftover options.txt.tmp that is complete is read
  * when options.txt is missing (a crash between the two steps loses nothing).
  */
 #include <errno.h>
@@ -22,7 +22,7 @@
 #include "plat_internal.h"
 
 #define OPT_FILE "options.txt"
-#define OPT_TMP "options.tmp"
+#define OPT_TMP "options.txt.tmp"
 #define MAX_ENTRIES 64
 #define KEY_LEN 24
 
@@ -106,16 +106,27 @@ static void put_entry(const char* key, int value) {
 }
 
 /* Reads one file into the table. Returns 1 when it was complete and well formed. */
-static int read_file(const char* path) {
-    FILE* f = fopen(path, "r");
-    if (f == NULL) {
+static int read_file(const char* path, int* exists) {
+    size_t text_n = 0;
+    char* text = plat_sd_read_file(path, &text_n);
+    if (exists != NULL) {
+        *exists = text != NULL;
+    }
+    if (text == NULL) {
         return 0;
     }
     Entry tmp[MAX_ENTRIES];
     int n = 0, ended = 0, bad = 0;
     char line[96];
-    while (fgets(line, sizeof(line), f) != NULL) {
-        size_t len = strlen(line);
+    for (char* p = text; *p != '\0';) {
+        char* nl = strchr(p, '\n');
+        size_t len = nl != NULL ? (size_t)(nl - p) : strlen(p);
+        if (len >= sizeof(line)) {
+            len = sizeof(line) - 1;
+        }
+        memcpy(line, p, len);
+        line[len] = '\0';
+        p = nl != NULL ? nl + 1 : p + strlen(p);
         while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r' || line[len - 1] == ' ')) {
             line[--len] = '\0';
         }
@@ -144,7 +155,7 @@ static int read_file(const char* path) {
         tmp[n].value = (int)v;
         n++;
     }
-    fclose(f);
+    free(text);
     if (!ended || bad) {
         PLOG_W("options: %s is %s; using the defaults", path, !ended ? "incomplete or corrupt" : "corrupt");
         return 0;
@@ -162,11 +173,11 @@ static void ensure_loaded(void) {
     }
     lock();
     if (!s_loaded) {
-        if (!read_file(OPT_FILE)) {
-            FILE* f = fopen(OPT_FILE, "r");
-            if (f != NULL) {
-                fclose(f); /* options.txt exists but was bad: defaults */
-            } else if (!read_file(OPT_TMP)) {
+        int exists = 0;
+        if (!read_file(OPT_FILE, &exists)) {
+            if (exists) {
+                /* options.txt exists but was bad: defaults */
+            } else if (!read_file(OPT_TMP, NULL)) {
                 PLOG_I("options: no options file, using the defaults");
             }
         }
@@ -228,14 +239,31 @@ void plat_options_save(void) {
         return;
     }
     lock();
-    FILE* f = fopen(OPT_TMP, "w");
-    if (f == NULL) {
-        PLOG_E("options: cannot write %s (%d)", OPT_TMP, errno);
+    /* The text is built here and handed to the SD service (core 1) as an atomic write: the caller
+     * never waits on the card. A failure is logged by the worker. */
+    size_t cap = 4096, len = 0;
+    char* buf = malloc(cap);
+    if (buf == NULL) {
+        PLOG_E("options: no memory to write %s", OPT_FILE);
         unlock();
         return;
     }
-    fprintf(f, "# ttyd3ds options v1\n");
-    int ok = 1;
+#define APP(...) \
+    do { \
+        if (len + 256 > cap) { \
+            cap *= 2; \
+            char* nb = realloc(buf, cap); \
+            if (nb == NULL) { \
+                free(buf); \
+                PLOG_E("options: no memory to write %s", OPT_FILE); \
+                unlock(); \
+                return; \
+            } \
+            buf = nb; \
+        } \
+        len += (size_t)snprintf(buf + len, cap - len, __VA_ARGS__); \
+    } while (0)
+    APP("# ttyd3ds options v1\n");
     if (s_menu != NULL) {
         for (int i = 0; i < s_menu->item_count; i++) {
             const PlatOptItem* it = &s_menu->items[i];
@@ -243,37 +271,26 @@ void plat_options_save(void) {
                 continue;
             }
             if (it->kind == PLAT_OPT_CHOICE) {
-                fprintf(f, "# %s:", it->key);
+                APP("# %s:", it->key);
                 for (int k = 0; k < name_count(it); k++) {
-                    fprintf(f, " %d=%s", k, it->names[k]);
+                    APP(" %d=%s", k, it->names[k]);
                 }
-                fprintf(f, "\n");
+                APP("\n");
             } else {
-                fprintf(f, "# %s: %d..%d\n", it->key, (int)it->min, (int)it->max);
+                APP("# %s: %d..%d\n", it->key, (int)it->min, (int)it->max);
             }
         }
     }
     for (int i = 0; i < s_n; i++) {
-        fprintf(f, "%s=%d\n", s_ent[i].key, s_ent[i].value);
+        APP("%s=%d\n", s_ent[i].key, s_ent[i].value);
     }
-    fprintf(f, "#end\n");
-    if (fflush(f) != 0 || ferror(f)) {
-        ok = 0;
-    }
-    if (fclose(f) != 0) {
-        ok = 0;
-    }
-    if (!ok) {
-        PLOG_E("options: write to %s failed", OPT_TMP);
-        remove(OPT_TMP);
+    APP("#end\n");
+#undef APP
+    if (plat_sd_write_file_own(OPT_FILE, buf, len, PLAT_SD_ATOMIC) == 0) {
+        s_dirty = 0;
+        PLOG_I("options: saving %d values to %s", s_n, OPT_FILE);
     } else {
-        remove(OPT_FILE);
-        if (rename(OPT_TMP, OPT_FILE) != 0) {
-            PLOG_E("options: rename %s -> %s failed (%d)", OPT_TMP, OPT_FILE, errno);
-        } else {
-            s_dirty = 0;
-            PLOG_I("options: saved %d values to %s", s_n, OPT_FILE);
-        }
+        PLOG_E("options: cannot queue the write of %s", OPT_FILE);
     }
     unlock();
 }

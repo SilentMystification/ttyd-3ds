@@ -15,6 +15,7 @@
 #include <dolphin/os.h>
 #include <dolphin/vi.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -31,6 +32,7 @@
 #include "plat/hud.h"
 #include "plat/input.h"
 #include "plat/plat.h"
+#include "plat/sdio.h"
 #include "plat/sweep.h"
 #include "port3ds/os_internal.h"
 #include "test_mode.h"
@@ -261,8 +263,9 @@ static void sweep_read(void) {
     }
     /* the game's map names for the sweep: stg battle-background hosts (test_gallery.c) */
     plat_sweep_register_entry_hook(tst_stage_host);
-    FILE* f = fopen("sweep.txt", "r");
-    if (f == NULL) {
+    size_t text_n = 0;
+    char* text = plat_sd_read_file("sweep.txt", &text_n); /* through the SD service: core 0 makes no SD call */
+    if (text == NULL) {
         PLOG_E("sweep: no sweep.txt");
         return;
     }
@@ -271,7 +274,15 @@ static void sweep_read(void) {
     s_sweep_maps = maps;
     s_sweep_story = story;
     char line[64];
-    while (s_sweep_n < SWEEP_MAX && fgets(line, sizeof(line), f) != NULL) {
+    for (char* p = text; s_sweep_n < SWEEP_MAX && *p != '\0';) {
+        char* nl = strchr(p, '\n');
+        size_t ll = nl != NULL ? (size_t)(nl - p) : strlen(p);
+        if (ll >= sizeof(line)) {
+            ll = sizeof(line) - 1;
+        }
+        memcpy(line, p, ll);
+        line[ll] = '\0';
+        p = nl != NULL ? nl + 1 : p + strlen(p);
         char name[16];
         int st = 0;
         int got = sscanf(line, "%15s %d", name, &st);
@@ -282,8 +293,8 @@ static void sweep_read(void) {
         story[s_sweep_n] = (u8)(got == 2 && st >= 0 && st <= 255 ? st : 0);
         s_sweep_n++;
     }
-    fclose(f);
-    mkdir("sweep", 0777);
+    free(text);
+    plat_sd_mkdir("sweep");
     PLOG_I("sweep: %d maps, %d frames each", s_sweep_n, s_sweep_frames);
     s_sweep_state = s_sweep_n > 0 ? 1 : 0;
 }

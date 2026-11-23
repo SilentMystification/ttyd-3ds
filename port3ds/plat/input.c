@@ -91,7 +91,10 @@ static void script_load(void) {
 #define TPAD_REC_BYTES 8
 #define TPAD_FLUSH_FRAMES 600
 
-static FILE* s_rec_file;
+/* All file access goes through the SD service (plat/sdio.c): the game thread posts the bytes
+ * and goes on, the core 1 worker writes them. */
+static char s_rec_path[128];
+static int s_rec_on;
 static int s_rec_init;
 static uint32_t s_rec_frames, s_rec_flushed;
 static uint8_t* s_rec_buf; /* all records of the run (8 bytes a frame; a 3 h run is under 6 MB) */
@@ -113,7 +116,7 @@ static uint32_t get32(const uint8_t* p) {
 }
 
 static void rec_flush(void) {
-    if (s_rec_file == NULL) {
+    if (!s_rec_on) {
         return;
     }
     uint8_t hdr[16];
@@ -121,50 +124,54 @@ static void rec_flush(void) {
     put32(hdr + 4, TPAD_VERSION);
     put32(hdr + 8, s_rec_frames);
     put32(hdr + 12, plat_switch_has("determ") ? TPAD_FLAG_DETERM : 0);
-    fseek(s_rec_file, 0, SEEK_SET);
-    fwrite(hdr, 1, sizeof(hdr), s_rec_file);
-    fseek(s_rec_file, 16 + (long)s_rec_flushed * TPAD_REC_BYTES, SEEK_SET);
-    fwrite(s_rec_buf + (size_t)s_rec_flushed * TPAD_REC_BYTES, TPAD_REC_BYTES, s_rec_frames - s_rec_flushed, s_rec_file);
+    if (s_rec_frames > s_rec_flushed) {
+        plat_sd_write_at(s_rec_path, 16 + (uint64_t)s_rec_flushed * TPAD_REC_BYTES,
+                         s_rec_buf + (size_t)s_rec_flushed * TPAD_REC_BYTES,
+                         (size_t)(s_rec_frames - s_rec_flushed) * TPAD_REC_BYTES);
+    }
+    plat_sd_write_at(s_rec_path, 0, hdr, sizeof(hdr)); /* after the frames: a header never counts frames not yet written */
     s_rec_flushed = s_rec_frames;
-    fflush(s_rec_file);
 }
 
 static void rec_pad_init(void) {
     s_rec_init = 1;
     char path[256];
     if (plat_switch_value("padfile", path, sizeof(path)) && path[0] != '\0') {
-        FILE* f = fopen(path, "rb");
-        uint8_t hdr[16];
-        if (f == NULL || fread(hdr, 1, 16, f) != 16 || get32(hdr) != TPAD_MAGIC || get32(hdr + 4) != TPAD_VERSION) {
+        size_t fsz = 0;
+        uint8_t* file = plat_sd_read_file(path, &fsz); /* the whole file, once, at the first pad read (a test switch) */
+        if (file == NULL || fsz < 16 || get32(file) != TPAD_MAGIC || get32(file + 4) != TPAD_VERSION) {
             PLOG_E("[PAD] padfile %s: missing or not a TPAD v1 file", path);
         } else {
-            uint32_t n = get32(hdr + 8);
+            uint32_t n = get32(file + 8);
+            size_t have = (fsz - 16) / TPAD_REC_BYTES;
+            if (n > have) {
+                n = (uint32_t)have;
+            }
             s_play_buf = malloc((size_t)n * TPAD_REC_BYTES + 1);
             if (s_play_buf != NULL) {
-                s_play_frames = (uint32_t)fread(s_play_buf, TPAD_REC_BYTES, n, f);
+                memcpy(s_play_buf, file + 16, (size_t)n * TPAD_REC_BYTES);
+                s_play_frames = n;
                 s_play_on = 1;
                 PLOG_I("[PAD] padfile %s: %u frames (recorded %sunder determ)", path, (unsigned)s_play_frames,
-                       (get32(hdr + 12) & TPAD_FLAG_DETERM) ? "" : "not ");
+                       (get32(file + 12) & TPAD_FLAG_DETERM) ? "" : "not ");
             }
         }
-        if (f != NULL) {
-            fclose(f);
-        }
+        free(file);
         return; /* a playback run records nothing */
     }
     if (plat_switch_value("padrec", path, sizeof(path)) && path[0] != '\0') {
-        s_rec_file = fopen(path, "wb");
-        if (s_rec_file == NULL) {
-            PLOG_E("[PAD] padrec %s: cannot create", path);
+        if (strlen(path) >= sizeof(s_rec_path)) {
+            PLOG_E("[PAD] padrec %s: path too long", path);
             return;
         }
         s_rec_cap = 4096;
         s_rec_buf = malloc((size_t)s_rec_cap * TPAD_REC_BYTES);
         if (s_rec_buf == NULL) {
-            fclose(s_rec_file);
-            s_rec_file = NULL;
             return;
         }
+        strcpy(s_rec_path, path);
+        plat_sd_write_file(s_rec_path, "", 0, 0); /* create or empty it */
+        s_rec_on = 1;
         rec_flush(); /* a valid empty file from the start */
         atexit(rec_flush);
         PLOG_I("[PAD] padrec %s", path);
@@ -196,7 +203,7 @@ void plat_pad_state(PlatPadState* s) {
         }
         return;
     }
-    if (s_rec_file != NULL) {
+    if (s_rec_on) {
         s_cur = *s;
         s_cur_set = 1;
     }
@@ -212,7 +219,7 @@ static void rec_pad_frame(void) {
         }
         return;
     }
-    if (s_rec_file == NULL) {
+    if (!s_rec_on) {
         return;
     }
     if (s_rec_frames == s_rec_cap) {

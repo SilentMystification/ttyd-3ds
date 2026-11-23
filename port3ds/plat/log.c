@@ -388,26 +388,16 @@ void plat_log_start_writer(void) {
         plat_fatal("log: no memory for the log queue");
     }
     memset(s_slots, 0, sizeof(Slot) * SLOTS);
-    /* Core 2 (the New 3DS's extra core, beside the render thread, at the
-     * lowest priority) so SD and network writes never take time from the
-     * game thread on core 0 or the audio and DMA threads on core 1; then
-     * core 1, then core 0. */
-    int core = 2;
-    s_writer = threadCreate(writer_main, NULL, 32 * 1024, 0x3F, 2, false);
-    if (s_writer == NULL) {
-        s_writer = threadCreate(writer_main, NULL, 32 * 1024, 0x3F, 1, false);
-        core = 1;
-    }
-    if (s_writer == NULL) {
-        s_writer = threadCreate(writer_main, NULL, 32 * 1024, 0x3F, 0, false);
-        core = 0;
-    }
+    /* Core 1 only, at the lowest priority: all SD access at run time is on core 1 (plat/sdio.c),
+     * so the game thread on core 0 and the render thread on core 2 never wait on the card.
+     * No fallback to another core: without the thread the log stays direct. */
+    s_writer = threadCreate(writer_main, NULL, 32 * 1024, 0x3F, 1, false);
     if (s_writer == NULL) {
         PLOG_E("log: writer thread not created, the log stays direct");
         return;
     }
     __atomic_store_n(&s_writer_on, 1, __ATOMIC_RELEASE);
-    PLOG_I("log: writer thread on core %d", core);
+    PLOG_I("log: writer thread on core 1");
 }
 
 void plat_log_stop(void) {
@@ -441,6 +431,7 @@ void plat_log_crash_flush(void) {
         return;
     }
     __atomic_store_n(&s_crashed, 1, __ATOMIC_RELEASE);
+    plat_sd_crashed();
     int got = LightLock_TryLock(&s_drain_lock) == 0;
     if (!got) {
         LightEvent_WaitTimeout(&s_flushed, 500000000LL);
@@ -467,6 +458,7 @@ void plat_log_crash_close(void) {
  * crash.txt (appended, kept across boots) and the debugger channel. */
 void plat_crash_line(const char* s, int n) {
     static int flushed;
+    plat_sd_crashed();
     if (!flushed) {
         flushed = 1;
         plat_log_crash_flush();

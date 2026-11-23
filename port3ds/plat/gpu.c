@@ -1633,11 +1633,11 @@ static void capture_depth(u32* buf, const char* path) {
                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                 GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
     GSPGPU_InvalidateDataCache(buf, bytes);
-    FILE* f = fopen(dpath, "wb");
-    if (f == NULL) {
+    u8* out = malloc(16 + 608 * 480 * 4);
+    if (out == NULL) {
         return;
     }
-    fprintf(f, "DEP1 608 480\n");
+    size_t out_n = (size_t)sprintf((char*)out, "DEP1 608 480\n");
     static u32 row[608];
     for (int y = 0; y < 480; y++) {
         for (int x = 0; x < 608; x++) {
@@ -1646,15 +1646,18 @@ static void capture_depth(u32* buf, const char* path) {
             u32 px = (u32)tx, py = TARGET_H - 1 - (u32)ty;
             row[x] = buf[py * TARGET_W + px];
         }
-        fwrite(row, 4, 608, f);
+        memcpy(out + out_n, row, sizeof(row));
+        out_n += sizeof(row);
     }
-    fclose(f);
+    plat_sd_write_file_own(dpath, out, out_n, 0);
 }
 
 /* The EFB (608x480, as the game drew it) to a PPM file. */
 static void capture_efb(const Record* r, const char* path) {
-    FILE* f = fopen(path, "wb");
-    if (f == NULL) {
+    /* The file is built in memory and queued to the SD service (core 1): this thread makes no SD call. */
+    u8* out = malloc(16 + 608 * 480 * 3);
+    size_t out_n = 0;
+    if (out == NULL) {
         return;
     }
     /* The GPU copies the EFB to linear memory first: a CPU read of VRAM can
@@ -1665,7 +1668,7 @@ static void capture_efb(const Record* r, const char* path) {
     if (buf == NULL) {
         buf = (u32*)linearAlloc(bytes);
         if (buf == NULL) {
-            fclose(f);
+            free(out);
             PLOG_W("shot %s: no linear memory", path);
             return;
         }
@@ -1677,7 +1680,7 @@ static void capture_efb(const Record* r, const char* path) {
                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                                 GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
     GSPGPU_InvalidateDataCache(buf, bytes);
-    fprintf(f, "P6\n608 480\n255\n");
+    out_n = (size_t)sprintf((char*)out, "P6\n608 480\n255\n");
     static u8 row[608 * 3];
     for (int y = 0; y < 480; y++) {
         for (int x = 0; x < 608; x++) {
@@ -1689,9 +1692,10 @@ static void capture_efb(const Record* r, const char* path) {
             row[x * 3 + 1] = (u8)(v >> 16);
             row[x * 3 + 2] = (u8)(v >> 8);
         }
-        fwrite(row, 1, sizeof(row), f);
+        memcpy(out + out_n, row, sizeof(row));
+        out_n += sizeof(row);
     }
-    fclose(f);
+    plat_sd_write_file_own(path, out, out_n, 0);
     if (s_depth_shots) {
         capture_depth(buf, path);
     }
@@ -1859,7 +1863,7 @@ void plat_gpu_init(void) {
     s_shots_from = (u32)plat_switch_int("shotfrom", 0); /* first presented frame a shot may be (shots=1: consecutive frames) */
     char dumpcopy[32];
     if (s_shots_every || plat_switch_value("gxdumpcopy", dumpcopy, sizeof(dumpcopy))) { /* its shots go there too */
-        mkdir("shots", 0777);
+        plat_sd_mkdir("shots");
     }
     s_threaded = !plat_switch_has("gxsync");
     /* Switch gpucore=N: the render thread's core (default 2 on the New 3DS, 1 on the old one). */

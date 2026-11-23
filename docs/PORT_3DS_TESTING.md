@@ -101,6 +101,7 @@ Switches the game reads (space-separated words in `--switches`):
 | `qtmgpu` | Allows `GPU_READ`/`GPU_WRITE` placements in QTM. Off by default: GPU access to QTM is unverified on hardware. `DSP` placements never go in QTM |
 | `texstats=N` | Every N frames, logs texture hashes, bytes hashed, lookups, hash mismatches and uploads per frame. The first change of each texture is logged with its address, size, format, memory region and the caller of the last `GXInitTexObj*` for that address |
 | `jobs=0` | Every `plat_job` runs inline: the A/B baseline for the core-2 job queue |
+| `sdstats=N` | Every N seconds, an `sdstats` line: SD operations by kind (write, append, writeat, remove, rename, mkdir, read, disc) and the core that asked, queue depth now and at most, bytes written and read, and the **direct SD calls**: from core 1, and from cores 0/2 after the game loop began (must be 0; a warning gives the first caller's address and core). See [PORT_3DS_MULTICORE.md](PORT_3DS_MULTICORE.md) |
 | `jobstats=N` | A `[JOBS]` counter line every N frames while the counters change |
 | `jobcore=C`, `jobprio=P` | Job worker core and priority (defaults 2 and 0x30, below the render thread) |
 | `jobcheck=1` | Each split conversion runs with jobs and again inline from the same bytes, and the two are compared (`[JOBCHECK]` lines) |

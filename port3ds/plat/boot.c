@@ -169,6 +169,11 @@ void plat_cpu_limit_transfer(int on) {
 }
 
 int plat_frame_poll(void) {
+    static int s_boot_marked;
+    if (!s_boot_marked) {
+        s_boot_marked = 1;
+        plat_sd_boot_done(); /* the game loop has begun: SD calls on cores 0 and 2 count as regressions */
+    }
     plat_wd_progress();
     plat_devupdate_frame();
     return aptMainLoop() ? 1 : 0;
@@ -205,6 +210,7 @@ void plat_quit(int relaunch) {
     }
     plat_cpu_limit_restore();
     plat_devupdate_stop();
+    plat_sd_flush();
     plat_log_stop();
     plat_log_crash_close();
     if (relaunch) {
@@ -286,6 +292,7 @@ int main(int argc, char** argv) {
     plat_switches_load(argc, argv);
     plat_log_init(s_netload || plat_switch_has("livelog"));
     plat_crash_setup();
+    plat_sd_start(); /* all run-time SD access goes through its core 1 worker (include/plat/sdio.h) */
     plat_stack_register(0, "main", __stacksize__);
     PLOG_I("TTYD 3DS v%s build %s, switches \"%s\"", PORT3DS_VERSION, PORT3DS_BUILD_STRING, plat_switches_text());
     PLOG_I("boot: argc %d argv[0] \"%s\" 3dslink_host 0x%08lx netload %d", argc,

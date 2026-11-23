@@ -91,10 +91,14 @@ def main():
     for r in rows:
         per[(r["tree"], r["emu"])].append(r)
     print(f"emu_usage: {len(rows)} runs in {args.log}")
-    print(f"{'runs':>5} {'total s':>9} {'max s':>8} {'wait s':>9}  emulator  worktree")
+    print(f"{'runs':>5} {'total s':>9} {'max s':>8} {'wait s':>9} {'timeouts':>12} {'stalls':>12}  emulator  worktree")
     for (tree, emu), rs in sorted(per.items(), key=lambda kv: -sum(r["ran"] for r in kv[1])):
+        # A timeout or stall is a run that ran to its limit: the time it wasted is what to watch.
+        to = [r for r in rs if r["result"].startswith("FAIL: timeout")]
+        st = [r for r in rs if r["result"].startswith("FAIL: stall")]
         print(f"{len(rs):5d} {sum(r['ran'] for r in rs):9.0f} {max(r['ran'] for r in rs):8.0f} "
-              f"{sum(r['wait'] for r in rs):9.0f}  {emu:<8}  {tree}")
+              f"{sum(r['wait'] for r in rs):9.0f} {len(to):4d} {sum(r['ran'] for r in to):7.0f}s "
+              f"{len(st):4d} {sum(r['ran'] for r in st):7.0f}s  {emu:<8}  {tree}")
     print(f"\nlongest {args.top} runs:")
     for r in sorted(rows, key=lambda r: -r["ran"])[:args.top]:
         print(f"{r['ran']:7.0f}s  {r['start']}  {r['emu']:<8} {Path(r['tree']).name}  {r['result'][:30]}  {r['switches'][:60]}")

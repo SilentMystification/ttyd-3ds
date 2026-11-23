@@ -14,8 +14,10 @@ What it does:
      its installed content (.app) is booted, so the ExHeader from the CIA
      (QTM mapping, 804 MHz, core 2) applies.
   4. Tails the game log (sdmc-relative --log). Stops on the --until regex
-     (pass), a "[CRASH]" line, --stall seconds without log growth,
-     --timeout, or the emulator exiting by itself.
+     (pass; --frames N is --until for "game frame N reached"), a "[CRASH]"
+     line, --stall seconds (default 20) without log growth, --timeout, or the
+     emulator exiting by itself. A run that times out with an --until that
+     never matched prints the last log lines.
   5. Always stops Azahar, then copies the game log and Azahar's own log to
      build/azahar-last/ and fails on Azahar lines that would fault on
      hardware (unmapped memory access, unhandled exceptions).
@@ -308,11 +310,15 @@ def main():
                     help="words written to sdmc:/3ds/ttyd/debug3ds.txt (fastboot is added unless nofastboot is given)")
     ap.add_argument("--log", default="3ds/ttyd/latest.log", help="game log path relative to the SD card root")
     ap.add_argument("--until", help="regex in the game log that means success")
+    ap.add_argument("--frames", type=int, metavar="N", default=None,
+                    help="pass when the game reaches game frame N (the game logs 'frame N reached' via the framemark "
+                    "switch); use this instead of a hand-written --until for runs to a frame")
     ap.add_argument("--timeout", type=float, default=None,
                     help="seconds the emulator may run once it has a slot (default 60; more needs --long)")
     ap.add_argument("--long", type=float, metavar="SECONDS", default=None,
                     help="a run that genuinely needs more than 60 s: the limit in seconds (max 1800)")
-    ap.add_argument("--stall", type=float, default=0.0, help="fail after this many seconds without log growth (0 = off)")
+    ap.add_argument("--stall", type=float, default=20.0,
+                    help="fail (FAIL: stall) after this many seconds without game log growth (default 20; 0 = off)")
     ap.add_argument("--gdb", action="store_true", help="enable Azahar's GDB stub; the guest waits for a debugger")
     ap.add_argument("--gdb-port", type=int, default=24689)
     ap.add_argument("--realtime", action="store_true",
@@ -337,11 +343,18 @@ def main():
     args.timeout, err = emu_usage.resolve_timeout("run_azahar", args.timeout, args.long)
     if err:
         fail(err, 2)
+    if args.frames is not None:
+        if args.until:
+            fail("--frames and --until are two ways to say when a run passes: use one", 2)
+        if args.frames < 1:
+            fail("--frames takes a game frame number of 1 or more", 2)
+        args.until = rf"\bframe {args.frames} reached\b"
     _usage["switches"] = args.switches
     build = args.build.resolve()
     # A background job starts with SIGINT ignored, and SIGTERM would skip the finally blocks:
     # turn both into an exception so the Azahar this run started always goes down with it.
     def _on_signal(signum, _frame):
+        _usage["result"] = f"killed: signal {signum}"
         raise KeyboardInterrupt(f"signal {signum}")
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
@@ -359,6 +372,8 @@ def main():
     ttyd_dir = sdmc / "3ds" / "ttyd"
     ttyd_dir.mkdir(parents=True, exist_ok=True)
     sw = args.switches.split()
+    if args.frames is not None:
+        sw = [w for w in sw if not w.startswith("framemark=")] + [f"framemark={args.frames}"]
     if "nofastboot" in sw:
         sw.remove("nofastboot")
     elif "fastboot" not in sw:
@@ -409,7 +424,7 @@ def main():
             elif proc.poll() is not None:
                 verdict, reason = (until is None), f"Azahar exited (status {proc.returncode})"
             elif args.stall and now - last_growth > args.stall:
-                verdict, reason = False, f"no log growth for {args.stall:.0f}s"
+                verdict, reason = False, f"stall: no log growth for {args.stall:.0f}s"
             elif now - start > args.timeout:
                 verdict, reason = False, f"timeout after {args.timeout:.0f}s"
     finally:
@@ -417,6 +432,14 @@ def main():
 
     if game_log.exists():
         shutil.copy(game_log, LAST / "game_log.txt")
+        if verdict is False and until is not None and reason.startswith(("timeout", "stall")):
+            lines = game_log.read_text(errors="replace").splitlines()
+            if not any(until.search(line) for line in lines):
+                # A run that ran to the limit with a pattern that never matched: show why (wrong pattern, or a
+                # line that only appears with a switch).
+                print("run_azahar: --until never matched; last log lines:")
+                for line in lines[-10:]:
+                    print(f"  {line}")
     faults = []
     if alog.exists():
         shutil.copy(alog, LAST / "azahar_log.txt")
@@ -436,4 +459,20 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Every exit gets a result for the usage log: a usage error, an exception or a SystemExit with a message
+    # that did not go through fail() would otherwise be logged as "no result".
+    try:
+        sys.exit(main())
+    except SystemExit as e:
+        if _usage["result"] == "no result":
+            if e.code == 2:
+                _usage["result"] = "usage error"
+            elif isinstance(e.code, str):
+                _usage["result"] = f"aborted: {e.code}"
+            else:
+                _usage["result"] = f"aborted: exit {e.code}"
+        raise
+    except BaseException as e:  # KeyboardInterrupt from a signal already set "killed: signal N"
+        if _usage["result"] == "no result":
+            _usage["result"] = f"aborted: {type(e).__name__}: {e}"
+        raise

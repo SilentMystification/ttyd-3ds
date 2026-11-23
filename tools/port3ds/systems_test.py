@@ -97,7 +97,9 @@ def run_game(build, switches, padscript, until, timeout, last, expect_exit=False
     cmd = [sys.executable, str(ROOT / "tools/port3ds/run_azahar.py"), "--build", str(build), "--profile", str(PROFILE),
            "--last", str(last), "--switches", sw, "--log", "3ds/ttyd/latest.log", *emu_usage.time_args(timeout),
            "--stall", "90"]
-    if until:
+    if isinstance(until, UntilFrame):
+        cmd += ["--frames", str(until.n)]
+    elif until:
         cmd += ["--until", until]
     t0 = time.monotonic()
     child = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -227,10 +229,17 @@ def scenario(name, card_in=None, card_out=None, timeout=600, until=None, switche
     return deco
 
 
+class UntilFrame:
+    """A run that ends at game frame n (run_azahar --frames n). The scenario's check reads the gwdump record
+    of that frame, which the game writes before the frame's marker, so n must be a gwdump frame (every 30)."""
+
+    def __init__(self, n):
+        self.n = n
+
+
 def until_frame(n):
-    """run_azahar --until for game frame n (a gwdump record: every 30 frames)."""
     assert n % 30 == 0, n
-    return rf"gwdump f={n} "
+    return UntilFrame(n)
 
 
 def card_writes(log):

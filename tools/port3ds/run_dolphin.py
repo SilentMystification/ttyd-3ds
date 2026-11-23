@@ -62,6 +62,7 @@ import json
 import os
 import resource
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -306,6 +307,13 @@ def main():
     ap.add_argument("--video", help="video backend (default Null; Vulkan with --shots)")
     args = ap.parse_args()
     global PROFILE
+    # A signal (SIGTERM from a caller's timeout, Ctrl-C) is a result, not "no result": the emulator is stopped by
+    # the normal exit path, and the usage log says what ended the run.
+    def _on_signal(signum, _frame):
+        _usage["result"] = f"killed: signal {signum}"
+        raise KeyboardInterrupt(f"signal {signum}")
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
     args.timeout, err = emu_usage.resolve_timeout("run_dolphin", args.timeout, args.long)
     if err:
         die(err, 2)
@@ -445,4 +453,13 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit as e:
+        if _usage["result"] == "no result":
+            _usage["result"] = "usage error" if e.code == 2 else f"aborted: exit {e.code}"
+        raise
+    except BaseException as e:  # KeyboardInterrupt from a signal already set "killed: signal N"
+        if _usage["result"] == "no result":
+            _usage["result"] = f"aborted: {type(e).__name__}: {e}"
+        raise

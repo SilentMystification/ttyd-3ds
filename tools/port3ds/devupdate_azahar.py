@@ -30,6 +30,7 @@ OWN_CIA = EXAMPLES / "devupdate/ctrdk-devupdate.cia"
 OTHER_CIA = EXAMPLES / "crash/ctrdk-crash.cia"
 TTYD_CIA = REPO / "build/3ds/game/ttyd.cia"
 results = []
+PORT = int(__import__("os").environ.get("DEVUPDATE_PORT", "5050"))  # another port when another session holds 5050
 
 
 def step(name, ok, detail=""):
@@ -40,7 +41,7 @@ def step(name, ok, detail=""):
 
 def tool(*argv, timeout=300, quiet=False):
     """devupdate.py with --ip 127.0.0.1: the same command line as for the console."""
-    cmd = [sys.executable, str(TOOL), "--ip", "127.0.0.1", "--timeout", "30", *argv]
+    cmd = [sys.executable, str(TOOL), "--ip", "127.0.0.1", "--port", str(PORT), "--timeout", "30", *argv]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     out = r.stdout + r.stderr
     if not quiet:
@@ -49,7 +50,7 @@ def tool(*argv, timeout=300, quiet=False):
 
 
 def session(action, profile, *extra, timeout=1200):
-    cmd = [sys.executable, str(TOOL), "azahar-session", action, "--profile", str(profile), *extra]
+    cmd = [sys.executable, str(TOOL), "--port", str(PORT), "azahar-session", action, "--profile", str(profile), *extra]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     print("    " + (r.stdout + r.stderr).strip().replace("\n", "\n    "), flush=True)
     return r.returncode, r.stdout + r.stderr
@@ -205,9 +206,68 @@ def run_ttyd(args, profile, crash):
     restart_last(profile, log, "hello=1")
 
 
+# --app ttyd-states: one fresh TTYD session per game state; a push (with the build's version sidecar, so the
+# version flag is on) is made in that state. Each must install and request the relaunch (Azahar cannot do the
+# relaunch itself: the instance ends). trigger: a regex on the game log that says the state has been reached.
+SWEEP_MAPS = "gor_01\nhei_00\ngon_02\nmri_01\ntik_00\ngor_00\nwin_00\ntou_01\n" * 4
+STATES = {
+    "options": dict(switches="map=gor_01 determ padscript=wait*700,select*3", trigger=r"options: menu open",
+                    note="Options menu open (paused, greyed)"),
+    "map-change": dict(switches="sweep=25", sweep=SWEEP_MAPS, trigger=r"sweep: hei_00 \(story",
+                       note="maps loading back to back (sweep)"),
+    "battle": dict(switches="map=gor_01 battle=0-5 battlewait=30", trigger=r"battle: ",
+                   note="battle starts, one after another"),
+    "stage": dict(switches="map=gor_01", trigger=r"warp: .*at game frame|frame hooks", push=["--stage"],
+                  note="push --stage (CIA through the SD card)"),
+    "fallback": dict(switches="map=gor_01", trigger=r"warp: .*at game frame|frame hooks",
+                     push=["--break-after", "512"], expect=r"retrying through the SD card",
+                     note="direct push breaks at 512 KiB, the PC retries with --stage"),
+}
+
+
+def run_ttyd_states(args, profile):
+    sdmc = profile / "data/azahar-emu/sdmc"
+    log = sdmc / "3ds/ttyd/latest.log"
+    if not (sdmc / "3ds/ttyd/game.iso").exists():
+        print("devupdate_azahar: the profile has no 3ds/ttyd/game.iso (hard-link iso/game.iso there)")
+        return
+    for name in args.states:
+        st = STATES[name]
+        print(f"devupdate_azahar: == state {name}: {st['note']}", flush=True)
+        for old in (log, sdmc / "3ds/ttyd/previous.log"):
+            old.unlink(missing_ok=True)
+        (sdmc / "3ds/ttyd/debug3ds.txt").write_text(f"devupdate devupdateport={PORT} fastboot " + st["switches"] + "\n")
+        if "sweep" in st:
+            (sdmc / "3ds/ttyd/sweep.txt").write_text(st["sweep"])
+        rc, out = session("start", profile, "--boot", str(TTYD_CIA), "--wait", "240")
+        if rc != 0:
+            step(f"{name}: session starts", False)
+            session("stop", profile)
+            continue
+        m = wait_log(log, st["trigger"], 240)
+        step(f"{name}: the game reached the state", m is not None, m.group(0) if m else "trigger not seen")
+        extra = st.get("push", [])
+        rc, out = tool("push", str(TTYD_CIA), *extra, timeout=900)
+        text = log.read_text(errors="replace") if log.exists() else ""
+        step(f"{name}: push installs and relaunches", rc == 0 and "installed" in out and "relaunching" in out,
+             next((l for l in out.splitlines() if l.startswith("devupdate: ") and "done" not in l and "sent" in l), ""))
+        if st.get("expect"):
+            step(f"{name}: expected path taken", re.search(st["expect"], out) is not None, st["expect"])
+        step(f"{name}: the game logged the relaunch request", re.search(r"relaunch requested", text) is not None or
+             wait_log(log, r"relaunch requested", 20) is not None)
+        waits = [l for l in log.read_text(errors="replace").splitlines() if "devupdate:" in l and
+                 ("paused" in l or "reach a frame" in l or "build " in l or "staged" in l)]
+        print("    " + "\n    ".join(waits[-6:]), flush=True)
+        time.sleep(3)
+        session("stop", profile)
+        shutil.copy(log, args.out / f"ttyd_state_{name}.log") if log.exists() else None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--app", choices=["example", "ttyd", "ttyd-crash"], default="example")
+    ap.add_argument("--app", choices=["example", "ttyd", "ttyd-crash", "ttyd-states"], default="example")
+    ap.add_argument("--states", type=lambda s: s.split(","), default=list(STATES),
+                    help="ttyd-states: comma list of " + ",".join(STATES))
     ap.add_argument("--profile", type=Path, help="default build/azahar-profile-devupdate (example) or "
                     "build/azahar-profile (TTYD, which needs the disc image there)")
     ap.add_argument("--out", type=Path, default=REPO / "build/devupdate-azahar")
@@ -218,6 +278,8 @@ def main():
     try:
         if args.app == "example":
             run_example(args, profile)
+        elif args.app == "ttyd-states":
+            run_ttyd_states(args, profile)
         else:
             run_ttyd(args, profile, args.app == "ttyd-crash")
     finally:

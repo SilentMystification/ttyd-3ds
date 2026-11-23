@@ -31,6 +31,8 @@ static void (*s_audio_abort)(void);
 
 void plat_set_audio_abort(void (*fn)(void)) { s_audio_abort = fn; }
 void plat_set_phase(const char* phase) { s_phase = phase; }
+const char* plat_get_phase(void) { return (const char*)s_phase; }
+const char* plat_get_map_name(void) { return s_map; }
 
 void plat_set_map_name(const char* map) {
     if (map == NULL) {

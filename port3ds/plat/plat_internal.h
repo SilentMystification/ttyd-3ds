@@ -37,6 +37,10 @@ void plat_set_audio_abort(void (*fn)(void)); /* DSP release for the crash exit (
 void plat_wd_quiesce(void);
 uint32_t plat_wd_frames(void);       /* plat_wd_progress calls so far */
 
+const char* plat_get_phase(void);    /* the last plat_set_phase text (what the game thread says it is doing) */
+const char* plat_get_map_name(void); /* the last plat_set_map_name text ("-" before a map) */
+int plat_options_menu_is_open(void);
+
 /* devupdate.c (glue to libs/ctr-devkit/devupdate; switch devupdate) */
 typedef bool (*PlatRecoveryHook)(const char* report, void* user);
 int plat_devupdate_enabled(void);

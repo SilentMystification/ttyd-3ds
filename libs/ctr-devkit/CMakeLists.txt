@@ -22,6 +22,7 @@ target_compile_options(ctrdk_crash PRIVATE ${CTRDK_FLAGS})
 add_library(ctrdk_devupdate STATIC
     "${CMAKE_CURRENT_LIST_DIR}/devupdate/devupdate.c"
     "${CMAKE_CURRENT_LIST_DIR}/devupdate/files.c"
+    "${CMAKE_CURRENT_LIST_DIR}/devupdate/proto.c"
     "${CMAKE_CURRENT_LIST_DIR}/devupdate/queue.c")
 target_include_directories(ctrdk_devupdate PUBLIC "${CMAKE_CURRENT_LIST_DIR}/include")
 target_compile_options(ctrdk_devupdate PRIVATE ${CTRDK_FLAGS})

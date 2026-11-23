@@ -44,6 +44,7 @@ static int (*s_save_busy)(void);
 static char s_token[32];
 static volatile int s_update_failed;
 static char s_build_line[64];
+#define PAUSE_WAIT_MS 2000 /* the longest on_begin waits for the game thread's next frame boundary */
 
 void plat_set_save_busy(int (*fn)(void)) { s_save_busy = fn; }
 /* On when this launch is a devupdate relaunch (which keeps the server on even
@@ -158,11 +159,25 @@ static void on_begin(void* user) {
     s_relaunch = 0;
     LightEvent_Clear(&s_resume);
     s_pause_req = 1;
-    for (int i = 0; i < 300 && !s_paused; i++) {
-        svcSleepThread(10000000LL); /* up to 3 s for the game to reach a frame boundary */
+    /* No state of the game may block an update: wait at most PAUSE_WAIT_MS for the game thread to reach
+     * a frame boundary (the Options menu polls every 16 ms; a map load, a battle start or a card write
+     * may take longer). Past that the update goes on with the thread still running; it holds at its
+     * next frame boundary (s_pause_req stays set), and a relaunch ends the process even if it never gets
+     * there (the library's relaunch deadline). What the thread was in is logged. */
+    int waited = 0;
+    while (waited < PAUSE_WAIT_MS && !s_paused) {
+        svcSleepThread(10000000LL);
+        waited += 10;
     }
     if (!s_paused) {
-        PLOG_W("devupdate: the game thread did not reach a frame boundary in 3 s; going on");
+        PLOG_W("devupdate: the game thread did not reach a frame boundary in %d ms; going on (phase \"%s\", map %s, "
+               "options menu %d, save busy %d, stereo %d, wd holds %d, frame %lu)",
+               waited, plat_get_phase(), plat_get_map_name(), plat_options_menu_is_open(),
+               s_save_busy != NULL ? s_save_busy() : 0, (int)gfxIs3D(), crash_wd_held(),
+               (unsigned long)plat_wd_frames());
+    } else if (waited > 0) {
+        PLOG_I("devupdate: the game thread paused after %d ms (phase \"%s\", options menu %d, save busy %d)", waited,
+               plat_get_phase(), plat_options_menu_is_open(), s_save_busy != NULL ? s_save_busy() : 0);
     }
     if (plat_audio_has_output()) {
         ndspSetMasterVol(0.0f);
@@ -227,13 +242,15 @@ static void on_resume(void* user) {
  * CIA install leaves sdmc:/3ds/ttyd/ (card/ and everything else) untouched. */
 static bool on_ready(void* user) {
     (void)user;
+    /* Only the card queue matters here. The watchdog hold count is not looked at: the Options menu,
+     * a load and the pause itself all hold it, and none of them is a reason to delay the relaunch. */
     int waited = 0;
-    while (((s_save_busy != NULL && s_save_busy()) || crash_wd_held() > 1) && waited < 1000) {
+    while (s_save_busy != NULL && s_save_busy() && waited < 1000) {
         svcSleepThread(10000000LL); /* up to 10 s */
         waited++;
     }
     if (waited >= 1000) {
-        PLOG_W("devupdate: a save was still running after 10 s");
+        PLOG_W("devupdate: a save was still running after 10 s; relaunching anyway");
     } else if (waited > 0) {
         PLOG_I("devupdate: waited %d ms for a save to finish", waited * 10);
     }

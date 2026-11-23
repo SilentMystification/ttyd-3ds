@@ -43,7 +43,7 @@
 #define STREAM_PENDING 4096       /* stream frees waiting for the frames in flight */
 
 enum { CMD_STATE_DELTA = 0x20, CMD_STATE = 1, CMD_FOG, CMD_DRAW, CMD_CLEAR, CMD_COPY, CMD_FRAME_END, CMD_SEGMENT_END, CMD_VSH_CONST, CMD_VSH_DRAW,
-       CMD_VSH_LIGHT };
+       CMD_VSH_LIGHT, CMD_VSH_DRAWP };
 
 /* CMD_VSH_DRAW body */
 typedef struct {
@@ -51,6 +51,14 @@ typedef struct {
     u32 layout, scales, cull;
     u32 first, count; /* indices in the record's index arena */
 } VshDraw;
+
+/* CMD_VSH_DRAWP body: a draw whose indices stay in linear memory (a prebuilt batch, front end switch gxbatch) */
+typedef struct {
+    const void* stream;
+    u32 layout, scales, cull;
+    const u16* idx;
+    u32 count;
+} VshDrawP;
 
 typedef struct {
     u16 type;
@@ -576,6 +584,28 @@ void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uin
     if (d != NULL) {
         *d = (VshDraw){stream, layout, scales, cull, first, nidx};
         s_last_vdraw = d;
+        s_stats_frame.vsh_draws++;
+    }
+}
+
+void plat_gpu_vsh_drawp(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, const uint16_t* idx,
+                        uint32_t nidx, uint32_t calls) {
+    nidx -= nidx % 3;
+    if (stream == NULL || idx == NULL || nidx < 3 || PLAT_VSH_STRIDE(layout) == 0) {
+        return;
+    }
+    Record* r = &s_rec[s_cur];
+    if (r->used + sizeof(CmdHead) + sizeof(VshDrawP) + 64 > RECORD_BYTES) {
+        flush_segment();
+    }
+    if (!s_last_vconst_valid) {
+        return; /* no uniform block in this record (cannot happen: end_segment puts it back) */
+    }
+    s_stats_frame.vsh_calls += calls;
+    s_stats_frame.vsh_indices += nidx;
+    VshDrawP* d = rec_put(CMD_VSH_DRAWP, sizeof(VshDrawP));
+    if (d != NULL) {
+        *d = (VshDrawP){stream, layout, scales, cull, idx, nidx};
         s_stats_frame.vsh_draws++;
     }
 }
@@ -1434,6 +1464,7 @@ static u8* stereo_split(const Record* r, u32* tail_cmds, u32* tail_zwrites) {
         case CMD_COPY: split = p; *tail_cmds = *tail_zwrites = 0; SEQ('C'); break;
         case CMD_DRAW:
         case CMD_VSH_DRAW:
+        case CMD_VSH_DRAWP:
             if (st == NULL || (st->color_write == 0 && !st->depth_write)) {
                 break; /* skipped by the replay, or writes nothing (sysDummyDraw, once per camera) */
             }
@@ -1631,14 +1662,28 @@ eye_again:
             vsh_apply_const((const PlatGpuVshConst*)body);
             vc_now = (const PlatGpuVshConst*)body;
             break;
-        case CMD_VSH_DRAW: {
+        case CMD_VSH_DRAW:
+        case CMD_VSH_DRAWP: {
+            /* the two bodies share their first four fields; DRAWP's indices are its own (linear memory) */
             const VshDraw* d = (const VshDraw*)body;
+            const u16* d_idx;
+            u32 d_count;
             if (cur_state == NULL) {
                 n_skip++;
                 break;
             }
-            if (d->count < 3 || d->first + d->count > r->nidx) {
-                break; /* bounds: never draw past the index arena */
+            if (h->type == CMD_VSH_DRAWP) {
+                d_idx = ((const VshDrawP*)body)->idx;
+                d_count = ((const VshDrawP*)body)->count;
+                if (d_count < 3) {
+                    break;
+                }
+            } else {
+                if (d->count < 3 || d->first + d->count > r->nidx) {
+                    break; /* bounds: never draw past the index arena */
+                }
+                d_idx = r->idx + d->first;
+                d_count = d->count;
             }
             if (restore) {
                 apply_state(cur_state); /* also sets cull none */
@@ -1663,7 +1708,7 @@ eye_again:
                 C3D_CullFace(vsh_cull(d->cull));
                 v_cull = d->cull;
             }
-            C3D_DrawElements(GPU_TRIANGLES, (int)d->count, C3D_UNSIGNED_SHORT, r->idx + d->first);
+            C3D_DrawElements(GPU_TRIANGLES, (int)d_count, C3D_UNSIGNED_SHORT, d_idx);
             n_draw++;
             after_last_draw = 0;
             break;

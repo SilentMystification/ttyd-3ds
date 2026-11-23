@@ -1075,6 +1075,7 @@ static int s_bref_on;
 static u32 s_bbox_reads, s_bbox_mism;
 
 void gx_bbox_clear(void) {
+    gx_batch_flush(); /* draws from here on count for the box */
     gx.bbox[0] = 1023;
     gx.bbox[1] = 1023;
     gx.bbox[2] = 0;
@@ -1553,8 +1554,40 @@ static int draw_vsh_imm(u8 prim, const GxVertex* v, u32 n, const void* ident, u3
     return 1;
 }
 
+GxVshLast gx_vsh_last;
+
+int gx_draw_batch_begin(const u8 unit_attr[3], u32 bat, const void* list0, u32 nbytes0, u32* hint0, void** group,
+                        u32* cull) {
+    ensure_state();
+    if (empty_target()) {
+        return 0;
+    }
+    vsh_state();
+    if (s_vsh_reasons != 0 || gx_bbox_active || s_bref_on || gx.cull == GX_CULL_ALL || s_dump ||
+        unit_attr[0] != s_vsh_unit_attr[0] || unit_attr[1] != s_vsh_unit_attr[1] || unit_attr[2] != s_vsh_unit_attr[2]) {
+        return 0;
+    }
+    void* g = gx_vsh_batch_route(gx.cur_pnmtx, bat, list0, nbytes0, hint0);
+    if (g == NULL) {
+        return 0;
+    }
+    if (s_vsh_lit) {
+        plat_gpu_vsh_light(&s_vsh_light, s_vsh_light_id);
+    }
+    plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
+    *group = g;
+    *cull = vsh_cull();
+    return 1;
+}
+
+void gx_draw_batch_end(void* group, u32 n, u32 verts, u32 idx) {
+    gx_vsh_batch_count(group, n, verts, idx);
+    gx_stat_draws += n;
+}
+
 int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nbytes, u32 nverts, const GxVertex* v,
                 const GxDlcDraw* d, u32 nd) {
+    gx_vsh_last.ok = 0;
     ensure_state();
     if (empty_target()) {
         gx_bbx_hint = NULL;
@@ -1596,6 +1629,9 @@ int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nb
     }
     plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
     plat_gpu_vsh_draw(gx_vsh_stream_base(s), s->layout, scales, vsh_cull(), s->idx, s->nidx);
+    gx_vsh_last = (GxVshLast){(u8)(!gx_bbox_active && !s_bref_on && !s_dump),
+                              {s_vsh_unit_attr[0], s_vsh_unit_attr[1], s_vsh_unit_attr[2]},
+                              gx_vsh_stream_base(s), s->layout, scales, vsh_cull()};
     gx_vsh_count_shader(nverts, s->nidx);
     gx_stat_draws++;
     return 1;
@@ -1605,6 +1641,7 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
     if (n == 0) {
         return;
     }
+    gx_batch_flush(); /* an open batch's draws come before this one */
     ensure_state();
     if (gx_vsh_on && !gx_vsh_noted) {
         int in_list = gx_pipe_in_list();

@@ -274,6 +274,11 @@ void plat_gpu_vsh_const(const PlatGpuVshConst* c, uint32_t id);
  * cull: 0 none, 1 GX front faces, 2 GX back faces (GX's front is clockwise on screen). */
 void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, const uint16_t* idx,
                        uint32_t nidx);
+/* The same draw from indices that already lie in linear memory (plat_gpu_stream_alloc, committed) and stay
+ * unchanged until freed with plat_gpu_stream_free: nothing is copied. `calls` is how many front-end draws it
+ * stands for (the counters only). */
+void plat_gpu_vsh_drawp(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, const uint16_t* idx,
+                        uint32_t nidx, uint32_t calls);
 
 typedef struct {
     uint32_t draws, vertices, state_changes;

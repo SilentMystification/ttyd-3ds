@@ -96,6 +96,9 @@ typedef struct {
     GxVshStream* vsh; /* gxvsh: the vertices as a PICA stream (linear memory), or NULL */
     u32 vsh_reason;   /* why there is none (GXV_R_*) */
     void* bbx;        /* gxbbox: the list's box record (gx_draw.c), or NULL */
+    u32 gen;          /* gxbatch: bumped whenever the entry's content or stream goes (kept across reuse of the slot) */
+    u16 bat_head;     /* gxbatch: chain of the batches that start with this entry (index + 1) */
+    u16 bat;          /* gxbatch: a batch that holds this entry (index + 1): while it is in use the entry is too */
 } DlcEntry;
 
 static DlcEntry* s_e; /* DLC_ENTRIES, heap (gx_bigmem.h) */
@@ -135,9 +138,23 @@ static struct {
 static inline DlcEntry* E(u16 i) { return i ? &s_e[i - 1] : NULL; }
 static inline u16 IDX(const DlcEntry* e) { return (u16)(e - s_e + 1); }
 
+/* gxbatch (below) */
+static int s_bat_on;        /* switch gxbatch: 0 off, 1 on, 2 verify */
+static u32 s_dlc_epoch = 1; /* bumped whenever any entry's gen is */
+static void bat_kill_chain(DlcEntry* e);
+static void bat_init(void);
+static int bat_open_chain(DlcEntry* e);
+static void bat_log(u32 frames);
+static u32 s_bat_log_every, s_bat_log_frames; /* the gxbatch line every gxthreadstats (or gxstats) frames */
+
 /* Frees an entry's decoded vertices and its stream (whose vertices the GPU
  * may still read: gx_vsh_stream_free holds them for the frames in flight). */
 static void free_blob(DlcEntry* e) {
+    e->gen++;
+    s_dlc_epoch++;
+    if (e->bat_head) {
+        bat_kill_chain(e);
+    }
     if (e->blob) {
         free(e->blob);
         s_used_bytes -= e->blob_bytes;
@@ -175,6 +192,7 @@ static void init(void) {
     s_free_head = 1;
     PLOG_I("gxcache: %s, budget %lu KB, %d entries, trust %d", s_enabled == 2 ? "verify" : s_enabled ? "on" : "off",
            (unsigned long)(s_budget / 1024), DLC_ENTRIES, s_trust);
+    bat_init();
 }
 
 int gx_dlcache_enabled(void) {
@@ -223,7 +241,9 @@ static void entry_drop(DlcEntry* e) {
     }
     lru_unlink(e);
     free_blob(e);
+    u32 gen = e->gen;
     memset(e, 0, sizeof(*e));
+    e->gen = gen;
     e->next = s_free_head;
     s_free_head = IDX(e);
     s_live--;
@@ -235,8 +255,24 @@ static void entry_drop(DlcEntry* e) {
  * over a cyclic working set larger than itself never hits). */
 static int evictable(const DlcEntry* e) { return e != NULL && gx_perf_frame_no() - e->last_frame > 1; }
 
+/* gxbatch: a batch's draws do not move its members in the LRU list or stamp them, so the tail can be an entry
+ * a batch still draws. Such entries go back to the front (they are in use); what is left at the tail is the
+ * least recently used entry no batch needs. */
+static void lru_skip_batched(void) {
+    for (u32 n = 0; n < DLC_ENTRIES && s_lru_tail; n++) {
+        DlcEntry* t = E(s_lru_tail);
+        if (!t->bat || !gx_batch_recent(t->bat)) {
+            return;
+        }
+        t->last_frame = gx_perf_frame_no();
+        lru_unlink(t);
+        lru_front(t);
+    }
+}
+
 static DlcEntry* entry_new(const void* list, u32 nbytes) {
     if (!s_free_head) {
+        lru_skip_batched();
         if (!evictable(E(s_lru_tail))) {
             s_st.full++;
             return NULL;
@@ -246,7 +282,9 @@ static DlcEntry* entry_new(const void* list, u32 nbytes) {
     }
     DlcEntry* e = E(s_free_head);
     s_free_head = e->next;
+    u32 gen = e->gen;
     memset(e, 0, sizeof(*e));
+    e->gen = gen;
     e->list = list;
     e->nbytes = nbytes;
     u32 b = bucket_of(list, nbytes);
@@ -402,7 +440,12 @@ static void replay(DlcEntry* e) {
 
 /* ---- Lookup (GXCallDisplayList) ---- */
 
-int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
+/* The per-list path. CALL_HIT_FORMABLE: a trusted entry (s_form_e) the shader drew, a member for a batch;
+ * CALL_BATCH: a batch that starts with this list was opened instead. */
+enum { CALL_MISS = 0, CALL_HIT, CALL_HIT_FORMABLE, CALL_BATCH };
+static DlcEntry* s_form_e;
+
+static int call_slow(const GxState* st, const void* list, u32 nbytes) {
     u64 t0 = GX_PERF_T();
     u32 frame = gx_perf_frame_no();
     s_st.calls++;
@@ -457,6 +500,9 @@ int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
                 }
             }
         }
+        if (ok && s_bat_on && e->bat_head && e->trust_gen != 0 && bat_open_chain(e)) {
+            return CALL_BATCH; /* the batch that starts here is open; its draws are recorded when it ends */
+        }
         if (ok) {
             s_st.hits++;
             s_st.hit_verts += e->nverts;
@@ -488,15 +534,19 @@ int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
                     if (gx_perf_on > 0) {
                         gx_perf.dl_verts += e->nverts;
                     }
-                    return 1;
+                    if (gx_vsh_last.ok && e->trust_gen != 0 && e->vsh != NULL) {
+                        s_form_e = e;
+                        return CALL_HIT_FORMABLE;
+                    }
+                    return CALL_HIT;
                 }
                 gx_vsh_noted = 1;
                 replay(e);
                 gx_vsh_noted = 0;
-                return 1;
+                return CALL_HIT;
             }
             replay(e);
-            return 1;
+            return CALL_HIT;
         }
         same_list_changed = e; /* same list and state, other bytes or array contents */
     }
@@ -540,7 +590,719 @@ decode_plain:
     if (gx_perf_on > 0) {
         gx_perf.t_cache += plat_ticks() - t0;
     }
+    return CALL_MISS;
+}
+
+/* ---- gxbatch: prebuilt batches of cached lists (PORT_3DS_GX_PERF.md, "Core-2 round 2") ----
+ *
+ * A run of consecutive hits on trusted entries, all drawn by the shader with no GX state, matrix or vertex-state
+ * change between them, is collected while it is drawn the per-list way (the "forming" run) and then kept as a
+ * batch: the member lists, the vertex state they matched, the GPU draws they merge into, and all their indices
+ * concatenated in linear memory. From the next frame on, a call of the batch's first list opens it after one
+ * validation of the whole batch; each following call that is the next member only moves a counter; when the
+ * run ends (another list, a state change seen at the next call, any other draw, a copy, the frame's end) the
+ * draws of the members called so far are recorded, without copying an index.
+ *
+ * What a batch relies on, and how each is checked once per use instead of once per member:
+ *   - the members' cache entries: s_dlc_epoch (any entry's content or stream going bumps it; then each member's
+ *     generation is compared once);
+ *   - the members' contents: every member trusted at the registry's current generation (an entry that is not
+ *     trusted never joins a batch and is hashed on the per-list path as before);
+ *   - the vertex state: the batch's own copy against the state in force (vs_ok: unchanged since it last matched);
+ *   - the pass-group route: every member's record decided "shader" (gx_vsh_dec_epoch), and the group's path this
+ *     frame is the shader (gx_vsh_batch_route); otherwise the members are routed one by one as before;
+ *   - the texture-coordinate mapping the scale words were made for (unit_attr).
+ * Not used: gxcache=2, gxthread=3 (their per-list checks), gxscribble, an armed bounding box, gxdump frames. */
+#define BAT_SLOTS 2048
+#define BAT_MAX_MEMBERS 1024
+#define BAT_MAX_DRAWS 64
+#define BAT_CHAIN 4
+#define BAT_ARRAYS 12
+#define BAT_IX_RUNS 256
+#define BAT_IX_PENDING 1024
+
+typedef struct {
+    const void* list;
+    u32 nbytes;
+    u16 eidx;       /* cache entry index (not + 1) */
+    u16 pad;
+    u32 egen;
+    u32 idx_end;    /* indices of members 0..this, from the batch's first index */
+    u32 verts_end;  /* vertices of members 0..this */
+} BatMember;
+
+typedef struct {
+    const void* stream;
+    u32 layout, scales;
+    u32 idx_first;  /* in the batch's indices */
+    u32 m_end;      /* one past its last member */
+} BatDraw;
+
+typedef struct {
+    u8 live;
+    u8 ndraws;
+    u16 n;
+    u16 next_head;  /* next batch with the same first entry (index + 1) */
+    u16 succ;       /* the batch that came after this one last time (index + 1): tried before any lookup */
+    u32 dlc_epoch, trust_gen, dec_epoch, vs_ok;
+    u32 last_frame;
+    u8 unit_attr[3];
+    u8 fmt_mask;
+    u8 cur_pnmtx;
+    u8 narr;
+    u8 arr_attr[BAT_ARRAYS];
+    u8 arr_stride[BAT_ARRAYS];
+    const u8* arr_base[BAT_ARRAYS];
+    u8 vtx_desc[GX_VA_MAX_ATTR];
+    u8 cur_texmtx[8];
+    void* blob;     /* BatMember[n], BatDraw[ndraws], GxAttrFmt[popcount(fmt_mask)][GX_VA_MAX_ATTR] */
+    u32 ix_first, ix_count; /* its range of the index pool */
+} Batch;
+
+int gx_batch_pending;
+static Batch* s_bat;       /* BAT_SLOTS, heap */
+static u16 s_bat_free;     /* free slots through .next_head (index + 1) */
+static u32 s_bat_hand;     /* eviction scan position */
+/* the index pool (linear memory): first fit over free runs, a bump pointer, frees held for the frames in flight */
+static u16* s_ix;
+static u32 s_ix_cap, s_ix_bump, s_ix_nruns, s_ix_npending;
+static struct {
+    u32 start, len;
+} s_ix_runs[BAT_IX_RUNS];
+static struct {
+    u32 start, len, frame;
+} s_ix_pending[BAT_IX_PENDING];
+/* the open batch */
+static Batch* s_act;
+static u32 s_act_pos, s_act_ver, s_act_xfv, s_act_vtxv, s_act_cull;
+static void* s_act_group;
+static Batch* s_bat_prev;  /* the batch drawn or formed last (for .succ) */
+/* the run being collected */
+typedef struct {
+    const void* stream;
+    u32 layout, scales;
+    const u16* idx;
+    u32 nidx, nverts;
+} FormX;
+static struct {
+    u32 n, ver, xfv, vtxv, trust_gen, cull;
+    u8 unit_attr[3];
+    u8 fmt_mask;
+    u8 cur_pnmtx;
+    u8 vtx_desc[GX_VA_MAX_ATTR];
+    u8 cur_texmtx[8];
+    const u8* array_base[GX_VA_MAX_ATTR];
+    u8 array_stride[GX_VA_MAX_ATTR];
+    GxAttrFmt vat[GX_MAX_VTXFMT][GX_VA_MAX_ATTR];
+    BatMember* m; /* BAT_MAX_MEMBERS, heap */
+    FormX* x;
+} s_form;
+enum { OF_EPOCH, OF_TRUST, OF_STATE, OF_DECISION, OF_BEGIN, OF_COUNT };
+static struct {
+    u32 opens, members, partial, formed, refreshed, killed, form_fail, open_fail[OF_COUNT], evicted, bad;
+} s_bst, s_bsum;
+
+static inline Batch* B(u32 i) { return i ? &s_bat[i - 1] : NULL; }
+static inline u32 BIDX(const Batch* b) { return (u32)(b - s_bat) + 1; }
+static inline BatMember* b_members(const Batch* b) { return (BatMember*)b->blob; }
+static inline BatDraw* b_draws(const Batch* b) { return (BatDraw*)(b_members(b) + b->n); }
+static inline GxAttrFmt* b_vat(const Batch* b) { return (GxAttrFmt*)(b_draws(b) + b->ndraws); }
+
+static void bat_init(void) {
+    s_bat_on = plat_switch_int("gxbatch", 0);
+    if (s_bat_on < 0 || s_bat_on > 2 || s_enabled != 1 || s_scribble_at != 0 || plat_switch_int("gxthread", 0) == 3) {
+        s_bat_on = 0;
+    }
+    if (!s_bat_on) {
+        return;
+    }
+    u32 kb = (u32)plat_switch_int("gxbatchkb", 512);
+    s_ix_cap = kb * 1024u / sizeof(u16);
+    s_ix = plat_gpu_stream_alloc(s_ix_cap * sizeof(u16));
+    s_bat = gx_big_alloc("gxbatch slots", sizeof(Batch) * BAT_SLOTS);
+    s_form.m = gx_big_alloc("gxbatch run", sizeof(BatMember) * BAT_MAX_MEMBERS);
+    s_form.x = gx_big_alloc("gxbatch run draws", sizeof(FormX) * BAT_MAX_MEMBERS);
+    if (s_ix == NULL || s_bat == NULL || s_form.m == NULL || s_form.x == NULL) {
+        PLOG_W("gxbatch: no memory (%lu KB of indices): off", (unsigned long)kb);
+        s_bat_on = 0;
+        return;
+    }
+    memset(s_bat, 0, sizeof(Batch) * BAT_SLOTS);
+    for (u32 i = 0; i < BAT_SLOTS; i++) {
+        s_bat[i].next_head = (u16)(i + 2 <= BAT_SLOTS ? i + 2 : 0);
+    }
+    s_bat_free = 1;
+    s_bat_log_every = (u32)plat_switch_int("gxthreadstats", plat_switch_int("gxstats", 0));
+    PLOG_I("gxbatch: %s, %d slots, %lu KB of indices in linear memory", s_bat_on == 2 ? "verify" : "on", BAT_SLOTS,
+           (unsigned long)kb);
+}
+
+int gx_batch_recent(u32 bat) {
+    if (bat == 0 || bat > BAT_SLOTS || s_bat == NULL) {
+        return 0;
+    }
+    const Batch* b = &s_bat[bat - 1];
+    return b->live && gx_perf_frame_no() - b->last_frame <= 2;
+}
+
+int gx_batch_member(u32 bat, u32 k, const void** list, u32* nbytes, u32** hint) {
+    if (bat == 0 || bat > BAT_SLOTS || s_bat == NULL || !s_bat[bat - 1].live || k >= s_bat[bat - 1].n) {
+        return 0;
+    }
+    const BatMember* m = &b_members(&s_bat[bat - 1])[k];
+    *list = m->list;
+    *nbytes = m->nbytes;
+    DlcEntry* e = &s_e[m->eidx];
+    *hint = e->list == m->list && e->nbytes == m->nbytes ? &e->vsh_rec : NULL;
+    return 1;
+}
+
+/* ---- index pool ---- */
+
+static void ix_release(u32 start, u32 len) {
+    if (start + len == s_ix_bump) {
+        s_ix_bump = start;
+        while (s_ix_nruns > 0 && s_ix_runs[s_ix_nruns - 1].start + s_ix_runs[s_ix_nruns - 1].len == s_ix_bump) {
+            s_ix_bump = s_ix_runs[--s_ix_nruns].start;
+        }
+        return;
+    }
+    u32 i = 0;
+    while (i < s_ix_nruns && s_ix_runs[i].start < start) {
+        i++;
+    }
+    if (i > 0 && s_ix_runs[i - 1].start + s_ix_runs[i - 1].len == start) {
+        s_ix_runs[i - 1].len += len;
+        if (i < s_ix_nruns && s_ix_runs[i - 1].start + s_ix_runs[i - 1].len == s_ix_runs[i].start) {
+            s_ix_runs[i - 1].len += s_ix_runs[i].len;
+            memmove(&s_ix_runs[i], &s_ix_runs[i + 1], (s_ix_nruns - i - 1) * sizeof(s_ix_runs[0]));
+            s_ix_nruns--;
+        }
+        return;
+    }
+    if (i < s_ix_nruns && start + len == s_ix_runs[i].start) {
+        s_ix_runs[i].start = start;
+        s_ix_runs[i].len += len;
+        return;
+    }
+    if (s_ix_nruns == BAT_IX_RUNS) {
+        return; /* too fragmented: the range is lost until the pool empties (never seen) */
+    }
+    memmove(&s_ix_runs[i + 1], &s_ix_runs[i], (s_ix_nruns - i) * sizeof(s_ix_runs[0]));
+    s_ix_runs[i].start = start;
+    s_ix_runs[i].len = len;
+    s_ix_nruns++;
+}
+
+static void ix_reap(void) {
+    u32 now = plat_gpu_present_count(), k = 0;
+    for (u32 i = 0; i < s_ix_npending; i++) {
+        if ((s32)(now - s_ix_pending[i].frame) >= 0) {
+            ix_release(s_ix_pending[i].start, s_ix_pending[i].len);
+        } else {
+            s_ix_pending[k++] = s_ix_pending[i];
+        }
+    }
+    s_ix_npending = k;
+}
+
+/* n indices (rounded up to a multiple of 4, so every range starts 8-byte aligned), or ~0. */
+static u32 ix_alloc(u32 n) {
+    n = (n + 3u) & ~3u;
+    ix_reap();
+    for (u32 i = 0; i < s_ix_nruns; i++) {
+        if (s_ix_runs[i].len >= n) {
+            u32 at = s_ix_runs[i].start;
+            s_ix_runs[i].start += n;
+            s_ix_runs[i].len -= n;
+            if (s_ix_runs[i].len == 0) {
+                memmove(&s_ix_runs[i], &s_ix_runs[i + 1], (s_ix_nruns - i - 1) * sizeof(s_ix_runs[0]));
+                s_ix_nruns--;
+            }
+            return at;
+        }
+    }
+    if (s_ix_bump + n <= s_ix_cap) {
+        u32 at = s_ix_bump;
+        s_ix_bump += n;
+        return at;
+    }
+    return ~0u;
+}
+
+/* ---- batch slots ---- */
+
+static void bat_kill(Batch* b) {
+    /* out of its first entry's chain (the chain is intact while the batch lives: free_blob kills it first) */
+    DlcEntry* e0 = &s_e[b_members(b)[0].eidx];
+    u16 me = (u16)BIDX(b);
+    for (u16* link = &e0->bat_head; *link; link = &B(*link)->next_head) {
+        if (*link == me) {
+            *link = b->next_head;
+            break;
+        }
+    }
+    if (s_ix_npending == BAT_IX_PENDING) {
+        ix_reap();
+    }
+    if (s_ix_npending < BAT_IX_PENDING) {
+        /* the record being written and the frames in flight may draw from it */
+        s_ix_pending[s_ix_npending].start = b->ix_first;
+        s_ix_pending[s_ix_npending].len = (b->ix_count + 3u) & ~3u;
+        s_ix_pending[s_ix_npending].frame = plat_gpu_present_count() + 3;
+        s_ix_npending++;
+    } /* else: the range is lost (never seen: more pending frees than batches) */
+    free(b->blob);
+    if (s_bat_prev == b) {
+        s_bat_prev = NULL;
+    }
+    memset(b, 0, sizeof(*b));
+    b->next_head = s_bat_free;
+    s_bat_free = me;
+    s_bst.killed++;
+}
+
+static void bat_kill_chain(DlcEntry* e) {
+    while (e->bat_head) {
+        Batch* b = B(e->bat_head);
+        if (b == s_act) {
+            s_act = NULL; /* never: entries change on the per-list path, after the open batch ended */
+        }
+        bat_kill(b);
+    }
+}
+
+/* Batches not drawn for two frames go, up to `want` of them (for a slot, or for room in the index pool). */
+static void bat_evict_old(u32 want) {
+    u32 frame = gx_perf_frame_no();
+    for (u32 n = 0; n < BAT_SLOTS && want > 0; n++) {
+        Batch* b = &s_bat[s_bat_hand];
+        s_bat_hand = (s_bat_hand + 1) % BAT_SLOTS;
+        if (b->live && b != s_act && frame - b->last_frame > 2) {
+            bat_kill(b);
+            s_bst.evicted++;
+            want--;
+        }
+    }
+}
+
+/* ---- validation and use ---- */
+
+static int bat_same_state(Batch* b) {
+    if (b->vs_ok == gx_vtx_version) {
+        return 1;
+    }
+    if (!gx_mem_equal(b->vtx_desc, gx.vtx_desc, sizeof(b->vtx_desc)) || b->cur_pnmtx != (u8)gx.cur_pnmtx ||
+        !gx_mem_equal(b->cur_texmtx, gx.cur_texmtx, sizeof(b->cur_texmtx))) {
+        return 0;
+    }
+    const GxAttrFmt* v = b_vat(b);
+    for (u32 f = 0; f < GX_MAX_VTXFMT; f++) {
+        if (b->fmt_mask & (1u << f)) {
+            if (!gx_mem_equal(v, gx.vat[f], sizeof(gx.vat[f]))) {
+                return 0;
+            }
+            v += GX_VA_MAX_ATTR;
+        }
+    }
+    for (u32 i = 0; i < b->narr; i++) {
+        if (gx.array_base[b->arr_attr[i]] != b->arr_base[i] || gx.array_stride[b->arr_attr[i]] != b->arr_stride[i]) {
+            return 0;
+        }
+    }
+    b->vs_ok = gx_vtx_version;
+    return 1;
+}
+
+/* Opens batch b for a call of its first list: 1 when every check passed (the call is consumed). */
+static int bat_open(Batch* b) {
+    BatMember* m = b_members(b);
+    u32 fail;
+    if (b->dlc_epoch != s_dlc_epoch) {
+        for (u32 i = 0; i < b->n; i++) {
+            const DlcEntry* e = &s_e[m[i].eidx];
+            if (e->gen != m[i].egen || e->state != E_BUILT || e->vsh == NULL) {
+                bat_kill(b); /* a member's entry or stream is gone: the run is collected again */
+                s_bst.open_fail[OF_EPOCH]++;
+                return 0;
+            }
+        }
+        b->dlc_epoch = s_dlc_epoch;
+    }
+    u32 tg = plat_memstable_gen();
+    if (b->trust_gen != tg) {
+        for (u32 i = 0; i < b->n; i++) {
+            if (s_e[m[i].eidx].trust_gen != tg) {
+                fail = OF_TRUST; /* the per-list path checks the members in full and asks for trust again */
+                goto no;
+            }
+        }
+        b->trust_gen = tg;
+    }
+    if (!bat_same_state(b)) {
+        fail = OF_STATE;
+        goto no;
+    }
+    if (b->dec_epoch != gx_vsh_dec_epoch) {
+        for (u32 i = 0; i < b->n; i++) {
+            DlcEntry* e = &s_e[m[i].eidx];
+            if (!gx_vsh_rec_decided(&e->vsh_rec, m[i].list, m[i].nbytes, BIDX(b))) {
+                fail = OF_DECISION;
+                goto no;
+            }
+        }
+        b->dec_epoch = gx_vsh_dec_epoch;
+    }
+    if (!gx_draw_batch_begin(b->unit_attr, BIDX(b), m[0].list, m[0].nbytes, &s_e[m[0].eidx].vsh_rec, &s_act_group,
+                             &s_act_cull)) {
+        fail = OF_BEGIN;
+        goto no;
+    }
+    if (s_bat_prev != NULL && s_bat_prev != b) {
+        s_bat_prev->succ = (u16)BIDX(b);
+    }
+    s_act = b;
+    s_act_pos = 1;
+    s_act_ver = gx.version;
+    s_act_xfv = gx_xf_version;
+    s_act_vtxv = gx_vtx_version;
+    gx_batch_pending = 1;
+    s_bst.opens++;
+    return 1;
+no:
+    s_bst.open_fail[fail]++;
     return 0;
+}
+
+static int bat_open_chain(DlcEntry* e) {
+    for (u16 bi = e->bat_head, next; bi; bi = next) {
+        Batch* b = B(bi);
+        next = b->next_head; /* bat_open may kill b */
+        if (bat_open(b)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Records the draws of the open batch's members called so far. */
+static void bat_close(void) {
+    Batch* b = s_act;
+    u32 p = s_act_pos;
+    s_act = NULL;
+    const BatMember* m = b_members(b);
+    const BatDraw* d = b_draws(b);
+    u32 idx_end = m[p - 1].idx_end;
+    for (u32 i = 0; i < b->ndraws; i++) {
+        u32 first = d[i].idx_first;
+        if (first >= idx_end) {
+            break;
+        }
+        u32 m0 = i ? d[i - 1].m_end : 0;
+        u32 mend = d[i].m_end < p ? d[i].m_end : p;
+        u32 end = m[mend - 1].idx_end;
+        plat_gpu_vsh_drawp(d[i].stream, d[i].layout, d[i].scales, s_act_cull, s_ix + b->ix_first + first, end - first,
+                           mend - m0);
+    }
+    gx_draw_batch_end(s_act_group, p, m[p - 1].verts_end, idx_end);
+    s_st.hits += p;
+    s_st.trusted += p;
+    s_st.hit_verts += m[p - 1].verts_end;
+    if (gx_perf_on > 0) {
+        gx_perf.dl_verts += m[p - 1].verts_end;
+    }
+    b->last_frame = gx_perf_frame_no();
+    s_bst.members += p;
+    if (p == b->n) {
+        s_bat_prev = b;
+    } else {
+        s_bat_prev = NULL;
+        s_bst.partial++;
+    }
+}
+
+/* Makes the collected run a batch. */
+static void form_end(void) {
+    u32 n = s_form.n;
+    s_form.n = 0;
+    if (n == 0) {
+        return;
+    }
+    BatMember* fm = s_form.m;
+    const FormX* fx = s_form.x;
+    DlcEntry* e0 = &s_e[fm[0].eidx];
+    for (u32 i = 0; i < n; i++) {
+        const DlcEntry* e = &s_e[fm[i].eidx];
+        if (e->gen != fm[i].egen || e->state != E_BUILT || e->vsh == NULL) {
+            s_bst.form_fail++;
+            return; /* an entry changed while the run was collected */
+        }
+    }
+    /* the same run again (its batch failed a check this frame and the members went one by one): keep that batch */
+    u32 chain = 0;
+    Batch* last = NULL;
+    for (u16 bi = e0->bat_head; bi; bi = B(bi)->next_head) {
+        Batch* b = B(bi);
+        chain++;
+        last = b;
+        if (b->n != n || b->fmt_mask != s_form.fmt_mask || b->unit_attr[0] != s_form.unit_attr[0] ||
+            b->unit_attr[1] != s_form.unit_attr[1] || b->unit_attr[2] != s_form.unit_attr[2] ||
+            b->cur_pnmtx != s_form.cur_pnmtx || !gx_mem_equal(b->vtx_desc, s_form.vtx_desc, sizeof(b->vtx_desc)) ||
+            !gx_mem_equal(b->cur_texmtx, s_form.cur_texmtx, sizeof(b->cur_texmtx))) {
+            continue;
+        }
+        const BatMember* bm = b_members(b);
+        u32 same = 1;
+        for (u32 i = 0; i < n && same; i++) {
+            same = bm[i].list == fm[i].list && bm[i].nbytes == fm[i].nbytes && bm[i].eidx == fm[i].eidx &&
+                   bm[i].egen == fm[i].egen;
+        }
+        const BatDraw* bd = b_draws(b);
+        for (u32 i = 0, k = 0; i < n && same; i++) {
+            if (i == bd[k].m_end) {
+                k++;
+            }
+            same = bd[k].stream == fx[i].stream && bd[k].layout == fx[i].layout && bd[k].scales == fx[i].scales;
+        }
+        const GxAttrFmt* v = b_vat(b);
+        for (u32 f = 0; f < GX_MAX_VTXFMT && same; f++) {
+            if (b->fmt_mask & (1u << f)) {
+                same = gx_mem_equal(v, s_form.vat[f], sizeof(s_form.vat[f]));
+                v += GX_VA_MAX_ATTR;
+            }
+        }
+        for (u32 i = 0; i < b->narr && same; i++) {
+            same = s_form.array_base[b->arr_attr[i]] == b->arr_base[i] &&
+                   s_form.array_stride[b->arr_attr[i]] == b->arr_stride[i];
+        }
+        if (same) {
+            b->trust_gen = s_form.trust_gen;
+            b->dlc_epoch = s_dlc_epoch;
+            b->last_frame = gx_perf_frame_no();
+            if (s_bat_prev != NULL && s_bat_prev != b) {
+                s_bat_prev->succ = (u16)BIDX(b);
+            }
+            s_bat_prev = b;
+            s_bst.refreshed++;
+            return;
+        }
+    }
+    if (chain >= BAT_CHAIN && last != NULL) {
+        bat_kill(last); /* the oldest of the batches that start here */
+    }
+    /* the GPU draws: members that share stream, layout and scale word merge */
+    u32 nd = 0, nidx = 0;
+    for (u32 i = 0; i < n; i++) {
+        if (i == 0 || fx[i].stream != fx[i - 1].stream || fx[i].layout != fx[i - 1].layout ||
+            fx[i].scales != fx[i - 1].scales) {
+            nd++;
+        }
+        nidx += fx[i].nidx;
+    }
+    if (nd > BAT_MAX_DRAWS) {
+        s_bst.form_fail++;
+        return;
+    }
+    if (!s_bat_free) {
+        bat_evict_old(8);
+    }
+    u32 ix = ix_alloc(nidx);
+    if (ix == ~0u) {
+        bat_evict_old(BAT_SLOTS); /* their ranges come back after the frames in flight */
+        ix = ix_alloc(nidx);
+    }
+    u32 nfmt = (u32)__builtin_popcount(s_form.fmt_mask);
+    u32 bytes = n * sizeof(BatMember) + nd * sizeof(BatDraw) + nfmt * sizeof(s_form.vat[0]);
+    void* blob = ix != ~0u && s_bat_free ? malloc(bytes) : NULL;
+    if (blob == NULL) {
+        if (ix != ~0u) {
+            ix_release(ix, (nidx + 3u) & ~3u); /* never drawn from: free at once */
+        }
+        s_bst.form_fail++;
+        return;
+    }
+    Batch* b = B(s_bat_free);
+    s_bat_free = b->next_head;
+    memset(b, 0, sizeof(*b));
+    b->live = 1;
+    b->n = (u16)n;
+    b->ndraws = (u8)nd;
+    b->blob = blob;
+    b->ix_first = ix;
+    b->ix_count = nidx;
+    b->dlc_epoch = s_dlc_epoch;
+    b->trust_gen = s_form.trust_gen;
+    b->last_frame = gx_perf_frame_no();
+    memcpy(b->unit_attr, s_form.unit_attr, 3);
+    b->fmt_mask = s_form.fmt_mask;
+    b->cur_pnmtx = s_form.cur_pnmtx;
+    memcpy(b->vtx_desc, s_form.vtx_desc, sizeof(b->vtx_desc));
+    memcpy(b->cur_texmtx, s_form.cur_texmtx, sizeof(b->cur_texmtx));
+    BatMember* bm = b_members(b);
+    BatDraw* bd = b_draws(b);
+    u16* out = s_ix + ix;
+    u32 at = 0, verts = 0, k = 0;
+    for (u32 i = 0; i < n; i++) {
+        if (i == 0 || fx[i].stream != fx[i - 1].stream || fx[i].layout != fx[i - 1].layout ||
+            fx[i].scales != fx[i - 1].scales) {
+            if (i != 0) {
+                bd[k - 1].m_end = i;
+            }
+            bd[k].stream = fx[i].stream;
+            bd[k].layout = fx[i].layout;
+            bd[k].scales = fx[i].scales;
+            bd[k].idx_first = at;
+            k++;
+        }
+        memcpy(out + at, fx[i].idx, fx[i].nidx * sizeof(u16));
+        at += fx[i].nidx;
+        verts += fx[i].nverts;
+        bm[i] = fm[i];
+        bm[i].idx_end = at;
+        bm[i].verts_end = verts;
+        s_e[fm[i].eidx].bat = (u16)BIDX(b);
+    }
+    bd[k - 1].m_end = n;
+    plat_gpu_stream_commit(out, nidx * sizeof(u16));
+    GxAttrFmt* v = b_vat(b);
+    for (u32 f = 0; f < GX_MAX_VTXFMT; f++) {
+        if (s_form.fmt_mask & (1u << f)) {
+            memcpy(v, s_form.vat[f], sizeof(s_form.vat[f]));
+            v += GX_VA_MAX_ATTR;
+        }
+    }
+    /* the arrays the members' vertex state names (every indexed attribute of the description) */
+    for (int a = GX_VA_POS; a <= GX_VA_TEX7; a++) {
+        u8 dsc = s_form.vtx_desc[a];
+        if (a == GX_VA_NRM && dsc == GX_NONE) {
+            dsc = s_form.vtx_desc[GX_VA_NBT];
+        }
+        if ((dsc == GX_INDEX8 || dsc == GX_INDEX16) && b->narr < BAT_ARRAYS) {
+            b->arr_attr[b->narr] = (u8)a;
+            b->arr_base[b->narr] = s_form.array_base[a];
+            b->arr_stride[b->narr] = s_form.array_stride[a];
+            b->narr++;
+        }
+    }
+    b->next_head = e0->bat_head;
+    e0->bat_head = (u16)BIDX(b);
+    if (s_bat_prev != NULL) {
+        s_bat_prev->succ = (u16)BIDX(b);
+    }
+    s_bat_prev = b;
+    s_bst.formed++;
+}
+
+/* A trusted list the shader just drew (s_form_e, gx_vsh_last): the next member of the run, or the first of a new one. */
+static void form_add(const void* list, u32 nbytes) {
+    DlcEntry* e = s_form_e;
+    u32 tg = plat_memstable_gen();
+    if (s_form.n != 0 && (s_form.ver != gx.version || s_form.xfv != gx_xf_version || s_form.vtxv != gx_vtx_version ||
+                          s_form.trust_gen != tg || s_form.n == BAT_MAX_MEMBERS)) {
+        form_end();
+    }
+    if (e->trust_gen != tg) {
+        form_end();
+        gx_batch_pending = 0;
+        return;
+    }
+    if (s_form.n == 0) {
+        s_form.ver = gx.version;
+        s_form.xfv = gx_xf_version;
+        s_form.vtxv = gx_vtx_version;
+        s_form.trust_gen = tg;
+        s_form.cull = gx_vsh_last.cull;
+        memcpy(s_form.unit_attr, gx_vsh_last.unit_attr, 3);
+        s_form.fmt_mask = 0;
+        s_form.cur_pnmtx = (u8)gx.cur_pnmtx;
+        memcpy(s_form.vtx_desc, gx.vtx_desc, sizeof(s_form.vtx_desc));
+        memcpy(s_form.cur_texmtx, gx.cur_texmtx, sizeof(s_form.cur_texmtx));
+        memcpy(s_form.array_base, gx.array_base, sizeof(s_form.array_base));
+        memcpy(s_form.array_stride, gx.array_stride, sizeof(s_form.array_stride));
+        memcpy(s_form.vat, gx.vat, sizeof(s_form.vat));
+    }
+    u32 i = s_form.n++;
+    s_form.m[i] = (BatMember){list, nbytes, (u16)(e - s_e), 0, e->gen, 0, 0};
+    s_form.x[i] = (FormX){gx_vsh_last.stream, gx_vsh_last.layout, gx_vsh_last.scales, e->vsh->idx, e->vsh->nidx,
+                          e->nverts};
+    s_form.fmt_mask |= e->fmt_mask;
+    gx_batch_pending = 1;
+}
+
+void gx_batch_flush_slow(void) {
+    if (s_act != NULL) {
+        bat_close();
+    }
+    form_end();
+    gx_batch_pending = 0;
+}
+
+/* gxbatch=2: what the per-list path would have checked for this member of the open batch. */
+static void bat_verify_member(const GxState* st, const Batch* b, u32 k, const void* list, u32 nbytes) {
+    const BatMember* m = &b_members(b)[k];
+    const DlcEntry* e = &s_e[m->eidx];
+    if (e->list != list || e->nbytes != nbytes || e->gen != m->egen || e->state != E_BUILT || e->vsh == NULL ||
+        !same_state_full(st, e) || e->trust_gen != plat_memstable_gen() ||
+        e->dl_hash != gx_hash32(list, nbytes, 0xD15Cu) || !same_arrays(e)) {
+        if (s_bst.bad++ == 0 && s_bsum.bad == 0) {
+            PLOG_W("gxbatch verify: member %lu of a batch (list %p, %lu bytes) fails the per-list checks",
+                   (unsigned long)k, list, (unsigned long)nbytes);
+        }
+    }
+}
+
+int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
+    if (!s_bat_on) {
+        return call_slow(st, list, nbytes) != CALL_MISS;
+    }
+    if (s_act != NULL) {
+        Batch* b = s_act;
+        if (s_act_pos < b->n && gx.version == s_act_ver && gx_xf_version == s_act_xfv && gx_vtx_version == s_act_vtxv &&
+            !gx_bbox_active) {
+            const BatMember* m = &b_members(b)[s_act_pos];
+            if (m->list == list && m->nbytes == nbytes) {
+                if (s_bat_on == 2) {
+                    bat_verify_member(st, b, s_act_pos, list, nbytes);
+                }
+                s_act_pos++;
+                s_st.calls++;
+                return 1;
+            }
+        }
+        bat_close();
+        gx_batch_pending = 0; /* no run is being collected while a batch is open */
+    }
+    if (st != &gx || gx_bbox_active) {
+        form_end();
+        gx_batch_pending = 0;
+        return call_slow(st, list, nbytes) != CALL_MISS;
+    }
+    /* the batch that followed the last one the last time, before any lookup */
+    if (s_bat_prev != NULL && s_bat_prev->succ != 0) {
+        Batch* b = B(s_bat_prev->succ);
+        if (b->live && b_members(b)[0].list == list && b_members(b)[0].nbytes == nbytes) {
+            form_end();
+            gx_batch_pending = 0;
+            if (bat_open(b)) {
+                s_st.calls++;
+                if (s_bat_on == 2) {
+                    bat_verify_member(st, b, 0, list, nbytes);
+                }
+                return 1;
+            }
+        }
+    }
+    int r = call_slow(st, list, nbytes);
+    if (r == CALL_HIT_FORMABLE) {
+        form_add(list, nbytes);
+    } else {
+        form_end();
+        gx_batch_pending = s_act != NULL;
+        if (r == CALL_BATCH && s_bat_on == 2) {
+            bat_verify_member(st, s_act, 0, list, nbytes);
+        }
+    }
+    return r != CALL_MISS;
 }
 
 /* ---- Capture (gx_pipe.c draw_from_reader) ---- */
@@ -785,6 +1547,7 @@ void gx_dlc_cap_finish(const GxState* st, u32 kind) {
         goto out;
     }
     while (s_used_bytes + total > s_budget) {
+        lru_skip_batched();
         DlcEntry* victim = E(s_lru_tail);
         if (victim == e) {
             lru_unlink(e);
@@ -866,6 +1629,32 @@ out:
 
 /* ---- Counters ---- */
 
+static void bat_log(u32 frames) {
+    u32 f = frames ? frames : 1;
+    const typeof(s_bsum)* a = &s_bsum;
+    u32 live = 0;
+    for (u32 i = 0; i < BAT_SLOTS; i++) {
+        live += s_bat[i].live;
+    }
+    u32 free_ix = s_ix_cap - s_ix_bump;
+    for (u32 i = 0; i < s_ix_nruns; i++) {
+        free_ix += s_ix_runs[i].len;
+    }
+    PLOG_I("gxbatch frame %lu: per frame %lu opens drawing %lu lists (%lu ended early) | in these frames: formed %lu "
+           "refreshed %lu killed %lu (evicted %lu) not formed %lu; opens refused: entries %lu trust %lu vertex state "
+           "%lu decision %lu state/group %lu | verify failures %lu | %lu batches, indices %lu of %lu KB (%lu frees "
+           "pending)",
+           (unsigned long)gx_perf_frame_no(), (unsigned long)(a->opens / f), (unsigned long)(a->members / f),
+           (unsigned long)(a->partial / f), (unsigned long)a->formed, (unsigned long)a->refreshed,
+           (unsigned long)a->killed, (unsigned long)a->evicted, (unsigned long)a->form_fail,
+           (unsigned long)a->open_fail[OF_EPOCH], (unsigned long)a->open_fail[OF_TRUST],
+           (unsigned long)a->open_fail[OF_STATE], (unsigned long)a->open_fail[OF_DECISION],
+           (unsigned long)a->open_fail[OF_BEGIN], (unsigned long)a->bad, (unsigned long)live,
+           (unsigned long)((s_ix_cap - free_ix) * sizeof(u16) / 1024), (unsigned long)(s_ix_cap * sizeof(u16) / 1024),
+           (unsigned long)s_ix_npending);
+    memset(&s_bsum, 0, sizeof(s_bsum));
+}
+
 /* switch gxscribble=N (a test of the verify mode, not for play): at frame N,
  * one array byte that a cached list reads is changed with a plain CPU store,
  * without a cache flush or any report to the registry. The lowest byte of
@@ -908,6 +1697,18 @@ void gx_dlcache_frame(void) {
         d[i] += s[i];
     }
     memset(&s_st, 0, sizeof(s_st));
+    if (s_bat_on) {
+        u32* bd = (u32*)&s_bsum;
+        const u32* bs = (const u32*)&s_bst;
+        for (size_t i = 0; i < sizeof(s_bst) / 4; i++) {
+            bd[i] += bs[i];
+        }
+        memset(&s_bst, 0, sizeof(s_bst));
+        if (s_bat_log_every != 0 && ++s_bat_log_frames >= s_bat_log_every) {
+            bat_log(s_bat_log_frames);
+            s_bat_log_frames = 0;
+        }
+    }
     if (s_scribble_at != 0 && s_enabled > 0 && gx_perf_frame_no() == s_scribble_at) {
         scribble();
     }

@@ -556,4 +556,38 @@ int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nb
 int gx_pipe_in_list(void);
 void gx_pipe_cur_list(const void** list, u32* nbytes); /* the display list being run */
 
+/* ---- gxbatch (gx_dlcache.c): prebuilt batches of cached lists (PORT_3DS_GX_PERF.md, "Core-2 round 2") ----
+ * A run of consecutive cache hits under one GX state is built once into a batch: its members, the vertex state
+ * they were validated under, the GPU draws they merge into and their indices in linear memory. A list call that
+ * continues the open batch is a compare; the batch's draws are recorded when it ends, so every other thing that
+ * records into the back end calls gx_batch_flush first. */
+extern int gx_batch_pending; /* a batch is open or a run is being collected */
+void gx_batch_flush_slow(void);
+static inline void gx_batch_flush(void) {
+    if (gx_batch_pending) {
+        gx_batch_flush_slow();
+    }
+}
+int gx_batch_recent(u32 bat);  /* batch `bat` (index + 1) was drawn this frame or in the last two */
+/* Member k of batch `bat`: its list and where its pass-group record index is kept; 0 past the end. */
+int gx_batch_member(u32 bat, u32 k, const void** list, u32* nbytes, u32** hint);
+/* gx_vsh.c */
+extern u32 gx_vsh_dec_epoch;
+int gx_vsh_rec_decided(u32* hint, const void* list, u32 nbytes, u32 bat);
+void* gx_vsh_batch_route(u32 pnmtx, u32 bat, const void* list0, u32 nbytes0, u32* hint0);
+void gx_vsh_batch_count(void* group, u32 n, u32 verts, u32 idx);
+/* gx_draw.c: what the last gx_draw_vsh recorded (ok 0: it drew nothing through the shader path) */
+typedef struct {
+    u8 ok;
+    u8 unit_attr[3];
+    const void* stream;
+    u32 layout, scales, cull;
+} GxVshLast;
+extern GxVshLast gx_vsh_last;
+/* The state part of gx_draw_vsh for a whole batch: PICA state, uniforms, the group's route. 1: the batch may
+ * draw (its uniform block is recorded, *group and *cull are set); 0: draw the members one by one. */
+int gx_draw_batch_begin(const u8 unit_attr[3], u32 bat, const void* list0, u32 nbytes0, u32* hint0, void** group,
+                        u32* cull);
+void gx_draw_batch_end(void* group, u32 n, u32 verts, u32 idx);
+
 #endif

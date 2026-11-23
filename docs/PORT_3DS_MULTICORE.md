@@ -52,6 +52,26 @@ How we get there:
 4. **Cheaper recording**: state recorded as deltas at draws instead of every setter.
 5. The default becomes `gxthread=2 gxthreadsplit=0 gxpipeline=1` only with identical output and faster frames in every scene, in Azahar and then on hardware.
 
+**Measured (2026-11-22, Azahar, `gxthreadstats=60`, the window ending at frame 1261).** Step 1 is in `PORT_3DS_GX_PERF.md` ("Round 3"). Steps 3 and 4 are built: `gxpipeline=1` and `gxthreaddedup=1` (the record skips a state call whose words equal the last recorded for the same piece of state; 70-74% of state calls skipped). Both are pixel-identical to `gxthread=0` under `determ` (gor_01 and gon_02, every pixel of 24 shots), `gw_diff` 160 records equal (all 23 fields), and the verify sweep (`gxthread=3 gxpipeline=1 gxcache=2`, gor_01/tik_01/hei_01/gon_02) shows 0 cache mismatches, 0 stale, 0 lists changed, 0 getter mismatches and 0 reads after a later report. Release fences fire 0.00-0.03 times a frame with pipelining (the battle's 0.03 is a smart-heap allocation).
+
+| Scene | today (`gxthread=0`): frame / core-0 busy | `gxthread=2 gxthreadsplit=0 gxpipeline=1`: frame / core-0 busy / fence wait | translator / render (core 2) | frame ends that waited for the frame before |
+|---|---|---|---|---|
+| gor_01 | 83.6 / 74.8 | 83.6 / **32.0** / 45.2 | 70.6 / 27.5 | 30 of 60 |
+| gon_02 | 49.1 / 34.2 | **41.8** / 12.9 / 23.2 | 34.7 / 15.4 | 30 |
+| aaa_00 | 50.2 / 35.1 | **41.8** / 12.9 / 23.6 | 34.4 / 15.7 | 30 |
+| tik_01 | 50.2 / 45.4 | 50.1 / 22.5 / 16.3 | 43.1 / 22.2 | 20 |
+| hei_01 | 33.4 / 30.9 | 38.7 / 13.4 / 17.8 (**slower**) | 30.2 / 12.9 | 27 |
+| jin_00 | 43.2 / 33.2 | **35.1** / 16.6 / 10.4 | 30.8 / 6.4 | 17 |
+| effects battle | 49.9 / 35.8 | **42.6** / 13.4 / 24.2 | 35.8 / 14.3 | 28 |
+| eki_00 | 33.4 / 28.7 | **29.5** / 10.6 / 12.5 | 25.6 / 9.8 | 23 |
+| usu_00 | 66.9 / 58.3 | **61.3** / 28.9 / 27.1 | 55.4 / 18.9 | 21 |
+| pik_00 | 100.3 / 85.8 | **90.3** / 40.8 / 40.4 | 81.6 / 27.5 | 23 |
+
+- Core 0 now does a third to a half of what it did (the game's logic, its draw code and the record). Core 2 is the limit everywhere: the translator and the replay together exceed the frame (106-130% of wall time, the two counted separately), so the frame-end fence waits for the frame before in a third to a half of the frames.
+- Seven of ten scenes are faster (up to 17%), gor_01 and tik_01 unchanged, **hei_01 is slower** (33.4 -> 38.7 ms): its translation (30 ms) plus the replay (13 ms) no longer fits the frame on core 2. So the default stays `gxthread=0` (step 5's rule).
+- Extra latency: one frame between a frame's logic and its display when pipelined (the GameCube's own CPU/GPU overlap).
+- What would flip it: less translation on core 2. The translator takes 0.9-1.0 times what the game thread spent on GX before; the replay of the frame before shares core 2. Next candidates: the display-list hit path and the immediate-mode ring (the largest translator stages), and moving the replay's CPU work (citro3d command building) down.
+
 Core 1 keeps the light, latency-tolerant work and **all SD card access** (disc reads, saves, log, options, test output), so cores 0 and 2 never block on SD I/O.
 
 ## Splits, ranked

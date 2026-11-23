@@ -426,7 +426,8 @@ static void card_thread(void* arg) {
             s_job_tail++;
             plat_mutex_unlock(s_lock);
             if (tst_rngtrace_wanted()) {
-                tst_log("[CARD] job %d done result %d at game frame %u", (int)j.kind, (int)r, (unsigned)tst_cur_frame());
+                tst_log("[CARD] job %d done result %d at game frame %u len=%d off=%d", (int)j.kind, (int)r,
+                        (unsigned)tst_cur_frame(), (int)(j.kind == JOB_CREATE ? (s32)j.size : j.length), (int)j.offset);
             }
             port_irq_enter();
             s_result[j.chan & 1] = r;
@@ -449,7 +450,8 @@ static s32 post(const Job* j) {
         return CARD_RESULT_BUSY;
     }
     if (tst_rngtrace_wanted()) {
-        tst_log("[CARD] job %d posted at game frame %u", (int)j->kind, (unsigned)tst_cur_frame());
+        tst_log("[CARD] job %d posted at game frame %u len=%d off=%d", (int)j->kind, (unsigned)tst_cur_frame(),
+                (int)(j->kind == JOB_CREATE ? (s32)j->size : j->length), (int)j->offset);
     }
     s_jobs[s_job_head % JOBS] = *j;
     s_job_head++;

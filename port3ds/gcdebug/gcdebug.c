@@ -340,17 +340,24 @@ static void padfile_load(void) {
  * 0 mount, 1 check, 2 format, 3 create, 4 read, 5 write, 6 setstatus) ---- */
 
 static CARDCallback s_card_cb[7];
+static s32 s_card_len[7], s_card_off[7];
+static OSTime s_hook_time; /* real time at the last frame hook: the ticks since it place an event in the frame */
 
-static void card_posted(int kind) {
+static void card_posted(int kind, s32 len, s32 off) {
+    s_card_len[kind] = len;
+    s_card_off[kind] = off;
     if (tst_rngtrace_wanted()) {
-        tst_log("[CARD] job %d posted at game frame %lu", kind, (unsigned long)tst_cur_frame());
+        tst_log("[CARD] job %d posted at game frame %lu len=%d off=%d since_hook=%lu", kind,
+                (unsigned long)tst_cur_frame(), (int)len, (int)off, (unsigned long)(OSGetTime() - s_hook_time));
     }
 }
 
 static void card_done(int kind, s32 chan, s32 result) {
     CARDCallback cb = s_card_cb[kind];
     if (tst_rngtrace_wanted()) {
-        tst_log("[CARD] job %d done result %d at game frame %lu", kind, (int)result, (unsigned long)tst_cur_frame());
+        tst_log("[CARD] job %d done result %d at game frame %lu len=%d off=%d since_hook=%lu", kind, (int)result,
+                (unsigned long)tst_cur_frame(), (int)s_card_len[kind], (int)s_card_off[kind],
+                (unsigned long)(OSGetTime() - s_hook_time));
     }
     if (cb != NULL) {
         cb(chan, result);
@@ -366,43 +373,43 @@ static void card_cb5(s32 chan, s32 result) { card_done(5, chan, result); }
 static void card_cb6(s32 chan, s32 result) { card_done(6, chan, result); }
 
 s32 gcdbg_CARDMountAsync(s32 chan, void* workArea, CARDCallback detachCallback, CARDCallback attachCallback) {
-    card_posted(0);
+    card_posted(0, 0, 0);
     s_card_cb[0] = attachCallback;
     return CARDMountAsync(chan, workArea, detachCallback, card_cb0);
 }
 
 s32 gcdbg_CARDCheckAsync(s32 chan, CARDCallback callback) {
-    card_posted(1);
+    card_posted(1, 0, 0);
     s_card_cb[1] = callback;
     return CARDCheckAsync(chan, card_cb1);
 }
 
 s32 gcdbg_CARDFormatAsync(s32 chan, CARDCallback callback) {
-    card_posted(2);
+    card_posted(2, 0, 0);
     s_card_cb[2] = callback;
     return CARDFormatAsync(chan, card_cb2);
 }
 
 s32 gcdbg_CARDCreateAsync(s32 chan, const char* fileName, u32 size, CARDFileInfo* fileInfo, CARDCallback callback) {
-    card_posted(3);
+    card_posted(3, (s32)size, 0);
     s_card_cb[3] = callback;
     return CARDCreateAsync(chan, fileName, size, fileInfo, card_cb3);
 }
 
 s32 gcdbg_CARDReadAsync(CARDFileInfo* fileInfo, void* buf, s32 length, s32 offset, CARDCallback callback) {
-    card_posted(4);
+    card_posted(4, length, offset);
     s_card_cb[4] = callback;
     return CARDReadAsync(fileInfo, buf, length, offset, card_cb4);
 }
 
 s32 gcdbg_CARDWriteAsync(CARDFileInfo* fileInfo, void* buf, s32 length, s32 offset, CARDCallback callback) {
-    card_posted(5);
+    card_posted(5, length, offset);
     s_card_cb[5] = callback;
     return CARDWriteAsync(fileInfo, buf, length, offset, card_cb5);
 }
 
 s32 gcdbg_CARDSetStatusAsync(s32 chan, s32 fileNo, CARDStat* stat, CARDCallback callback) {
-    card_posted(6);
+    card_posted(6, 0, 0);
     s_card_cb[6] = callback;
     return CARDSetStatusAsync(chan, fileNo, stat, card_cb6);
 }
@@ -579,6 +586,7 @@ void gcdbg_stop(u32 frame) { gcdbg_stop_frame = frame; }
 
 static void frame_hooks(void) {
     static int stop = -1;
+    s_hook_time = OSGetTime();
     if (stop < 0) {
         stop = tst_sw_int("stopframe", 0);
         tst_log("gcdbg: switches \"%s\"", gcdbg_switches);

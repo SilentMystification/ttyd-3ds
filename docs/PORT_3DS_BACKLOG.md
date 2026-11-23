@@ -10,10 +10,15 @@ Updated 2026-11-22. Owner goals: original GameCube frame rates, stereo 3D, all t
 
 | Item | Agent |
 |---|---|
-| Galleries, effect and battle sweeps, the `gon_02` GameCube comparison (lane A 5, B 3–4) | Opus |
-| Port vs Dolphin replay: memory-card timing under `determ` | Sonnet |
-| Boot panic when the binary grows by ~0.6 MB | Sonnet |
+| Galleries, effect and battle sweeps, `gon_02` GameCube comparison (lane A 5, B 3-4) | Opus |
 | Systems tests: saves, copy/delete, game over, reset, pause tabs, mail, journal (lane B 6) | Opus |
+| Story checkpoints, every chapter, port vs Dolphin (lane B 2) | Opus |
+| Shader path: matrix palette, lighting, `MTX3x4` texgen, bbox from positions; then pipelined frame end and delta recording (lane C 3, 5) | Opus |
+| Memory-card timing under `determ`; saves never stall the game | Sonnet |
+| NDSP stream clicks in `gor_01` | Sonnet |
+| Texture filter option (`texfilter`, generated mipmaps) | Sonnet |
+
+**Done since the last update:** stereo 3D (Azahar), GX translation thread (`gxthread`), recorded inputs, Japanese ROM font, versioning and release script, battle-stage sweep hook, PM64-style bottom screen, SD access confined to core 1 (`sdstats`), large GX tables moved to the heap (image end 0x00ADED28; build fails past 0x01000000), emulator and build throttling.
 
 ## Lane A: tooling (Azahar)
 

@@ -33,7 +33,7 @@ Both scripts build in the image from `tools/port3ds/docker/Dockerfile`:
 
 The image tag is the first 12 hex digits of the Dockerfile's SHA-256, so editing the Dockerfile rebuilds the image.
 
-Compiler A/B options for the game (both off by default; PORT_3DS_60FPS.md, "Step 1 results"): `tools/port3ds/build.sh . -DTTYD_LTO=ON` (link-time optimisation of the DOL code, MusyX and the port; the static RELs stay plain) and `-DTTYD_GX_O3=ON` (`-O3` on `port3ds/game/gx/*.c`). They stay in the build directory's cache: pass `=OFF` to go back.
+Compiler options for the game (both on by default since the declaration mismatches were fixed; PORT_3DS_60FPS.md, "Step 1 results"): `tools/port3ds/build.sh . -DTTYD_LTO=ON` (link-time optimisation of the DOL code, MusyX and the port; the static RELs stay plain) and `-DTTYD_GX_O3=ON` (`-O3` on `port3ds/game/gx/*.c`). They stay in the build directory's cache: pass `=OFF` for the plain -O2 build.
 
 On Windows the sources are copied into the Docker volume `ttyd3ds-work` with rsync and built there, because bind mounts are slow. `iso/`, `orig/`, `build/` and `.git/` are not copied.
 

@@ -60,6 +60,26 @@ Noise: two -O2 builds (before and after the counters below) gave gor_01 70.8 / 7
 
 LTO also found type mismatches between translation units that the per-file build cannot see (`-Wlto-type-mismatch`, 14). One is a real ABI bug on the 3DS today, independent of LTO: `partyNrmToAngle` is defined as `f32 partyNrmToAngle(Vec n)` (`party_hit.c`) but `party.c` and `party_move.c` declare and call it as `partyNrmToAngle(Vec* n)`. MWCC passes a struct by reference, so the GameCube is fine; with the ARM hard-float ABI the callee reads the vector from `s0`-`s2` while the caller passes a pointer in `r0`. The others: `marioJumpData` (array vs struct), `cloudGetStatus`/`bomheiGetStatus` (`u8` vs `s32`), `evt_cam_road_reset`, `effCoinFukidashiEntry`, `shadowFlagOn`, `shadowSetCamId`, `iconGetWidthHight`, `iconGetTexObj`, `effSparkEntry`, three `marioWeapon_*` (all in the LTO build log). Also `-Waggressive-loop-optimizations` in `sac_zubastar.c` (a loop to 17 over a 16-entry array, the game's) and the generated `mtx_sdk.c`. **Before LTO becomes the default, fix the declarations** (header prototypes), since LTO may optimise across them.
 
+**Fixed (2026-11-23).** The GameCube build stays 100% (G8ME01: all categories, MusyX 31/31), so every fix that would change MWCC's code is under `TARGET_PORT` and the GameCube keeps its FAKE:
+
+| Mismatch | Fix |
+|---|---|
+| `partyNrmToAngle` | `party.h` prototype `f32 partyNrmToAngle(Vec* n)` and a pointer definition in `party_hit.c`, port only (a pointer definition changes the GameCube code: `party_hit` fell to 97.4%); the GameCube keeps the by-value definition and the callers' local pointer externs |
+| `cloudGetStatus`, `bomheiGetStatus` | `evt_party.c` includes the real headers (`u8`) under `TARGET_PORT`; the GameCube keeps the `s32` externs |
+| `evt_cam_road_reset` | `seq_mapchange.c` includes `evt/evt_cam.h` instead of its `void (s32, s32)` prototype; same GameCube code |
+| `effCoinFukidashiEntry` | `evt_mobj.c`: real prototype in the port, a macro keeps the position-first call order (the GameCube evaluates it in that order) |
+| `effSparkEntry` | `battle_status_effect.c`: the port calls the 4-argument prototype (the two extra arguments were never read) |
+| `shadowSetCamId`, `shadowFlagOn` | prototypes in `shadowdrv.h` under `TARGET_PORT` (`s16`/`u16`); `party.c` keeps its `s32`/`u32` ones on the GameCube |
+| `iconGetTexObj`, `iconGetWidthHight` | `fontmgr.c`, `win_main.c`, `eff_updown.c` include `icondrv.h`; `eff_naniga.c` and `msgdrv.c` call directly (all port only) |
+| `marioJumpData` | `koopa.c` declares `MarioJumpData` and reads `.jump` (port only) |
+| `marioDefaultWeapon_Jump`, `marioWeapon_KururinJump`, `marioDefaultWeapon_Hammer` (the three `marioWeapon_*`) | `battle_seq.c` declares them as `BattleWeapon` (port only) |
+| `sac_zubastar.c` loop to 17 | the 17th "line" is the next member of the work, `capture` (a pointer), whose first word is read as `state`; a pointer is never 5, so that pass does nothing. The port stops at 16 |
+| `mtx_sdk.c` warning | it is `sac_deka.c` `yuka_main`: `prev[r][j - 1]` and `prev[r][j + 1]` run one element past each row, into the neighbouring row, `vel[1][128]` or `u[0][0..2]`, all inside the same `YukaMesh` with the same layout in the port. The port reads them through the mesh's base (`DEKA_PREV`) so the compiler sees them in bounds |
+
+**`partyNrmToAngle` in game.** It is the slope test of `partyGetAppearPos3` (party_move.c; the demo's copy is in party.c): where the partner is put back next to Mario (Goombella, Ms. Mowz, `party_motion.c`, `party_kuribo.c`, `party_chuchu.c`). It tries nine spots 30 units from Mario and skips floors steeper than 60 degrees. With the ARM ABI bug the angle was computed from whatever was in `s0`-`s2` (the normal was never passed), so the test accepted or rejected spots at random: a partner could be placed on a cliff face, or fail all nine spots. Not measured in a run (no cheap trigger found; the owner limited emulator runs to short ones); read from the code and the ABI.
+
+**Result, LTO + `-O3` GX, with the fixes.** No `-Wlto-type-mismatch` and no `-Waggressive-loop-optimizations` in the US, JP and PAL builds. Image ends: US 0x00b7dabc, JP 0x00b67ff8, PAL 0x00c7267c (limit 0x01000000). `determ` shots 1200 to 1205 compared with the `-O2` build of the same source: identical, 6/6 in `gor_01` and 6/6 in the battle (`gon_02 story=30 battle=1 btlauto=perfect`). Short map sweep (story 30, 120 frames): `gor_01`, `gon_02` (a battle on entry), `usu_00`, `pik_00` all ok. Both options are now on by default in `port3ds/CMakeLists.txt` (`release.py` uses the same build).
+
 ### 2. Debug overhead in a normal run
 
 Checked by reading every per-frame and per-call path and by the PC samples (5., no switches but `gxthreadstats`): **no diagnostic code appears among the game thread's or render thread's sampled functions** (top 30 of each, 236 of 280 game-thread samples in gor_01; the remainder spread at ≤ 2 samples each).

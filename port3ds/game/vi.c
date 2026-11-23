@@ -553,7 +553,7 @@ static void determ_retrace(void) {
     port_ai_pump(quanta);
 }
 
-/* Switch dvdsettle=1 (outside determ): while a map change or a battle start loads, a frame does not end until
+/* Switch dvdsettle (on by default outside determ; dvdsettle=0 turns it off): while a map change or a battle start loads, a frame does not end until
  * the DVD manager's queued reads have finished (up to SETTLE_MAX_MS), as determ's frames do. The DVD manager
  * thread only runs while the game thread sleeps, so with one slow frame per read the load took one frame per read
  * (the GameCube's frames are short and its drive slow: reads overlapped frames; a determ run of the same load
@@ -564,7 +564,7 @@ static int s_settle = -1;
 
 static void dvd_settle(void) {
     if (s_settle < 0) {
-        s_settle = plat_switch_has("dvdsettle");
+        s_settle = plat_switch_int("dvdsettle", 1) != 0;
     }
     if (!s_settle || gp == NULL) {
         return;

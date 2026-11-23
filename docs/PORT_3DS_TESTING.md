@@ -117,7 +117,7 @@ Switches the game reads (space-separated words in `--switches`):
 | `aramfast=1` | ARAM DMA callbacks come 20 us after the post whatever the size, instead of after the 80 MB/s transfer time |
 | `discra=KB` | Disc read-ahead on the file thread: a read of at most 64 KB that starts where the previous read ended reads KB kilobytes from there in one SD call, and the next reads that fall inside come from memory. Measured as a loss (over-read, no time saved); off by default |
 | `discbatch=1` | Requests queued behind the one the file thread is reading that continue it on disc and in memory are read in the same SD call; each still completes in order with its own result. The queue is almost always one deep, so it merges nothing in the measured loads |
-| `dvdsettle=1` | While a map change or a battle start loads (outside `determ`), a frame does not end until the DVD manager's queued reads have finished (at most 250 ms). A load then takes the frames the game's own logic needs (what `determ` and Dolphin show) instead of about one frame per read: `gor_01` 79 to 63 frames, `gor_00` 78 to 52 in Azahar. Default off until judged on hardware |
+| `dvdsettle` (default 1) | While a map change or a battle start loads (outside `determ`), a frame does not end until the DVD manager's queued reads have finished (at most 250 ms). A load then takes the frames the game's own logic needs (what `determ` and Dolphin show) instead of about one frame per read: `gor_01` 79 to 63 frames, `gor_00` 78 to 52 in Azahar. On by default; `dvdsettle=0` turns it off (`determ` never uses it). To be judged on hardware |
 | `padlog` | Logs `padlog: 3ds=<held hex> gc=<GameCube button bits>` whenever the GameCube button state changes, to verify remaps |
 | `lang=<en\|de\|fr\|es\|it\|nl>` | PAL: the game language. The default comes from the 3DS system language; any other language falls back to English |
 | `hz=50` | PAL: preselects 50 Hz at the 50/60 Hz prompt (default 60 Hz) |
@@ -450,7 +450,7 @@ Player settings live in `sdmc:/3ds/ttyd/options.txt` as `key=value` lines ending
 
 - **Building:**
   - `tools/port3ds/build.sh . -DREGION=JP` (or `PAL`) writes to `build/3ds/game_jp` (or `build/3ds/game_pal`).
-  - The discs go in `iso/G8MJ01.iso` and `iso/G8MP01.iso`, or are given with `-DTTYD_DISC=`.
+  - The discs go in `iso/G8MJ01.iso` and `iso/G8MP01.iso`, (the arena table in `gen_disc_data.py` is filled from them once: `--print-arena`).
 - **Wrong-disc check:** a build refuses a disc from another region. With the US disc, `run_azahar.py --build build/3ds/game_pal/ttyd.cia --switches "" --until "This build is for"` should pass.
 - **JP and PAL in-game testing needs the JP and PAL discs.** The steps are in PORT_3DS_PLAN.md section 9.1.
 

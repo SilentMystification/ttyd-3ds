@@ -200,6 +200,13 @@ void gx_perf_frame(void) {
                (unsigned long)us(a->t_sync, f), (unsigned long)us(a->t_present, f), (unsigned long)other,
                (unsigned long)idle);
     }
+    {
+        u32 reads, mism;
+        gx_bbox_counts(&reads, &mism);
+        PLOG_I("gxstats   bbox: shader draws armed %lu (verts %lu) %lu us | reads %lu, verify mismatches %lu (total)",
+               (unsigned long)(a->bbox_draws / f), (unsigned long)(a->bbox_verts / f), (unsigned long)us(a->t_bbox, f),
+               (unsigned long)reads, (unsigned long)mism);
+    }
     gx_dlcache_log(f);
     gx_vsh_log(f);
     memset(&s_sum, 0, sizeof(s_sum));

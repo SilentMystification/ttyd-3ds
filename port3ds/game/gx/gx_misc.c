@@ -191,11 +191,7 @@ void GXClearBoundingBox(void) {
         gx_rec_call(REC_ClearBoundingBox, NULL, 0);
         return;
     }
-    gx.bbox[0] = 1023;
-    gx.bbox[1] = 1023;
-    gx.bbox[2] = 0;
-    gx.bbox[3] = 0;
-    gx_bbox_active = 1;
+    gx_bbox_clear();
 }
 
 void GXReadBoundingBox(u16* left, u16* top, u16* right, u16* bottom) {
@@ -203,10 +199,12 @@ void GXReadBoundingBox(u16* left, u16* top, u16* right, u16* bottom) {
     if (gx_rec_on()) {
         gx_rec_fence(GXF_READBACK); /* the box is the translator's, complete once it caught up */
     }
-    *left = gx.bbox[0];
-    *top = gx.bbox[1];
-    *right = gx.bbox[2];
-    *bottom = gx.bbox[3];
+    u16 b[4];
+    gx_bbox_read(b); /* the translator is idle here (fenced, or this thread translates) */
+    *left = b[0];
+    *top = b[1];
+    *right = b[2];
+    *bottom = b[3];
 }
 
 /* ---- Pixel peek ---- */

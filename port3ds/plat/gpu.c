@@ -42,7 +42,8 @@
 #define INDEX_ARENA (192 * 1024) /* u16 indices of shader-path draws per record */
 #define STREAM_PENDING 4096       /* stream frees waiting for the frames in flight */
 
-enum { CMD_STATE = 1, CMD_FOG, CMD_DRAW, CMD_CLEAR, CMD_COPY, CMD_FRAME_END, CMD_SEGMENT_END, CMD_VSH_CONST, CMD_VSH_DRAW };
+enum { CMD_STATE = 1, CMD_FOG, CMD_DRAW, CMD_CLEAR, CMD_COPY, CMD_FRAME_END, CMD_SEGMENT_END, CMD_VSH_CONST, CMD_VSH_DRAW,
+       CMD_VSH_LIGHT };
 
 /* CMD_VSH_DRAW body */
 typedef struct {
@@ -89,6 +90,12 @@ static shaderProgram_s s_prog;
 static int s_uloc_rot0, s_uloc_rot1;
 /* shader path (vsh) uniforms */
 static int s_uloc_vsh, s_uloc_clip, s_uloc_texrow, s_uloc_texsel, s_uloc_vscale, s_uloc_clrmix, s_uloc_matclr;
+/* GX lighting in the shader (PlatGpuVshLight) */
+static int s_uloc_lit, s_uloc_eyerow, s_uloc_nrmrow, s_uloc_amb, s_uloc_dmode, s_uloc_amode, s_uloc_lpos, s_uloc_ldir,
+    s_uloc_lcol, s_uloc_lka, s_uloc_lkk, s_uloc_lcount;
+static u32 s_last_vlight_id; /* the light block last recorded in the current record (0: none) */
+static int s_uloc_tgsrc;
+static PlatGpuVshLight s_last_vlight;
 static C3D_AttrInfo s_attr;
 static TexSlot s_tex[MAX_TEX];
 /* Bound to texture units the draw does not use: citro3d's C3D_TexBind
@@ -220,6 +227,7 @@ static void submit(int present) {
     s_last_draw = NULL;
     s_last_vdraw = NULL;
     s_last_vconst_valid = 0;
+    s_last_vlight_id = 0;
     s_last_alloc = NULL;
     memset(&s_last_state, 0xFF, sizeof(s_last_state));
     s_last_state_valid = 0;
@@ -238,8 +246,12 @@ static void end_segment(void) {
     PlatGpuVshConst keep_v = s_last_vconst;
     u32 keep_vid = s_last_vconst_id;
     int have_v = s_last_vconst_valid;
+    u32 keep_lid = s_last_vlight_id;
     rec_put(CMD_SEGMENT_END, 0);
     submit(0);
+    if (keep_lid != 0) {
+        plat_gpu_vsh_light(&s_last_vlight, keep_lid);
+    }
     if (have_state) {
         plat_gpu_set_state(&keep);
     }
@@ -424,6 +436,19 @@ void plat_gpu_vsh_const(const PlatGpuVshConst* c, uint32_t id) {
         s_last_vconst_id = id;
         s_last_vconst_valid = 1;
         s_stats_frame.vsh_consts++;
+    }
+}
+
+/* The light block for the following lit shader draws; recorded when its id changed. */
+void plat_gpu_vsh_light(const PlatGpuVshLight* l, uint32_t id) {
+    if (id != 0 && id == s_last_vlight_id) {
+        return;
+    }
+    PlatGpuVshLight* d = rec_put(CMD_VSH_LIGHT, sizeof(*l));
+    if (d != NULL) {
+        *d = *l;
+        s_last_vlight = *l;
+        s_last_vlight_id = id;
     }
 }
 
@@ -1076,11 +1101,42 @@ static void vsh_apply_const(const PlatGpuVshConst* c) {
     }
     C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clip + 2, c->clip[2][0], c->clip[2][1], c->clip[2][2], c->clip[2][3]);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clip + 3, c->clip[3][0], c->clip[3][1], c->clip[3][2], c->clip[3][3]);
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 9; i++) {
         C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_texrow + i, c->tex[i][0], c->tex[i][1], c->tex[i][2], c->tex[i][3]);
+    }
+    for (int i = 0; i < 3; i++) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_tgsrc + i, c->tgsrc[i][0], c->tgsrc[i][1], c->tgsrc[i][2],
+                      c->tgsrc[i][3]);
     }
     C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_clrmix, c->clrmix[0], c->clrmix[1], c->clrmix[2], c->clrmix[3]);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_matclr, c->matclr[0], c->matclr[1], c->matclr[2], c->matclr[3]);
+    if (s_uloc_lit >= 0) {
+        C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_lit, (c->flags & PLAT_VSH_LIT) != 0);
+    }
+}
+
+static void vsh_apply_light(const PlatGpuVshLight* l) {
+    if (s_uloc_lit < 0) {
+        return;
+    }
+    for (int i = 0; i < 3; i++) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_eyerow + i, l->eye[i][0], l->eye[i][1], l->eye[i][2], l->eye[i][3]);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_nrmrow + i, l->nrm[i][0], l->nrm[i][1], l->nrm[i][2], l->nrm[i][3]);
+    }
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_amb, l->amb[0], l->amb[1], l->amb[2], l->amb[3]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_dmode, l->dmode[0], l->dmode[1], l->dmode[2], l->dmode[3]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_amode, l->amode[0], l->amode[1], l->amode[2], l->amode[3]);
+    u32 n = l->count > PLAT_VSH_LIGHTS ? PLAT_VSH_LIGHTS : l->count;
+    for (u32 i = 0; i < (n ? n : 1); i++) {
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_lpos + i, l->light[i].pos[0], l->light[i].pos[1], l->light[i].pos[2], 0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_ldir + i, l->light[i].dir[0], l->light[i].dir[1], l->light[i].dir[2], 0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_lcol + i, l->light[i].color[0], l->light[i].color[1],
+                      l->light[i].color[2], 0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_lka + i, l->light[i].a[0], l->light[i].a[1], l->light[i].a[2], 0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_lkk + i, l->light[i].k[0], l->light[i].k[1], l->light[i].k[2], 0);
+    }
+    /* the loop runs count + 1 times; with no light it runs once over light 0, which the front end zeroes */
+    C3D_IVUnifSet(GPU_VERTEX_SHADER, s_uloc_lcount, n ? (int)n - 1 : 0, 0, 1, 0);
 }
 
 static float pow2_neg(u32 k) {
@@ -1106,12 +1162,12 @@ static void vsh_apply_scales(u32 scales) {
 /* Vertex loaders for a stream layout: position v0, colour v1, slots v2-v4;
  * registers the stream lacks are fixed attributes (0). */
 static void vsh_apply_layout(const void* stream, u32 layout, C3D_AttrInfo* ai, C3D_BufInfo* vbi) {
-    int32_t off[5];
+    int32_t off[6];
     u32 nslots = PLAT_VSH_NSLOTS(layout);
-    u32 stride = plat_vsh_layout(layout & PLAT_VSH_POS_S16, nslots, layout >> 3 & 7, off);
+    u32 stride = plat_vsh_layout_n(layout & PLAT_VSH_POS_S16, nslots, layout >> 3 & 7, layout & PLAT_VSH_NRM, off);
     /* buffer order: the present attributes sorted by offset */
-    int order[5], n = 0;
-    for (int a = 0; a < 5; a++) {
+    int order[6], n = 0;
+    for (int a = 0; a < 6; a++) {
         if (off[a] >= 0) {
             int k = n++;
             while (k > 0 && off[order[k - 1]] > off[a]) {
@@ -1128,23 +1184,27 @@ static void vsh_apply_layout(const void* stream, u32 layout, C3D_AttrInfo* ai, C
             AttrInfo_AddLoader(ai, 0, (layout & PLAT_VSH_POS_S16) ? GPU_SHORT : GPU_FLOAT, 3);
         } else if (a == 1) {
             AttrInfo_AddLoader(ai, 1, GPU_UNSIGNED_BYTE, 4);
+        } else if (a == 5) {
+            AttrInfo_AddLoader(ai, 5, GPU_FLOAT, 3);
         } else {
             AttrInfo_AddLoader(ai, a, (layout & PLAT_VSH_SLOT_S16(a - 2)) ? GPU_SHORT : GPU_FLOAT, 2);
         }
     }
-    int fixed[3], nfixed = 0;
-    for (int a = 2; a < 5; a++) {
+    int fixed[4], fixed_reg[4], nfixed = 0;
+    for (int a = 2; a < 6; a++) {
         if (off[a] < 0) {
+            fixed_reg[nfixed] = a;
             fixed[nfixed++] = AttrInfo_AddFixed(ai, a);
         }
     }
     BufInfo_Init(vbi);
-    BufInfo_Add(vbi, stream, (ptrdiff_t)stride, n, 0x43210ull & ((1ull << (4 * n)) - 1));
+    BufInfo_Add(vbi, stream, (ptrdiff_t)stride, n, 0x543210ull & ((1ull << (4 * n)) - 1));
     C3D_SetAttrInfo(ai);
     C3D_SetBufInfo(vbi);
     for (int i = 0; i < nfixed; i++) {
         if (fixed[i] >= 0) {
-            C3D_FixedAttribSet(fixed[i], 0, 0, 0, 0);
+            /* no normal: (0, 0, 1), as the CPU path lights a vertex without one */
+            C3D_FixedAttribSet(fixed[i], 0, 0, fixed_reg[i] == 5 ? 1.0f : 0.0f, 0);
         }
     }
 }
@@ -1361,6 +1421,9 @@ eye_again:
             }
             break;
         }
+        case CMD_VSH_LIGHT:
+            vsh_apply_light((const PlatGpuVshLight*)body);
+            break;
         case CMD_VSH_CONST:
             vsh_apply_const((const PlatGpuVshConst*)body);
             vc_now = (const PlatGpuVshConst*)body;
@@ -1867,6 +1930,28 @@ void plat_gpu_init(void) {
     s_uloc_vscale = shaderInstanceGetUniformLocation(s_prog.vertexShader, "vscale");
     s_uloc_clrmix = shaderInstanceGetUniformLocation(s_prog.vertexShader, "clrmix");
     s_uloc_matclr = shaderInstanceGetUniformLocation(s_prog.vertexShader, "matclr");
+    s_uloc_tgsrc = shaderInstanceGetUniformLocation(s_prog.vertexShader, "tgsrc");
+    if (s_uloc_tgsrc < 0) {
+        plat_fatal("gpu: the shader has no tgsrc uniform");
+    }
+    s_uloc_lit = shaderInstanceGetUniformLocation(s_prog.vertexShader, "lit");
+    s_uloc_eyerow = shaderInstanceGetUniformLocation(s_prog.vertexShader, "eyerow");
+    s_uloc_nrmrow = shaderInstanceGetUniformLocation(s_prog.vertexShader, "nrmrow");
+    s_uloc_amb = shaderInstanceGetUniformLocation(s_prog.vertexShader, "amb");
+    s_uloc_dmode = shaderInstanceGetUniformLocation(s_prog.vertexShader, "dmode");
+    s_uloc_amode = shaderInstanceGetUniformLocation(s_prog.vertexShader, "amode");
+    s_uloc_lpos = shaderInstanceGetUniformLocation(s_prog.vertexShader, "lpos");
+    s_uloc_ldir = shaderInstanceGetUniformLocation(s_prog.vertexShader, "ldir");
+    s_uloc_lcol = shaderInstanceGetUniformLocation(s_prog.vertexShader, "lcol");
+    s_uloc_lka = shaderInstanceGetUniformLocation(s_prog.vertexShader, "lka");
+    s_uloc_lkk = shaderInstanceGetUniformLocation(s_prog.vertexShader, "lkk");
+    s_uloc_lcount = shaderInstanceGetUniformLocation(s_prog.vertexShader, "lcount");
+    if (s_uloc_lit < 0 || s_uloc_eyerow < 0 || s_uloc_nrmrow < 0 || s_uloc_amb < 0 || s_uloc_dmode < 0 ||
+        s_uloc_amode < 0 || s_uloc_lpos < 0 || s_uloc_ldir < 0 || s_uloc_lcol < 0 || s_uloc_lka < 0 ||
+        s_uloc_lkk < 0 || s_uloc_lcount < 0) {
+        PLOG_W("gpu: the shader has no lighting uniforms: lit draws stay on the CPU");
+        s_uloc_lit = -1;
+    }
     /* C3D_BoolUnifSet takes the location (b0 is 0x68); b15 must stay unused */
     if (s_uloc_vsh < 0x68 || s_uloc_vsh >= 0x68 + 15 || s_uloc_clip < 0 || s_uloc_texrow < 0 || s_uloc_texsel < 0 ||
         s_uloc_vscale < 0 || s_uloc_clrmix < 0 || s_uloc_matclr < 0) {

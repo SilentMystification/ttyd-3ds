@@ -418,9 +418,11 @@ GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, 
             s16mask |= 1u << i;
         }
     }
-    int32_t off[5];
-    u32 stride = plat_vsh_layout(posk >= 0, nslots, s16mask, off);
-    u32 layout = plat_vsh_layout_word(posk >= 0, nslots, s16mask);
+    /* the normal (float, as decoded) when the list has one: GX lighting in the shader reads it */
+    u32 nrm = vtx_desc[GX_VA_NRM] != GX_NONE || vtx_desc[GX_VA_NBT] != GX_NONE;
+    int32_t off[6];
+    u32 stride = plat_vsh_layout_n(posk >= 0, nslots, s16mask, nrm, off);
+    u32 layout = plat_vsh_layout_word_n(posk >= 0, nslots, s16mask, nrm);
     u32 nidx = ntri * 3;
     u32 sbytes = sizeof(GxVshStream) + nidx * sizeof(u16);
     GxVshStream* s = malloc(sbytes);
@@ -472,6 +474,9 @@ GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, 
                 memcpy(p + off[2 + k], tc, 8);
             }
         }
+        if (nrm) {
+            memcpy(p + off[5], v[i].nrm, 12);
+        }
         const GXColor* c = &v[i].clr[0];
         p[off[1] + 0] = c->r;
         p[off[1] + 1] = c->g;
@@ -514,7 +519,7 @@ static struct {
 } s_imm[IMM_CHUNKS];
 static int s_imm_cur = -1;
 static u32 s_imm_stride, s_imm_layout;
-static int32_t s_imm_off[5];
+static int32_t s_imm_off[6];
 static u16 s_imm_idx[IMM_MAX_VERTS * 3 * 2];
 static GxVshImm s_imm_out;
 
@@ -546,8 +551,8 @@ int gx_vsh_imm_room(u32 n) {
         return 1;
     }
     if (s_imm_stride == 0) {
-        s_imm_stride = plat_vsh_layout(0, 3, 0, s_imm_off);
-        s_imm_layout = plat_vsh_layout_word(0, 3, 0);
+        s_imm_stride = plat_vsh_layout_n(0, 3, 0, 1, s_imm_off); /* with the normal, for lit draws */
+        s_imm_layout = plat_vsh_layout_word_n(0, 3, 0, 1);
     }
     u32 now = plat_gpu_present_count();
     for (int i = 0; i < IMM_CHUNKS; i++) {
@@ -594,6 +599,12 @@ const GxVshImm* gx_vsh_imm_build(u8 prim, const GxVertex* v, u32 n) {
             } else {
                 memset(p + s_imm_off[2 + k], 0, 8);
             }
+        }
+        if (v[i].has_nrm) {
+            memcpy(p + s_imm_off[5], v[i].nrm, 12);
+        } else {
+            static const f32 up[3] = {0, 0, 1}; /* as the CPU path lights a vertex without a normal */
+            memcpy(p + s_imm_off[5], up, 12);
         }
         const GXColor* cl = &v[i].clr[0];
         p[s_imm_off[1] + 0] = cl->r;
@@ -1118,5 +1129,16 @@ void gx_vsh_log(u32 frames) {
            (unsigned long)a->build_fail, (unsigned long)s_nseg, (unsigned long)(s_seg_bytes / 1024),
            (unsigned long)gs.stream_kb, (unsigned long)s_npending, (unsigned long)a->rec_full,
            (unsigned long)a->group_full, why);
+    /* since boot: CPU-path draws by reason (a census over a sweep: which features the game uses at all) */
+    static u64 total[GXV_R_COUNT];
+    n = 0;
+    for (u32 b = 0; b < GXV_R_COUNT && n + 24 < sizeof(why); b++) {
+        total[b] += a->reason_draws[b];
+        if (total[b]) {
+            n += (u32)snprintf(why + n, sizeof(why) - n, " %c %llu", reason_letters[b], (unsigned long long)total[b]);
+        }
+    }
+    why[n] = 0;
+    PLOG_I("gxstats   vsh census since boot, CPU-path draws by reason:%s", why);
     memset(&s_sum, 0, sizeof(s_sum));
 }

@@ -94,6 +94,9 @@ void gx_opts_init(void) {
     gx_opt_fogcache = plat_switch_int("gxfogcache", 1) != 0;
     gx_opt_unlit = plat_switch_int("gxunlit", 1) != 0;
     gx_vsh_imm_on = plat_switch_int("gxvshimm", 1) != 0;
+    gx_opt_vshbbox = plat_switch_int("gxvshbbox", 0);
+    gx_opt_vshlit = plat_switch_int("gxvshlit", 1) != 0;
+    gx_opt_vshtg = plat_switch_int("gxvshtg", 1) != 0;
     PLOG_I("gx: statever %d fogcache %d unlit %d", gx_opt_statever, gx_opt_fogcache, gx_opt_unlit);
     gx_vsh_init();
 }
@@ -549,27 +552,12 @@ static int s_dump; /* this frame's draws are logged (switch gxdump) */
 
 int gx_draw_dumping(void) { return s_dump; }
 
-static void transform(const GxVertex* v, Out* o) {
+/* The position part of transform(): eye position p, clip position, front test and window position. Shared by
+ * the bounding box of shader-path draws (gxvshbbox), so the box comes out of the same arithmetic. */
+static inline __attribute__((always_inline)) void xf_position(const GxVertex* v, Out* o, f32* p) {
     const f32(*m)[4] = gx.pos_mtx[v->pnmtx % GX_POS_MTX_COUNT];
-    f32 p[3];
     for (int r = 0; r < 3; r++) {
         p[r] = m[r][0] * v->pos[0] + m[r][1] * v->pos[1] + m[r][2] * v->pos[2] + m[r][3];
-    }
-    f32 n[3] = {0, 0, 1};
-    /* the eye-space normal feeds only the lighting (texgen reads the vertex's own normal) */
-    if (v->has_nrm && (!gx_opt_unlit || s_need_nrm)) {
-        const f32(*nm)[3] = gx.nrm_mtx[v->pnmtx % GX_POS_MTX_COUNT];
-        for (int r = 0; r < 3; r++) {
-            n[r] = nm[r][0] * v->nrm[0] + nm[r][1] * v->nrm[1] + nm[r][2] * v->nrm[2];
-        }
-        /* unit length, as Dolphin lights: a normal matrix with scale in it must not dim the model */
-        f32 len2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
-        if (len2 > 0.0f && len2 != 1.0f) {
-            f32 inv = 1.0f / sqrtf(len2);
-            n[0] *= inv;
-            n[1] *= inv;
-            n[2] *= inv;
-        }
     }
     f32 cx, cy, cz, cw;
     if (gx.proj[0] == (f32)GX_PERSPECTIVE) {
@@ -593,6 +581,27 @@ static void transform(const GxVertex* v, Out* o) {
         o->wy = gx.vp[1] + gx.vp[3] * 0.5f * (1.0f - cy / cw);
     } else {
         o->wx = o->wy = 0;
+    }
+}
+
+static void transform(const GxVertex* v, Out* o) {
+    f32 p[3];
+    xf_position(v, o, p);
+    f32 n[3] = {0, 0, 1};
+    /* the eye-space normal feeds only the lighting (texgen reads the vertex's own normal) */
+    if (v->has_nrm && (!gx_opt_unlit || s_need_nrm)) {
+        const f32(*nm)[3] = gx.nrm_mtx[v->pnmtx % GX_POS_MTX_COUNT];
+        for (int r = 0; r < 3; r++) {
+            n[r] = nm[r][0] * v->nrm[0] + nm[r][1] * v->nrm[1] + nm[r][2] * v->nrm[2];
+        }
+        /* unit length, as Dolphin lights: a normal matrix with scale in it must not dim the model */
+        f32 len2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+        if (len2 > 0.0f && len2 != 1.0f) {
+            f32 inv = 1.0f / sqrtf(len2);
+            n[0] *= inv;
+            n[1] *= inv;
+            n[2] *= inv;
+        }
     }
     GXColor chan_out[2];
     int need_both = 0;
@@ -644,19 +653,96 @@ static void transform(const GxVertex* v, Out* o) {
     }
 }
 
-static void bbox_add(const Out* o) {
-    if (!gx_bbox_active || !o->front) {
-        return;
-    }
+static void box_add(u16* box, const Out* o) {
     s32 x = (s32)o->wx, y = (s32)o->wy;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x > gx.efb_w - 1) x = gx.efb_w - 1;
     if (y > gx.efb_h - 1) y = gx.efb_h - 1;
-    if (x < gx.bbox[0]) gx.bbox[0] = (u16)x;
-    if (y < gx.bbox[1]) gx.bbox[1] = (u16)y;
-    if (x > gx.bbox[2]) gx.bbox[2] = (u16)x;
-    if (y > gx.bbox[3]) gx.bbox[3] = (u16)y;
+    if (x < box[0]) box[0] = (u16)x;
+    if (y < box[1]) box[1] = (u16)y;
+    if (x > box[2]) box[2] = (u16)x;
+    if (y > box[3]) box[3] = (u16)y;
+}
+
+/* Switch gxvshbbox (default 0: eki_00's edge row, PORT_3DS_GX_PERF.md round 3, awaits a decision). 1: a draw made while the bounding box is armed takes the shader path like any
+ * other, and the box gets the window positions of its vertices from xf_position on the CPU (the arithmetic
+ * transform() uses, so the box is the same); GXReadBoundingBox disarms it (every TTYD read follows its own
+ * GXClearBoundingBox). 0: armed draws stay on the CPU path, armed until the next clear (the old rule).
+ * 2: as 1, plus the old box (every draw since the clear, through transform()) kept beside it and compared
+ * at each read (`gxstats` bbox line, and a warning). */
+int gx_opt_vshbbox = 0;
+static u16 s_bref[4];
+static int s_bref_on;
+static u32 s_bbox_reads, s_bbox_mism;
+
+void gx_bbox_clear(void) {
+    gx.bbox[0] = 1023;
+    gx.bbox[1] = 1023;
+    gx.bbox[2] = 0;
+    gx.bbox[3] = 0;
+    gx_bbox_active = 1;
+    memcpy(s_bref, gx.bbox, sizeof(s_bref));
+    s_bref_on = gx_opt_vshbbox == 2;
+}
+
+void gx_bbox_read(u16* out) {
+    memcpy(out, gx.bbox, sizeof(gx.bbox));
+    if (gx_opt_vshbbox == 0) {
+        return;
+    }
+    s_bbox_reads++;
+    if (s_bref_on && memcmp(s_bref, gx.bbox, sizeof(s_bref)) != 0) {
+        if (s_bbox_mism++ < 8) {
+            PLOG_W("gxvshbbox verify: box %u,%u %u,%u, the CPU path's %u,%u %u,%u", gx.bbox[0], gx.bbox[1], gx.bbox[2],
+                   gx.bbox[3], s_bref[0], s_bref[1], s_bref[2], s_bref[3]);
+        }
+    }
+    gx_bbox_active = 0;
+}
+
+void gx_bbox_counts(u32* reads, u32* mism) {
+    *reads = s_bbox_reads;
+    *mism = s_bbox_mism;
+}
+
+static void bbox_add(const Out* o) {
+    if (!o->front) {
+        return;
+    }
+    if (gx_bbox_active) {
+        box_add(gx.bbox, o);
+    }
+    if (s_bref_on) {
+        box_add(s_bref, o);
+    }
+}
+
+/* The box of a draw the shader makes: positions only (gxvshbbox=1); with 2 also the old box through transform(). */
+static void bbox_shader_draw(const GxVertex* v, u32 n) {
+    if (!gx_bbox_active && !s_bref_on) {
+        return;
+    }
+    u64 t0 = GX_PERF_T();
+    Out o;
+    f32 p[3];
+    for (u32 i = 0; i < n; i++) {
+        xf_position(&v[i], &o, p);
+        if (gx_bbox_active && o.front) {
+            box_add(gx.bbox, &o);
+        }
+        if (s_bref_on) {
+            transform(&v[i], &o);
+            if (o.front) {
+                box_add(s_bref, &o);
+            }
+        }
+    }
+    if (gx_perf_on > 0) {
+        gx_perf.bbox_draws++;
+        gx_perf.bbox_verts += n;
+        gx_perf.t_bbox += plat_ticks() - t0;
+    }
 }
 
 /* GX front faces are clockwise on screen (window y down). */
@@ -842,9 +928,70 @@ static PlatGpuVshConst s_vsh_const;
  * back end compares ids, not 160 bytes, per draw; and equal rebuilds after a
  * setter call keep the draws merging). */
 static u32 s_vsh_const_id;
+/* switch gxvshlit (default 1): colour channel 0 lit by GX lights in the shader (map materials: diffuse clamp or sign,
+ * spot or no attenuation, ambient from the register, alpha unlit); 0 keeps lit draws on the CPU */
+int gx_opt_vshlit = 1;
+/* switch gxvshtg (default 1): texgen from the position or the normal, and MTX3x4, in the shader */
+int gx_opt_vshtg = 1;
+static int s_vsh_lit;
+static PlatGpuVshLight s_vsh_light;
+static u32 s_vsh_light_id;
+
+/* Whether the lit colour channel `ch` can be lit in the shader; fills the light block. */
+static int vsh_light_block(int ch, PlatGpuVshLight* L) {
+    const typeof(gx.chan[0])* c = &gx.chan[ch];
+    if (!gx_opt_vshlit || ch != 0 || !c->enable || gx.chan[ch + 2].enable || c->amb_src != GX_SRC_REG ||
+        (c->diff_fn != GX_DF_NONE && c->diff_fn != GX_DF_CLAMP && c->diff_fn != GX_DF_SIGN) ||
+        (c->attn_fn != GX_AF_NONE && c->attn_fn != GX_AF_SPOT)) {
+        return 0;
+    }
+    memset(L, 0, sizeof(*L));
+    const f32(*m)[4] = gx.pos_mtx[gx.cur_pnmtx % GX_POS_MTX_COUNT];
+    memcpy(L->eye, m, sizeof(L->eye));
+    int has_nrm = gx.vtx_desc[GX_VA_NRM] != GX_NONE || gx.vtx_desc[GX_VA_NBT] != GX_NONE;
+    for (int r = 0; r < 3; r++) {
+        for (int k = 0; k < 3; k++) {
+            /* transform() leaves a vertex without a normal at (0, 0, 1), untransformed */
+            L->nrm[r][k] = has_nrm ? gx.nrm_mtx[gx.cur_pnmtx % GX_POS_MTX_COUNT][r][k] : (r == k ? 1.0f : 0.0f);
+        }
+    }
+    L->amb[0] = gx.amb[ch].r;
+    L->amb[1] = gx.amb[ch].g;
+    L->amb[2] = gx.amb[ch].b;
+    L->dmode[0] = c->diff_fn == GX_DF_CLAMP ? 0.0f : -1e15f;
+    L->dmode[1] = c->diff_fn == GX_DF_NONE ? 0.0f : 1.0f;
+    L->dmode[2] = c->diff_fn == GX_DF_NONE ? 1.0f : 0.0f;
+    L->amode[0] = c->attn_fn == GX_AF_SPOT ? 1.0f : 0.0f;
+    L->amode[1] = c->attn_fn == GX_AF_SPOT ? 0.0f : 1.0f;
+    u32 n = 0;
+    for (int l = 0; l < GX_MAX_LIGHT; l++) {
+        if (!(c->light_mask & (1u << l))) {
+            continue;
+        }
+        const GxLightObj* lt = &gx.light[l];
+        for (int k = 0; k < 3; k++) {
+            L->light[n].pos[k] = lt->pos[k];
+            L->light[n].dir[k] = lt->dir[k];
+            L->light[n].a[k] = lt->a[k];
+            L->light[n].k[k] = lt->k[k];
+        }
+        L->light[n].color[0] = lt->color.r;
+        L->light[n].color[1] = lt->color.g;
+        L->light[n].color[2] = lt->color.b;
+        n++;
+    }
+    if (n == 0) {
+        /* the shader's loop runs once: a light that adds nothing (colour 0, far away, k0 = 1) */
+        L->light[0].pos[2] = 1e6f;
+        L->light[0].k[0] = 1.0f;
+    }
+    L->count = n;
+    return 1;
+}
 
 static void vsh_prepare(void) {
     u32 why = 0;
+    s_vsh_lit = 0;
     PlatGpuVshConst cb;
     PlatGpuVshConst* c = &cb;
     memset(c, 0, sizeof(*c));
@@ -855,7 +1002,18 @@ static void vsh_prepare(void) {
     if (gx.num_chans != 0) {
         int ch = s_color_chan;
         if (!s_unlit[ch]) {
-            why |= GXV_R_LIT;
+            PlatGpuVshLight L;
+            if (vsh_light_block(ch, &L)) {
+                s_vsh_lit = 1;
+                if (s_vsh_light_id == 0 || !gx_mem_equal(&L, &s_vsh_light, sizeof(L))) {
+                    s_vsh_light = L;
+                    if (++s_vsh_light_id == 0) {
+                        s_vsh_light_id = 1;
+                    }
+                }
+            } else {
+                why |= GXV_R_LIT;
+            }
         }
         if (ch == 1 && (s_mat_vtx_rgb[1] || s_mat_vtx_a[1])) {
             why |= GXV_R_CLR1; /* the stream carries colour 0 */
@@ -868,27 +1026,40 @@ static void vsh_prepare(void) {
         c->clrmix[3] = s_mat_vtx_a[ch] ? 1.0f : 0.0f;
         c->matclr[3] = s_mat_vtx_a[ch] ? 0.0f : (f32)m.a;
     }
-    /* texture units: texgen() with an MTX2x4 matrix on (s, t, 1, 1) */
+    /* texture units: texgen() with an MTX2x4 or (gxvshtg) MTX3x4 matrix on (s, t, 1, 1), or on the position or the
+     * normal (x, y, z, 1); MTX3x4 divides by q per vertex, as texgen() does */
+    int has_nrm = gx.vtx_desc[GX_VA_NRM] != GX_NONE || gx.vtx_desc[GX_VA_NBT] != GX_NONE;
     for (int u = 0; u < 3; u++) {
         s_vsh_unit_attr[u] = 0xFF;
+        c->tex[3 * u + 2][3] = 1.0f; /* q row (0, 0, 0, 1): no divide */
         if (u >= s_units) {
             continue; /* rows 0: the coordinate is (0, 0), as on the CPU */
         }
         const typeof(gx.texgen[0])* tg = &gx.texgen[s_unit_coord[u]];
-        if (tg->func != GX_TG_MTX2x4) {
+        int proj = tg->func == GX_TG_MTX3x4;
+        if (tg->func != GX_TG_MTX2x4 && !(proj && gx_opt_vshtg)) {
             why |= GXV_R_TGFUNC;
         }
-        if (tg->src < GX_TG_TEX0 || tg->src > GX_TG_TEX7) {
-            why |= GXV_R_TGSRC;
-        } else {
+        if (tg->src >= GX_TG_TEX0 && tg->src <= GX_TG_TEX7) {
             s_vsh_unit_attr[u] = (u8)(tg->src - GX_TG_TEX0);
+            c->tgsrc[u][2] = 1.0f;
+        } else if (gx_opt_vshtg && tg->src == GX_TG_POS) {
+            c->tgsrc[u][0] = 1.0f;
+        } else if (gx_opt_vshtg && tg->src == GX_TG_NRM && has_nrm) {
+            c->tgsrc[u][1] = 1.0f;
+        } else {
+            why |= GXV_R_TGSRC;
         }
         if (tg->pt_mtx != GX_PTIDENTITY && tg->pt_mtx >= GX_PTTEXMTX0) {
             why |= GXV_R_TGPOST;
         }
         const f32* m = matrix_rows(tg->mtx);
-        memcpy(c->tex[2 * u], m, 16);
-        memcpy(c->tex[2 * u + 1], m + 4, 16);
+        memcpy(c->tex[3 * u], m, 16);
+        memcpy(c->tex[3 * u + 1], m + 4, 16);
+        if (proj) {
+            memcpy(c->tex[3 * u + 2], m + 8, 16);
+            c->tgsrc[u][3] = 1.0f;
+        }
     }
     /* clip rows: projection x position matrix, in 32-bit float on the CPU */
     const f32(*m)[4] = gx.pos_mtx[gx.cur_pnmtx % GX_POS_MTX_COUNT];
@@ -906,7 +1077,7 @@ static void vsh_prepare(void) {
             c->clip[3][j] = j == 3 ? 1.0f : 0.0f;
         }
     }
-    c->flags = p[0] == (f32)GX_PERSPECTIVE ? 0u : PLAT_VSH_ORTHO;
+    c->flags = (p[0] == (f32)GX_PERSPECTIVE ? 0u : PLAT_VSH_ORTHO) | (s_vsh_lit ? PLAT_VSH_LIT : 0u);
     s_vsh_reasons = why;
     if (s_vsh_const_id == 0 || !gx_mem_equal(c, &s_vsh_const, sizeof(*c))) {
         s_vsh_const = *c;
@@ -935,7 +1106,7 @@ int gx_vsh_imm_on = 1; /* switch gxvshimm (default 1): immediate-mode draws may 
 static int draw_vsh_imm(u8 prim, const GxVertex* v, u32 n, const void* ident, u32 ident_n, int imm) {
     vsh_state();
     u32 why = gx_vsh_imm_on ? s_vsh_reasons | gx_vsh_imm_reasons(prim, n) : GXV_R_IMM;
-    if (gx_bbox_active) {
+    if (gx_bbox_active && gx_opt_vshbbox == 0) {
         why |= GXV_R_BBOX;
     }
     if (why == 0 && !gx_vsh_imm_room(n)) {
@@ -944,6 +1115,7 @@ static int draw_vsh_imm(u8 prim, const GxVertex* v, u32 n, const void* ident, u3
     if (!gx_vsh_route(v[0].pnmtx, why, ident, ident_n, n, imm)) {
         return 0;
     }
+    bbox_shader_draw(v, n);
     if (gx.cull == GX_CULL_ALL) {
         return 1;
     }
@@ -954,6 +1126,9 @@ static int draw_vsh_imm(u8 prim, const GxVertex* v, u32 n, const void* ident, u3
         u32 slot = a < 8 ? im->attr_slot[a] : 0xFF;
         scales |= (slot < 3 ? PLAT_VSH_UNIT(slot, 0) : PLAT_VSH_UNIT(3, 0)) << (8 + 8 * u);
     }
+    if (s_vsh_lit) {
+        plat_gpu_vsh_light(&s_vsh_light, s_vsh_light_id);
+    }
     plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
     plat_gpu_vsh_draw(im->base, im->layout, scales, vsh_cull(), im->idx, im->nidx);
     gx_vsh_count_shader(n, im->nidx);
@@ -961,18 +1136,24 @@ static int draw_vsh_imm(u8 prim, const GxVertex* v, u32 n, const void* ident, u3
     return 1;
 }
 
-int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nbytes, u32 nverts) {
+int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nbytes, u32 nverts, const GxVertex* v,
+                const GxDlcDraw* d, u32 nd) {
     ensure_state();
     if (empty_target()) {
         return 1; /* the CPU path would draw nothing either */
     }
     vsh_state();
     u32 why = s == NULL ? (entry_reason ? entry_reason : GXV_R_POOL) : s_vsh_reasons;
-    if (gx_bbox_active) {
+    if (gx_bbox_active && gx_opt_vshbbox == 0) {
         why |= GXV_R_BBOX; /* GXReadBoundingBox needs the window positions on the CPU */
     }
     if (!gx_vsh_route(gx.cur_pnmtx, why, list, nbytes, nverts, 0)) {
         return 0;
+    }
+    if (gx_bbox_active || s_bref_on) {
+        for (u32 i = 0; i < nd; i++) { /* the vertices replay() would transform, in its order */
+            bbox_shader_draw(v + d[i].first, d[i].count);
+        }
     }
     if (gx.cull == GX_CULL_ALL) {
         return 1; /* every triangle culled */
@@ -982,6 +1163,9 @@ int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nb
         u8 a = s_vsh_unit_attr[u];
         u32 slot = a < 8 ? s->attr_slot[a] : 0xFF;
         scales |= (slot < 3 ? PLAT_VSH_UNIT(slot, s->slot_k[slot]) : PLAT_VSH_UNIT(3, 0)) << (8 + 8 * u);
+    }
+    if (s_vsh_lit) {
+        plat_gpu_vsh_light(&s_vsh_light, s_vsh_light_id);
     }
     plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
     plat_gpu_vsh_draw(gx_vsh_stream_base(s), s->layout, scales, vsh_cull(), s->idx, s->nidx);

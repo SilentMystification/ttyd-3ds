@@ -281,6 +281,8 @@ extern GxState gx_game;
 static inline GxState* gx_g(void) { return gx_rec_on() ? &gx_game : &gx; }
 void gx_rec_init(void);
 void gx_rec_call(u32 id, const u32* w, u32 n);
+extern int gx_dl_has_ops;
+void gx_rec_state_list(const void* list); /* a list the game built holds state calls */
 /* Fences: everything recorded so far is translated when they return. */
 enum { GXF_SYNC, GXF_DRAWDONE, GXF_READBACK, GXF_RELEASE, GXF_FULL, GXF_VERIFY, GXF_COUNT };
 void gx_rec_fence(int why);
@@ -357,6 +359,12 @@ u32 gx_tex_copy_target(const void* addr, u16 w, u16 h, u8 fmt);
 void gx_tex_init(void);
 void gx_state_init(u16 efb_w, u16 efb_h);
 extern int gx_bbox_active;
+extern int gx_opt_vshbbox; /* switch gxvshbbox */
+extern int gx_opt_vshlit;  /* switch gxvshlit */
+extern int gx_opt_vshtg;   /* switch gxvshtg */
+void gx_bbox_clear(void);
+void gx_bbox_read(u16* out);
+void gx_bbox_counts(u32* reads, u32* mism);
 /* Decodes a GameCube-format texture to RGBA8 (row-major). */
 void gx_tex_decode_rgba8(const u8* src, u32 w, u32 h, u32 fmt, const u16* tlut, u32 tlut_fmt, u8* out);
 
@@ -397,11 +405,13 @@ typedef struct {
     u32 v_tg_2x4, v_tg_3x4, v_tg_other, v_tg_pos, v_tg_nrm, v_tg_tex, v_tg_color, v_tg_post, v_tg_normalize;
     u32 max_pnmtx_in_draw;
     u32 builds_same; /* version changes with the state build_state reads unchanged (no rebuild) */
+    u32 bbox_draws, bbox_verts; /* shader-path draws while the bounding box is armed (positions on the CPU) */
     /* u64 times in system ticks */
     u64 t_frame, t_dl, t_dl_decode, t_imm, t_imm_decode, t_state, t_xform, t_emit, t_cache;
     /* game thread: waits in GXDrawDone and at the frame's submit, and the gap from the end of GXCopyDisp to the
      * next frame's first GXInvalidateVtxCache (DEMOBeforeRender), which is the draw-sync check and the retrace wait */
     u64 t_sync, t_present, t_idle;
+    u64 t_bbox; /* the CPU bounding box of shader-path draws */
 } GxPerf;
 extern GxPerf gx_perf;
 extern int gx_perf_on; /* -1 until the first frame reads the switch */
@@ -536,7 +546,8 @@ void gx_vsh_count_shader(u32 nverts, u32 nidx);
 void gx_vsh_frame(void); /* frame boundary: hysteresis, decal links, counters */
 void gx_vsh_log(u32 frames);
 /* gx_draw.c: draws a cached entry through the shader when its group takes that path; 0: draw it on the CPU. */
-int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nbytes, u32 nverts);
+int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nbytes, u32 nverts, const GxVertex* v,
+                const GxDlcDraw* d, u32 nd);
 int gx_pipe_in_list(void);
 void gx_pipe_cur_list(const void** list, u32* nbytes); /* the display list being run */
 

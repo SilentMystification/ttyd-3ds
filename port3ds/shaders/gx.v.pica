@@ -24,15 +24,27 @@
 
 .fvec rot0, rot1        ; CPU path: clip -> rotated target clip (x, y rows)
 .fvec clip[4]           ; shader path: rotated clip rows (x, y, z, w)
-.fvec texrow[6]         ; shader path: s and t rows of units 0, 1, 2
+.fvec texrow[9]         ; shader path: s, t and q rows of units 0, 1, 2
+.fvec tgsrc[3]          ; shader path: per unit, weights of the source: x position, y normal, z texture slot
 .fvec texsel[3]         ; shader path: per unit, weights of slots v2, v3, v4 (scale or 0)
 .fvec vscale            ; shader path: position scale (s, s, s, 1)
 .fvec clrmix            ; shader path: per component 1 = vertex colour, 0 = constant
 .fvec matclr            ; shader path: constant colour (0..255), 0 where clrmix is 1
 
+; GX lighting of colour channel 0 (bool lit, switch gxvshlit): the CPU path's light_channel per vertex
+.fvec eyerow[3]         ; eye-space position rows (the position matrix)
+.fvec nrmrow[3]         ; eye-space normal rows (the normal matrix; identity when the vertex has no normal)
+.fvec amb               ; ambient colour 0..255
+.fvec dmode             ; diffuse: x floor, y weight of n.l, z 1 - y
+.fvec amode             ; attenuation: x weight of the spot term, y 1 - x
+.fvec lpos[8], ldir[8], lcol[8], lka[8], lkk[8] ; per light: eye position, direction, colour, a0-a2, k0-k2
+
 .bool vsh
+.bool lit
+.ivec lcount            ; (lights - 1, 0, 1)
 
 .constf consts(0.0039215686, 1.0, 0.0, 0.0)
+.constf c255(255.0, 255.0, 255.0, 255.0)
 .alias inv255 consts.xxxx
 
 .out outpos position
@@ -46,6 +58,7 @@
 .alias intc0 v2
 .alias intc1 v3
 .alias intc2 v4
+.alias innrm v5
 
 .proc main
     ifu vsh
@@ -60,32 +73,131 @@
         mul r5, clrmix, inclr
         add r5, matclr, r5
 
-        ; unit 0: (slot x weight, 1, 1) . (m0, m1, m2, m3)
+        ; GX lighting, colour only (the alpha stays the material's, as with the channel's alpha unlit)
+        ifu lit
+            dp4 r7.x, eyerow[0], r2
+            dp4 r7.y, eyerow[1], r2
+            dp4 r7.z, eyerow[2], r2
+            mov r7.w, consts.z
+            mov r8, innrm
+            mov r8.w, consts.z
+            dp4 r9.x, nrmrow[0], r8
+            dp4 r9.y, nrmrow[1], r8
+            dp4 r9.z, nrmrow[2], r8
+            mov r9.w, consts.z
+            dp3 r10, r9, r9
+            rsq r10, r10
+            mul r9, r9, r10
+            mov r11, amb
+            for lcount
+                add r12, lpos[aL], -r7
+                dp3 r13, r12, r12
+                rsq r14, r13
+                mul r12, r12, r14
+                mul r15, r13, r14
+                ; diffuse: n . l, floored (clamp or sign), or 1
+                dp3 r10, r9, r12
+                max r10, dmode.xxxx, r10
+                mul r10, dmode.yyyy, r10
+                add r10, dmode.zzzz, r10
+                ; spot attenuation: max(a0 + a1 c + a2 c^2, 0) / (k0 + k1 d + k2 d^2), c = max(l . dir, 0)
+                dp3 r14, ldir[aL], r12
+                max r14, consts.zzzz, r14
+                mul r13, lka[aL].zzzz, r14
+                add r13, lka[aL].yyyy, r13
+                mul r13, r13, r14
+                add r13, lka[aL].xxxx, r13
+                max r13, consts.zzzz, r13
+                mul r12, lkk[aL].zzzz, r15
+                add r12, lkk[aL].yyyy, r12
+                mul r12, r12, r15
+                add r12, lkk[aL].xxxx, r12
+                rcp r12, r12
+                mul r13, r13, r12
+                mul r13, amode.xxxx, r13
+                add r13, amode.yyyy, r13
+                mul r13, r13, r10
+                mul r12, lcol[aL], r13
+                add r11, r11, r12
+            .end
+            max r11, consts.zzzz, r11
+            min r11, c255, r11
+            mul r12, r5, r11
+            mul r12, inv255, r12
+            flr r12, r12
+            mov r5.xyz, r12
+        .end
+
+        mov r8, innrm
+        mov r8.w, consts.z
+        ; unit 0: source (slot x weight, wtex, 1) + wpos x position + wnrm x normal, then (s, t, q) rows;
+        ; s and t times 1 + w (1/q - 1): w = 1 divides by q (MTX3x4; q = 0 is left undivided, as the CPU path
+        ; does), w = 0 multiplies by exactly 1
         mul r4, texsel[0].xxxx, intc0
         mad r4, intc1, texsel[0].yyyy, r4
         mad r4, intc2, texsel[0].zzzz, r4
-        mov r4.zw, consts.yy
+        mov r4.z, tgsrc[0].zzzz
+        mov r4.w, consts.y
+        mad r4.xyz, r2, tgsrc[0].xxxx, r4
+        mad r4.xyz, r8, tgsrc[0].yyyy, r4
         mov r1, consts.zzzy
         dp4 r1.x, texrow[0], r4
         dp4 r1.y, texrow[1], r4
+        dp4 r15.x, texrow[2], r4
+        max r14.x, r15.x, -r15.x
+        sge r14.x, consts.z, r14.x
+        add r15.x, r15.x, r14.x
+        rcp r15.x, r15.x
+        add r15.x, -consts.y, r15.x
+        mul r15.x, tgsrc[0].wwww, r15.x
+        add r15.x, consts.y, r15.x
+        mul r1.xy, r15.xx, r1.xy
 
-        ; unit 1
+        ; unit 1: source (slot x weight, wtex, 1) + wpos x position + wnrm x normal, then (s, t, q) rows;
+        ; s and t times 1 + w (1/q - 1): w = 1 divides by q (MTX3x4; q = 0 is left undivided, as the CPU path
+        ; does), w = 0 multiplies by exactly 1
         mul r4, texsel[1].xxxx, intc0
         mad r4, intc1, texsel[1].yyyy, r4
         mad r4, intc2, texsel[1].zzzz, r4
-        mov r4.zw, consts.yy
+        mov r4.z, tgsrc[1].zzzz
+        mov r4.w, consts.y
+        mad r4.xyz, r2, tgsrc[1].xxxx, r4
+        mad r4.xyz, r8, tgsrc[1].yyyy, r4
         mov r3, consts.zzzy
-        dp4 r3.x, texrow[2], r4
-        dp4 r3.y, texrow[3], r4
+        dp4 r3.x, texrow[3], r4
+        dp4 r3.y, texrow[4], r4
+        dp4 r15.x, texrow[5], r4
+        max r14.x, r15.x, -r15.x
+        sge r14.x, consts.z, r14.x
+        add r15.x, r15.x, r14.x
+        rcp r15.x, r15.x
+        add r15.x, -consts.y, r15.x
+        mul r15.x, tgsrc[1].wwww, r15.x
+        add r15.x, consts.y, r15.x
+        mul r3.xy, r15.xx, r3.xy
 
-        ; unit 2
+        ; unit 2: source (slot x weight, wtex, 1) + wpos x position + wnrm x normal, then (s, t, q) rows;
+        ; s and t times 1 + w (1/q - 1): w = 1 divides by q (MTX3x4; q = 0 is left undivided, as the CPU path
+        ; does), w = 0 multiplies by exactly 1
         mul r4, texsel[2].xxxx, intc0
         mad r4, intc1, texsel[2].yyyy, r4
         mad r4, intc2, texsel[2].zzzz, r4
-        mov r4.zw, consts.yy
+        mov r4.z, tgsrc[2].zzzz
+        mov r4.w, consts.y
+        mad r4.xyz, r2, tgsrc[2].xxxx, r4
+        mad r4.xyz, r8, tgsrc[2].yyyy, r4
         mov r6, consts.zzzy
-        dp4 r6.x, texrow[4], r4
-        dp4 r6.y, texrow[5], r4
+        dp4 r6.x, texrow[6], r4
+        dp4 r6.y, texrow[7], r4
+        dp4 r15.x, texrow[8], r4
+        max r14.x, r15.x, -r15.x
+        sge r14.x, consts.z, r14.x
+        add r15.x, r15.x, r14.x
+        rcp r15.x, r15.x
+        add r15.x, -consts.y, r15.x
+        mul r15.x, tgsrc[2].wwww, r15.x
+        add r15.x, consts.y, r15.x
+        mul r6.xy, r15.xx, r6.xy
     .else
         mov r0, inpos
         dp4 r0.x, rot0, inpos

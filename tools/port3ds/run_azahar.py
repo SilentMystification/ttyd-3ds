@@ -120,10 +120,30 @@ _usage["t0"] = time.monotonic()
 atexit.register(_log_usage)
 
 
-def acquire_slot():
+DEVUPDATE_BASE = 5050  # the console's devupdate port; a slot's run gets DEVUPDATE_BASE + 10 + slot index
+_slot_index = None
+_slot_path = None
+_slot_info = {}
+
+
+def devupdate_port(index):
+    return DEVUPDATE_BASE + 10 + index
+
+
+def set_slot_info(**fields):
+    """Updates this run's slot file (boot time, emulator process group, limit, log): what the reaper reads."""
+    _slot_info.update(fields)
+    if _slot_fd is not None:
+        emu_usage.write_slot_info(_slot_fd, _slot_info)
+
+
+def acquire_slot(kind="run"):
     """Machine-wide limit on Azahar instances: one flock'd slot file per instance, held until this
-    process ends (the OS drops the lock if it dies). AZAHAR_MAX (default 3) is the number of slots."""
-    global _slot_fd
+    process ends (the OS drops the lock if it dies). AZAHAR_MAX (default 3) is the number of slots.
+    A busy slot whose run is past its limit (or whose owner is gone, or whose game log is quiet) is reaped:
+    its emulator is stopped and the slot is taken (see emu_usage.reap_slot). kind "session" (devupdate's
+    azahar-session) is never reaped."""
+    global _slot_fd, _slot_index, _slot_path, _slot_info
     n = int(os.environ.get("AZAHAR_MAX", "3"))
     run = os.environ.get("XDG_RUNTIME_DIR")
     d = Path(run) / "ttyd-azahar" if run and os.access(run, os.W_OK) else Path(f"/tmp/ttyd-azahar-{os.getuid()}")
@@ -132,17 +152,21 @@ def acquire_slot():
     while True:
         used = 0
         for i in range(n):
-            fd = os.open(d / f"azahar-slot-{i}", os.O_RDWR | os.O_CREAT, 0o666)
+            path = d / f"azahar-slot-{i}"
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                os.ftruncate(fd, 0)
-                os.write(fd, f"{os.getpid()}\n".encode())
-                _slot_fd = fd
+                _slot_fd, _slot_index, _slot_path = fd, i, path
+                _slot_info = {"kind": kind, "pid": os.getpid(), "start": time.time(), "boot": None, "pgid": None,
+                              "hint": "azahar", "limit": None, "log": None, "worktree": str(REPO), "switches": ""}
+                emu_usage.write_slot_info(fd, _slot_info)
                 _usage["slot"] = time.monotonic()
                 return
             except OSError:
                 os.close(fd)
                 used += 1
+                if emu_usage.reap_slot(path, "azahar", i, emu_usage.record, print):
+                    time.sleep(1)  # the killed emulator's owner lets go of the slot as it exits
         if not told:
             print(f"run_azahar: waiting for a free Azahar slot ({used} in use)", flush=True)
             told = True
@@ -374,6 +398,10 @@ def main():
     sw = args.switches.split()
     if args.frames is not None:
         sw = [w for w in sw if not w.startswith("framemark=")] + [f"framemark={args.frames}"]
+    # Each slot has its own devupdate port, so one agent's push cannot reach another agent's instance.
+    if "nodevupdate" not in sw and not any(w.startswith("devupdateport=") for w in sw):
+        sw.append(f"devupdateport={devupdate_port(_slot_index)}")
+        print(f"run_azahar: devupdate port {devupdate_port(_slot_index)} (slot {_slot_index})", flush=True)
     if "nofastboot" in sw:
         sw.remove("nofastboot")
     elif "fastboot" not in sw:
@@ -400,6 +428,9 @@ def main():
         proc = subprocess.Popen(flatpak_cmd([str(boot)]), env=run_env(), stdout=so, stderr=subprocess.STDOUT,
                                 start_new_session=True, preexec_fn=emulator_preexec)
         atexit.register(lambda p=proc: stop_azahar(p))
+        # The slot file says what this run is, so a waiting run can reap it if it overruns or hangs.
+        set_slot_info(pgid=proc.pid, boot=time.time(), limit=args.timeout, log=str(game_log),
+                      worktree=str(REPO), switches=args.switches)
 
     until = re.compile(args.until) if args.until else None
     # Periodic lines the game writes even when it is stuck: they do not count as log growth for --stall.

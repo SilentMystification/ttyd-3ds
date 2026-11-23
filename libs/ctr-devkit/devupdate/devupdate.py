@@ -767,6 +767,23 @@ def session_pids(sid):
     return pids
 
 
+SLOT_INDEX = None  # the Azahar slot the last acquire_slot took (TTYD's run_azahar.py scheme), else None
+
+
+def devupdate_port(index):
+    """A slot's devupdate port in the TTYD repository: 5050 + 10 + slot index (run_azahar.devupdate_port)."""
+    return 5050 + 10 + index
+
+
+def set_debug_port(sdmc, port):
+    """Points the game's devupdateport switch (sdmc:/3ds/ttyd/debug3ds.txt, written by the caller) at port."""
+    path = sdmc / "3ds/ttyd/debug3ds.txt"
+    words = path.read_text().split() if path.is_file() else ["devupdate"]
+    words = [w for w in words if not w.startswith("devupdateport=")] + [f"devupdateport={port}"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(" ".join(words) + "\n")
+
+
 def acquire_slot(wait_s):
     """One of the machine-wide Azahar slots (flock'd files, AZAHAR_MAX, default 3). In the TTYD
     repository this is tools/port3ds/run_azahar.py's acquire_slot; elsewhere the same scheme.
@@ -777,7 +794,9 @@ def acquire_slot(wait_s):
         try:
             import run_azahar
             if hasattr(run_azahar, "acquire_slot"):
-                run_azahar.acquire_slot()
+                run_azahar.acquire_slot(kind="session")  # a session is never reaped
+                global SLOT_INDEX
+                SLOT_INDEX = run_azahar._slot_index
                 return run_azahar._slot_fd
         finally:
             sys.path.pop(0)
@@ -918,6 +937,11 @@ def cmd_azahar_session(args):
     if slot is None:
         print(f"devupdate: no free Azahar slot after {args.slot_wait} s")
         return 2
+    # Each session listens on its own port (its slot's), unless --port says otherwise: one agent's push
+    # cannot reach another agent's instance.
+    if not args.port_given and SLOT_INDEX is not None:
+        args.port = devupdate_port(SLOT_INDEX)
+    set_debug_port(sdmc, args.port)
     if boot.suffix == ".cia":
         r = subprocess.run(az_cmd(profile, ["-i", str(boot)]), capture_output=True, text=True, timeout=180)
         if "Installed CIA successfully" not in r.stdout + r.stderr:
@@ -947,7 +971,7 @@ def cmd_azahar_session(args):
         (sdmc / EMU_ARGS).unlink(missing_ok=True)
     # The slot's fd goes to Azahar: the slot stays taken exactly as long as this instance runs.
     proc = az_spawn(profile, target, display, slot)
-    state = {"sid": proc.pid, "xvfb_sid": xvfb_sid, "display": display, "boot": str(target)}
+    state = {"sid": proc.pid, "xvfb_sid": xvfb_sid, "display": display, "boot": str(target), "port": args.port}
     if args.supervise:
         sup = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "azahar-session", "supervise",
                                 "--profile", str(profile), "--slot-fd", str(slot)],
@@ -956,7 +980,7 @@ def cmd_azahar_session(args):
         state["supervisor"] = sup.pid
     state_file.write_text(json.dumps(state))
     os.close(slot)
-    print(f"devupdate: azahar-session started (sid {proc.pid}{f', Xvfb :{display}' if display else ''}"
+    print(f"devupdate: azahar-session started on port {args.port} (sid {proc.pid}{f', Xvfb :{display}' if display else ''}"
           f"{', supervised' if args.supervise else ''}), booted {target.name}")
     if args.wait:
         args.ip = args.ip or "127.0.0.1"
@@ -1051,7 +1075,8 @@ def cmd_selftest(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ip", default=os.environ.get("N3DS_IP"), help="console address (default $N3DS_IP)")
-    ap.add_argument("--port", type=int, default=5050)
+    ap.add_argument("--port", type=int, default=None,
+                    help="TCP port (default $DEVUPDATE_PORT or 5050; azahar-session start picks its slot's port)")
     ap.add_argument("--token", default="", help="shared secret, if the app set one")
     ap.add_argument("--timeout", type=float, default=30.0, help="seconds without an answer before giving up")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1111,6 +1136,9 @@ def main():
     p.add_argument("--window", action="store_true", help="start: on this display instead of a headless Xvfb")
     p.add_argument("--slot-wait", type=float, default=900, help="start: wait this long for one of the 3 Azahar slots")
     args = ap.parse_args()
+    args.port_given = args.port is not None
+    if args.port is None:
+        args.port = int(os.environ.get("DEVUPDATE_PORT", "5050"))
     if args.cmd == "azahar-session":
         return cmd_azahar_session(args)
     if args.cmd == "selftest":

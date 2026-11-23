@@ -214,3 +214,12 @@ Rosalina profiles plus `gxthreadstats`, `gxstats`, `stereostats` and the counter
 ## Done when
 
 `fps` HUD at 60 in every scene of the map sweep, the story checkpoints and the battle gallery on the console, with stereo off; and a measured cost for stereo on.
+
+## Future levers kept open (owner, 2026-11-23)
+
+**Bounding box (`GXReadBoundingBox`).** The exact positions-only path is the default. Alternatives stay available behind `gxbbox=` and are measured with `gxbbox_verify=1`:
+- `cache`: exact box reused while the display list, matrix, projection, viewport and arrays are unchanged. Hits only with a still camera and static objects.
+- `hull`: exact box from model-space convex-hull vertices (closed meshes, in front of the near plane); otherwise exact.
+- `corners`: conservative box from the model AABB. Not for play: a larger box can capture neighbouring objects into offscreen effects and raise smart-heap use.
+A fully-GPU box is not possible on the PICA: it has no bounding-box output or occlusion query, and the game reads the box directly after the draw, before the GPU runs it. QTM does not change this (it changes where data lives, not when it is ready).
+

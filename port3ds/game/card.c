@@ -22,6 +22,7 @@
 
 #include "plat/plat.h"
 #include "plat/thread.h"
+#include "test_mode.h"
 #include "port3ds/os_internal.h"
 #include "version.h"
 
@@ -424,6 +425,9 @@ static void card_thread(void* arg) {
             plat_mutex_lock(s_lock);
             s_job_tail++;
             plat_mutex_unlock(s_lock);
+            if (tst_rngtrace_wanted()) {
+                tst_log("[CARD] job %d done result %d at game frame %u", (int)j.kind, (int)r, (unsigned)tst_cur_frame());
+            }
             port_irq_enter();
             s_result[j.chan & 1] = r;
             if (j.cb != NULL) {
@@ -443,6 +447,9 @@ static s32 post(const Job* j) {
     if (s_job_head - s_job_tail >= JOBS) {
         plat_mutex_unlock(s_lock);
         return CARD_RESULT_BUSY;
+    }
+    if (tst_rngtrace_wanted()) {
+        tst_log("[CARD] job %d posted at game frame %u", (int)j->kind, (unsigned)tst_cur_frame());
     }
     s_jobs[s_job_head % JOBS] = *j;
     s_job_head++;

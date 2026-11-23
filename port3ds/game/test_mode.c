@@ -236,6 +236,7 @@ static void gwdump(u32 frame) {
 
 /* switch rngtrace=<from>,<to>: every rand() call in that game frame window, and each sequence change */
 static u32 s_cur_frame, s_rt_from, s_rt_to;
+static int s_rt_verbose; /* rngtrace=from,to,v: one line per call; else one summary line per frame */
 static int s_rt_state = -1; /* -1 unread, 0 off, 1 on */
 
 static int rngtrace_on(void) {
@@ -248,24 +249,44 @@ static int rngtrace_on(void) {
             while (*c >= '0' && *c <= '9') s_rt_from = s_rt_from * 10 + (u32)(*c++ - '0');
             if (*c == ',') c++;
             while (*c >= '0' && *c <= '9') s_rt_to = s_rt_to * 10 + (u32)(*c++ - '0');
+            if (*c == ',') {
+                s_rt_verbose = c[1] == 'v';
+            }
             s_rt_state = 1;
         }
     }
     return s_rt_state == 1 && s_cur_frame >= s_rt_from && s_cur_frame <= s_rt_to;
 }
 
+u32 tst_cur_frame(void) { return s_cur_frame; }
+
 int tst_rngtrace_wanted(void) { return rngtrace_on(); }
+
+static u32 s_rt_calls, s_rt_hash, s_rt_first;
 
 void tst_rngtrace(unsigned long caller, unsigned long caller2, unsigned long caller3, u32 val) {
     if (rngtrace_on()) {
-        tst_log("[RNG] f=%lu caller=%08lx caller2=%08lx caller3=%08lx val=%lu", (unsigned long)s_cur_frame, caller,
-                caller2, caller3, (unsigned long)val);
+        if (s_rt_calls == 0) {
+            s_rt_first = val;
+        }
+        s_rt_calls++;
+        s_rt_hash = s_rt_hash * 31u + val;
+        if (s_rt_verbose) {
+            tst_log("[RNG] f=%lu caller=%08lx caller2=%08lx caller3=%08lx val=%lu", (unsigned long)s_cur_frame, caller,
+                    caller2, caller3, (unsigned long)val);
+        }
     }
 }
 
 void tst_frame(u32 frame) {
     static int last_seq = -99;
     tst_init();
+    if (s_rt_state == 1 && frame > s_rt_from && frame - 1 <= s_rt_to) {
+        tst_log("[FRM] f=%lu rand calls=%lu first=%lu hash=%08lx", (unsigned long)(frame - 1),
+                (unsigned long)s_rt_calls, (unsigned long)s_rt_first, (unsigned long)s_rt_hash);
+    }
+    s_rt_calls = 0;
+    s_rt_hash = 0;
     s_cur_frame = frame;
     if (rngtrace_on() && gp != NULL && (int)seqGetSeq() != last_seq) {
         last_seq = (int)seqGetSeq();

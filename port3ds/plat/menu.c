@@ -1,16 +1,12 @@
 /* Bottom screen: HUD, the scrolling log and the menus.
  *
- * One 40x30 libctru console, laid out like the PM64 port's:
- *   rows 1-2    HUD: two status lines, refreshed twice a second, trylock only
- *               (the game thread never waits). The HUD option (off, FPS only,
- *               full) decides what they show.
- *   rows 3-30   the log (plat/log.c prints there)
- * When a menu opens (Options, or the developer Select menu) the screen changes
- * mode: the menu takes rows 3-14 and the log shrinks to rows 16-30, where it
- * keeps scrolling. On close the menu rows are blanked and the log gets rows
- * 3-30 back. Lines are rewritten padded, never cleared, so there is no blank frame.
- * Touching the top two rows (the HUD, which shows an [Options] label when it has room)
- * opens the Options menu.
+ * One 40x30 libctru console (layout at the LOG_FIRST define below): a HUD block on top,
+ * the scrolling log in the middle, a build row at the bottom. The HUD refreshes twice a
+ * second with trylock only (the game thread never waits); the HUD option (off, FPS only,
+ * full) decides what it shows. A menu (Options, or the developer Select menu) or the
+ * updater screen covers the screen; the log keeps collecting in a buffer and the close
+ * repaints everything from the buffers, changed lines only, so there is no blank frame.
+ * Touching the HUD rows (they show an [Options] label when there is room) opens Options.
  *
  * Two menus share the menu area:
  *  - the player Options menu (plat/options_menu.c), opened with SELECT or by
@@ -28,9 +24,18 @@
 #include <string.h>
 
 #include "options_internal.h"
+#include <malloc.h>
+
+#include <3ds.h>
+
+#include "plat/gpu.h"
 #include "plat/hud.h"
 #include "plat/input.h"
 #include "plat_internal.h"
+#include "port3ds_build.h"
+
+extern u32 __ctru_heap_size, __ctru_linear_heap_size;
+#define VRAM_TOTAL_KB 6144
 
 enum { TAB_GENERAL, TAB_DEBUG, TAB_COUNT };
 
@@ -43,54 +48,51 @@ static volatile int s_warp_pending;
 static const char* const* s_maps;
 static int s_map_count, s_map_index;
 static PlatHudStats s_stats;
-static uint32_t s_last_hud_ms, s_last_frames;
+static uint32_t s_last_hud_ms, s_last_frames, s_last_presented;
 static float s_fps;
 static PrintConsole s_console;
 
-#define LOG_TOP 2 /* log window top (0-based row): rows 3-30 */
-#define LOG_ROWS 28
+/* Screen layout (1-based rows of the 40x30 console):
+ *   1-5    HUD: frame rate and frame time, CPU and GPU times, RAM, VRAM, QTM
+ *   6-8    blank, a line of '-', blank
+ *   9-26   the log (18 rows, scrolling)
+ *   27-29  blank, a line of '-', blank
+ *   30     the build: version, build number and hash
+ * HUD off blanks rows 1-5 (the touch label stays on row 1); the separators and the build row stay. */
 #define COLS 40
+#define LOG_ROWS 28 /* rows of log text kept; the last LOG_VIS are on the screen */
+#define LOG_FIRST 9
+#define LOG_LAST 26
+#define LOG_VIS (LOG_LAST - LOG_FIRST + 1)
+#define HUD_ROWS 5
+#define FOOT_FIRST 27
 
 static int s_menu_mode;
-static int s_top = LOG_TOP + 1; /* first row (1-based) of the log window: 3, or below the updater's rows */
 static int s_upd, s_upd_draw, s_upd_prev_menu; /* the updater screen is up; it is drawing; a menu was open under it */
-#define UPD_TOP 8 /* updater rows 1-7, the log below */
 static void draw_menu(void);
 
 /* What the screen should show, kept as text so a menu can cover it and the close can
- * repaint it exactly: the HUD's two lines and the last LOG_ROWS rows of the log
+ * repaint it exactly: the HUD's lines and the last LOG_ROWS rows of the log
  * (wrapped at 40 columns; the last one is the row being written). */
-static char s_hud_line[2][COLS + 1];
+static char s_hud_line[HUD_ROWS][COLS + 1];
 static char s_log[LOG_ROWS][COLS + 1];
 static int s_log_col; /* characters in the last row */
+static char s_build_row[COLS + 1];
+static const char k_dashes[] = "----------------------------------------";
 /* What is on the screen for rows 1-30 as far as at() knows: a line is rewritten only when it differs. Row 0 of an entry is '\1' when unknown. */
 static char s_shadow[30][COLS + 1];
 
 static void log_window(void) {
-    int rows = 31 - s_top;
-    consoleSetWindow(&s_console, 1, s_top, COLS, rows); /* libctru window and cursor coordinates are 1-based */
+    consoleSetWindow(&s_console, 1, LOG_FIRST, COLS, LOG_VIS); /* libctru window and cursor coordinates are 1-based */
     s_console.cursorX = s_log_col + 1; /* the next text continues the last row, at the bottom */
-    s_console.cursorY = rows;
-}
-
-void plat_console_init(void) {
-    if (s_console_up) {
-        return;
-    }
-    consoleInit(GFX_BOTTOM, &s_console);
-    consoleSetWindow(&s_console, 1, LOG_TOP + 1, COLS, LOG_ROWS);
-    s_console.cursorX = 1;
-    s_console.cursorY = 1; /* boot lines fill the window from its top */
-    memset(s_shadow, 1, sizeof(s_shadow));
-    s_console_up = 1;
-    plat_log_console_ready();
+    s_console.cursorY = LOG_VIS;
 }
 
 /* Writes one padded line of the 30-row screen without disturbing the log's
  * window or cursor, unless it is already there. Caller holds the console lock. row is 1-based. */
 static void at(int row, const char* text) {
     if (s_upd && !s_upd_draw) {
-        return; /* the updater screen owns the rows above its log */
+        return; /* the updater screen owns the rows */
     }
     char buf[COLS + 1];
     snprintf(buf, sizeof(buf), "%-40.40s", text);
@@ -107,6 +109,45 @@ static void at(int row, const char* text) {
     consoleSetWindow(&s_console, wx, wy, ww, wh);
     s_console.cursorX = cx;
     s_console.cursorY = cy;
+}
+
+/* The whole normal screen from the buffers, changed lines only; the log window is set again.
+ * Caller holds the console lock. */
+static void repaint(int force) {
+    if (force) {
+        memset(s_shadow, 1, sizeof(s_shadow)); /* every row is written, whatever at() believes is there */
+    }
+    for (int r = 0; r < HUD_ROWS; r++) {
+        at(1 + r, s_hud_line[r]);
+    }
+    at(HUD_ROWS + 1, "");
+    at(HUD_ROWS + 2, k_dashes);
+    at(HUD_ROWS + 3, "");
+    for (int r = LOG_FIRST; r <= LOG_LAST; r++) {
+        at(r, s_log[LOG_ROWS - 1 - (LOG_LAST - r)]);
+    }
+    at(FOOT_FIRST, "");
+    at(FOOT_FIRST + 1, k_dashes);
+    at(FOOT_FIRST + 2, "");
+    at(FOOT_FIRST + 3, s_build_row);
+    log_window();
+    for (int r = LOG_FIRST - 1; r < LOG_LAST; r++) {
+        s_shadow[r][0] = 1; /* the log scrolls again */
+    }
+}
+
+void plat_console_init(void) {
+    if (s_console_up) {
+        return;
+    }
+    consoleInit(GFX_BOTTOM, &s_console);
+    snprintf(s_build_row, sizeof(s_build_row), "v%s %s", PORT3DS_VERSION, plat_build_string());
+    memset(s_shadow, 1, sizeof(s_shadow));
+    s_console_up = 1;
+    s_log_col = 0;
+    repaint(0);
+    s_console.cursorY = 1; /* boot lines fill the window from its top */
+    plat_log_console_ready();
 }
 
 /* The console writer (plat/log.c) hands every log text here, under the console lock.
@@ -131,42 +172,14 @@ void plat_console_log(const char* s, size_t n) {
     if (!s_menu_mode) {
         fwrite(s, 1, n, stdout);
         fflush(stdout);
-        for (int r = s_top - 1; r < 30; r++) {
+        for (int r = LOG_FIRST - 1; r < LOG_LAST; r++) {
             s_shadow[r][0] = 1; /* the console scrolled: the screen text is no longer known */
         }
     }
 }
 
-/* Repaints the HUD and the log from the buffers, the log starting at screen row top; changed lines only. */
-static void repaint(int top) {
-    for (int r = 0; r < 2; r++) {
-        at(1 + r, s_hud_line[r]);
-    }
-    for (int r = 3; r < top; r++) {
-        at(r, "");
-    }
-    s_top = top;
-    for (int r = top; r <= 30; r++) {
-        at(r, s_log[LOG_ROWS - 1 - (30 - r)]);
-    }
-    log_window();
-    for (int r = top - 1; r < 30; r++) {
-        s_shadow[r][0] = 1; /* the log scrolls again */
-    }
-}
-
-static void repaint_log_only(void) {
-    for (int r = s_top; r <= 30; r++) {
-        at(r, s_log[LOG_ROWS - 1 - (30 - r)]);
-    }
-    log_window();
-    for (int r = s_top - 1; r < 30; r++) {
-        s_shadow[r][0] = 1;
-    }
-}
-
 /* A menu opens (on): it covers the whole screen and the log goes to the buffer only.
- * Closed (off): the HUD and the log are repainted from the buffers, changed lines only.
+ * Closed (off): the screen is repainted from the buffers, changed lines only.
  * Caller holds the console lock. */
 void plat_console_menu_mode(int on) {
     if (!s_console_up || s_menu_mode == on) {
@@ -177,10 +190,9 @@ void plat_console_menu_mode(int on) {
         return;
     }
     s_menu_mode = on;
-    if (on) {
-        return;
+    if (!on) {
+        repaint(0);
     }
-    repaint(3);
 }
 
 /* A HUD line: remembered, and drawn unless a menu covers the screen. */
@@ -191,8 +203,8 @@ static void hud_line(int row, const char* text) {
     }
 }
 
-/* The updater screen (devupdate): rows 1-7 are its title, status line and progress bar, the log keeps
- * scrolling in the rows below. Off puts back exactly what was on the screen before. Called from the
+/* The updater screen (devupdate): rows 1-7 are its title, build line, status line and progress bar, the log
+ * keeps scrolling in the rows below. Off puts back exactly what was on the screen before. Called from the
  * updater thread while the game thread is paused. */
 void plat_updater_screen(int on) {
     if (!s_console_up) {
@@ -202,27 +214,25 @@ void plat_updater_screen(int on) {
     if (on && !s_upd) {
         s_upd_prev_menu = s_menu_mode;
         s_menu_mode = 0;
+        repaint(1); /* the log and footer back first (a menu may have covered them) */
         s_upd = 1;
         s_upd_draw = 1;
-        for (int r = 1; r < UPD_TOP; r++) {
+        for (int r = 1; r < LOG_FIRST; r++) {
             at(r, "");
         }
         at(1, "Updater");
-        at(UPD_TOP - 1, "----------------------------------------");
-        s_top = UPD_TOP;
-        repaint_log_only();
+        at(LOG_FIRST - 1, k_dashes);
         s_upd_draw = 0;
     } else if (!on && s_upd) {
         s_upd = 0;
         s_menu_mode = s_upd_prev_menu;
         if (!s_menu_mode) {
-            repaint(3);
+            repaint(1);
         } else {
             for (int r = 0; r < 30; r++) {
                 s_shadow[r][0] = 1; /* the menu draws itself again */
             }
         }
-        s_top = 3;
     }
     plat_console_unlock();
     if (!on && s_menu_mode) {
@@ -413,59 +423,98 @@ int plat_menu_input(uint32_t held, uint32_t down) {
     if (down & PLAT_KEY_TOUCH) {
         touchPosition tp;
         hidTouchRead(&tp);
-        touch_button = tp.py < 16; /* the HUD rows */
+        touch_button = tp.py < 8 * HUD_ROWS; /* the HUD rows */
     }
     if (down & PLAT_KEY_SELECT) {
-        if (s_open) {
-            s_open = 0;
-            clear_menu();
-        } else if (dev_menu_enabled() && (held & PLAT_KEY_ZL)) {
+        if (dev_menu_enabled() && (held & PLAT_KEY_ZL)) {
             s_open = 1;
             s_exit_armed = 0;
         } else {
             touch_button = 1;
         }
     }
-    if (touch_button && !s_open) {
+    if (s_open) {
+        return 1; /* opened this frame; the frame hook runs it (the game is paused, like the Options menu) */
+    }
+    if (touch_button) {
         plat_options_menu_open();
         return plat_options_menu_is_open();
     }
-    if (!s_open) {
-        return 0;
-    }
-    if (down & KEY_B) {
+    return 0;
+}
+
+/* One key press of the developer menu. */
+static void dev_menu_keys(uint32_t down) {
+    if (down & (PLAT_KEY_B | PLAT_KEY_SELECT)) {
         s_open = 0;
-        clear_menu();
-        return 1;
+        return;
     }
-    if (down & (KEY_L | KEY_R)) {
+    if (down & (PLAT_KEY_L | PLAT_KEY_R)) {
         s_tab = (s_tab + 1) % TAB_COUNT;
         s_row = 0;
         s_exit_armed = 0;
     }
-    if (down & KEY_DUP) {
+    if (down & PLAT_KEY_DUP) {
         s_row = (s_row + rows_in_tab() - 1) % rows_in_tab();
         s_exit_armed = 0;
     }
-    if (down & KEY_DDOWN) {
+    if (down & PLAT_KEY_DDOWN) {
         s_row = (s_row + 1) % rows_in_tab();
         s_exit_armed = 0;
     }
-    if (down & KEY_DLEFT) {
+    if (down & PLAT_KEY_DLEFT) {
         activate(-1);
     }
-    if (down & KEY_DRIGHT) {
+    if (down & PLAT_KEY_DRIGHT) {
         activate(1);
     }
-    if (down & KEY_A) {
+    if (down & PLAT_KEY_A) {
         activate(0);
     }
-    if (s_open) {
-        draw_menu();
-    } else {
-        clear_menu();
+}
+
+/* The developer menu runs as a loop in the frame hook like the Options menu: the game thread is paused
+ * (watchdog held, top screen greyed, sound muted) until it closes. */
+static void dev_menu_run(void) {
+    PLOG_I("menu: developer menu open (game paused)");
+    plat_set_phase("developer menu");
+    plat_pause_begin();
+    uint32_t prev = plat_input_modal_poll(); /* the opening keys may still be down */
+    int rep[4] = {0, 0, 0, 0};
+    static const uint32_t rep_keys[4] = {PLAT_KEY_DUP, PLAT_KEY_DDOWN, PLAT_KEY_DLEFT, PLAT_KEY_DRIGHT};
+    int dirty = 1;
+    while (s_open) {
+        if (dirty) {
+            draw_menu(); /* trylock: when the log writer holds the console it is tried again next loop */
+        }
+        svcSleepThread(16666667);
+        if (!plat_frame_poll()) {
+            plat_options_save();
+            plat_shutdown();
+        }
+        uint32_t held = plat_input_modal_poll();
+        uint32_t down = held & ~prev;
+        prev = held;
+        for (int i = 0; i < 4; i++) {
+            if (held & rep_keys[i]) {
+                rep[i]++;
+                if (rep[i] > 20 && rep[i] % 4 == 0) {
+                    down |= rep_keys[i];
+                }
+            } else {
+                rep[i] = 0;
+            }
+        }
+        if (down) {
+            dev_menu_keys(down);
+            dirty = 1;
+        }
+        plat_options_tick();
     }
-    return 1;
+    clear_menu();
+    plat_input_menu_closed();
+    plat_pause_end();
+    PLOG_I("menu: developer menu closed");
 }
 
 void plat_hud_frame(const PlatHudStats* stats) {
@@ -477,28 +526,56 @@ void plat_hud_frame(const PlatHudStats* stats) {
     }
     uint32_t dt = now - s_last_hud_ms;
     s_fps = dt ? (float)(stats->frames - s_last_frames) * 1000.0f / (float)dt : 0.0f;
+    uint32_t presented = plat_gpu_present_count();
+    float drawn_fps = dt ? (float)(presented - s_last_presented) * 1000.0f / (float)dt : 0.0f;
+    s_last_presented = presented;
     s_last_hud_ms = now;
     s_last_frames = stats->frames;
     if (!s_console_up || !plat_console_trylock()) {
         return;
     }
     int mode = opt_get_hud_mode();
-    char l1[48] = "", l2[48] = "";
-    if (mode == PLAT_OPT_HUD_FULL) {
-        snprintf(l1, sizeof(l1), "%s %-8s %4.1ffps %s", plat_build_string(), s_stats.map, (double)s_fps,
-                 plat_qtm_available() ? "QTM" : "QTM:off");
-        snprintf(l2, sizeof(l2), "cpu%5.1f gpu%5.1fms d%4lu v%5lu h%luK", (double)s_stats.frame_us / 1000.0,
-                 (double)s_stats.gpu_us / 1000.0, (unsigned long)s_stats.draws, (unsigned long)s_stats.vertices,
-                 (unsigned long)s_stats.heap_free_kb);
-    } else {
-        if (mode == PLAT_OPT_HUD_FPS) {
-            snprintf(l1, sizeof(l1), "%4.1f fps", (double)s_fps);
+    char l[HUD_ROWS][48] = {"", "", "", "", ""};
+    if (mode != PLAT_OPT_HUD_OFF) {
+        snprintf(l[0], sizeof(l[0]), "%4.1f fps  %4.1f ms", (double)s_fps, s_fps > 0.0f ? 1000.0 / (double)s_fps : 0.0);
+        if (mode == PLAT_OPT_HUD_FULL) {
+            size_t n = strlen(l[0]);
+            snprintf(l[0] + n, sizeof(l[0]) - n, " drawn %4.1f", (double)drawn_fps);
         }
-        /* the touch hint, where the HUD leaves room */
-        snprintf(mode == PLAT_OPT_HUD_FPS ? l2 : l1, sizeof(l1), "%31s[Options]", "");
     }
-    hud_line(1, l1);
-    hud_line(2, l2);
+    if (mode == PLAT_OPT_HUD_FULL) {
+        snprintf(l[1], sizeof(l[1]), "cpu %5.1fms gpu %5.1fms rnd %4.1fms", (double)s_stats.frame_us / 1000.0,
+                 (double)s_stats.gpu_us / 1000.0, (double)s_stats.render_us / 1000.0);
+        struct mallinfo mi = mallinfo();
+        unsigned long heap_t = __ctru_heap_size >> 20, heap_u = (unsigned long)mi.uordblks >> 20;
+        unsigned long lin_t = __ctru_linear_heap_size >> 20, lin_u = (__ctru_linear_heap_size - linearSpaceFree()) >> 20;
+        snprintf(l[2], sizeof(l[2]), "heap%3lu/%luM%3lu%% lin%3lu/%luM%3lu%%", heap_u, heap_t,
+                 heap_t ? heap_u * 100 / heap_t : 0, lin_u, lin_t, lin_t ? lin_u * 100 / lin_t : 0);
+        uint32_t qused, qtotal;
+        plat_qtm_usage(&qused, &qtotal);
+        if (qtotal) {
+            snprintf(l[4], sizeof(l[4]), "QTM %lu/%lu KiB %lu%%", (unsigned long)(qused >> 10), (unsigned long)(qtotal >> 10),
+                     (unsigned long)((uint64_t)qused * 100 / qtotal));
+        } else {
+            snprintf(l[4], sizeof(l[4]), "QTM: off");
+        }
+        unsigned long vfree = vramSpaceFree() / 1024, vused = VRAM_TOTAL_KB - vfree;
+        static unsigned long s_big;
+        static uint32_t s_big_ms;
+        if (now - s_big_ms >= 4000) {
+            s_big = plat_gpu_vram_largest_kb(); /* probes with vramAlloc: not every refresh */
+            s_big_ms = now;
+        }
+        snprintf(l[3], sizeof(l[3]), "vram%5lu/%luK%3lu%% big %luK", vused, (unsigned long)VRAM_TOTAL_KB,
+                 vused * 100 / VRAM_TOTAL_KB, s_big);
+    }
+    /* the touch hint on row 1, where the line leaves room */
+    if (strlen(l[0]) <= 30) {
+        snprintf(l[0], sizeof(l[0]), "%-31s[Options]", l[0]);
+    }
+    for (int r = 0; r < HUD_ROWS; r++) {
+        hud_line(1 + r, l[r]);
+    }
     plat_console_unlock();
 }
 
@@ -506,6 +583,10 @@ void plat_hud_frame(const PlatHudStats* stats) {
  * game thread (and game time) stands still while it is open. */
 void plat_menu_frame(void) {
     if (!plat_options_menu_is_open()) {
+        if (s_open) {
+            dev_menu_run();
+            s_last_hud_ms = 0;
+        }
         return;
     }
     plat_options_menu_run();

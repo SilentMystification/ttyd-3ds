@@ -41,6 +41,9 @@ int plat_switch_int(const char* key, int fallback);
 /* ---- Time (plat/boot.c) ---- */
 #define PLAT_TICKS_PER_SEC 268111856u /* ARM11 system tick */
 uint64_t plat_ticks(void);
+/* System ticks the game thread has spent in intentional pauses (menus, an update transfer) since boot:
+ * a frame's timing subtracts the change over the frame. */
+uint64_t plat_paused_ticks(void);
 uint32_t plat_uptime_ms(void);
 uint64_t plat_rtc_ms_since_1900(void); /* the console's clock */
 

@@ -66,6 +66,12 @@ static const char* const k_tier_name[PLAT_TIER_COUNT] = {"QTM", "LINEAR", "HEAP"
 
 int plat_qtm_available(void) { return s_qtm; }
 
+/* The QTM placements taken so far and the application part's size, in bytes (0, 0 when not mapped). */
+void plat_qtm_usage(uint32_t* used, uint32_t* total) {
+    *used = s_qtm ? s_qtm_next : 0;
+    *total = s_qtm ? QTM_BYTES : 0;
+}
+
 static int qtm_mapped(void) {
     MemInfo mi;
     PageInfo pi;

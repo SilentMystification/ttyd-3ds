@@ -847,6 +847,7 @@ void du_send_all(int fd, const char* s, size_t n) { send_all(fd, s, n); }
 int du_recv_some(int fd, void* buf, size_t n, int timeout_ms) { return recv_some(fd, buf, n, timeout_ms); }
 uint8_t* du_buf(void) { return s_buf; }
 uint32_t du_crc_update(uint32_t crc, const uint8_t* p, uint32_t n) { return crc_update(crc, p, n); }
+void devupdate_set_next_args(const char* args) { set_next(true, 0, args); }
 void du_set_next(bool self, uint64_t tid, const char* args) { set_next(self, tid, args); }
 void du_begin(bool recovery) { begin(recovery); }
 void du_hand_over(int fd, bool self, uint64_t tid, const char* args, bool recovery) {

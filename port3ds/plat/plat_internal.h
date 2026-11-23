@@ -40,6 +40,9 @@ uint32_t plat_wd_frames(void);       /* plat_wd_progress calls so far */
 /* devupdate.c (glue to libs/ctr-devkit/devupdate; switch devupdate) */
 typedef bool (*PlatRecoveryHook)(const char* report, void* user);
 int plat_devupdate_enabled(void);
+int plat_devupdate_wanted(void);     /* the option as set (or its default): what the next launch does */
+void plat_devupdate_address(char* out, size_t n); /* "ip:port" while the server runs, else "" */
+void plat_relaunch(void);            /* restart the title now with the current switches (does not return) */
 void plat_devupdate_init(void);      /* starts the server when the switch is on */
 void plat_devupdate_stop(void);
 void plat_devupdate_frame(void);     /* game thread, each frame: pauses there during an update */
@@ -47,7 +50,8 @@ PlatRecoveryHook plat_devupdate_recovery_hook(void); /* for the crash handler; N
 
 /* menu.c: returns 1 while the Select menu is open (it consumed the input). */
 int plat_menu_input(uint32_t held, uint32_t down);
-void plat_console_menu_mode(int on); /* a menu owns rows 3-14 and the log shrinks to rows 16-30 (on), or the log has rows 3-30 (off); caller holds the console lock for on */
+void plat_console_menu_mode(int on); /* on: a menu covers the whole screen and the log goes to a buffer only; off: HUD and log are repainted from the buffers. Caller holds the console lock */
+void plat_console_log(const char* s, size_t n); /* the console writer's text, under the console lock: buffered, and shown unless a menu covers the screen */
 void plat_menu_shot_tick(void);      /* switch shotbottom=N: bottom screen to shots/bNNNNN.ppm */
 
 /* memplace.c */

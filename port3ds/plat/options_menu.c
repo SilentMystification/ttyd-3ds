@@ -1,10 +1,10 @@
 /* Player options menu: the generic list UI (see include/plat/options.h).
  *
- * Bottom console rows (1-based, 40 columns; the HUD keeps rows 1-2 and the
- * log shrinks to rows 16-30 while the menu is open, see plat/menu.c):
- *   3        title, page number, [Close] button
- *   4-13     the page's items (scrolls when there are more than 10)
- *   14       key help
+ * Bottom console rows (1-based, 40 columns; the menu covers the whole screen
+ * while it is open, and the HUD and log come back on close, see plat/menu.c):
+ *   1        title, page number, [Close] button
+ *   3-24     the page's items (scrolls when there are more than 22)
+ *   30       key help
  * Keys: L/R page, Up/Down move, Left/Right change a value, A changes it too
  * (or runs a reset), B or SELECT closes. Touch: tap an item to select and
  * change it, tap the title to turn the page, tap [Close] to close.
@@ -20,8 +20,8 @@
 #include "plat/input.h"
 #include "plat_internal.h"
 
-#define FIRST_ROW 4
-#define VISIBLE 10
+#define FIRST_ROW 3
+#define VISIBLE 22
 #define MAX_PAGE_ITEMS 24
 
 static int s_open;
@@ -93,7 +93,8 @@ static void draw(const PlatOptMenu* m) {
     snprintf(buf, sizeof(buf), " OPTIONS: %s (%d/%d)", m->pages[s_page], s_page + 1, pages);
     memcpy(line, buf, strlen(buf) < 30 ? strlen(buf) : 30);
     memcpy(line + 31, "[ Close ]", 9);
-    put(3, line);
+    put(1, line);
+    put(2, "");
     for (int r = 0; r < VISIBLE; r++) {
         int k = s_scroll + r;
         if (k >= s_idx_n) {
@@ -113,7 +114,10 @@ static void draw(const PlatOptMenu* m) {
         snprintf(line, sizeof(line), "%c %-18.18s %-19.19s", k == s_sel ? '>' : ' ', it->label, val);
         put(FIRST_ROW + r, line);
     }
-    put(14, "L/R page Up/Dn move </> change B close");
+    for (int r = FIRST_ROW + VISIBLE; r < 30; r++) {
+        put(r, "");
+    }
+    put(30, "L/R page Up/Dn move </> change B close");
     plat_console_unlock();
 }
 
@@ -207,7 +211,7 @@ static void handle_touch(const PlatOptMenu* m) {
     touchPosition tp;
     hidTouchRead(&tp);
     int row = tp.py / 8 + 1; /* console row, 1-based */
-    if (row <= 3) { /* the HUD rows and the title row */
+    if (row <= 2) { /* the title row */
         if (tp.px >= 240) {
             s_open = 0;
         } else {

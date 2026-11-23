@@ -114,6 +114,9 @@ void devupdate_relaunch(void);
 /* Sets the chainloader for the pending relaunch without exiting, for apps
  * with their own exit path. */
 void devupdate_prepare_relaunch(void);
+/* The switch text the next launch of this title gets (as for a restart), for an app that
+ * relaunches itself without a PC: set it, then devupdate_prepare_relaunch() and exit. */
+void devupdate_set_next_args(const char* args);
 
 /* The switch text this launch received as APT deliver arguments; "" if
  * none. Read once (the first call), any time, also before devupdate_start. */

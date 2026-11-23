@@ -128,16 +128,14 @@ static void console_write(const char* body, size_t n) {
         }
         return;
     }
-    fwrite(body, 1, n, stdout);
-    fflush(stdout);
+    plat_console_log(body, n);
 }
 
 void plat_log_console_ready(void) {
     plat_console_lock();
     s_console_up = 1;
     if (s_console_pending_n) {
-        fwrite(s_console_pending, 1, s_console_pending_n, stdout);
-        fflush(stdout);
+        plat_console_log(s_console_pending, s_console_pending_n);
         s_console_pending_n = 0;
     }
     plat_console_unlock();

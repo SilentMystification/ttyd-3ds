@@ -16,6 +16,7 @@
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <malloc.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -149,8 +150,15 @@ void plat_log_init(int live) {
     LightEvent_Init(&s_flushed, RESET_ONESHOT);
 
     /* Keep the previous run: a crash trace must survive the next boot. */
-    unlink("log.old");
-    rename("log.txt", "log.old");
+    /* A log under 4 KiB is an aborted boot: it must not replace the log of the run before it
+     * (a console lockup leaves the only trace of the freeze in log.txt; the next boot rotates it). */
+    struct stat lst;
+    if (stat("log.txt", &lst) == 0 && lst.st_size < 4096 && stat("log.prev.txt", &lst) == 0) {
+        unlink("log.txt");
+    } else {
+        unlink("log.prev.txt");
+        rename("log.txt", "log.prev.txt");
+    }
     s_log_fd = open("log.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
 
     char lv[16];

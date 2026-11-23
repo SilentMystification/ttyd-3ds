@@ -223,7 +223,7 @@ def main():
     finally:
         session("stop", profile)
         sdmc = profile / "data/azahar-emu/sdmc"
-        for rel in ("3ds/ctrdk-devupdate/log.txt", "3ds/ctrdk-devupdate/log.old", "3ds/ttyd/log.txt"):
+        for rel in ("3ds/ctrdk-devupdate/log.txt", "3ds/ctrdk-devupdate/log.old", "3ds/ttyd/log.prev.txt", "3ds/ttyd/log.txt"):
             if (sdmc / rel).exists():
                 shutil.copy(sdmc / rel, args.out / f"{args.app}_{Path(rel).name}")
         for name in ("devupdate-session-azahar.txt",):

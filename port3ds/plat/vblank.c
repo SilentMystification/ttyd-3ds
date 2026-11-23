@@ -1,5 +1,6 @@
 /* Vertical blank thread: the GameCube retrace interrupt on the 3DS. */
 #include "plat_internal.h"
+#include "ctrdk/crash.h"
 
 static void (*s_handler)(void);
 static Thread s_thread;
@@ -11,9 +12,17 @@ static void vblank_thread(void* arg) {
     (void)arg;
     plat_crash_install_thread();
     plat_thread_register("vblank", 16 * 1024);
+    u64 last = svcGetSystemTick();
     for (;;) {
         gspWaitForVBlank();
+        u64 nowt = svcGetSystemTick();
+        if (nowt - last > 500ull * (SYSCLOCK_ARM11 / 1000u)) {
+            PLOG_W("vblank: gap %lu ms before tick %lu (suspended, or the interrupt was missed)",
+                   (unsigned long)((nowt - last) / (SYSCLOCK_ARM11 / 1000u)), (unsigned long)(s_count + 1));
+        }
+        last = nowt;
         s_count++;
+        crash_wd_alive();
         /* HOME is seen here up to a game frame before the game thread's aptMainLoop reacts. */
         if (aptShouldJumpToHome()) {
             plat_cpu_limit_home_pressed();

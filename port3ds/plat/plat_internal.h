@@ -12,7 +12,7 @@ void plat_switches_load(int argc, char** argv);
 const char* plat_switches_text(void);
 
 /* log.c */
-void plat_log_init(int live);        /* open log.txt (previous run kept as log.old), live socket */
+void plat_log_init(int live);        /* open log.txt (previous run kept as log.prev.txt), live socket */
 void plat_log_start_writer(void);    /* the writer thread on core 1; before it, lines are written directly */
 void plat_log_stop(void);            /* normal exit: write everything, stop the writer */
 void plat_log_crash_flush(void);     /* crash path: write the queue in the calling thread */

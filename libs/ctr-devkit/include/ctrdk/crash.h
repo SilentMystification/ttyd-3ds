@@ -120,6 +120,8 @@ void crash_wd_progress(void);
 void crash_wd_hold(bool hold);
 void crash_wd_quiesce(void);
 int crash_wd_held(void);
+/* Call from a thread that keeps ticking while the game thread may not (the vblank thread). */
+void crash_wd_alive(void);
 uint32_t crash_frame_count(void);
 
 /* A report of kind "fatal" with the message, then the exit. */

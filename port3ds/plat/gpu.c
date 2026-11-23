@@ -1010,6 +1010,11 @@ static void copy_to_texture(u16 x, u16 y, u16 w, u16 h, u32 handle, u32 dst_w, u
         return;
     }
     TexSlot* slot = &s_tex[handle];
+    /* The copy fills the whole power-of-two texture, stretched as gx_tex.c resamples a loaded texture: a
+     * draw's texture coordinates are fractions of the GX size (608 x 480 is a 1024 x 512 texture here),
+     * and an image kept at 1:1 in the corner came out magnified, black beyond its edge (the pause menu). */
+    dst_w = slot->tex.width;
+    dst_h = slot->tex.height;
     if (slot->via_scratch) {
         /* Strips: the copy is rendered R rows at a time into the scratch target, and each strip is copied
          * (a raw memory copy, both are in the PICA's tiled layout) to its place in the linear texture. Memory

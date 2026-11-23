@@ -216,7 +216,14 @@ static void run_one(u32 type, const u32* w, u32 n) {
 }
 
 /* Translates the ring up to word `upto` (the caller has gx_tls_translator set). */
+static int s_null; /* switch gxnull=1 (measuring only): the record is dropped, nothing is translated or drawn */
+
 static void consume(u32 upto) {
+    if (s_null) {
+        s_rd = upto;
+        store_sc(&s_rd_pub, s_rd);
+        return;
+    }
     u32 pub = s_rd;
     while (s_rd != upto) {
         const u32* c = s_ring + (s_rd & s_ring_mask);
@@ -749,6 +756,10 @@ void gx_rec_frame(void) {
            (unsigned long)(s_gs.cmds / f), (unsigned long)(s_gs.lists / f), (unsigned long)(s_gs.prims / f),
            (unsigned long)(s_direct_sum / f), (unsigned long)s_switch_at);
     s_direct_sum = 0;
+    PLOG_I("gxthread   render (last frame): %lu us, %lu of them in C3D_FrameBegin's vblank wait; %lu records "
+           "(segments %lu); syncs since boot %lu",
+           (unsigned long)gs.render_us, (unsigned long)gs.begin_wait_us, (unsigned long)gs.records,
+           (unsigned long)gs.segments, (unsigned long)gs.syncs);
     PLOG_I("gxthread   fences per frame (count, us): sync %lu.%02lu %lu, drawdone %lu.%02lu %lu, readback %lu.%02lu %lu, "
            "release %lu.%02lu %lu, full %lu.%02lu %lu, verify %lu.%02lu %lu",
            (unsigned long)(s_gs.fences[0] / f), (unsigned long)(s_gs.fences[0] * 100 / f % 100),
@@ -795,6 +806,12 @@ void gx_rec_init(void) {
     s_split_fixed = plat_switch_int("gxthreadsplitat", -1) >= 0;
     if (s_split_fixed) {
         s_switch_at = (u32)plat_switch_int("gxthreadsplitat", 0);
+    }
+    /* gxnull=1: record as gxthread=1 and drop the record at each fence (the fences still answer), so the game
+     * thread's time is the game's own work plus recording; nothing is shown */
+    s_null = plat_switch_int("gxnull", 0) != 0;
+    if (s_null) {
+        mode = 1;
     }
     if (mode == 0) {
         return;

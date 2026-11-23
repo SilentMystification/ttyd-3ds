@@ -37,7 +37,7 @@ Updated 2026-11-22. Owner goals: original GameCube frame rates, stereo 3D, all t
 3. Battles: every action command, partner and special move, boss, hazard and audience event, through `battle=` plus a test hook that picks moves and forces action-command results.
 4. Effects: all of `src/effect/` and `src/effect/n64/`, plus the screen-copy, indirect-texture and z-texture scenes, with per-game GX overrides where the PICA can't. This includes the curtain fix and closing out the prologue-cabin black frames.
 5. Side content: the Pit of 100 Trials, Trouble Center, Pianta Parlor, quizzes, cooking, shops, the transformations.
-6. Systems: save/load in every slot, copy and delete, game over, soft reset, every pause-menu tab, mail, journal.
+6. Systems: save/load in every slot, copy and delete, game over, soft reset, every pause-menu tab, mail, journal. **Done in Azahar (2026-11-22):** `tools/port3ds/systems_test.py`, 9 scenarios, 9 pass (PORT_3DS_TESTING.md, "Systems tests"). Open: Mario stands 5 units from the saved position after a load (Dolphin comparison pending); the same scenarios on hardware.
 7. Regions: JP and PAL through the converter. PAL at 50 and 60 Hz, all languages. Each passes boot, a new game, and the map sweep.
 
 ## Lane C: performance (to the original frame rates)

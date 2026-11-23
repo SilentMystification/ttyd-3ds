@@ -6,7 +6,7 @@ Developer tools for any libctru homebrew on the Nintendo 3DS. MIT licence (see `
 |---|---|
 | `crash` | Crash and hang handler: one versioned report for CPU exceptions, fatals, `svcBreak` and a hang watchdog. It writes to your log and a report file, shows a crash screen on both displays, dumps every thread's registers on a hang, and ends the process cleanly |
 | `devupdate` | **Development only.** Installs a CIA over the network while the title runs, relaunches it with test switches, and keeps a crashed process reachable (recovery mode) |
-| `devupdate/devupdate.py` | The PC side (Python 3, standard library only): `push`, `ping`, `restart`, `report`, `launch`, `bootstrap`, `azahar-session` |
+| `devupdate/devupdate.py` | The PC side (Python 3, standard library only): `push`, `ping`, `restart`, `report`, `launch`, `bootstrap`, `files`, `queue`, `azahar-session` |
 | `examples/crash`, `examples/devupdate` | Standalone example apps (3dsx and CIA). The devupdate example built as a 3dsx is the generic bootstrap `devupdate-boot.3dsx` |
 
 ## Building
@@ -99,6 +99,38 @@ devupdate.py bootstrap --cia build/app.cia --switches "..."   # first install, n
 
 `bootstrap` sends `devupdate-boot.3dsx` to the Homebrew Launcher with 3dslink (press Y there first). It waits for the bootstrap to answer, pushes the CIA, and the bootstrap installs it and jumps into it with the switches as deliver arguments. From then on, the installed title's own devupdate takes over.
 
+### Files and the test-run queue
+
+Two more commands, for running a series of tests on the console with nobody there (no live scripting; everything is sent first). Both work in one folder the app chooses with `files_dir` (a path relative to its working directory, e.g. `queue` for `sdmc:/3ds/<app>/queue/`); the PC cannot reach anything outside it.
+
+```sh
+devupdate.py files put walk.tpad other.bin [--dest sub]   # upload, CRC32 checked; stored as <files_dir>/[sub/]name
+devupdate.py files ls [dir] | get remote [-o local] | rm path...
+devupdate.py queue add manifest.json [more files...]      # uploads the padfiles it names, then adds the entries
+devupdate.py queue list | clear | start | status
+devupdate.py queue pull build/walk                        # results.txt and everything the entries collected
+```
+
+- **Store.** The files and the queue are written through `DevUpdateConfig.store`: callbacks for write, append, rename, remove, mkdir, flush and read. An app that keeps SD access on one core passes callbacks that queue the work there (TTYD does, onto its SD service); with `NULL` the library uses stdio. Recovery mode always uses stdio, because the app's SD layer may be what crashed. Listing and sizes use stdio on the server thread.
+- **Manifest** (JSON, a list or `{"defaults": {...}, "entries": [...]}`). An entry:
+
+  | Field | Meaning |
+  |---|---|
+  | `name` | letters, digits, `. _ -`, up to 40; used in file names |
+  | `switches` | the app's switches for this run (up to about 600 bytes) |
+  | `padfile` | optional: a local file, uploaded; the run gets `<queue_padfile_key>=<files_dir>/<name>` (key default `padfile`) |
+  | `until` | optional: a pattern matched against each of the app's log lines; a match ends the entry (result `pass`) |
+  | `frames` | optional: ends the entry (result `frames`) after that many app frames |
+  | `timeout_s` | seconds from process start; the entry ends with result `timeout` (default 300) |
+  | `collect` | app paths (e.g. `shots`) moved to `out/<run>_<N>_<name>/` when the entry ends |
+  | `shots` | optional shorthand for a screenshot setting; needs `--shots-switches "shots={n}"` (the app's own switch text) and collects `shots` |
+
+  The `until` pattern is matched by a small built-in matcher (newlib for the 3DS has no `regcomp`): literals, `.`, `[set]`, `[^set]`, ranges, `\d \w \s`, `* + ?` on one of those, `^`, `$` and `|` between alternatives. Groups and counts are refused when queued.
+- **Running it.** `queue start` relaunches the title (the restart path: APT deliver arguments) for entry 1 with its switches plus `padfile=...` and `ctrdkq=1`. The launch that finds `ctrdkq=N` runs entry N. The app feeds the library two things: `devupdate_queue_log_line(line)` for each log line and `devupdate_queue_frame()` once per frame. The server thread ends the entry when one of them, the timeout, or `devupdate_queue_finish(result)` says so: it records a line in `results.txt` (`N, name, result, frames, ms, outdir, detail`, tab-separated), moves the `collect` paths, logs `[QUEUE] entry N <name> done result <result> ...` and relaunches for entry N+1. After the last entry it logs `[QUEUE] done` and relaunches with no switches. State lives in the launch arguments, so a cold start from the HOME Menu never continues a queue; `state.txt` only serves `queue status`.
+- **A crash** in an entry goes to recovery mode as always; instead of waiting for the PC, the recovery thread records the entry as `crash` (the report goes to `out/.../crash.txt`) and relaunches for the next entry. A hung relaunch (the app's exit path does not end the process within 8 s) is ended by the server thread.
+- **Files in `files_dir`:** `queue.txt` (entries, tab-separated), `state.txt`, `results.txt`, `out/`, and the uploaded files.
+- **Walks are for milestones.** A queue ties the console up for as long as its entries take; keep routine checks in an emulator.
+
 ### The same commands on Azahar
 
 The tool and any harness built on it target hardware or Azahar alike; only `--ip` changes. Azahar's sockets are the host's, so the guest's port 5050 is `127.0.0.1:5050`. One long-lived headless instance serves many commands:
@@ -108,6 +140,8 @@ devupdate.py azahar-session start --profile ~/azahar-dev --boot build/app.cia   
 devupdate.py --ip 127.0.0.1 push build/app.cia --no-relaunch
 devupdate.py azahar-session stop --profile ~/azahar-dev                          # only this instance
 ```
+
+Azahar cannot do the APT relaunch. `azahar-session start --supervise` emulates it for a test: it creates `sdmc:/3ds/ctrdk-emulate-relaunch`, and the library, which relaunches by writing the next launch's arguments to `sdmc:/3ds/ctrdk-launch-args.txt` when that marker exists (never on a console), leaves them there as it ends the process. A supervisor process sees the file, ends the instance if it is still around and starts Azahar on the same title again; the new process reads and deletes the file where `devupdate_launch_args()` would have had APT's deliver arguments. A restart, a push with relaunch and a queue's next entry then work in Azahar. What it cannot show is whether APT really keeps the arguments (hardware only).
 
 `azahar-session` takes one of the machine's Azahar slots (flock'd slot files, `AZAHAR_MAX`, default 3; in this repository the lock of `tools/port3ds/run_azahar.py`), and the Azahar process holds the slot for as long as it runs. `stop` ends only the processes of that session.
 

@@ -280,6 +280,10 @@ typedef struct {
     uint32_t calls; /* plat_gpu_draw calls; `draws` is the draw commands after merging */
     uint32_t vsh_draws, vsh_calls, vsh_indices, vsh_consts; /* shader path: commands after merging, calls, indices, uniform blocks */
     uint32_t stream_kb, stream_pending; /* linear memory of live streams; frees waiting for the frames in flight */
+    /* render thread, last presented frame: records replayed (1 + segments + mid-frame syncs) and the time spent
+     * in C3D_FrameBegin's vblank wait over them (included in render_us) */
+    uint32_t records, begin_wait_us;
+    uint32_t syncs; /* plat_gpu_sync calls since boot (each ends a record mid-frame) */
 } PlatGpuStats;
 void plat_gpu_stats(PlatGpuStats* out);
 uint32_t plat_gpu_present_count(void); /* frames presented so far (the shot number) */

@@ -33,6 +33,8 @@ Both scripts build in the image from `tools/port3ds/docker/Dockerfile`:
 
 The image tag is the first 12 hex digits of the Dockerfile's SHA-256, so editing the Dockerfile rebuilds the image.
 
+Compiler A/B options for the game (both off by default; PORT_3DS_60FPS.md, "Step 1 results"): `tools/port3ds/build.sh . -DTTYD_LTO=ON` (link-time optimisation of the DOL code, MusyX and the port; the static RELs stay plain) and `-DTTYD_GX_O3=ON` (`-O3` on `port3ds/game/gx/*.c`). They stay in the build directory's cache: pass `=OFF` to go back.
+
 On Windows the sources are copied into the Docker volume `ttyd3ds-work` with rsync and built there, because bind mounts are slow. `iso/`, `orig/`, `build/` and `.git/` are not copied.
 
 Check a CIA's ExHeader (memory mode, clock, L2, core 2, QTM mapping):
@@ -154,11 +156,12 @@ Switches the game reads (space-separated words in `--switches`):
 | `stereolog=N` | Logs the draw order of stereo frames N and N+300 (S/s scene draw on the CPU/shader path, L/l screen-layer draw, C copy, X clear) and where the 2D tail starts |
 | `scrshot` | Mono shots also save the top screen target as `shots/N.M.ppm` (400x240), for comparing against stereo eye shots |
 | `gxthread=0/1/2/3` | Where GX is translated (`port3ds/game/gx/gx_rec.c`). 0 (default): on the game thread as each call is made. 1: recorded by value into a ring and translated by the game thread at fences (draw sync, `GXDrawDone`, read-backs, a memory release while translation is pending, a full ring). 2: a translator thread on core 2 follows the ring; the game thread translates the first part of each frame itself (see `gxthreadsplit`). 3: verify, as 1 plus getter, list-byte and late-read checks (`gxthread verify` warnings, `verify (total)` line). See PORT_3DS_MULTICORE.md "A, built" |
-| `gxthreadstats=N` | Every N frames, `gxthread` lines: frame, game busy, fence and idle times, translator and render busy and core-2 share, record words, commands, lists, primitives, split point, fences by cause, array snapshot bytes. Cheap, unlike `gxstats` |
+| `gxthreadstats=N` | Every N frames, `gxthread` lines: frame, game busy, fence and idle times, translator and render busy and core-2 share, record words, commands, lists, primitives, split point, fences by cause, array snapshot bytes; and the render thread's last frame: its time, the part of it spent in `C3D_FrameBegin`'s vblank wait, records replayed (segments) and `plat_gpu_sync` calls since boot. Cheap, unlike `gxstats` |
 | `gxthreadsplit=0/1` | `gxthread=2`: 1 (default) translates each frame's first display-list calls on the game thread while core 2 replays the previous frame (hill-climbed split); 0 records everything |
 | `gxthreadsplitat=N` | `gxthread=2`: fixed split of N display-list calls, for measuring |
 | `gxthreadrel=0/1` | 1 (default): a memory release reported while translation is pending is a fence. 0 is for verify experiments only |
 | `gxthreadkb=N` | Record ring size in KB (default 4096) |
+| `gxnull=1` | Measuring only: GX calls are recorded as with `gxthread=1` and the record is dropped at each fence, so nothing is translated, drawn or shown (the screen stays black) while the fences and read-backs still answer. With `gxthreadstats=N` the game thread's busy time is the game's own work plus recording: the floor GX translation sits on (PORT_3DS_60FPS.md, "Step 1 results") |
 | `gpucore=N` | Render thread core (default 2 on New 3DS, 1 on old) |
 | `yieldsleep[=us]` | When `OSYieldThread` finds no other ready OS thread, sleeps `us` µs (default 100) instead of returning at once. This stops the DVD manager's `proc_main` spinning on core 0. Default off until measured on hardware |
 | `yieldstats=N` | Every N seconds, a `[THREADS]` line: each OS thread's share of baton-holding time, idle yields, and time slept by `yieldsleep` |
@@ -284,9 +287,29 @@ Azahar runs:
 - the protocol and the CRC refusal;
 - the AM install, also over the running game, which keeps running;
 - the pause at a frame boundary and the resume;
-- recovery mode after `crashtest=fatal`.
+- recovery mode after `crashtest=fatal`;
+- `files` and `queue`, and (with `azahar-session start --supervise`, which emulates the relaunch) restarts and whole queues.
 
-It cannot do an APT application jump: the Flatpak Azahar aborts, or never starts the new title, on any relaunch (`restart`, a push with relaunch, the bootstrap's jump). In Azahar a cancelled push over an installed title also removes that install, because its AM writes into the title's folder. Relaunches, their deliver arguments, and the old install surviving a refused push are therefore checked on the console only.
+It cannot do an APT application jump: the Flatpak Azahar aborts, or never starts the new title, on any relaunch (`restart`, a push with relaunch, the bootstrap's jump); `--supervise` stands in for it by starting the title again. In Azahar a cancelled push over an installed title also removes that install, because its AM writes into the title's folder. Whether APT really keeps the deliver arguments across a relaunch, and the old install surviving a refused push, are therefore checked on the console only.
+
+### Console walk (`hw_walk.py`): milestones only
+
+A walk runs a list of test runs on the console unattended: no live scripting, everything is uploaded first. **It is for milestone checks, not routine ones**: it ties up the console for tens of minutes, so routine checks (a map, a fix) stay in Azahar (`run_azahar.py`, `map_sweep.py`). `hw_walk.py` therefore takes only an explicit list (`--maps`, `--list` or `--manifest`; there is no "every map"), prints the entry count and an estimated time before it does anything, wants `--yes` for more than 12 entries, and pauses 10 s before starting.
+
+```sh
+export N3DS_IP=192.168.1.50                      # the title runs with the devupdate switch (debug3ds.txt)
+tools/port3ds/hw_walk.py --name m5 --maps gor_01,hei_00,gon_02 --story 30 --frames 600 --shots 1 --dry-run
+tools/port3ds/hw_walk.py --name m5 --maps gor_01,hei_00,gon_02 --story 30 --frames 600 --shots 1
+tools/port3ds/hw_walk.py --name pads --maps gor_01 --pad gor_01=build/pads/gor01.tpad     # the entry ends with the padfile
+tools/port3ds/hw_walk.py --name custom --manifest walk.json                                # any entries
+```
+
+- **Entries.** One per map: `fastboot livelog map=M story=S party=P`, ended after `--frames` game frames (from the process start, so include boot and load; about 30 fps is assumed for the estimate) or, with a `--pad MAP=FILE`, when the TPAD file ends (`[PAD] padfile end`). `--shots N` takes screenshots in the last 40 frames (`shots=1 shotfrom=... shotmax=N`) and collects `shots/`. `--timeout` is per entry, counted from the process start.
+- **What happens.** The manifest goes to `build/hw-walk/<name>/manifest.json`; the pad files and the queue are uploaded with `devupdate.py` (`files`, `queue`; docs in `libs/ctr-devkit/README.md`); `queue start` relaunches the game for each entry; the script follows the live log (`live.log`, reconnecting across the relaunches) and polls `queue status`; at the end it pulls `results.txt` and the collected files.
+- **Results.** `build/hw-walk/<name>/results.json` (per entry: result, frames, ms, detail, files), `shots/` as PNG (Pillow) or PPM, `live.log`, and a table on the terminal. Results: `pass` (the `until` pattern matched) and `frames` count as passing; `timeout` and `crash` (recorded by recovery mode, with the report in `out/.../crash.txt`) do not. Exit status 1 if any entry did not pass.
+- **Manifest** (JSON, `devupdate.py --help`): `{"defaults": {...}, "entries": [{"name", "switches", "padfile", "until", "frames", "timeout_s", "collect"}]}`. `until` is matched against the game's own log lines by a small matcher (no groups or counts). A crash test entry: `{"name": "crash", "switches": "fastboot map=gor_01 crashtest=fatal crashframe=300", "timeout_s": 300}`.
+- **On the SD card** (`sdmc:/3ds/ttyd/queue/`): `queue.txt`, `state.txt`, `results.txt`, the uploaded pad files and `out/r<run>_<N>_<name>/`. The log lines are `[QUEUE] entry N <name> start|done result ...` and `[QUEUE] done`. SD writes of the queue go through `plat/sdio.c` (core 1) like all others.
+- **Azahar.** Azahar has no APT relaunch, so `devupdate.py azahar-session start --supervise` emulates it (see the README): `devupdate.py azahar-session start --profile build/azahar-profile --boot build/3ds/game/ttyd.cia --supervise`, then `hw_walk.py --ip 127.0.0.1 ...`, then `azahar-session stop`. Checked 2026-11-22 with a 3-entry queue (a `gor_01` pad file, a `gon_02` battle, a deliberate `crashtest=fatal`). Not testable there: that APT keeps the deliver arguments across a self-relaunch, the relaunch time, and the Luma behaviour.
 
 ## Running the GameCube game in Dolphin
 
@@ -392,6 +415,8 @@ Player settings live in `sdmc:/3ds/ttyd/options.txt` as `key=value` lines ending
 - Details are in [PORT_3DS_TEST_INFRA.md](PORT_3DS_TEST_INFRA.md).
 
 ### Recorded inputs
+
+**Regression replay (port vs GameCube):** `tools/port3ds/testdata/title_newgame_save.tpad` (3286 frames: title, file select, new save created and written). Copy it to `build/gcdebug-disc/files/` and to the Azahar profile's sdmc root, then `tools/port3ds/gw_diff.py --switches "determ gwdump=10 padfile=/title_newgame_save.tpad" --frames 3400`. Passing (2026-11-22): 340 of 340 records equal, f 10..3400, 22 fields, with both memory cards empty (`--card empty`, the default) and the determ card timing model.
 
 `padrec=` writes the pad state the game saw into a TPAD file, and `padfile=` plays it back, so a run (a hand-played session, or a `padscript` run) can be repeated exactly, or a Dolphin movie can drive the port.
 

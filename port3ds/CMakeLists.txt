@@ -320,6 +320,25 @@ target_compile_definitions(ttyd_port_plat PRIVATE PORT3DS_PLAT_SIDE=1)
 target_include_directories(ttyd_port_plat PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include" "${TTYD_GEN_DIR}"
     "${TTYD_REPO_DIR}/libs/ctr-devkit/include")
 
+# Compiler A/B switches (docs/PORT_3DS_60FPS.md, "Step 1 results"); both off by default.
+#   TTYD_LTO:    link-time optimisation over the decomp's DOL code, MusyX and both port halves (the static
+#                RELs stay plain objects: tools/port3ds/rel_link.py links them with ld -r).
+#   TTYD_GX_O3:  -O3 on the GX front end (port3ds/game/gx/*.c) only.
+option(TTYD_LTO "Link-time optimisation of the DOL code, MusyX and the port" OFF)
+option(TTYD_GX_O3 "-O3 on port3ds/game/gx/*.c" OFF)
+if(TTYD_LTO)
+    foreach(_t ttyd_dol ttyd_musyx ttyd_port_game ttyd_port_plat)
+        target_compile_options(${_t} PRIVATE -flto=auto -ffat-lto-objects)
+    endforeach()
+    # declares the function tou_gamen_screen_tev as an array (it only takes its address): LTO refuses to merge it
+    set_source_files_properties("${TTYD_REPO_DIR}/src/battle/sac/sac_suki.c" TARGET_DIRECTORY ttyd_dol
+        PROPERTIES COMPILE_OPTIONS "-fno-lto")
+endif()
+if(TTYD_GX_O3)
+    file(GLOB _gx_sources "${CMAKE_CURRENT_LIST_DIR}/game/gx/*.c")
+    set_source_files_properties(${_gx_sources} TARGET_DIRECTORY ttyd_port_game PROPERTIES COMPILE_OPTIONS "-O3")
+endif()
+
 add_executable(ttyd
     $<TARGET_OBJECTS:ttyd_dol>
     $<TARGET_OBJECTS:ttyd_musyx>
@@ -331,6 +350,9 @@ add_dependencies(ttyd ttyd_rels)
 # --wrap=svcBreak: the crash library turns every svcBreak (libctru and citro3d panics too) into a crash report
 target_link_options(ttyd PRIVATE -Wl,--gc-sections -Wl,--wrap=svcBreak -Wl,--wrap=threadCreate -Wl,--wrap=fopen -Wl,--wrap=open -Wl,--wrap=opendir -Wl,--wrap=remove -Wl,--wrap=rename -Wl,--wrap=mkdir -Wl,--wrap=unlink -Wl,--wrap=fsync -Wl,--wrap=stat -Wl,--no-enum-size-warning
     -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/ttyd.map)
+if(TTYD_LTO)
+    target_link_options(ttyd PRIVATE -flto=auto -O2)
+endif()
 target_link_libraries(ttyd PRIVATE ttyd_gx_shader_bin ttyd_sjis_font_bin ctrdk_devupdate ctrdk_crash citro3d ctru z m)
 # The image must end below 0x01000000 (PORT_IS_ADDR, sound-id flag bits): fail the build, not the boot.
 add_custom_command(TARGET ttyd POST_BUILD

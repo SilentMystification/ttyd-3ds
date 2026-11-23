@@ -29,6 +29,26 @@ The GameCube debug DOL (configure.py --gcdebug; docs/PORT_3DS_TEST_INFRA.md):
                          the JSON's "log" and build/dolphin-last/gcdbg_log.txt
   --disc NAME            the disc folder build/NAME/ (a hard-linked copy of
                          build/gcdebug-disc/ with its own DOL and RELs)
+  --shots DIR            screenshots: stop at every tst_shot_point (the test
+                         switches shotat=, fxshots=, btlshots=), read the
+                         frame's XFB from memory and save DIR/fNNNNN.png
+                         (608x480, the EFB size), until --break (or the
+                         timeout). Renders with Vulkan on the headless
+                         platform (no window, no display needed), single core,
+                         XFB copies written to memory
+
+Screenshots: Dolphin's Null backend draws nothing, so --shots uses the
+Vulkan backend with -p headless (no surface; it renders offscreen). XFB
+copies go to emulated memory (GFX.Hacks.XFBToTextureEnable=False), and at
+tst_shot_point(F), in the frame hook of game frame F after DEMODoneRender's
+draw sync, DemoCurrentBuffer holds the picture finished at F: YUYV 4:2:2,
+fbWidth x xfbHeight = 608x480 in the US render modes, the size of the EFB
+(the copy is 1:1, no scaling; PAL's 50 Hz mode stretches 480 EFB lines to
+568, --xfb-size 608x568). The copy's vertical deflicker filter is off
+(GFX.Hacks.DisableCopyFilter, Dolphin's default), as on the port, whose
+shots are the EFB itself. It is converted to RGB with the inverse of the
+GameCube's RGB to YCbCr copy (BT.601, studio range), so a colour differs
+from the EFB's by the 4:2:2 chroma averaging and rounding only.
 
 Results are printed as hex and, with --json, written as
 {"frame": N, "reads": {label: {"addr": A, "hex": "..."}}}.
@@ -147,6 +167,95 @@ def prepare_gcdebug_disc(version, iso, name):
     return disc / "sys" / "main.dol"
 
 
+def xfb_to_png(data, w, h, path):
+    """A GameCube XFB (YUYV 4:2:2: Y0 Cb Y1 Cr per pair of pixels) to an RGB PNG."""
+    import numpy as np
+    from PIL import Image
+    a = np.frombuffer(data, np.uint8).reshape(h, w // 2, 4).astype(np.float32)
+    y = np.stack([a[..., 0], a[..., 2]], axis=-1).reshape(h, w) - 16.0
+    u = np.repeat(a[..., 1], 2, axis=1) - 128.0
+    v = np.repeat(a[..., 3], 2, axis=1) - 128.0
+    rgb = np.stack([1.164 * y + 1.596 * v, 1.164 * y - 0.392 * u - 0.813 * v, 1.164 * y + 2.017 * u], axis=-1)
+    Image.fromarray(np.clip(rgb + 0.5, 0, 255).astype(np.uint8), "RGB").save(path)
+
+
+def bulk_read(rsp, addr, size, chunk=0x400, depth=16):
+    """A large memory read: 'm' requests pipelined `depth` deep and the replies parsed a buffer at a time
+    (RSP.read parses byte by byte, about 10 s for an XFB)."""
+    reqs = [(a, min(chunk, addr + size - a)) for a in range(addr, addr + size, chunk)]
+    out = bytearray()
+    buf = bytearray(rsp.buf)
+    rsp.buf = b""
+    sent = 0
+    for i in range(len(reqs)):
+        while sent < len(reqs) and sent < i + depth:
+            a, n = reqs[sent]
+            rsp.send(f"m{a:x},{n:x}")
+            sent += 1
+        while True:
+            start = buf.find(b"$")
+            end = buf.find(b"#", start + 1) if start >= 0 else -1
+            if end >= 0 and len(buf) >= end + 3:
+                break
+            data = rsp.sock.recv(65536)
+            if not data:
+                raise RSPError("GDB stub closed the connection")
+            buf += data
+        body = bytes(buf[start + 1:end])
+        del buf[:end + 3]
+        rsp.sock.sendall(b"+")
+        if len(body) != reqs[i][1] * 2:
+            raise RSPError(f"read at 0x{reqs[i][0]:x}: reply {body[:8]!r}")
+        out += bytes.fromhex(body.decode("latin-1"))
+    rsp.buf = bytes(buf)
+    return bytes(out)
+
+
+def stop_regs(rsp):
+    """(pc, r3) at a stop, read with 'p' (GDB's PowerPC numbering: r3 is 3, the PC 64)."""
+    pc, r3 = rsp.command("p40"), rsp.command("p3")
+    if len(pc) < 8 or len(r3) < 8:
+        die(f"unexpected register replies {pc!r} {r3!r}")
+    return int(pc[:8], 16), int(r3[:8], 16)
+
+
+def shot_loop(rsp, syms, args, start):
+    """Stops at every tst_shot_point(frame) and saves the frame's XFB, until --break (or the timeout)."""
+    w, h = (int(v) for v in args.xfb_size.lower().split("x"))
+    args.shots.mkdir(parents=True, exist_ok=True)
+    for name in ("tst_shot_point", "DemoCurrentBuffer"):
+        if name not in syms:
+            die(f"{name} is not in the ELF (an older debug build?)", 2)
+    point = syms["tst_shot_point"].addr
+    end = None
+    if args.brk:
+        if args.brk not in syms:
+            die(f"unknown symbol {args.brk}", 2)
+        end = syms[args.brk].addr
+        rsp.set_breakpoint(end)
+    rsp.set_breakpoint(point)
+    saved = []
+    while True:
+        if time.monotonic() - start > args.timeout:
+            die(f"timeout with {len(saved)} shots")
+        rsp.cont()
+        pc, r3 = stop_regs(rsp)
+        if pc == point:
+            buf = struct.unpack(">I", rsp.read(syms["DemoCurrentBuffer"].addr, 4))[0]
+            path = args.shots / f"f{r3:05d}.png"
+            xfb_to_png(bulk_read(rsp, buf, w * h * 2), w, h, path)
+            saved.append(r3)
+            print(f"run_dolphin: shot f={r3} -> {path}", flush=True)
+        elif pc == end:
+            break
+        else:
+            die(f"stopped at 0x{pc:08X}, neither tst_shot_point nor {args.brk}")
+    rsp.clear_breakpoint(point)
+    if end is not None:
+        rsp.clear_breakpoint(end)
+    return saved
+
+
 def main():
     ap = argparse.ArgumentParser(description="Run TTYD in headless Dolphin and read memory by symbol.")
     ap.add_argument("--version", default="G8ME01")
@@ -168,12 +277,15 @@ def main():
     ap.add_argument("--disc", default="gcdebug-disc",
                     help="with --gcdebug: the disc folder under build/ (another name: a hard-linked copy, so two runs "
                     "of different debug builds can go at once)")
+    ap.add_argument("--shots", type=Path, help="with --gcdebug: save the XFB at every tst_shot_point as DIR/fNNNNN.png")
+    ap.add_argument("--xfb-size", default="608x480", help="with --shots: fbWidth x xfbHeight (default 608x480)")
+    ap.add_argument("--video", help="video backend (default Null; Vulkan with --shots)")
     args = ap.parse_args()
     global PROFILE
     if args.profile:
         PROFILE = args.profile.resolve()
-    if (args.switches is not None or args.read_log) and not args.gcdebug:
-        die("--switches and --read-log need --gcdebug", 2)
+    if (args.switches is not None or args.read_log or args.shots) and not args.gcdebug:
+        die("--switches, --read-log and --shots need --gcdebug", 2)
 
     elf = args.elf or REPO / "build" / args.version / "MarioSt.elf"
     if args.gcdebug:
@@ -187,7 +299,8 @@ def main():
 
     PROFILE.mkdir(parents=True, exist_ok=True)
     LAST.mkdir(parents=True, exist_ok=True)
-    cmd = ["dolphin-emu-nogui", "-u", str(PROFILE), "-p", "headless", "-v", "Null",
+    video = args.video or ("Vulkan" if args.shots else "Null")
+    cmd = ["dolphin-emu-nogui", "-u", str(PROFILE), "-p", "headless", "-v", video,
            "-C", f"Dolphin.General.GDBPort={args.port}",
            "-C", "Dolphin.Core.CPUCore=1",
            # The JIT only honours breakpoints with debugging enabled.
@@ -195,6 +308,23 @@ def main():
            "-C", "Dolphin.Core.EmulationSpeed=0",
            "-C", "Dolphin.Interface.ConfirmStop=False",
            "-C", "Dolphin.Analytics.PermissionAsked=True"]
+    shots_ini = PROFILE / "GameSettings" / f"{args.version}.ini"
+    if args.shots:
+        # XFB copies to emulated memory, no copy filter, native resolution, and single core so the GPU has
+        # finished the frame's copy by the time the CPU passes its draw sync. The game's own INI layer sits above
+        # the command line, so the hacks also go into this profile's user game INI (the top game layer).
+        shots_ini.parent.mkdir(parents=True, exist_ok=True)
+        shots_ini.write_text("[Video_Hacks]\nXFBToTextureEnable = False\nImmediateXFBEnable = False\n"
+                             "DeferEFBCopies = False\nDisableCopyFilter = True\n"
+                             "[Core]\nCPUThread = False\n")
+        cmd += ["-C", "GFX.Hacks.XFBToTextureEnable=False",
+                "-C", "GFX.Hacks.ImmediateXFBEnable=False",
+                "-C", "GFX.Hacks.DeferEFBCopies=False",
+                "-C", "GFX.Hacks.DisableCopyFilter=True",
+                "-C", "GFX.Settings.InternalResolution=1",
+                "-C", "Dolphin.Core.CPUThread=False"]
+    elif shots_ini.exists():
+        shots_ini.unlink()
     if args.gcdebug:
         cmd += ["-e", str(args.dol.resolve())]  # sys/main.dol of an extracted disc: Dolphin boots the folder
     elif args.dol:
@@ -227,7 +357,11 @@ def main():
                 rsp.cont()
             rsp.clear_breakpoint(bp)
             result["frame"] = args.frames
-        if args.brk:
+        if args.shots:
+            result["shots"] = shot_loop(rsp, syms, args, start)
+            if args.brk:
+                result["break"] = args.brk
+        elif args.brk:
             if args.brk not in syms:
                 die(f"unknown symbol {args.brk}", 2)
             rsp.set_breakpoint(syms[args.brk].addr)

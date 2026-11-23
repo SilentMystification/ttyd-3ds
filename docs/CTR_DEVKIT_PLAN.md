@@ -61,6 +61,16 @@ What it keeps from today:
 
 **Report format.** It's line-based and versioned (`[CRASH] v1 ...`), so `crash_report.py` works for any app given that app's ELF. The build ID in the report selects the ELF.
 
+## `devupdate` extras: `files` and `queue` (built 2026-11-22)
+
+Owner request: no live scripting, but send input files to the console and queue several test runs, so a walk (a series of runs) goes by itself. Both are generic and live in `libs/ctr-devkit/devupdate/` (`files.c`, `queue.c`); TTYD only supplies glue (`port3ds/plat/devupdate.c`). Details and the manifest format are in `libs/ctr-devkit/README.md`.
+
+- **`files`** (`put`, `get`, `ls`, `rm`): one app-chosen SD folder (`files_dir`, TTYD: `sdmc:/3ds/ttyd/queue/`), CRC32-checked uploads written to `<name>.part` and renamed on success. The bytes go through a store callback set (`DevUpdateStore`: write, append, rename, remove, mkdir, flush, read). The port passes one that queues onto its SD service on core 1; the default is stdio; recovery mode always uses stdio.
+- **`queue`** (`add`, `list`, `clear`, `start`, `status`, plus `pull` on the PC): entries `{name, switches, padfile, until, frames, timeout_s, collect}` stored on the card. `start` relaunches the title for entry 1 (APT deliver arguments, as `restart`), each entry ends on its `until` pattern, frame count or timeout, logs `[QUEUE] entry N <name> done result ...`, appends a line to `results.txt` and relaunches for the next; after the last it logs `[QUEUE] done`. A crash is recorded by the recovery thread and the queue goes on. The run state travels in the launch arguments (`ctrdkq=N`), so a cold start never continues a queue.
+- **Choices:** the console has no JSON parser (the PC turns the manifest into tab-separated lines) and no regex library (a small matcher: literals, classes, `* + ?`, anchors, top-level `|`).
+- **Azahar** has no APT relaunch; `azahar-session start --supervise` emulates it (marker file, arguments in a file, a supervisor that starts the title again). What stays untestable there is whether APT keeps the deliver arguments across a self-relaunch on a real console, and the relaunch timing.
+- **Walks are for milestones.** The owner wants console walks rarely; the TTYD tool `tools/port3ds/hw_walk.py` takes an explicit list only, prints the entry count and estimate first, and the docs say so.
+
 ## Steps
 
 1. **Hardware check of today's handler:** `crashtest=segv` and `hang` on the console. This verifies SVC 0x3B and the real exception path before the code moves.

@@ -475,19 +475,25 @@ static void stat_frame(void) {
 /* ---- determ: modelled completion time ----
  * Under determ a job finishes at a time a GameCube card would take, not when the card thread is done, and the
  * completion callback runs at the start of the game frame it falls in, so card timing is the same every run
- * and matches the GameCube debug DOL under Dolphin. The numbers were measured on that DOL (determ, the
- * title to file select of the first save screen), in 40.5 MHz ticks:
- *   - a job is posted about 671100 ticks into a frame (the game's post comes at the end of the frame's wait);
- *   - a read takes 39790 ticks per 512-byte sector (8192 bytes 636k, 16384 bytes 1273k);
- *   - mount takes 3204170, check 15406.
- * Unmeasured, so guesses: format as mount, create and set-status as check, write as read.
- * A job landing at tick T of the post frame completes in frame post + T / frame length, where the frame
- * length is a retrace (675675) plus 13000 of hook latency seen in the same measurements. */
-#define MODEL_POST_TICKS 671100
-#define MODEL_FRAME_SLACK 13000
+ * and matches the GameCube debug DOL under Dolphin. The durations D are in 40.5 MHz ticks, fitted to that DOL
+ * (determ, padfile pad3, an empty card: mount, check, 18 reads, create, two writes, set-status):
+ *   mount 3204170, check 15406, read 39790 per 512-byte sector, create 401173 per 8 KB block of the file
+ *   (17 blocks: 6.82M), set-status 3407969,
+ *   write 3.26M per 8 KB block plus 0.51M per 8 KB block of the start offset (two points only: 73728 bytes at
+ *   offset 0 took 29.34M, 65536 at 73728 took 30.66M).
+ * Format is a guess (as create). The game posts a job near the end of the frame's wait, about 4575 ticks before
+ * the frame counter moves on; a job of at least 50000 ticks therefore completes in the frame
+ *     post + 1 + (D - 4575) / retrace,
+ * a shorter one (check) in the frame of its post. */
+#define MODEL_POST_EARLY_TICKS 4575
 #define MODEL_SECTOR_TICKS 39790
 #define MODEL_MOUNT_TICKS 3204170
 #define MODEL_SMALL_TICKS 15406
+#define MODEL_CREATE_BLOCK_TICKS 401173
+#define MODEL_SETSTATUS_TICKS 3407969
+#define MODEL_WRITE_BLOCK_TICKS 3260000
+#define MODEL_WRITE_OFFSET_TICKS 509000
+#define MODEL_BLOCK 8192
 
 static int determ_on(void) {
     static int s_on = -1;
@@ -503,14 +509,21 @@ static u32 model_due(const Job* j) {
         return j->post_frame;
     }
     switch (j->kind) {
-    case JOB_MOUNT:
-    case JOB_FORMAT: d = MODEL_MOUNT_TICKS; break;
-    case JOB_READ:
-    case JOB_WRITE: d = (s64)((j->length + 511) / 512) * MODEL_SECTOR_TICKS; break;
+    case JOB_MOUNT: d = MODEL_MOUNT_TICKS; break;
+    case JOB_FORMAT: d = (s64)17 * MODEL_CREATE_BLOCK_TICKS; break;
+    case JOB_READ: d = (s64)((j->length + 511) / 512) * MODEL_SECTOR_TICKS; break;
+    case JOB_WRITE:
+        d = (s64)((j->length + MODEL_BLOCK - 1) / MODEL_BLOCK) * MODEL_WRITE_BLOCK_TICKS +
+            (s64)(j->offset / MODEL_BLOCK) * MODEL_WRITE_OFFSET_TICKS;
+        break;
+    case JOB_CREATE: d = (s64)((j->size + MODEL_BLOCK - 1) / MODEL_BLOCK) * MODEL_CREATE_BLOCK_TICKS; break;
+    case JOB_SETSTATUS: d = MODEL_SETSTATUS_TICKS; break;
     default: d = MODEL_SMALL_TICKS; break;
     }
-    s64 frame_len = (s64)tst_retrace_ticks() + MODEL_FRAME_SLACK;
-    return j->post_frame + (u32)((MODEL_POST_TICKS + d) / frame_len);
+    if (d < 50000) {
+        return j->post_frame;
+    }
+    return j->post_frame + 1 + (u32)((d - MODEL_POST_EARLY_TICKS) / (s64)tst_retrace_ticks());
 }
 
 static void card_complete(const Job* j, s32 r, u32 frame_label) {

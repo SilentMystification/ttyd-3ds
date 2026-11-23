@@ -600,7 +600,9 @@ static void frame_hooks(void) {
     s_hook_time = OSGetTime();
     if (stop < 0) {
         stop = tst_sw_int("stopframe", 0);
-        tst_log("gcdbg: switches \"%s\"", gcdbg_switches);
+        /* at most 400 characters: tst_log formats into 512 bytes on the stack (vsprintf, no bound), and the
+         * switches hold up to 1023 (a long padscript overran the line and crashed the game) */
+        tst_log("gcdbg: switches \"%.400s%s\"", gcdbg_switches, strlen(gcdbg_switches) > 400 ? "..." : "");
     }
     s_frames++;
     tst_frame(s_frames);

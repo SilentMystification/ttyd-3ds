@@ -73,5 +73,8 @@ extern volatile u32 tst_shot_frame;
 void tst_battle_frame(u32 frame);
 /* ---- test_font.c (port only): fonttest=sjis ---- */
 void tst_font_frame(u32 frame);
+/* ---- test_systems.c (port only): storyjump, marioat=, hp=, syslog ---- */
+void tst_systems_frame(u32 frame);
+void tst_story_jump(int story);
 
 #endif

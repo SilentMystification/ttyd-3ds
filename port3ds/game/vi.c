@@ -168,7 +168,11 @@ static void warp_new_game(int story, int party) {
     stg0_00_init();
     marioPartyKill();
     swInit();
-    swByteSet(0, story);
+    if (plat_switch_has("storyjump")) {
+        tst_story_jump(story); /* every story point's setup up to story (test_systems.c) */
+    } else {
+        swByteSet(0, story);
+    }
     if (party > 0 && party < 8) {
         partyJoin((PartyId)party);
         marioPartyEntry((PartyId)party);
@@ -234,7 +238,13 @@ static void warp_switch(void) {
     if (state != 1 || gp == NULL) {
         return;
     }
-    if (seqGetSeq() == SEQ_TITLE || (seqGetSeq() == SEQ_GAME && strcmp(gp->currentMapName, map) != 0)) {
+    /* warpingame (tests, systems_test.py): wait for a game started from the file select, so the save slot
+     * and the player name are that file's */
+    static int in_game = -1;
+    if (in_game < 0) {
+        in_game = plat_switch_has("warpingame");
+    }
+    if ((seqGetSeq() == SEQ_TITLE && !in_game) || (seqGetSeq() == SEQ_GAME && strcmp(gp->currentMapName, map) != 0)) {
         warp_new_game(plat_switch_int("story", 0), plat_switch_int("party", 1));
         PLOG_I("warp: %s %s (switch) at game frame %u", map, bero, (unsigned)s_frames);
         seqSetSeq(SEQ_MAP_CHANGE, map, bero[0] ? bero : NULL);
@@ -448,6 +458,7 @@ static void frame_hooks(void) {
     port_debug_frame(s_frames);
     tst_frame(s_frames);
     port_card_frame(s_frames); /* determ: modelled card completions */
+    tst_systems_frame(s_frames);
     plat_input_frame();
     plat_set_phase("frame hooks");
     if (!plat_frame_poll()) {

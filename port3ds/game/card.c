@@ -622,6 +622,11 @@ static void card_thread(void* arg) {
                 continue;
             }
             stat_done(&j, r);
+            if (j.kind == JOB_CREATE || j.kind == JOB_WRITE || j.kind == JOB_FORMAT) {
+                static const char* const kind[] = {"mount", "check", "format", "create", "read", "write", "status"};
+                PLOG_I("card: %s %s offset 0x%lx length 0x%lx result %ld", kind[j.kind], j.kind == JOB_CREATE ? j.name : "",
+                       (unsigned long)j.offset, (unsigned long)(j.kind == JOB_CREATE ? j.size : (u32)j.length), (long)r);
+            }
             if (tst_rngtrace_wanted()) {
                 tst_log("[CARD] job %d done result %d at game frame %u len=%d off=%d", (int)j.kind, (int)r,
                         (unsigned)tst_cur_frame(), (int)(j.kind == JOB_CREATE ? (s32)j.size : j.length), (int)j.offset);
@@ -788,6 +793,7 @@ s32 CARDDelete(s32 chan, const char* fileName) {
     if (post(&j) != CARD_RESULT_READY) {
         remove(j.path); /* queue full: rare, and a stall is better than a stale file */
     }
+    PLOG_I("card: delete %s", fileName);
     return CARD_RESULT_READY;
 }
 

@@ -157,6 +157,21 @@ A shot of frame F is the picture finished at F's frame hook (the start of `VIWai
 
 **`gon_02` struck-first frame** (`gallery.py frames`-style run, `map=gon_02 story=30`, shots every 8 frames): the bottom 57 rows (423 to 479) are black in frames 648 to 680 and half of them at 688 in **both** builds, the same picture (mean difference 5 to 10, all of it texture filtering); the bar is gone from 696 on. `gw_diff.py` over the two `gwdump=4` streams: 275 records equal, frames 4 to 1100 (Mario's position in both: 0, 0, 0 until the battle at 740). `gwdump` has no camera field.
 
+**Battle tables**, `gallery.py battlelist` (a `sweep=40 btllist` run over the 282 maps that are not `stg_*`; 274 visited `ok`): 19 areas have battle setups, 382 in all: `aji` 23, `bom` 7, `dou` 27, `eki` 19, `gon` 21, `gor` 6, `gra` 13, `hei` 27, `jin` 25, `jon` 52, `las` 60, `moo` 16, `mri` 21, `muj` 15, `nok` 1, `pik` 10, `rsh` 2, `tik` 29, `win` 8. `aaa`, `hom`, `kpa`, `tou`, `usu`, `yuu` have an empty table; `bti`, `end`, `sys` no map with an NPC. That run also logged 163,862 unmapped 32-bit writes in Azahar, all in `animPoseMain` (`animdrv.c:4448` `pose->rawFrame`, and 4696; addresses 0x0 to 0x13C, so a NULL `AnimPose`), from about 100 s in to the end. The same sweep of the first ten maps (`aaa_00`, `aji_00` to `aji_08`) did not reproduce it, so the map is not known yet; the fx and battle runs had none. In each area the sweeps use the first map with an enemy NPC (`aji_01`, `bom_01`, `dou_02`, `eki_02`, `gon_04`, `gor_00`, `gra_03`, `hei_01`, `jin_01`, `jon_00`, `las_01`, `moo_01`, `mri_05`, `muj_02`, `nok_00`, `pik_00`, `rsh_02_a`, `tik_01`, `win_00`).
+
+**Battles (B3)**, `gallery.py battlesweep`, port only, `determ`, the default move every turn (the menu's first action and target). Battle results: 1 won, 3 Mario's side defeated, 5 interrupted (`battle_seq_end.c`).
+
+- `btlauto=perfect`, the first and last setup of each area (37 battles, `--per-area 2`, 2 per boot, `gwdump=20`): 28 ended (22 won; 5 lost: `gor` 0 and 5, `bom` 6, `jon` 51, `muj` 0; `nok` 0 interrupted after 364 frames, no turn), 9 did not end in the time given (about 10000 to 22000 frames), all still taking turns: `gon` 20 (Hooktail, 56 turns), `las` 0 and 59, `mri` 20, `muj` 14, `pik` 9, `rsh` 0 and 1, `tik` 28. Every action command result 2. No crash, no hang, no unmapped access, no `GX:` warning; one `TEV: 3 GX stages -> 3 PICA stages approximated: TEV compare op` per boot (the battle's first draw of that setup).
+- `btlauto=fail`, the first setup of each area (19 battles, one per boot): 18 ended (7 won, 10 lost, `nok` 0 interrupted), `jin` 0 still taking turns after 24; every action command result 0. No crash, hang or unmapped access. `muj` adds the `fire` effect's two TEV approximations.
+- Full tables: `build/gallery/btl_perfect/table.md`, `build/gallery/btl_fail/table.md`.
+
+**Battle start against the GameCube**, the first battle of each area's perfect run against the same switches in the debug DOL (Dolphin, `gwdump=20` to frame 4500): the battle starts at the same frame in all 19 areas. The first differing record (always `rng` first):
+- shortly after the start, frames 780 to 820, in 8 areas: `aji`, `gra`, `hei`, `jin`, `mri`, `moo`, `nok`, `win`;
+- later in the battle in 6: `pik` 1160, `bom` 1220, `las` 1620, `dou`, `eki` and `jon` 2520;
+- not at all up to frame 4500 in 5: `gon`, `gor`, `muj`, `rsh`, `tik` (the same menu turns, frame for frame).
+
+Frame by frame (`gwdump=1`, frames 700 to 830): `hei` first differs at 768 (as before), `aji` at 794, `mri` at 803, `gor` and `tik` not at all. Only `hei` shows the clean pattern of the earlier analysis (the same states two frames later); in `aji` and `mri` some of the GameCube's states never appear in the port's stream, so the port makes a different number of `rand` calls there, not only later ones. So the battle-start divergence is not everywhere: it depends on the battle (the enemies' set-up), which points at an enemy- or stage-specific wait rather than at the battle start itself.
+
 ## Risks to determinism not removed
 
 Found, not removed (the runs above show none of them in their streams, but each can move a stream):

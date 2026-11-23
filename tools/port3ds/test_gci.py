@@ -376,6 +376,12 @@ void port_thread_dispatch_if_idle(void) {}
 int tst_rngtrace_wanted(void) { return 0; }
 unsigned tst_cur_frame(void) { return 0; }
 void tst_log(const char* f, ...) { (void)f; }
+int tst_determ(void) { return 0; }
+long long tst_retrace_ticks(void) { return 675000; }
+int plat_switch_has(const char* w) { (void)w; return 0; }
+uint64_t plat_ticks(void) { return 0; }
+void plat_disc_stats(uint32_t* r, uint64_t* b) { if (r) *r = 0; if (b) *b = 0; }
+void plat_thread_yield(void) {}
 typedef struct { pthread_t t; } PlatThread;
 typedef struct { pthread_mutex_t m; pthread_cond_t c; int s; } PlatEvent;
 typedef struct { pthread_mutex_t m; } PlatMutex;

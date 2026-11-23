@@ -538,6 +538,7 @@ void plat_gpu_frame_end(uint16_t efb_w, uint16_t efb_h) {
 }
 
 void plat_gpu_sync(void) {
+    s_stats.syncs++;
     end_segment();
     wait_idle();
 }
@@ -1311,6 +1312,9 @@ static void fog_bind(const void* body) {
     C3D_FogLutBind(&lut);
 }
 
+static u64 s_begin_wait_acc; /* render thread: ticks in C3D_FrameBegin over this frame's records */
+static u32 s_begin_records;
+
 static void render_record(Record* r) {
     u64 t0 = svcGetSystemTick();
     reap_targets();
@@ -1318,7 +1322,13 @@ static void render_record(Record* r) {
     u32 tail_cmds = 0, tail_zwrites = 0;
     u8* split = r->present && stereo_wanted() ? stereo_split(r, &tail_cmds, &tail_zwrites) : NULL;
     int stereo = split != NULL && stereo_begin();
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    /* C3D_FRAME_SYNCDRAW waits for the next vblank of both screens. Only a frame's first record takes it: a
+     * segment or a mid-frame sync (plat_gpu_sync) after it would wait for one more vblank each, a frame lost
+     * per extra record. The game thread is paced by the retrace already. */
+    u64 tw = svcGetSystemTick();
+    C3D_FrameBegin(s_begin_records == 0 ? C3D_FRAME_SYNCDRAW : 0);
+    s_begin_wait_acc += svcGetSystemTick() - tw;
+    s_begin_records++;
     if (stereo) {
         stereo_prepare();
         s_gx_entries += STEREO_GX_ENTRIES;
@@ -1527,6 +1537,12 @@ eye_again:
     C3D_FrameEnd(0);
     s_stats.render_us = (u32)((svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000000u));
     s_stats.gpu_us = (u32)(C3D_GetDrawingTime() * 1000.0f);
+    if (r->present) {
+        s_stats.begin_wait_us = (u32)(s_begin_wait_acc / (SYSCLOCK_ARM11 / 1000000u));
+        s_stats.records = s_begin_records;
+        s_begin_wait_acc = 0;
+        s_begin_records = 0;
+    }
     if (r->present) {
         stereo_frame_done(stereo, s_stats.render_us, s_stats.gpu_us, tail_cmds, tail_zwrites);
     }

@@ -383,7 +383,7 @@ Player settings live in `sdmc:/3ds/ttyd/options.txt` as `key=value` lines ending
 
 - **Build:** `python3 configure.py --version G8ME01 --gcdebug && ninja -f build_gcdebug.ninja` builds a non-matching DOL with the same test switches.
 - **Run:** `run_dolphin.py --gcdebug` boots it headless.
-- **Compare:** `tools/port3ds/gw_diff.py` runs the same switches and padscript in Azahar (with `determ`) and in Dolphin, and reports the first frame and the fields that differ.
+- **Compare:** `tools/port3ds/gw_diff.py` runs the same switches and padscript in Azahar (with `determ`) and in Dolphin, and reports the first frame and the fields that differ. Both runs start with the same memory card, no save files by default (`--card empty`) or exactly one GCI (`--card PATH.gci`); the port's `sdmc:/3ds/ttyd/card/` and Dolphin's `GC/<region>/Card A` folder are emptied and filled to match, and the state is printed. Save data changes the file-select text and so the RNG, so a run on a card with saves differs from one without.
 - Details are in [PORT_3DS_TEST_INFRA.md](PORT_3DS_TEST_INFRA.md).
 
 ### Recorded inputs

@@ -373,6 +373,9 @@ void plat_set_save_busy(int (*b)(void)) { (void)b; }
 void port_irq_enter(void) {}
 void port_irq_leave(void) {}
 void port_thread_dispatch_if_idle(void) {}
+int tst_rngtrace_wanted(void) { return 0; }
+unsigned tst_cur_frame(void) { return 0; }
+void tst_log(const char* f, ...) { (void)f; }
 typedef struct { pthread_t t; } PlatThread;
 typedef struct { pthread_mutex_t m; pthread_cond_t c; int s; } PlatEvent;
 typedef struct { pthread_mutex_t m; } PlatMutex;

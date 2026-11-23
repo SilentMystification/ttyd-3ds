@@ -280,6 +280,7 @@ void plat_options_save(void) {
 
 /* Once per frame (plat/input.c): applies what the platform itself owns. */
 void plat_options_tick(void) {
+    plat_menu_shot_tick();
     int out = plat_audio_has_output();
     int vol = opt_get_volume();
     if (out && (vol != s_applied_volume || !s_applied_output)) {

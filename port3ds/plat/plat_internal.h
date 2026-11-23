@@ -43,6 +43,8 @@ PlatRecoveryHook plat_devupdate_recovery_hook(void); /* for the crash handler; N
 
 /* menu.c: returns 1 while the Select menu is open (it consumed the input). */
 int plat_menu_input(uint32_t held, uint32_t down);
+void plat_console_menu_mode(int on); /* a menu owns rows 3-14 and the log shrinks to rows 16-30 (on), or the log has rows 3-30 (off); caller holds the console lock for on */
+void plat_menu_shot_tick(void);      /* switch shotbottom=N: bottom screen to shots/bNNNNN.ppm */
 
 /* memplace.c */
 void plat_memplace_init(void);

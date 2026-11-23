@@ -40,7 +40,7 @@ install the CIA.
 - There is **no separate conversion step** and no progress bar. The port converts models, maps and textures
   from the disc while you play, as the game loads them.
 - You see the game's own logos, then the title screen.
-- The bottom screen shows a small status line at the top and a scrolling log. This is normal.
+- The bottom screen shows two status lines at the top (rows 1-2) and a scrolling log below them. This is normal.
 - How long the start takes on a real console is unverified. In Azahar the title screen appears
   after about 800 game frames.
 - If something is wrong with the disc image or the SD card, you see a black text screen. See Troubleshooting.
@@ -61,14 +61,17 @@ The game sees one GameCube controller. The 3DS maps to it like this:
 | ZR | Z |
 
 - ZL does nothing by default (you can give it a job in the Options menu).
-- In the game itself the touch screen is not used. It opens the Options menu (below).
+- In the game itself the touch screen is not used, except that touching the status lines on the bottom screen opens the Options menu (below).
 - Rumble does not exist on the 3DS, so the game's rumble option does nothing.
 - The game's own soft reset (hold B, X and START) is unverified.
 
 ### Options menu
 
-Press **SELECT**, or touch the **[Options]** button on the bottom screen (right side, under the status lines).
+Press **SELECT**, or touch the two status lines at the top of the bottom screen (with the HUD on FPS only or off they show an **[Options]** label on the right).
 The game pauses while the menu is open and receives no input.
+
+The bottom screen changes mode when the menu opens: the menu takes rows 3-14 and the log shrinks to the rows below it
+(it keeps scrolling there). When you close the menu the log gets the whole area back. The status lines stay on top in both modes.
 
 - **L / R** change the page. **Up / Down** move. **Left / Right** or **A** change a value. **B** or **SELECT** closes it.
 - With the touch screen, tap a line to change it, tap the title line to go to the next page, tap **[ Close ]** to close.
@@ -80,7 +83,7 @@ The game pauses while the menu is open and receives no input.
 | Controls | C-stick is | C-stick nub (default), or D-pad. With the D-pad as the C-stick the D-pad no longer sends GameCube D-pad presses, and the C-stick nub does nothing |
 | Controls | Reset to defaults | puts the page back to A, B, X, Y, ZR = Z, L, R, START and the C-stick nub |
 | Display | 3D effect | off or on (default on). Stereoscopic 3D is not in the port yet; the setting is stored for when it is |
-| Display | Bottom screen HUD | off, FPS only, or full (default). The log below it stays |
+| Display | Bottom screen HUD | off, FPS only, or full (default). Only the two status lines change; the log stays |
 | Audio | Master volume | 0 to 100 percent in steps of 10 (default 100) |
 | Performance | Quality | auto (default), high or fast. Stored only; later speed features will read it |
 | Language | Game language | PAL version only: English, Deutsch, Francais, Espanol, Italiano. Stored only for now |

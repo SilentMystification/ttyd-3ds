@@ -153,6 +153,7 @@ Switches the game reads (space-separated words in `--switches`):
 | `gpucore=N` | Render thread core (default 2 on New 3DS, 1 on old) |
 | `yieldsleep[=us]` | When `OSYieldThread` finds no other ready OS thread, sleeps `us` µs (default 100) instead of returning at once. This stops the DVD manager's `proc_main` spinning on core 0. Default off until measured on hardware |
 | `yieldstats=N` | Every N seconds, a `[THREADS]` line: each OS thread's share of baton-holding time, idle yields, and time slept by `yieldsleep` |
+| `shotbottom=N` | Saves the bottom screen as `shots/bNNNNN.ppm` (320x240, at most 60) every N ticks. A tick is a game frame, or a ~16 ms menu poll while the Options menu is open, so it also catches the open menu (the log line says `menu=1` or `menu=0`). Layout: rows 1-2 HUD, rows 3-30 log; with a menu open, rows 3-14 menu and rows 16-30 log (`plat/menu.c`) |
 | `devmenu` | Enables the developer menu, opened with ZL+SELECT. SELECT alone opens the player Options menu, so a `padscript` that pressed `select` for the old developer menu now opens Options. While the Options menu is open, `padscript` steps advance once per ~16 ms menu poll, not per game frame. Example: `wait*900,select*3,wait*5,right*2,wait*5,select*3` |
 | `devupdate` | Development only: starts the ctr-devkit updater at boot (TCP 5050, `devupdateport=N`, `devupdatetoken=TEXT`), and a crash then goes to recovery mode instead of waiting for START. See "ctr-devkit: crash and devupdate" below |
 

@@ -1,23 +1,30 @@
-/* Bottom screen: HUD, Select menu and the scrolling log.
+/* Bottom screen: HUD, the scrolling log and the menus.
  *
- * Layout of the 40x30 libctru console on the bottom screen:
- *   rows 1-2   HUD (build, map, FPS, frame and GPU times, draws, vertices,
- *              memory, QTM, model), refreshed twice a second
- *   rows 4-15  the Select menu while it is open
- *   rows 17-30 the log (plat/log.c prints there)
- * Only changed lines are rewritten, so the screen does not flicker.
+ * One 40x30 libctru console, laid out like the PM64 port's:
+ *   rows 1-2    HUD: two status lines, refreshed twice a second, trylock only
+ *               (the game thread never waits). The HUD option (off, FPS only,
+ *               full) decides what they show.
+ *   rows 3-30   the log (plat/log.c prints there)
+ * When a menu opens (Options, or the developer Select menu) the screen changes
+ * mode: the menu takes rows 3-14 and the log shrinks to rows 16-30, where it
+ * keeps scrolling. On close the menu rows are blanked and the log gets rows
+ * 3-30 back. Lines are rewritten padded, never cleared, so there is no blank frame.
+ * Touching the top two rows (the HUD, which shows an [Options] label when it has room)
+ * opens the Options menu.
  *
- * Two menus share the screen:
+ * Two menus share the menu area:
  *  - the player Options menu (plat/options_menu.c), opened with SELECT or by
- *    touching the "Options" button on row 3 (right side). The game is paused
- *    while it is open.
+ *    touching the HUD rows. The game is paused while it is open.
  *  - this file's developer Select menu, only with the switch "devmenu" (or a
  *    build with PORT3DS_DEV_BUILD): ZL+SELECT opens and closes it. L/R change
  *    tab, Up/Down move, Left/Right/A change a value or run an action, B
  *    closes. While it is open the game sees no input but keeps running.
- * The HUD (rows 1-2) follows the player's HUD option: off, FPS only or full.
+ *
+ * Test aid: switch shotbottom=N saves the bottom screen as shots/bNNNNN.ppm
+ * every N ticks (game frames, and menu polls while the Options menu is open).
  */
 #include <stdio.h>
+#include <sys/stat.h>
 #include <string.h>
 
 #include "options_internal.h"
@@ -41,23 +48,58 @@ static uint32_t s_last_hud_ms, s_last_frames;
 static float s_fps;
 static PrintConsole s_console;
 
+#define LOG_TOP 2     /* log window top (0-based row) with no menu: rows 3-30 */
+#define LOG_TOP_MENU 15 /* with a menu: rows 16-30 */
+#define MENU_FIRST 3  /* 1-based, first and last row the menu owns */
+#define MENU_LAST 14
+
+static int s_menu_mode;
+
+static void log_window(int menu) {
+    int top = menu ? LOG_TOP_MENU : LOG_TOP;
+    consoleSetWindow(&s_console, 1, top + 1, 40, 30 - top); /* libctru window and cursor coordinates are 1-based */
+    s_console.cursorX = 1; /* the log's next line comes at the bottom */
+    s_console.cursorY = 30 - top;
+}
+
 void plat_console_init(void) {
     if (s_console_up) {
         return;
     }
     consoleInit(GFX_BOTTOM, &s_console);
-    consoleSetWindow(&s_console, 0, 16, 40, 14);
+    log_window(0);
+    s_console.cursorY = 1; /* boot lines fill the window from its top */
     s_console_up = 1;
     plat_log_console_ready();
 }
 
+/* Writes one padded line of the 30-row screen without disturbing the log's
+ * window or cursor. Caller holds the console lock. row is 1-based. */
 static void at(int row, const char* text) {
-    /* row is 1-based in the full 30-row screen; the window covers the log */
-    printf("\x1b[s");
-    consoleSetWindow(&s_console, 0, 0, 40, 30);
-    printf("\x1b[%d;1H%-40.40s", row, text);
-    consoleSetWindow(&s_console, 0, 16, 40, 14);
-    printf("\x1b[u");
+    int wx = s_console.windowX, wy = s_console.windowY, ww = s_console.windowWidth, wh = s_console.windowHeight;
+    int cx = s_console.cursorX, cy = s_console.cursorY;
+    consoleSetWindow(&s_console, 1, 1, 40, 30);
+    s_console.cursorX = 1;
+    s_console.cursorY = row;
+    printf("%-40.40s", text); /* all 40 columns, so no stale log text stays in the last one */
+    consoleSetWindow(&s_console, wx, wy, ww, wh);
+    s_console.cursorX = cx;
+    s_console.cursorY = cy;
+}
+
+/* A menu is opening (on) or closed (off): the log window shrinks or grows.
+ * Caller holds the console lock. */
+void plat_console_menu_mode(int on) {
+    if (!s_console_up || s_menu_mode == on) {
+        return;
+    }
+    s_menu_mode = on;
+    if (!on) {
+        for (int r = MENU_FIRST; r <= MENU_LAST + 1; r++) {
+            at(r, "");
+        }
+    }
+    log_window(on);
 }
 
 void plat_console_row(int row, const char* text) { at(row, text); }
@@ -70,14 +112,6 @@ static int dev_menu_enabled(void) {
 #else
     return plat_switch_has("devmenu");
 #endif
-}
-
-static void draw_options_button(void) {
-    if (!s_console_up || !plat_console_trylock()) {
-        return;
-    }
-    at(3, "                               [Options]");
-    plat_console_unlock();
 }
 
 int plat_reset_requested(void) {
@@ -113,8 +147,9 @@ static void draw_menu(void) {
     char line[48];
     snprintf(line, sizeof(line), " Options  %s %s  (L/R tab)", s_tab == TAB_GENERAL ? "[General]" : " General ",
              s_tab == TAB_DEBUG ? "[Debug]" : " Debug ");
-    at(4, line);
-    for (int r = 0; r < 10; r++) {
+    plat_console_menu_mode(1);
+    at(MENU_FIRST, line);
+    for (int r = 0; r < 9; r++) {
         line[0] = '\0';
         const char* cur = r == s_row ? ">" : " ";
         if (s_tab == TAB_GENERAL) {
@@ -140,18 +175,17 @@ static void draw_menu(void) {
             default: break;
             }
         }
-        at(6 + r, line);
+        at(MENU_FIRST + 2 + r, line);
     }
     plat_console_unlock();
 }
 
 static void clear_menu(void) {
-    if (!s_console_up || !plat_console_trylock()) {
+    if (!s_console_up) {
         return;
     }
-    for (int r = 4; r <= 15; r++) {
-        at(r, "");
-    }
+    plat_console_lock(); /* the rows must be blanked: wait for the log writer */
+    plat_console_menu_mode(0);
     plat_console_unlock();
 }
 
@@ -207,7 +241,7 @@ int plat_menu_input(uint32_t held, uint32_t down) {
     if (down & PLAT_KEY_TOUCH) {
         touchPosition tp;
         hidTouchRead(&tp);
-        touch_button = tp.py < 40 && tp.px >= 216;
+        touch_button = tp.py < 16; /* the HUD rows */
     }
     if (down & PLAT_KEY_SELECT) {
         if (s_open) {
@@ -296,11 +330,11 @@ void plat_hud_frame(const PlatHudStats* stats) {
         at(1, "");
         at(2, "");
     }
+    if (mode != PLAT_OPT_HUD_FULL && !s_open) {
+        at(mode == PLAT_OPT_HUD_FPS ? 2 : 1, "                               [Options]");
+    }
     s_hud_drawn = mode;
     plat_console_unlock();
-    if (!s_open) {
-        draw_options_button();
-    }
 }
 
 /* From the frame hook (plat/input.c): the player Options menu runs here, so the
@@ -310,12 +344,47 @@ void plat_menu_frame(void) {
         return;
     }
     plat_options_menu_run();
-    if (s_console_up && plat_console_trylock()) {
-        for (int r = 3; r <= 16; r++) {
-            at(r, "");
-        }
-        plat_console_unlock();
+    clear_menu();
+    s_hud_drawn = -1; /* the HUD rows are rewritten at the next refresh */
+    s_last_hud_ms = 0;
+}
+
+/* shotbottom=N: the bottom framebuffer as a PPM, every N ticks, at most 60. */
+void plat_menu_shot_tick(void) {
+    static int every = -1, ticks, taken;
+    if (every < 0) {
+        every = plat_switch_int("shotbottom", 0);
     }
-    s_hud_drawn = -1;
-    draw_options_button();
+    if (every <= 0 || !s_console_up || ++ticks % every != 0 || taken >= 60) {
+        return;
+    }
+    u16 w, h;
+    u8* fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &w, &h); /* column major, bottom row first */
+    int bpp = gfxGetScreenFormat(GFX_BOTTOM) == GSP_BGR8_OES ? 3 : 2;
+    char path[48];
+    snprintf(path, sizeof(path), "shots/b%05d.ppm", ticks);
+    mkdir("shots", 0777);
+    FILE* f = fb ? fopen(path, "wb") : NULL;
+    if (f == NULL) {
+        return;
+    }
+    plat_console_lock();
+    fprintf(f, "P6\n%u %u\n255\n", (unsigned)h, (unsigned)w);
+    for (unsigned y = 0; y < w; y++) {
+        for (unsigned x = 0; x < h; x++) {
+            const u8* px = fb + ((size_t)x * w + (w - 1 - y)) * (size_t)bpp;
+            unsigned r, g, b;
+            if (bpp == 3) {
+                b = px[0]; g = px[1]; r = px[2];
+            } else {
+                unsigned c = px[0] | (px[1] << 8);
+                r = ((c >> 11) & 31) * 255 / 31; g = ((c >> 5) & 63) * 255 / 63; b = (c & 31) * 255 / 31;
+            }
+            fputc((int)r, f); fputc((int)g, f); fputc((int)b, f);
+        }
+    }
+    plat_console_unlock();
+    fclose(f);
+    taken++;
+    PLOG_I("shotbottom: %s menu=%d", path, s_menu_mode);
 }

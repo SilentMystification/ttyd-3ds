@@ -1,5 +1,7 @@
 /* TTYD's glue to the ctr-devkit updater (libs/ctr-devkit/devupdate/).
- * Development use only: off unless the switch devupdate is given.
+ * On in development builds (PORT3DS_VERSION contains "-dev") unless the switch
+ * nodevupdate is given. Release builds are off unless the switch devupdate is
+ * given (or this launch is a devupdate relaunch).
  *
  *   devupdate             start the server at boot (TCP 5050)
  *   devupdateport=N       another port
@@ -28,6 +30,7 @@
 #include "plat/audio.h"
 #include "plat/gpu.h"
 #include "plat_internal.h"
+#include "port3ds_build.h"
 
 static volatile int s_pause_req, s_paused, s_relaunch;
 static LightEvent s_resume;
@@ -35,9 +38,15 @@ static int (*s_save_busy)(void);
 static char s_token[32];
 
 void plat_set_save_busy(int (*fn)(void)) { s_save_busy = fn; }
-/* The switch, or this launch is a devupdate relaunch (which keeps the server
- * on even when the restart gave no switches). */
-int plat_devupdate_enabled(void) { return plat_switch_has("devupdate") || devupdate_launched(); }
+/* On when this launch is a devupdate relaunch (which keeps the server on even
+ * when the restart gave no switches), or the switch devupdate is given, or
+ * this is a development build and the switch nodevupdate is not given. */
+int plat_devupdate_enabled(void) {
+    if (devupdate_launched() || plat_switch_has("devupdate")) {
+        return 1;
+    }
+    return strstr(PORT3DS_VERSION, "-dev") != NULL && !plat_switch_has("nodevupdate");
+}
 
 /* The files and queue commands write the card through plat/sdio.c (core 1), like every other writer. */
 static int st_write(const char* path, uint64_t off, const void* data, size_t n, void* user) {

@@ -94,7 +94,7 @@ void gx_opts_init(void) {
     gx_opt_fogcache = plat_switch_int("gxfogcache", 1) != 0;
     gx_opt_unlit = plat_switch_int("gxunlit", 1) != 0;
     gx_vsh_imm_on = plat_switch_int("gxvshimm", 1) != 0;
-    gx_opt_vshbbox = plat_switch_int("gxvshbbox", 0);
+    gx_opt_vshbbox = plat_switch_int("gxvshbbox", 1);
     gx_opt_vshlit = plat_switch_int("gxvshlit", 1) != 0;
     gx_opt_vshtg = plat_switch_int("gxvshtg", 1) != 0;
     PLOG_I("gx: statever %d fogcache %d unlit %d", gx_opt_statever, gx_opt_fogcache, gx_opt_unlit);
@@ -665,13 +665,13 @@ static void box_add(u16* box, const Out* o) {
     if (y > box[3]) box[3] = (u16)y;
 }
 
-/* Switch gxvshbbox (default 0: eki_00's edge row, PORT_3DS_GX_PERF.md round 3, awaits a decision). 1: a draw made while the bounding box is armed takes the shader path like any
+/* Switch gxvshbbox (default 1 since eki_00's row was found to be texel ties, accepted 2026-11-23). 1: a draw made while the bounding box is armed takes the shader path like any
  * other, and the box gets the window positions of its vertices from xf_position on the CPU (the arithmetic
  * transform() uses, so the box is the same); GXReadBoundingBox disarms it (every TTYD read follows its own
  * GXClearBoundingBox). 0: armed draws stay on the CPU path; the read disarms the box there too.
  * 2: as 1, plus the old box (every draw since the clear, through transform()) kept beside it and compared
  * at each read (`gxstats` bbox line, and a warning). */
-int gx_opt_vshbbox = 0;
+int gx_opt_vshbbox = 1;
 static u16 s_bref[4];
 static int s_bref_on;
 static u32 s_bbox_reads, s_bbox_mism;

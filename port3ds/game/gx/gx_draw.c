@@ -22,6 +22,7 @@
 #include "plat/plat.h"
 
 int gx_unit_of_map[GX_MAX_TEXMAP];
+int gx_unit_of_stage[GX_MAX_TEV]; /* the texture unit each TEV stage samples, -1 none */
 static int s_unit_coord[3];  /* GX texcoord each PICA unit samples with */
 static int s_unit_map[3];
 static int s_units;
@@ -223,20 +224,35 @@ static void assign_units(void) {
         } else if (gx.tev[s].color == GX_COLOR1A1 || gx.tev[s].color == GX_COLOR1 || gx.tev[s].color == GX_ALPHA1) {
             chan_votes[1]++;
         }
-        if (map >= GX_MAX_TEXMAP || gx_unit_of_map[map] >= 0) {
+        gx_unit_of_stage[s] = -1;
+        if (map >= GX_MAX_TEXMAP) {
+            continue;
+        }
+        /* one unit per (map, texcoord): a map sampled at two coordinates takes two units */
+        u8 coord = gx.tev[s].coord < GX_MAX_TEXGEN ? gx.tev[s].coord : 0;
+        int u = 0;
+        while (u < s_units && !(s_unit_map[u] == map && s_unit_coord[u] == coord)) {
+            u++;
+        }
+        if (u < s_units) {
+            gx_unit_of_stage[s] = u;
             continue;
         }
         if (s_units == 3) {
             static int warned;
-            if (!warned) {
+            gx_unit_of_stage[s] = gx_unit_of_map[map]; /* units full: the map's first coordinate */
+            if (gx_unit_of_stage[s] < 0 && !warned) {
                 warned = 1;
                 PLOG_W("GX: a TEV setup samples more than 3 textures (PICA has 3 units)");
             }
             continue;
         }
-        gx_unit_of_map[map] = s_units;
+        if (gx_unit_of_map[map] < 0) {
+            gx_unit_of_map[map] = s_units;
+        }
+        gx_unit_of_stage[s] = s_units;
         s_unit_map[s_units] = map;
-        s_unit_coord[s_units] = gx.tev[s].coord < GX_MAX_TEXGEN ? gx.tev[s].coord : 0;
+        s_unit_coord[s_units] = coord;
         s_units++;
     }
     s_color_chan = chan_votes[1] > chan_votes[0] ? 1 : 0;

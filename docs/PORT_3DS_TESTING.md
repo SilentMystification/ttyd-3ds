@@ -143,6 +143,10 @@ Switches the game reads (space-separated words in `--switches`):
 | `battle=<id\|name>` | Starts the given entry of the current area's battle setup table after the map is up (`battlewait=N`) |
 | `fonttest=sjis` | Draws fixed Shift-JIS strings (katakana, full-width digits, hiragana, half-width, kanji) over every frame in any region build, through the port's SJIS ROM font: `OSInitFont`, `OSGetFontTexture` and one GX quad per glyph (port3ds/game/test_font.c). Logs `fonttest: SJIS font loaded ...`. The font is rendered at build time by `tools/port3ds/gen_sjis_font.py` (Noto Sans CJK JP, SIL OFL); `build.sh` runs it on the host (Python Pillow; the font is downloaded once into `build/fonts/`). The JP build uses the same font for its system messages |
 | `btlauto=perfect\|fail` | Runs battles unattended. `btlmoves=` gives the menu keys per turn and `btlstep=` the frames between presses. `perfect` forces every action command to succeed and `fail` presses nothing during them |
+| `shotat=F,...` / `fxshots=O,...` / `btlshots=O,...` | Gallery shots of game frame F (or O frames after each `fx=` spawn or `battle=` start): the port saves the EFB as `gallery/fFFFFF.ppm`, the debug DOL stops at `tst_shot_point` for `run_dolphin.py --shots` |
+| `fx=0-80,n64:0-102` | `fx=` also takes index ranges, up to 128 effects per boot |
+| `battle=0-5,7` | Several battles per boot, one after another, HP and FP refilled before each |
+| `btllist` | Logs each map's NPC count and, once per area, its battle setup table (use with `sweep=`) |
 | `stopframe=N` | GameCube debug DOL only: stops at game frame N, for `run_dolphin.py --break gcdbg_stop` |
 | `ndspvoices=1` | Plays MusyX's dry DSP-ADPCM voices on NDSP channels 1–23, timed to the software mix on channel 0. Streams, PCM, voices with an aux send, and starts beyond the free channels stay in software, and a voice that later gets an aux send moves back. Loops that start inside an ADPCM frame are re-aligned at load. Default off. See [PORT_3DS_AUDIO.md](PORT_3DS_AUDIO.md) |
 | `ndspstats=N` | Every N seconds, `[NDSPV]` lines: voice-frames in software, on NDSP and with aux, overflows, starts, cache hits, re-aligned loops, late events, and the share of time in the mixer. Also channel 0 flushes, `flush ticks`, and with streams on: starts, refills, underruns, waits and dropped events |
@@ -521,6 +525,11 @@ Player settings live in `sdmc:/3ds/ttyd/options.txt` as `key=value` lines ending
 - **Run:** `run_dolphin.py --gcdebug` boots it headless.
 - **Compare:** `tools/port3ds/gw_diff.py` runs the same switches and padscript in Azahar (with `determ`) and in Dolphin, and reports the first frame and the fields that differ. Both runs start with the same memory card, no save files by default (`--card empty`) or exactly one GCI (`--card PATH.gci`); the port's `sdmc:/3ds/ttyd/card/` and Dolphin's `GC/<region>/Card A` folder are emptied and filled to match, and the state is printed. Save data changes the file-select text and so the RNG, so a run on a card with saves differs from one without.
 - Details are in [PORT_3DS_TEST_INFRA.md](PORT_3DS_TEST_INFRA.md).
+
+### Screenshot galleries and the TEV check
+
+- `tools/port3ds/gallery.py fx|battle|frames|battlelist|battlesweep|report` runs the port in Azahar and the debug DOL in Dolphin (`run_dolphin.py --shots`, Vulkan headless) with the same switches in `determ`, diffs the 608x480 shots and writes `build/gallery/<name>/index.html`. Details in [PORT_3DS_TEST_INFRA.md](PORT_3DS_TEST_INFRA.md).
+- `tools/port3ds/tev_check/build.sh && build/tev_check/tev_check [-v] [-b] [setup...]` checks the TEV to PICA compiler (`gx_tev.c` and the game's overrides, `port3ds/game/tev_override_ttyd.c`) on the PC: the game's TEV setups evaluated as GX TEV and as the compiled PICA program over random inputs, largest and mean difference per setup; `-v` prints the program, `-b` gives textures 1-bit alpha. No emulator.
 
 ### Recorded inputs
 

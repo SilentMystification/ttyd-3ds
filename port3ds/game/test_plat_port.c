@@ -3,7 +3,10 @@
  * extra keys through plat_input_set_extra_keys. */
 #include <dolphin/pad.h>
 #include <stdarg.h>
+#include <stdio.h>
+#include <sys/stat.h>
 
+#include "plat/gpu.h"
 #include "plat/input.h"
 #include "plat/plat.h"
 #include "port_addr_impl.h"
@@ -25,6 +28,20 @@ void tst_log(const char* fmt, ...) {
 }
 
 u32 tst_rand_state(void) { return ttyd_rand_state(); }
+
+/* The render thread is idle after plat_gpu_sync, so the named shot catches the
+ * next present: the frame the game draws now, finished at frame `frame`. */
+void tst_plat_shot(u32 frame) {
+    static int made;
+    char path[40];
+    if (!made) {
+        mkdir("gallery", 0777);
+        made = 1;
+    }
+    snprintf(path, sizeof(path), "gallery/f%05lu.ppm", (unsigned long)frame);
+    plat_gpu_sync();
+    plat_gpu_shot(path);
+}
 
 int tst_is_ptr(u32 v) { return port_is_addr(v); }
 

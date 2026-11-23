@@ -105,6 +105,73 @@ Checked (2026-11-22), the same switches in both builds:
 - `fx=kemuri,1,n64:sweat_n64,nosuch fxgap=90` on `gor_01`: three spawns at frames 727, 817 and 907 (60, 150 and 240 frames after the map came up), events 66 to 68, the same frames and event ids in Azahar and Dolphin; all ended 90 frames later; in Dolphin (the 2-frame check came after the Azahar run) `kemuri` and `sweat_n64` were alive 2 frames after the spawn and `confetti` already gone; `nosuch` logged as not an effect.
 - `battle=0` on `gor_01` (`GOR` test battle 0, against `gor_02_01_off_1`) and `battle=4` on `hei_01` (`hei01` Goomba): the battle starts at the same frame in both builds, the menu turns, action commands and enemy turns follow at the same frame offsets (`gor_01`: start 727, turn 1 at 913, its action command 958 to 1099 with result 2, in both builds). With the message-window fix the `hei_01` battle runs to `battle: end result 1` in both. `btlauto=fail` gives action command result 0 every time.
 
+## Screenshot galleries (A5)
+
+```sh
+tools/port3ds/gallery.py fx --items 0-80,n64:0-102 --name fx_all            # every effect on gor_01
+tools/port3ds/gallery.py battle --map hei_01 --items 0-3 --offsets 120,400 --name hei
+tools/port3ds/gallery.py frames --switches "map=gon_02 story=30" --frames 648,664,688 --name gon02
+tools/port3ds/gallery.py report --name fx_all                               # redo the report only
+tools/port3ds/gallery.py battlelist --name btllist                          # every area's battle setup table
+tools/port3ds/gallery.py battlesweep --name btl_perfect --mode perfect --per-area 2 --gwdump 20
+tools/port3ds/gallery.py fx --items 0-80,n64:0-102 --name fx_all --gc-only  # Dolphin side ahead, then --reuse-gc
+```
+
+Output: `build/gallery/<name>/index.html` (items sorted by score, port | GameCube | difference x4), `results.json` (per item: the shots, mean/max difference, share of pixels over 32, the log lines: spawn, alive checks, `TEV:`/`GX:` warnings, crashes), `port/<batch>/`, `gc/<batch>/`, `diff/`, `logs/` (each run's game log; `hw_faults.json`: Azahar's unmapped accesses per PC, which are counted, not a failure).
+
+**Score.** The plain port/GameCube difference of a shot is mostly the scene's (texture filtering, edges: about 4 to 7 of 255 on `gor_01`). Every `fx=` batch shoots the same frames of the same scene, so for each frame the median difference over all items shot there is the scene's, and an item's excess over it is the effect's. The score is the worst shot's mean excess, less the median score of its batch (a batch whose scene drifted, e.g. an NPC elsewhere, otherwise raises all its items alike). Items over 0.5 are marked for review.
+
+**Shots in both builds** (shared test code, `test_gallery.c`):
+
+| Switch | Effect |
+|---|---|
+| `shotat=F,F,...` | Shots of these game frames |
+| `fxshots=O,O,...` | Shots O frames after each `fx=` spawn |
+| `btlshots=O,O,...` | Shots O frames after each `battle=` start |
+| `fx=0-80,n64:0-102` | `fx=` also takes index ranges (up to 128 effects per boot) |
+| `battle=0-5,7` | Several battles per boot, one after another, HP and FP refilled before each |
+| `btllist` | 30 frames after each map is up: `btllist: map M npcs N enemies E`, and once per area its battle setup table (with `sweep=`, every area in one run) |
+
+A shot of frame F is the picture finished at F's frame hook (the start of `VIWaitForRetrace` in frame F, after `DEMODoneRender`'s draw sync and before the buffer flip). Both builds log `shot: f=F`.
+
+- **Port:** at F-1 the test code waits for the render thread (`plat_gpu_sync`) and asks for a named shot (`plat_gpu_shot`), so the next present, frame F's, is saved: `gallery/fFFFFF.ppm`, the EFB, 608x480.
+- **GameCube:** at F the test code calls `tst_shot_point(F)`. `run_dolphin.py --shots DIR` stops there, reads `DemoCurrentBuffer` and the XFB it points to (YUYV 4:2:2, 608x480) and saves `DIR/fFFFFF.png`.
+
+**Dolphin without a window.** The Null backend draws nothing, so `--shots` uses `-v Vulkan` with `-p headless` (no surface, it renders offscreen; no Xvfb needed) and:
+- XFB copies written to emulated memory (`XFBToTextureEnable=False`), not deferred (`DeferEFBCopies=False`), no copy filter (`DisableCopyFilter=True`, the vertical deflicker), native resolution, single core;
+- these hacks also go into the profile's `GameSettings/G8ME01.ini`, because TTYD's own game INI is a higher config layer than `-C` and turned the XFB copies back into textures (the first try read an untouched XFB);
+- the XFB (570 KB) is read with pipelined `m` packets parsed a buffer at a time (`RSP.read` parses byte by byte). A `gor_01` run to frame 900 with 6 shots takes 45 s.
+
+**Alignment.** No cropping or scaling: `fbWidth` 608 and `efbHeight` = `xfbHeight` = 480 in the US modes, so the XFB is the EFB 1:1. The XFB is YUV 4:2:2, converted back with the inverse of the GameCube's copy (BT.601, studio range): about 1 to 2 levels of colour error and half the horizontal chroma resolution. Checked on `gor_01` at frame 700: best offset (0, 0) of all shifts within 2 pixels, mean difference 6.1 of 255 (4.3 inside a 4-pixel border), 2.8% of pixels over 32 (edges and texture filtering). PAL's 50 Hz mode stretches 480 lines to 568 (`--xfb-size 608x568`, then scale).
+
+**Azahar's black shots.** With `shots=N`, Azahar sometimes saves a single-colour shot of a frame that drew normally. The gallery's shots (taken after `plat_gpu_sync`) showed none in 368; a single-colour shot would be marked and left out of the score.
+
+**Speed.** Azahar (OpenGL on Xvfb, software GL) runs the game at about 20 to 40 game frames per second; its Vulkan renderer aborts at boot under Xvfb (status 134). An `fx=` batch of 24 effects, 60 frames apart, takes about 5 minutes in Azahar and 4 in Dolphin with 48 shots.
+
+### First results (2026-11-22)
+
+**Effects (B4)**, `tools/port3ds/gallery.py fx --items 0-80,n64:0-102 --name fx_all`: all 184 (81 of `eff_set_table`, 103 of `eff_set_n64`) on `gor_01`, story 30, default arguments, 8 boots of 24, shots 6 and 20 frames after each spawn.
+- Every effect spawned in both builds, no crash, no hang, no unmapped access. The alive checks agree between the builds for all 184: 103 entries are gone 2 frames after the spawn with the default arguments (type 0 at Mario's position), 43 still alive after 60 frames (deleted then).
+- `TEV: ... approximated` warnings, first seen at: `damage_star`, `fire`, `stageclear` (3 stages, TEV compare op), `bomb` (3 GX stages to 5 PICA stages, compare op), `fire` (4 to 6, compare op), `explosion_n64` (more than 6 combiner stages), `flame_n64` (combiner buffer unavailable for a two-step stage). No `GX:` warning after the map was up.
+- Over the review threshold: `bomb` (score 5.1: the port draws its smoke puffs dark grey on black squares, the GameCube white), `flame_n64` (4.6: a black haze where the GameCube has a pale yellow one), `itemget` (1.6: the halftone background opaque white instead of tinted), `freeze_n64` (0.8), `stageclear` (0.8: its letters dark grey instead of green). The first two and the last are effects with a TEV approximation warning. Everything else is at most 0.3.
+
+**`gon_02` struck-first frame** (`gallery.py frames`-style run, `map=gon_02 story=30`, shots every 8 frames): the bottom 57 rows (423 to 479) are black in frames 648 to 680 and half of them at 688 in **both** builds, the same picture (mean difference 5 to 10, all of it texture filtering); the bar is gone from 696 on. `gw_diff.py` over the two `gwdump=4` streams: 275 records equal, frames 4 to 1100 (Mario's position in both: 0, 0, 0 until the battle at 740). `gwdump` has no camera field.
+
+**Battle tables**, `gallery.py battlelist` (a `sweep=40 btllist` run over the 282 maps that are not `stg_*`; 274 visited `ok`): 19 areas have battle setups, 382 in all: `aji` 23, `bom` 7, `dou` 27, `eki` 19, `gon` 21, `gor` 6, `gra` 13, `hei` 27, `jin` 25, `jon` 52, `las` 60, `moo` 16, `mri` 21, `muj` 15, `nok` 1, `pik` 10, `rsh` 2, `tik` 29, `win` 8. `aaa`, `hom`, `kpa`, `tou`, `usu`, `yuu` have an empty table; `bti`, `end`, `sys` no map with an NPC. That run also logged 163,862 unmapped 32-bit writes in Azahar, all in `animPoseMain` (`animdrv.c:4448` `pose->rawFrame`, and 4696; addresses 0x0 to 0x13C, so a NULL `AnimPose`), from about 100 s in to the end. The same sweep of the first ten maps (`aaa_00`, `aji_00` to `aji_08`) did not reproduce it, so the map is not known yet; the fx and battle runs had none. In each area the sweeps use the first map with an enemy NPC (`aji_01`, `bom_01`, `dou_02`, `eki_02`, `gon_04`, `gor_00`, `gra_03`, `hei_01`, `jin_01`, `jon_00`, `las_01`, `moo_01`, `mri_05`, `muj_02`, `nok_00`, `pik_00`, `rsh_02_a`, `tik_01`, `win_00`).
+
+**Battles (B3)**, `gallery.py battlesweep`, port only, `determ`, the default move every turn (the menu's first action and target). Battle results: 1 won, 3 Mario's side defeated, 5 interrupted (`battle_seq_end.c`).
+
+- `btlauto=perfect`, the first and last setup of each area (37 battles, `--per-area 2`, 2 per boot, `gwdump=20`): 28 ended (22 won; 5 lost: `gor` 0 and 5, `bom` 6, `jon` 51, `muj` 0; `nok` 0 interrupted after 364 frames, no turn), 9 did not end in the time given (about 10000 to 22000 frames), all still taking turns: `gon` 20 (Hooktail, 56 turns), `las` 0 and 59, `mri` 20, `muj` 14, `pik` 9, `rsh` 0 and 1, `tik` 28. Every action command result 2. No crash, no hang, no unmapped access, no `GX:` warning; one `TEV: 3 GX stages -> 3 PICA stages approximated: TEV compare op` per boot (the battle's first draw of that setup).
+- `btlauto=fail`, the first setup of each area (19 battles, one per boot): 18 ended (7 won, 10 lost, `nok` 0 interrupted), `jin` 0 still taking turns after 24; every action command result 0. No crash, hang or unmapped access. `muj` adds the `fire` effect's two TEV approximations.
+- Full tables: `build/gallery/btl_perfect/table.md`, `build/gallery/btl_fail/table.md`.
+
+**Battle start against the GameCube**, the first battle of each area's perfect run against the same switches in the debug DOL (Dolphin, `gwdump=20` to frame 4500): the battle starts at the same frame in all 19 areas. The first differing record (always `rng` first):
+- shortly after the start, frames 780 to 820, in 8 areas: `aji`, `gra`, `hei`, `jin`, `mri`, `moo`, `nok`, `win`;
+- later in the battle in 6: `pik` 1160, `bom` 1220, `las` 1620, `dou`, `eki` and `jon` 2520;
+- not at all up to frame 4500 in 5: `gon`, `gor`, `muj`, `rsh`, `tik` (the same menu turns, frame for frame).
+
+Frame by frame (`gwdump=1`, frames 700 to 830): `hei` first differs at 768 (as before), `aji` at 794, `mri` at 803, `gor` and `tik` not at all. Only `hei` shows the clean pattern of the earlier analysis (the same states two frames later); in `aji` and `mri` some of the GameCube's states never appear in the port's stream, so the port makes a different number of `rand` calls there, not only later ones. So the battle-start divergence is not everywhere: it depends on the battle (the enemies' set-up), which points at an enemy- or stage-specific wait rather than at the battle start itself.
+
 ## Risks to determinism not removed
 
 Found, not removed (the runs above show none of them in their streams, but each can move a stream):

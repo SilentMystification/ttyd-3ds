@@ -76,6 +76,7 @@ void plat_options_save(void);
  * should use them for these settings. */
 #define PLAT_OPT_KEY_STEREO3D "stereo3d"
 #define PLAT_OPT_KEY_HUD "hud"
+#define PLAT_OPT_KEY_DEVUPDATE "devupdate" /* developer Select menu: update server on(1)/off(0); unset = the build default */
 #define PLAT_OPT_KEY_VOLUME "volume"
 #define PLAT_OPT_KEY_QUALITY "quality"
 #define PLAT_OPT_KEY_LANGUAGE "language"

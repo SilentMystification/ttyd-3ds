@@ -1,7 +1,8 @@
 /* TTYD's glue to the ctr-devkit updater (libs/ctr-devkit/devupdate/).
  * On in development builds (PORT3DS_VERSION contains "-dev") unless the switch
- * nodevupdate is given. Release builds are off unless the switch devupdate is
- * given (or this launch is a devupdate relaunch).
+ * nodevupdate is given or the option "devupdate" (Select menu, options.txt) is off.
+ * Release builds are off unless the switch devupdate is given, the option is on,
+ * or this launch is a devupdate relaunch.
  *
  *   devupdate             start the server at boot (TCP 5050)
  *   devupdateport=N       another port
@@ -23,12 +24,17 @@
  *     through plat/sdio.c; each log line goes to the queue's `until` matcher
  *     and each game frame is counted. See docs/PORT_3DS_TESTING.md, "Console walk".
  */
+#include <arpa/inet.h>
+#include <stdio.h>
+#include <netinet/in.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "ctrdk/crash.h"
 #include "ctrdk/devupdate.h"
 #include "plat/audio.h"
 #include "plat/gpu.h"
+#include "plat/options.h"
 #include "plat_internal.h"
 #include "port3ds_build.h"
 
@@ -42,10 +48,51 @@ void plat_set_save_busy(int (*fn)(void)) { s_save_busy = fn; }
  * when the restart gave no switches), or the switch devupdate is given, or
  * this is a development build and the switch nodevupdate is not given. */
 int plat_devupdate_enabled(void) {
-    if (devupdate_launched() || plat_switch_has("devupdate")) {
-        return 1;
+    static int s_enabled = -1; /* decided once, at boot (the option is read from options.txt then) */
+    if (s_enabled >= 0) {
+        return s_enabled;
+    }
+    int opt = plat_opt_get(PLAT_OPT_KEY_DEVUPDATE, -1); /* -1: the player never set it */
+    int dev_build = strstr(PORT3DS_VERSION, "-dev") != NULL;
+    if (devupdate_launched() || plat_switch_has("devupdate") || opt == 1) {
+        s_enabled = 1;
+    } else {
+        s_enabled = dev_build && !plat_switch_has("nodevupdate") && opt != 0;
+    }
+    return s_enabled;
+}
+
+/* The option's value as the Select menu shows it: what the next launch will do. */
+int plat_devupdate_wanted(void) {
+    int opt = plat_opt_get(PLAT_OPT_KEY_DEVUPDATE, -1);
+    if (opt >= 0) {
+        return opt;
     }
     return strstr(PORT3DS_VERSION, "-dev") != NULL && !plat_switch_has("nodevupdate");
+}
+
+/* "192.168.1.20:5050" while the server runs and the console has an address, else "". */
+void plat_devupdate_address(char* out, size_t n) {
+    out[0] = '\0';
+    if (!devupdate_running()) {
+        return;
+    }
+    unsigned long ip = (uint32_t)gethostid(); /* libctru's soc: the console's address, network byte order */
+    if (ip == 0 || ip == 0x0100007f) {
+        return;
+    }
+    snprintf(out, n, "%lu.%lu.%lu.%lu:%d", ip & 255, (ip >> 8) & 255, (ip >> 16) & 255, ip >> 24,
+             plat_switch_int("devupdateport", DEVUPDATE_DEFAULT_PORT));
+}
+
+/* Restart the title now with the current switches (the way a devupdate restart does), so a
+ * changed option or the server takes effect at once. */
+void plat_relaunch(void) {
+    PLOG_I("relaunch requested, args \"%s\"", plat_switches_text());
+    plat_options_save();
+    devupdate_set_next_args(plat_switches_text());
+    devupdate_prepare_relaunch();
+    plat_quit(1);
 }
 
 /* The files and queue commands write the card through plat/sdio.c (core 1), like every other writer. */

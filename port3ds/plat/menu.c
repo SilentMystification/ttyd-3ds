@@ -36,7 +36,6 @@ enum { TAB_GENERAL, TAB_DEBUG, TAB_COUNT };
 
 static int s_console_up;
 static int s_open, s_tab, s_row;
-static int s_hud_drawn = -1; /* HUD mode whose rows are on screen */
 static int s_exit_armed;
 static volatile int s_reset_request;
 static char s_warp_map[16], s_warp_bero[16];
@@ -48,18 +47,25 @@ static uint32_t s_last_hud_ms, s_last_frames;
 static float s_fps;
 static PrintConsole s_console;
 
-#define LOG_TOP 2     /* log window top (0-based row) with no menu: rows 3-30 */
-#define LOG_TOP_MENU 15 /* with a menu: rows 16-30 */
-#define MENU_FIRST 3  /* 1-based, first and last row the menu owns */
-#define MENU_LAST 14
+#define LOG_TOP 2 /* log window top (0-based row): rows 3-30 */
+#define LOG_ROWS 28
+#define COLS 40
 
 static int s_menu_mode;
 
-static void log_window(int menu) {
-    int top = menu ? LOG_TOP_MENU : LOG_TOP;
-    consoleSetWindow(&s_console, 1, top + 1, 40, 30 - top); /* libctru window and cursor coordinates are 1-based */
-    s_console.cursorX = 1; /* the log's next line comes at the bottom */
-    s_console.cursorY = 30 - top;
+/* What the screen should show, kept as text so a menu can cover it and the close can
+ * repaint it exactly: the HUD's two lines and the last LOG_ROWS rows of the log
+ * (wrapped at 40 columns; the last one is the row being written). */
+static char s_hud_line[2][COLS + 1];
+static char s_log[LOG_ROWS][COLS + 1];
+static int s_log_col; /* characters in the last row */
+/* What is on the screen for rows 1-30 as far as at() knows: a line is rewritten only when it differs. Row 0 of an entry is '\1' when unknown. */
+static char s_shadow[30][COLS + 1];
+
+static void log_window(void) {
+    consoleSetWindow(&s_console, 1, LOG_TOP + 1, COLS, LOG_ROWS); /* libctru window and cursor coordinates are 1-based */
+    s_console.cursorX = s_log_col + 1; /* the next text continues the last row, at the bottom */
+    s_console.cursorY = LOG_ROWS;
 }
 
 void plat_console_init(void) {
@@ -67,39 +73,91 @@ void plat_console_init(void) {
         return;
     }
     consoleInit(GFX_BOTTOM, &s_console);
-    log_window(0);
+    consoleSetWindow(&s_console, 1, LOG_TOP + 1, COLS, LOG_ROWS);
+    s_console.cursorX = 1;
     s_console.cursorY = 1; /* boot lines fill the window from its top */
+    memset(s_shadow, 1, sizeof(s_shadow));
     s_console_up = 1;
     plat_log_console_ready();
 }
 
 /* Writes one padded line of the 30-row screen without disturbing the log's
- * window or cursor. Caller holds the console lock. row is 1-based. */
+ * window or cursor, unless it is already there. Caller holds the console lock. row is 1-based. */
 static void at(int row, const char* text) {
+    char buf[COLS + 1];
+    snprintf(buf, sizeof(buf), "%-40.40s", text);
+    if (strcmp(buf, s_shadow[row - 1]) == 0) {
+        return;
+    }
+    memcpy(s_shadow[row - 1], buf, sizeof(buf));
     int wx = s_console.windowX, wy = s_console.windowY, ww = s_console.windowWidth, wh = s_console.windowHeight;
     int cx = s_console.cursorX, cy = s_console.cursorY;
-    consoleSetWindow(&s_console, 1, 1, 40, 30);
+    consoleSetWindow(&s_console, 1, 1, COLS, 30);
     s_console.cursorX = 1;
     s_console.cursorY = row;
-    printf("%-40.40s", text); /* all 40 columns, so no stale log text stays in the last one */
+    fputs(buf, stdout);
     consoleSetWindow(&s_console, wx, wy, ww, wh);
     s_console.cursorX = cx;
     s_console.cursorY = cy;
 }
 
-/* A menu is opening (on) or closed (off): the log window shrinks or grows.
+/* The console writer (plat/log.c) hands every log text here, under the console lock.
+ * It always goes into the row buffer; it reaches the screen only when no menu covers it. */
+void plat_console_log(const char* s, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (c == '\r') {
+            continue;
+        }
+        if (c == '\n' || s_log_col >= COLS) {
+            memmove(s_log[0], s_log[1], sizeof(s_log) - sizeof(s_log[0]));
+            s_log[LOG_ROWS - 1][0] = '\0';
+            s_log_col = 0;
+            if (c == '\n') {
+                continue;
+            }
+        }
+        s_log[LOG_ROWS - 1][s_log_col++] = (c >= 32 && c < 127) ? c : '?';
+        s_log[LOG_ROWS - 1][s_log_col] = '\0';
+    }
+    if (!s_menu_mode) {
+        fwrite(s, 1, n, stdout);
+        fflush(stdout);
+        for (int r = LOG_TOP; r < 30; r++) {
+            s_shadow[r][0] = 1; /* the console scrolled: the screen text is no longer known */
+        }
+    }
+}
+
+/* A menu opens (on): it covers the whole screen and the log goes to the buffer only.
+ * Closed (off): the HUD and the log are repainted from the buffers, changed lines only.
  * Caller holds the console lock. */
 void plat_console_menu_mode(int on) {
     if (!s_console_up || s_menu_mode == on) {
         return;
     }
     s_menu_mode = on;
-    if (!on) {
-        for (int r = MENU_FIRST; r <= MENU_LAST + 1; r++) {
-            at(r, "");
-        }
+    if (on) {
+        return;
     }
-    log_window(on);
+    for (int r = 0; r < 2; r++) {
+        at(1 + r, s_hud_line[r]);
+    }
+    for (int r = 0; r < LOG_ROWS; r++) {
+        at(LOG_TOP + 1 + r, s_log[r]);
+    }
+    log_window();
+    for (int r = LOG_TOP; r < 30; r++) {
+        s_shadow[r][0] = 1; /* the log scrolls again */
+    }
+}
+
+/* A HUD line: remembered, and drawn unless a menu covers the screen. */
+static void hud_line(int row, const char* text) {
+    snprintf(s_hud_line[row - 1], sizeof(s_hud_line[0]), "%-40.40s", text);
+    if (!s_menu_mode) {
+        at(row, text);
+    }
 }
 
 void plat_console_row(int row, const char* text) { at(row, text); }
@@ -138,7 +196,7 @@ int plat_take_warp_request(char* map, uint32_t map_size, char* bero, uint32_t be
 
 static const char* const s_level_names[] = {"error", "warn", "info", "debug"};
 
-static int rows_in_tab(void) { return s_tab == TAB_GENERAL ? 3 : 3; }
+static int rows_in_tab(void) { return s_tab == TAB_GENERAL ? 5 : 3; }
 
 static void draw_menu(void) {
     if (!s_console_up || !plat_console_trylock()) {
@@ -148,8 +206,9 @@ static void draw_menu(void) {
     snprintf(line, sizeof(line), " Options  %s %s  (L/R tab)", s_tab == TAB_GENERAL ? "[General]" : " General ",
              s_tab == TAB_DEBUG ? "[Debug]" : " Debug ");
     plat_console_menu_mode(1);
-    at(MENU_FIRST, line);
-    for (int r = 0; r < 9; r++) {
+    at(1, line);
+    at(2, "");
+    for (int r = 0; r < 28; r++) {
         line[0] = '\0';
         const char* cur = r == s_row ? ">" : " ";
         if (s_tab == TAB_GENERAL) {
@@ -162,6 +221,14 @@ static void draw_menu(void) {
             case 2:
                 snprintf(line, sizeof(line), "%s Exit to HOME Menu%s", cur, s_exit_armed ? " (A again)" : "");
                 break;
+            case 3: {
+                char addr[24];
+                plat_devupdate_address(addr, sizeof(addr));
+                snprintf(line, sizeof(line), "%s Update server: %s %s", cur, plat_devupdate_wanted() ? "on" : "off",
+                         plat_devupdate_wanted() != plat_devupdate_enabled() ? "(after relaunch)" : addr);
+                break;
+            }
+            case 4: snprintf(line, sizeof(line), "%s Relaunch (A)", cur); break;
             default: break;
             }
         } else {
@@ -175,7 +242,7 @@ static void draw_menu(void) {
             default: break;
             }
         }
-        at(MENU_FIRST + 2 + r, line);
+        at(3 + r, line);
     }
     plat_console_unlock();
 }
@@ -184,7 +251,7 @@ static void clear_menu(void) {
     if (!s_console_up) {
         return;
     }
-    plat_console_lock(); /* the rows must be blanked: wait for the log writer */
+    plat_console_lock(); /* the repaint must happen: wait for the log writer */
     plat_console_menu_mode(0);
     plat_console_unlock();
 }
@@ -207,6 +274,12 @@ static void activate(int dir) {
                     plat_quit(0);
                 }
                 s_exit_armed = 1;
+            }
+            break;
+        case 3: plat_opt_set(PLAT_OPT_KEY_DEVUPDATE, !plat_devupdate_wanted()); break;
+        case 4:
+            if (dir == 0) {
+                plat_relaunch();
             }
             break;
         default: break;
@@ -311,29 +384,22 @@ void plat_hud_frame(const PlatHudStats* stats) {
         return;
     }
     int mode = opt_get_hud_mode();
-    char line[48];
+    char l1[48] = "", l2[48] = "";
     if (mode == PLAT_OPT_HUD_FULL) {
-        snprintf(line, sizeof(line), "%s %-8s %4.1ffps %s", plat_build_string(), s_stats.map, (double)s_fps,
+        snprintf(l1, sizeof(l1), "%s %-8s %4.1ffps %s", plat_build_string(), s_stats.map, (double)s_fps,
                  plat_qtm_available() ? "QTM" : "QTM:off");
-        at(1, line);
-        snprintf(line, sizeof(line), "cpu%5.1f gpu%5.1fms d%4lu v%5lu h%luK", (double)s_stats.frame_us / 1000.0,
+        snprintf(l2, sizeof(l2), "cpu%5.1f gpu%5.1fms d%4lu v%5lu h%luK", (double)s_stats.frame_us / 1000.0,
                  (double)s_stats.gpu_us / 1000.0, (unsigned long)s_stats.draws, (unsigned long)s_stats.vertices,
                  (unsigned long)s_stats.heap_free_kb);
-        at(2, line);
-    } else if (mode == PLAT_OPT_HUD_FPS) {
-        snprintf(line, sizeof(line), "%4.1f fps", (double)s_fps);
-        at(1, line);
-        if (s_hud_drawn != mode) {
-            at(2, "");
+    } else {
+        if (mode == PLAT_OPT_HUD_FPS) {
+            snprintf(l1, sizeof(l1), "%4.1f fps", (double)s_fps);
         }
-    } else if (s_hud_drawn != mode) {
-        at(1, "");
-        at(2, "");
+        /* the touch hint, where the HUD leaves room */
+        snprintf(mode == PLAT_OPT_HUD_FPS ? l2 : l1, sizeof(l1), "%31s[Options]", "");
     }
-    if (mode != PLAT_OPT_HUD_FULL && !s_open) {
-        at(mode == PLAT_OPT_HUD_FPS ? 2 : 1, "                               [Options]");
-    }
-    s_hud_drawn = mode;
+    hud_line(1, l1);
+    hud_line(2, l2);
     plat_console_unlock();
 }
 
@@ -345,7 +411,6 @@ void plat_menu_frame(void) {
     }
     plat_options_menu_run();
     clear_menu();
-    s_hud_drawn = -1; /* the HUD rows are rewritten at the next refresh */
     s_last_hud_ms = 0;
 }
 

@@ -21,8 +21,11 @@ GxState gx;
  * arguments are small enums and indices, so a recorded call is about as
  * long as the GameCube's register writes for it, and display lists the
  * game builds into fixed heaps (makeDisplayList's map lists) fit as there. */
+int gx_dl_has_ops; /* the display list being recorded holds a state call (gx_pipe.c, gxthread's dedup) */
+
 static void rec(u32 id, const u32* words, u32 n) {
     u8 head[3] = {GXDL_OP_PORT, (u8)id, (u8)n};
+    gx_dl_has_ops = 1;
     gx_dl_put(head, 3);
     for (u32 i = 0; i < n; i++) {
         u8 b[5];

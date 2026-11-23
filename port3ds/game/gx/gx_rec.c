@@ -319,7 +319,178 @@ static inline void commit(u32 n, int kick) {
     }
 }
 
+/* ---- Only state that changed (switch gxthreaddedup, default 1) ----
+ * The game sets most state again before each draw with the value in force
+ * (TEV, blend, vertex format, texture objects). A call whose words equal the
+ * last ones recorded for the same piece of state (its slot) is not recorded:
+ * the translator's state already holds them. Slots are chosen so that no two
+ * slots' calls write the same field (calls that can overlap share a slot and
+ * the stored words include the call id; the colour-channel calls, whose
+ * channel selectors overlap, keep only the last one valid). Everything is
+ * forgotten when the translator's state can change behind the record: a call
+ * to a display list the game built with state calls in it, an exclusive
+ * section or the split's direct part. A call skipped this way would only have
+ * bumped the state version again: build_state is a function of the state. */
+#define DD_WORDS 14
+#define DD_SLOTS 768
+typedef struct {
+    u32 gen;
+    u8 id, n;
+    u32 w[DD_WORDS];
+} DdSlot;
+static DdSlot* s_dd; /* DD_SLOTS, allocated with the ring (the image must stay small) */
+static u32 s_dd_gen = 1;
+static int s_dedup = 1;
+static u32 s_dd_skipped, s_dd_calls;
+
+static inline u32 nbt_nrm(u32 a) { return a == GX_VA_NBT ? GX_VA_NRM : a; }
+
+/* The slot of call `id`, or -1 (always recorded). */
+static int dd_slot(u32 id, const u32* w) {
+    enum { B_VTX = 0, B_VAT = 32, B_ARR = 32 + 8 * 32, B_POSMTX = B_ARR + 32, B_NRMMTX = B_POSMTX + 10,
+           B_TEXMTX = B_NRMMTX + 10, B_TG = B_TEXMTX + 64, B_CHAN = B_TG + 8, B_LIGHT = B_CHAN + 18,
+           B_TEV = B_LIGHT + 8, B_KCOLOR = B_TEV + 16 * 9, B_SWAPT = B_KCOLOR + 4, B_TEVREG = B_SWAPT + 4,
+           B_TEXOBJ = B_TEVREG + 4, B_TLUT = B_TEXOBJ + 8, B_IND = B_TLUT + 20, B_GLOBAL = B_IND + 12 };
+    _Static_assert(B_GLOBAL + 40 <= DD_SLOTS, "dedup slots");
+    switch (id) {
+    case REC_SetVtxDesc: return w[0] < 32 ? B_VTX + (int)nbt_nrm(w[0]) : -1;
+    case REC_SetVtxAttrFmt: return w[0] < 8 && w[1] < 32 ? B_VAT + (int)(w[0] * 32 + nbt_nrm(w[1])) : -1;
+    case REC_SetArray: return w[0] < 32 ? B_ARR + (int)nbt_nrm(w[0]) : -1;
+    case REC_LoadPosMtx: return w[0] / 3 < 10 ? B_POSMTX + (int)(w[0] / 3) : -1;
+    case REC_LoadNrmMtx: return w[0] / 3 < 10 ? B_NRMMTX + (int)(w[0] / 3) : -1;
+    case REC_LoadTexMtx: return w[0] / 3 < 64 ? B_TEXMTX + (int)(w[0] / 3) : -1;
+    case REC_SetTexCoordGen2: return w[0] < 8 ? B_TG + (int)w[0] : -1;
+    case REC_SetChanCtrl: return w[0] < 6 ? B_CHAN + (int)w[0] : -1;
+    case REC_SetChanAmbColor: return w[0] < 6 ? B_CHAN + 6 + (int)w[0] : -1;
+    case REC_SetChanMatColor: return w[0] < 6 ? B_CHAN + 12 + (int)w[0] : -1;
+    case REC_LoadLightObj: {
+        u32 l = w[0] & 0xFF;
+        return l != 0 && (l & (l - 1)) == 0 ? B_LIGHT + (31 - __builtin_clz(l)) : -1;
+    }
+    case REC_SetTevOrder: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 0 : -1;
+    case REC_SetTevColorIn: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 1 : -1;
+    case REC_SetTevAlphaIn: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 2 : -1;
+    case REC_SetTevColorOp: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 3 : -1;
+    case REC_SetTevAlphaOp: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 4 : -1;
+    case REC_SetTevKColorSel: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 5 : -1;
+    case REC_SetTevKAlphaSel: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 6 : -1;
+    case REC_SetTevSwapMode: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 7 : -1;
+    case REC_SetTevDirect:
+    case REC_SetTevIndirect: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 8 : -1; /* both write ind_enabled */
+    case REC_SetTevKColor: return w[0] < 4 ? B_KCOLOR + (int)w[0] : -1;
+    case REC_SetTevSwapModeTable: return w[0] < 4 ? B_SWAPT + (int)w[0] : -1;
+    case REC_SetTevColor:
+    case REC_SetTevColorS10: return w[0] < 4 ? B_TEVREG + (int)w[0] : -1; /* one register */
+    case REC_LoadTexObj: return w[0] < 8 ? B_TEXOBJ + (int)w[0] : -1;
+    case REC_LoadTlut: return w[0] < 20 ? B_TLUT + (int)w[0] : -1;
+    case REC_SetIndTexOrder: return w[0] < 4 ? B_IND + (int)w[0] : -1;
+    case REC_SetIndTexCoordScale: return w[0] < 4 ? B_IND + 4 + (int)w[0] : -1;
+    case REC_SetIndTexMtx: return w[0] >= GX_ITM_0 && w[0] < GX_ITM_0 + 3 ? B_IND + 8 + (int)(w[0] - GX_ITM_0) : -1;
+    case REC_SetDispCopySrc:
+    case REC_SetTexCopySrc: return B_GLOBAL + 0; /* one copy source */
+    case REC_SetCurrentMtx: return B_GLOBAL + 1;
+    case REC_SetNumTexGens: return B_GLOBAL + 2;
+    case REC_SetNumChans: return B_GLOBAL + 3;
+    case REC_SetNumTevStages: return B_GLOBAL + 4;
+    case REC_SetAlphaCompare: return B_GLOBAL + 5;
+    case REC_SetBlendMode: return B_GLOBAL + 6;
+    case REC_SetZMode: return B_GLOBAL + 7;
+    case REC_SetZCompLoc: return B_GLOBAL + 8;
+    case REC_SetColorUpdate: return B_GLOBAL + 9;
+    case REC_SetAlphaUpdate: return B_GLOBAL + 10;
+    case REC_SetCullMode: return B_GLOBAL + 11;
+    case REC_SetFog: return B_GLOBAL + 12;
+    case REC_SetScissor: return B_GLOBAL + 13;
+    case REC_SetViewport: return B_GLOBAL + 14;
+    case REC_SetProjection: return B_GLOBAL + 15;
+    case REC_SetLineWidth: return B_GLOBAL + 16;
+    case REC_SetNumIndStages: return B_GLOBAL + 17;
+    case REC_SetZScaleOffset: return B_GLOBAL + 18;
+    case REC_SetScissorBoxOffset: return B_GLOBAL + 19;
+    case REC_SetDstAlpha: return B_GLOBAL + 20;
+    case REC_SetPixelFmt: return B_GLOBAL + 21;
+    case REC_SetZTexture: return B_GLOBAL + 22;
+    case REC_SetCopyClear: return B_GLOBAL + 23;
+    case REC_SetDispCopyDst: return B_GLOBAL + 24;
+    case REC_SetDispCopyYScale: return B_GLOBAL + 25;
+    case REC_SetTexCopyDst: return B_GLOBAL + 26;
+    default: return -1; /* ClearVtxDesc (see below), copies, syncs, the bounding box */
+    }
+}
+
+static void dd_forget(void) {
+    if (++s_dd_gen == 0) {
+        memset(s_dd, 0, DD_SLOTS * sizeof(DdSlot));
+        s_dd_gen = 1;
+    }
+}
+
+/* Lists the game built with state calls in them (their start addresses). */
+#define SL_SLOTS 2048
+static const void** s_state_lists; /* SL_SLOTS, allocated with the ring */
+
+static u32 sl_hash(const void* p) { return ((u32)p >> 5) * 2654435761u >> 21; }
+
+void gx_rec_state_list(const void* list) {
+    if (!gx_rec_mode || s_state_lists == NULL) {
+        return;
+    }
+    u32 h = sl_hash(list);
+    for (u32 i = 0; i < SL_SLOTS; i++, h = (h + 1) & (SL_SLOTS - 1)) {
+        if (s_state_lists[h] == list) {
+            return;
+        }
+        if (s_state_lists[h] == NULL) {
+            s_state_lists[h] = list;
+            return;
+        }
+    }
+    s_dedup = 0; /* table full: stop skipping calls (never seen) */
+    PLOG_W("gxthread: more than %d display lists with state calls: dedup off", SL_SLOTS);
+}
+
+static int is_state_list(const void* list) {
+    u32 h = sl_hash(list);
+    for (u32 i = 0; i < SL_SLOTS; i++, h = (h + 1) & (SL_SLOTS - 1)) {
+        if (s_state_lists[h] == list) {
+            return 1;
+        }
+        if (s_state_lists[h] == NULL) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
 void gx_rec_call(u32 id, const u32* w, u32 n) {
+    if (s_dedup) {
+        s_dd_calls++;
+        int sl = n <= DD_WORDS ? dd_slot(id, w) : -1;
+        if (sl >= 0) {
+            DdSlot* d = &s_dd[sl];
+            if (d->gen == s_dd_gen && d->id == id && d->n == n && gx_mem_equal(d->w, w, n * 4)) {
+                s_dd_skipped++;
+                return; /* the translator's state holds it already */
+            }
+            d->gen = s_dd_gen;
+            d->id = (u8)id;
+            d->n = (u8)n;
+            memcpy(d->w, w, n * 4);
+            if (id == REC_SetChanCtrl || id == REC_SetChanAmbColor || id == REC_SetChanMatColor) {
+                /* channel selectors overlap (COLOR0A0 covers COLOR0 and ALPHA0): only this one stays valid */
+                int base = sl - (int)w[0];
+                for (int c = 0; c < 6; c++) {
+                    if (c != (int)w[0]) {
+                        s_dd[base + c].gen = 0;
+                    }
+                }
+            }
+        } else if (id == REC_ClearVtxDesc) {
+            for (int a = 0; a < 32; a++) {
+                s_dd[a].gen = 0; /* the vertex description slots */
+            }
+        }
+    }
     u32* c = put(id, n);
     for (u32 i = 0; i < n; i++) {
         c[i] = w[i];
@@ -334,6 +505,9 @@ void gx_rec_call(u32 id, const u32* w, u32 n) {
 }
 
 void gx_rec_list(const void* list, u32 nbytes, const void* caller) {
+    if (s_dedup && is_state_list(list)) {
+        dd_forget(); /* its state calls change the translator's state */
+    }
     u32 n = gx_rec_mode == 3 ? 4 : 3;
     u32* c = put(GXR_LIST, n);
     c[0] = (u32)list;
@@ -514,26 +688,54 @@ void gx_rec_raw(const PPCWGPipe* slots, u32 nslots) {
 
 static void frame_sync(u64 waited, u64 now);
 
+/* Waits until everything recorded before ring position `upto` is translated. */
+static void wait_translated(u32 upto) {
+    if (gx_rec_mode == 2) {
+        publish();
+        if ((s32)(load_sc(&s_rd_pub) - upto) < 0) {
+            store_sci(&s_want_done, 1);
+            while ((s32)(load_sc(&s_rd_pub) - upto) < 0) {
+                plat_event_wait(s_ev_done);
+            }
+            store_sci(&s_want_done, 0);
+        }
+    } else if ((s32)(s_rd - upto) < 0) {
+        gx_tls_translator = 1;
+        consume(upto);
+        gx_tls_translator = 0;
+    }
+    /* verify: drop the reports no pending call can be read after */
+    u32 k = 0;
+    for (u32 i = 0; i < s_nrep; i++) {
+        if ((s32)(s_rep[i].pos - upto) > 0) {
+            s_rep[k++] = s_rep[i];
+        }
+    }
+    s_nrep = k;
+}
+
+/* gxpipeline=1: the frame's own draw sync (the first GXReadDrawSync after GXCopyDisp) does not wait for this
+ * frame's translation, only for the frame before's, so core 2 translates and replays frame N while the game
+ * runs frame N+1, as the GameCube's GPU overlaps the CPU's next frame. Every other fence still waits for all. */
+static int s_pipeline;
+static u32 s_frame_mark; /* ring position at the last frame's draw sync */
+static u32 s_pipe_waits; /* frame-end fences that had to wait for the frame before */
+
 void gx_rec_fence(int why) {
     if (!gx_rec_on()) {
         return;
     }
     u64 t0 = plat_ticks();
-    if (gx_rec_mode == 2) {
-        publish();
-        if (load_sc(&s_rd_pub) != s_wr) {
-            store_sci(&s_want_done, 1);
-            while (load_sc(&s_rd_pub) != s_wr) {
-                plat_event_wait(s_ev_done);
-            }
-            store_sci(&s_want_done, 0);
+    if (why == GXF_SYNC && s_pipeline && s_after_copydisp) {
+        u32 prev = s_frame_mark;
+        s_frame_mark = s_wr;
+        if ((s32)(rd_seen() - prev) < 0) {
+            s_pipe_waits++;
         }
-    } else if (s_rd != s_wr) {
-        gx_tls_translator = 1;
-        consume(s_wr);
-        gx_tls_translator = 0;
+        wait_translated(prev);
+    } else {
+        wait_translated(s_wr);
     }
-    s_nrep = 0; /* verify: every recorded call is translated, no report can follow one */
     u64 t1 = plat_ticks();
     s_gs.fences[why]++;
     s_gs.t_fence[why] += t1 - t0;
@@ -605,6 +807,7 @@ static void frame_sync(u64 waited, u64 now) {
 void gx_rec_switch(void) {
     memcpy(&gx_game, &gx, sizeof(gx));
     gx_rec_direct = 0;
+    dd_forget();
 }
 
 void gx_rec_direct_list(void) {
@@ -626,6 +829,7 @@ void gx_rec_excl_end(void) {
     if (s_excl) {
         s_excl = 0;
         gx_tls_translator = 0;
+        dd_forget();
     }
 }
 
@@ -760,8 +964,19 @@ void gx_rec_frame(void) {
            (unsigned long)(s_gs.fences[4] / f), (unsigned long)(s_gs.fences[4] * 100 / f % 100),
            (unsigned long)us_of(s_gs.t_fence[4], f), (unsigned long)(s_gs.fences[5] / f),
            (unsigned long)(s_gs.fences[5] * 100 / f % 100), (unsigned long)us_of(s_gs.t_fence[5], f));
-    PLOG_I("gxthread   array snapshots: %lu bytes per frame, %lu spans too large (read live), %lu not used (total)",
-           (unsigned long)(s_snap_bytes / f), (unsigned long)s_snap_live, (unsigned long)s_snap_mism);
+    PLOG_I("gxthread   array snapshots: %lu bytes per frame, %lu spans too large (read live), %lu not used (total)%s",
+           (unsigned long)(s_snap_bytes / f), (unsigned long)s_snap_live, (unsigned long)s_snap_mism,
+           s_pipeline ? " | pipelined" : "");
+    if (s_dedup) {
+        PLOG_I("gxthread   dedup: %lu of %lu state calls per frame not recorded (unchanged)",
+               (unsigned long)(s_dd_skipped / f), (unsigned long)(s_dd_calls / f));
+        s_dd_skipped = s_dd_calls = 0;
+    }
+    if (s_pipeline) {
+        PLOG_I("gxthread   pipeline: %lu of %lu frame ends waited for the frame before", (unsigned long)s_pipe_waits,
+               (unsigned long)f);
+        s_pipe_waits = 0;
+    }
     s_snap_bytes = 0;
     if (gx_rec_mode == 3) {
         u32 gm = 0;
@@ -792,6 +1007,11 @@ void gx_rec_init(void) {
     s_stats_every = (u32)plat_switch_int("gxthreadstats", plat_switch_int("gxstats", 0));
     s_fence_release = plat_switch_int("gxthreadrel", 1) != 0;
     s_split = plat_switch_int("gxthreadsplit", 1) != 0;
+    s_pipeline = plat_switch_int("gxpipeline", 0) != 0;
+    s_dedup = plat_switch_int("gxthreaddedup", 1) != 0;
+    if (s_pipeline) {
+        s_split = 0; /* the split needs the translator idle at a frame's start */
+    }
     s_split_fixed = plat_switch_int("gxthreadsplitat", -1) >= 0;
     if (s_split_fixed) {
         s_switch_at = (u32)plat_switch_int("gxthreadsplitat", 0);
@@ -808,6 +1028,11 @@ void gx_rec_init(void) {
     if (s_ring == NULL) {
         PLOG_W("gxthread: no memory for a %lu KB ring: GX translates on the game thread", (unsigned long)(words / 256u));
         return;
+    }
+    s_dd = calloc(DD_SLOTS, sizeof(DdSlot));
+    s_state_lists = calloc(SL_SLOTS, sizeof(*s_state_lists));
+    if (s_dd == NULL || s_state_lists == NULL) {
+        s_dedup = 0;
     }
     s_ring_words = words;
     s_ring_mask = words - 1;

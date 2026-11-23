@@ -833,6 +833,7 @@ void GXBeginDisplayList(void* list, u32 size) {
         plat_fatal("GXBeginDisplayList twice");
     }
     plat_memstable_release(list, size); /* the CPU builds a list here: no longer disc content */
+    gx_dl_has_ops = 0;
     s_dl_buf = list;
     s_dl_size = size;
     s_dl_used = 0;
@@ -852,6 +853,9 @@ u32 GXEndDisplayList(void) {
     u32 used = s_dl_overflow ? 0 : s_dl_used;
     if (s_dl_overflow) {
         PLOG_W("GX: display list overflowed its %lu-byte buffer", (unsigned long)s_dl_size);
+    }
+    if (gx_dl_has_ops) {
+        gx_rec_state_list(s_dl_buf); /* calling it changes the translator's state behind the record */
     }
     s_dl_buf = NULL;
     return used;

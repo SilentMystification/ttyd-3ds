@@ -170,11 +170,19 @@ Azahar, HLE DSP, 34% speed, both sides recorded the same way (the machine was lo
 |---|---|---|---|---|---|---|---|
 | title (a stream; 4 s to 38 s) | 0.86/0.92; 0.99/0.99 | +0.10/+0.06 | 1.26 (4.1 at 16 kHz) | 0 | 0.96 | 0.0/0.0 | ok |
 | battle (6 streams) | 0.93/0.92; 0.82/0.81 | +0.19/+0.16 | 2.27 (7.4 at 16 kHz) | 0 | 0.92 | 0.0/1.2 | ok |
-| `gor_01` | 0.83/0.83; 0.72/0.75 | +0.05/+0.03 | 1.29 (4.1 at 16 kHz) | 0 | 0.94 | 53/85 | clicks |
+| `gor_01` | 0.83/0.83; 0.72/0.75 | +0.05/+0.03 | 1.29 (4.1 at 16 kHz) | 0 | 0.94 | 53/85 | clicks (high-frequency noise above 10 kHz, see below) |
 
 - The 16 kHz band is NDSP's 32728 Hz output and polyphase filter against the 32 kHz mix (as for `win_00` above). The envelope numbers are the instrument's (Azahar stalls). Level and pitch agree to 0.2 dB and exactly.
-- `gor_01` clicks: voices alone (`ndspvoices=1`) against `ndspvoices=0`: 67/53 a minute, voices plus streams against voices alone 85/67. Footsteps and jumps are the clicks (the doc's earlier 11 a minute between identical runs); +18 is above that, and the title and battle, which are all music, show none, so the segment joins are not the cause, but the cause is not pinned.
+- `gor_01` clicks (+18 a minute with streams): **not clicks of the stream path; the detector counts high-frequency noise.** Pinned with the event log (`ndspevlog=1`: voice starts/stops, stream starts, refills as the mirror applies them, segment queueing with ring wraps, underruns, each with its output frame; the log lines are `[EV] kind chN t T now N a b`, and `tools/port3ds/audio_clicks.py REC.wav --log game_log.txt` lines the clicks up with them: the recording's offset against the game clock is found from the voice starts' onsets) on two captures, `ndspstreams=1` (117 clicks, 88 a minute) and `ndspstreams=0` (83, 62 a minute), both `ndspvoices=1`:
+  - None of the event classes lines up with the clicks. Within 3 ms of a click: segment queues 28, ring wraps 11, refill applications 33, voice starts 0, voice stops 3 (the 7000 to 8000 events in 80 s put about 10 to 30 of 117 clicks within 3 ms of an event by chance); the phase of the clicks within the 17.5 ms segment is flat; 0 underruns, 0 waits. Only 2 of 117 clicks lie within 5 ms of a cut (Azahar stall) of the recording.
+  - Cutting the recording with a low-pass before the detector: at 22 kHz 88/62 a minute, at 14 kHz 28/18, at **10 kHz 2/1, at 6 kHz 0/0**. Every "click" is above 10 kHz: the detector's second difference over a noisy high-frequency signal (hi-hat and ambient noise at -16 dBFS peaks, 10 to 13 times the local second-difference RMS against the threshold 10), at a rhythm of about 215 ms (the music's), not a discontinuity.
+  - The NDSP stream has more high frequencies than the software mix: stream on against stream in software, per band (25 to 75 s of the recording): 0.1 to 4 kHz +0.1 dB, 4 to 8 kHz +0.9, 8 to 12 kHz +2.6, 12 to 16 kHz +3.8, 16 to 20 kHz +4.1. That is the `spectrum` column above (4.1 dB at 16 kHz), the same gap a `win_00` NDSP voice has, and it pushes more of the noise over the detector's ratio. The same two runs' clicks do not even fall at the same moments (107 of 117 unmatched within 30 ms), so a run-to-run count is not a per-event measure.
+  - So there is no extra click to fix at the segment joins, the ring wrap or the refill application, and the voice path adds none. What remains is the 2.6 to 4 dB of top-band energy of NDSP's resampler (polyphase) against MusyX's software resampler for music; not changed here (it is the NDSP voice's `interp` and its 32 to 32.7 kHz conversion; a run with `NDSP_INTERP_LINEAR` on streams would show whether it is the interpolation).
 - Streams on NDSP in the runs: title 4 starts (two stereo pieces), battle 6, `gor_01` 4; 0 underruns, 0 waits, 0 dropped refill events; refills about 600 a minute per stereo pair.
+
+### Event log and static memory
+
+`ndspevlog=1` (with `ndspvoices=1`) logs the events above to the game log; it keeps 256 entries in memory and writes them every DSP frame. The port's static data ends within about 9 KB of the 16 MB limit `boot.c` checks (`__end__` must stay below 0x01000000, or the game stops at boot with `svcBreak`; the gx display-list cache is most of it): a larger buffer there crashed the boot.
 
 ### CPU, streams
 

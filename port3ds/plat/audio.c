@@ -595,6 +595,36 @@ void plat_voice_note(uint32_t software, uint32_t ndsp, uint32_t aux, uint32_t ov
     s_vstat.aux_late = aux_late;
 }
 
+/* --- Event log (switch ndspevlog=1): voice and stream events with their output-frame times, kept in
+ * memory and written out with the stats line. 'N' now (channel 0's playback position) once a second,
+ * 'S' voice start / 'X' stop (event time, applied at now), 'T' stream start, 'R' refill applied
+ * (off, len), 'Q' segment queued (ring position, absolute sample; 'W' when it starts at the ring's
+ * head), 'U' underrun. Output frames are 32 kHz; the recording's time is these over 32000. --- */
+#define EVLOG_MAX 256 /* small: the port's static data is within 14 KB of the 16 MB limit boot.c checks */
+static int s_evlog_on;
+static struct { uint32_t t, now, a, b; char k; uint8_t ch; } s_evlog[EVLOG_MAX];
+static uint32_t s_evlog_head, s_evlog_tail;
+static void evlog(char k, int ch, uint32_t t, uint32_t now, uint32_t a, uint32_t b) {
+    if (!s_evlog_on || s_evlog_head - s_evlog_tail >= EVLOG_MAX) {
+        return;
+    }
+    __typeof__(s_evlog[0])* e = &s_evlog[s_evlog_head++ % EVLOG_MAX];
+    e->k = k;
+    e->ch = (uint8_t)ch;
+    e->t = t;
+    e->now = now;
+    e->a = a;
+    e->b = b;
+}
+static void evlog_flush(void) {
+    int n = 0;
+    while (s_evlog_tail != s_evlog_head && n++ < 400) {
+        __typeof__(s_evlog[0])* e = &s_evlog[s_evlog_tail++ % EVLOG_MAX];
+        PLOG_I("[EV] %c ch%d t %lu now %lu %lu %lu", e->k, e->ch, (unsigned long)e->t, (unsigned long)e->now,
+               (unsigned long)e->a, (unsigned long)e->b);
+    }
+}
+
 /* --- NDSP streams --- */
 
 static int s_streams_on;
@@ -729,6 +759,7 @@ static void stream_pump(int ch) {
         }
     }
     if (pending == 0 && !st->first && any_done) {
+        evlog('U', ch, st->abs_next, s_play_pos, 0, 0);
         s_sstat.underruns++;
     }
     uint32_t guard = st->samples * 2 / 5;
@@ -768,6 +799,7 @@ static void stream_pump(int ch) {
             st->first = 0;
         }
         ndspChnWaveBufAdd(ch, wb);
+        evlog(rp == 0 ? 'W' : 'Q', ch, st->wb_abs[i], s_play_pos, rp, q);
         st->abs_next += len;
         pending++;
     }
@@ -779,6 +811,7 @@ static void apply_sdata(const StreamEvent* e) {
         return;
     }
     memcpy(st->mirror + e->off, st->ring + e->off, e->len);
+    evlog('R', st->ch, e->at, s_play_pos, e->off, e->len);
     DSP_FlushDataCache(st->mirror + e->off, e->len);
     s_sstat.refills++;
     s_sstat.refill_bytes += e->len;
@@ -818,6 +851,7 @@ static void apply_event(const VoiceEvent* e) {
     VoiceChannel* vc = &s_vch[ch];
     switch (e->type) {
     case EV_STOP:
+        evlog('X', ch, e->at, s_play_pos, 0, 0);
         ndspChnWaveBufClear(ch);
         channel_release(ch);
         break;
@@ -830,6 +864,7 @@ static void apply_event(const VoiceEvent* e) {
         if (e->cache <= -2) {
             int slot = -2 - e->cache;
             StreamSlot* st = &s_str[slot];
+            evlog('T', ch, e->at, s_play_pos, slot, 0);
             ndspChnWaveBufClear(ch);
             channel_release(ch);
             vc->stream = (int8_t)slot; /* the start event's reference moves to the channel */
@@ -842,6 +877,7 @@ static void apply_event(const VoiceEvent* e) {
             break;
         }
         CacheEntry* c = &s_cache[e->cache];
+        evlog('S', ch, e->at, s_play_pos, e->cache, 0);
         ndspChnWaveBufClear(ch);
         channel_release(ch);
         vc->cache = e->cache; /* the start event's reference moves to the channel */
@@ -897,6 +933,11 @@ static void apply_due_events(void) {
         return;
     }
     uint32_t now = play_position();
+    static uint32_t last_n;
+    if (s_evlog_on && now - last_n >= s_rate) {
+        last_n = now;
+        evlog('N', 0, now, now, 0, 0);
+    }
     while (s_sev_tail != s_sev_head) {
         const StreamEvent* se = &s_sev[s_sev_tail % STREAM_EVENTS];
         int32_t sahead = (int32_t)(se->at - now);
@@ -924,6 +965,7 @@ static void apply_due_events(void) {
 
 static void voices_log(void) {
     static uint64_t since;
+
     if (s_vstats_every <= 0 || s_frames - since < (uint64_t)s_rate * s_vstats_every) {
         return;
     }
@@ -975,6 +1017,7 @@ static void voices_init(void) {
         s_vch[ch].interp = 0;
     }
     s_streams_on = plat_switch_int("ndspstreams", 0) != 0;
+    s_evlog_on = plat_switch_int("ndspevlog", 0) != 0;
     s_voices_on = 1;
     PLOG_I("audio: NDSP voices on, channels 1..%d, sample cache %lu KB (linear free %lu KB), streams %s", VOICE_CHANNELS,
            (unsigned long)(s_cache_budget / 1024), (unsigned long)(free_lin / 1024), s_streams_on ? "on" : "off");
@@ -1009,6 +1052,7 @@ static void ndsp_thread(void* arg) {
             }
         }
         s_busy_ticks += svcGetSystemTick() - t0;
+        evlog_flush();
         voices_log();
         int done = 0;
         for (int i = 0; i < WAVEBUFS; i++) {

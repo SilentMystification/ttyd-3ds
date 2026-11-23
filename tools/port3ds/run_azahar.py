@@ -28,6 +28,7 @@ import atexit
 import fcntl
 import os
 import re
+import resource
 import shutil
 import signal
 import struct
@@ -124,6 +125,13 @@ def acquire_slot():
             print(f"run_azahar: waiting for a free Azahar slot ({used} in use)", flush=True)
             told = True
         time.sleep(5)
+
+
+def emulator_preexec():
+    """Runs in the child before exec: no core dump (a crashed emulator would be dumped by systemd-coredump,
+    costing minutes of CPU and disk) and a lower priority, so builds and the desktop get the cores first."""
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    os.nice(10)
 
 
 def fail(msg, code=1):
@@ -253,7 +261,8 @@ def cia_title_id(cia):
 
 def install_cia(cia, sdmc):
     print(f"run_azahar: installing {cia.name}")
-    r = subprocess.run(flatpak_cmd(["-i", str(cia)]), env=run_env(), capture_output=True, text=True, timeout=120)
+    r = subprocess.run(flatpak_cmd(["-i", str(cia)]), env=run_env(), capture_output=True, text=True, timeout=120,
+                       preexec_fn=emulator_preexec)
     if r.returncode != 0 or "Installed CIA successfully" not in r.stdout + r.stderr:
         print(r.stdout[-2000:], r.stderr[-2000:])
         fail("CIA install failed", 2)
@@ -346,7 +355,7 @@ def main():
     print(f"run_azahar: booting {boot}")
     with open(stdout_path, "w") as so:
         proc = subprocess.Popen(flatpak_cmd([str(boot)]), env=run_env(), stdout=so, stderr=subprocess.STDOUT,
-                                start_new_session=True)
+                                start_new_session=True, preexec_fn=emulator_preexec)
         atexit.register(lambda p=proc: stop_azahar(p))
 
     until = re.compile(args.until) if args.until else None

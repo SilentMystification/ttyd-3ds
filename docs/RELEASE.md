@@ -8,6 +8,11 @@ The version lives in one place: `port3ds/VERSION` (`MAJOR.MINOR.MICRO`, semver).
 
 The log banner and the error screen show `<version>-dev+<shorthash>` for any build that is not a clean tree at the tag `v<version>`. The CIA and SMDH carry the plain `x.y.z`, because they are made when CMake configures and must not go stale.
 
+
+## Standing rule: no game assets in the binaries
+
+The CIA, the 3dsx and every release package contain no game assets. Models, textures, maps, sound, text and the executable's data arrays are read from the player's own disc image at run time. The binaries hold compiled code (the decompiled game, the SDK, MusyX and the port) and the port's own data (the generated JP ROM font, placeholder banner, icon and sound, the per-region arena value). New data the port needs from the game is read from the disc image, never embedded. The build's image-array check (a fixed list of about 7 KB of small arrays in the decompiled sources) must not grow, and `release.py` refuses artifacts that look like a disc image.
+
 ## Checklist
 
 1. **Tests**, on the commit to release (nothing dirty):

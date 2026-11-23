@@ -13,12 +13,15 @@
  *
  * Where each GX register's current value lives is tracked: its initial
  * GXSetTevColor value (a constant), the previous PICA stage's output, or the
- * combiner buffer (kept with the buffer update bits). Texture units are
- * assigned by gx_draw.c (`unit_of_map`); the raster color is the vertex
- * color. Setups that need more than six PICA stages or a constant layout
- * PICA cannot express are logged once (with their stage count and the
- * reason) and drawn with the closest result; docs/PORT_3DS_PLAN.md 5.4 has
- * the multipass plan for them.
+ * combiner buffer (kept with the buffer update bits), and a half whose
+ * result is a constant needs no stage. Texture units are assigned by
+ * gx_draw.c, one per (map, texcoord) pair (`gx_unit_of_stage`); the raster
+ * color is the vertex color. Compare ops are folded, simplified or turned
+ * into thresholds (plan_cmp). Setups that need more than six PICA stages or
+ * a constant layout PICA cannot express are logged once (with their stage
+ * count and the reason) and drawn with the closest result; a game can give
+ * exact programs for its own setups (gx_tev_game_override).
+ * tools/port3ds/tev_check checks the compiler against the GX TEV in software.
  */
 #include <string.h>
 
@@ -75,13 +78,15 @@ typedef struct {
     PlatGpuState* st;
     int n;              /* PICA stages emitted */
     int overflow;
-    int unit_of_map[GX_MAX_TEXMAP];
+    int unit_of_stage[GX_MAX_TEV];
     u8 loc_c[4], loc_a[4]; /* location of PREV, REG0..2 (color, alpha) */
     int buf_c_reg, buf_a_reg; /* which GX reg the buffer holds, -1 none */
+    u8 kv[4][4];        /* value of a register at LOC_CONST: GXSetTevColor's, or a constant a stage wrote */
+    int sharp;          /* compare ops: further x4 threshold stages still allowed (each multiplies the slope by 4) */
     const char* approx;
 } Ctx;
 
-extern int gx_unit_of_map[GX_MAX_TEXMAP];
+extern int gx_unit_of_stage[GX_MAX_TEV];
 
 static u8 clamp8(int v) { return (u8)(v < 0 ? 0 : v > 255 ? 255 : v); }
 
@@ -139,8 +144,8 @@ static Opnd reg_opnd(Ctx* c, int reg, int alpha_part, int is_alpha) {
     case LOC_PREV: o.src = SRC_PREV; break;
     case LOC_BUF: o.src = SRC_BUFFER; break;
     default: {
-        GXColorS10 v = gx.tev_reg[reg];
-        o = k_const(clamp8(v.r), clamp8(v.g), clamp8(v.b), clamp8(v.a));
+        const u8* v = c->kv[reg];
+        o = k_const(v[0], v[1], v[2], v[3]);
         if (alpha_part) {
             o.val[0] = o.val[1] = o.val[2] = o.val[3];
         }
@@ -154,7 +159,7 @@ static Opnd reg_opnd(Ctx* c, int reg, int alpha_part, int is_alpha) {
 static Opnd tex_opnd(Ctx* c, int s, int want_alpha, int is_alpha, int chan) {
     int map = gx.tev[s].map;
     Opnd o = {0};
-    int unit = map < GX_MAX_TEXMAP ? c->unit_of_map[map] : -1;
+    int unit = map < GX_MAX_TEXMAP ? c->unit_of_stage[s] : -1;
     if (unit < 0) {
         return k_const(255, 255, 255, 255); /* no texture: GX reads white */
     }
@@ -252,6 +257,13 @@ static int is_one(const Opnd* o) {
     return o->is_const && o->val[0] == 255 && o->val[1] == 255 && o->val[2] == 255 && o->val[3] == 255;
 }
 
+static int same_opnd(const Opnd* x, const Opnd* y) {
+    if (x->is_const || y->is_const) {
+        return x->is_const && y->is_const && !memcmp(x->val, y->val, 4);
+    }
+    return x->src == y->src && x->op == y->op;
+}
+
 /* A planned PICA operation for one half (rgb or alpha) of a stage. */
 typedef struct {
     u8 func;
@@ -312,6 +324,12 @@ static int plan(Half* out, Opnd a, Opnd b, Opnd cc, Opnd d, u8 op, u8 bias, u8 s
     } else if (is_zero(&d) && !sub) {
         h.func = F_INTERPOLATE;
         h.s[0] = b;
+        h.s[1] = a;
+        h.s[2] = cc;
+    } else if (!sub && is_zero(&b) && same_opnd(&cc, &d)) {
+        /* c + (1 - c) a: a lerp toward one */
+        h.func = F_INTERPOLATE;
+        h.s[0] = k_const(255, 255, 255, 255);
         h.s[1] = a;
         h.s[2] = cc;
     } else {
@@ -597,11 +615,152 @@ static int read_later(int from, int reg, int alpha) {
     return 0;
 }
 
+/* ---- Compare ops ----
+ * GX: out = d + (a CMP b ? c : 0), compared per channel (RGB8, and A8 for
+ * alpha) or on the red, green-red or blue-green-red value of a and b's color
+ * (R8, GR16, BGR24; for the alpha half too). PICA has no compare, so:
+ *  - folded when a and b are constants (a mask of c);
+ *  - "a > 0 ? a : 0" is a, exactly (the letters of stageclear and sys);
+ *  - otherwise a threshold: t = clamp(4 (a - b)), or clamp(16 (a - b)) with
+ *    a second stage when the setup has the stages, then d + t c. Exact where
+ *    a and b differ by at least 1/4 (1/16), as with the 1-bit alpha of
+ *    sprites; a ramp over the last 64 (16) levels above b otherwise.
+ * GR16 and BGR24 compare their top channel only (green, blue); EQ is exact
+ * only when folded. */
+
+/* One channel of an operand of the color combiner, as an operand of the
+ * color (all channels the same) or alpha combiner. */
+static Opnd chan_sel(Opnd o, int ch, int to_alpha) {
+    if (o.is_const) {
+        u8 v = o.val[ch];
+        return k_const(v, v, v, v);
+    }
+    int from; /* 0..2 r, g, b; 3 alpha */
+    switch (o.op) {
+    case OPC_COLOR: from = ch; break;
+    case OPC_R: from = 0; break;
+    case OPC_G: from = 1; break;
+    case OPC_B: from = 2; break;
+    default: from = 3; break;
+    }
+    if (to_alpha) {
+        o.op = from == 3 ? OPA_ALPHA : (u8)(OPA_R + 2 * from);
+    } else {
+        o.op = from == 3 ? OPC_ALPHA : (u8)(OPC_R + 4 * from);
+    }
+    return o;
+}
+
+static int plan_cmp(Ctx* c, Half* out, Opnd a, Opnd b, Opnd cc, Opnd d, Opnd ca, Opnd cb, u8 op, int is_alpha) {
+    int kind = (op - GX_TEV_COMP_R8_GT) >> 1; /* 0 R8, 1 GR16, 2 BGR24, 3 RGB8 / A8 */
+    int eq = op & 1;
+    Opnd A = a, B = b;
+    if (kind < 3) {
+        /* the color inputs' red (green, blue): the same value for every channel */
+        A = chan_sel(is_alpha ? ca : a, kind, is_alpha);
+        B = chan_sel(is_alpha ? cb : b, kind, is_alpha);
+        if (kind > 0 && !(A.is_const && B.is_const)) {
+            approx(c, "TEV GR16/BGR24 compare by its top channel");
+        }
+    }
+    Opnd zero = k_const(0, 0, 0, 0), one = k_const(255, 255, 255, 255);
+    if (A.is_const && B.is_const) {
+        Opnd m = zero;
+        for (int i = 0; i < 4; i++) {
+            int ch = kind < 3 ? 0 : is_alpha ? 3 : i;
+            int va = A.val[ch], vb = B.val[ch];
+            m.val[i] = (u8)((eq ? va == vb : va > vb) ? 255 : 0);
+        }
+        return plan(out, zero, cc, m, d, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, is_alpha);
+    }
+    if (kind == 3 && !eq && is_zero(&B) && same_opnd(&A, &cc)) {
+        return plan(out, zero, A, one, d, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, is_alpha); /* a > 0 ? a : 0 */
+    }
+    if (eq) {
+        approx(c, "TEV compare EQ");
+        return plan(out, zero, zero, zero, d, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, is_alpha);
+    }
+    Opnd own = is_alpha ? k_own_prev_a : k_own_prev_c;
+    int n = 0;
+    Half h = {F_SUBTRACT, {A, B}, 2};
+    out[n++] = h;
+    /* each further x4 stage: x16, x64, x256 (exact for 8-bit inputs) */
+    for (int k = 0; k < 3 && c->sharp > 0; k++) {
+        c->sharp--;
+        Half x = {F_REPLACE, {own}, 2};
+        out[n++] = x;
+    }
+    if (is_one(&cc) && is_zero(&d)) {
+        return n;
+    }
+    Half t = {0};
+    if (is_zero(&d)) {
+        t.func = F_MODULATE, t.s[0] = own, t.s[1] = cc;
+    } else if (is_one(&cc)) {
+        t.func = F_ADD, t.s[0] = own, t.s[1] = d;
+    } else {
+        t.func = F_MULT_ADD, t.s[0] = own, t.s[1] = cc, t.s[2] = d;
+    }
+    out[n++] = t;
+    return n;
+}
+
+static int tev_compile_pass(PlatGpuState* st, int sharp, const char** why);
+
+/* Per-game TEV overrides (portability rule, plan section 1): the game side
+ * may give exact PICA programs for setups this compiler can only
+ * approximate (unclamped intermediates, more than six stages). Returns 1 if
+ * it wrote `st`'s stages. The default has none. */
+__attribute__((weak)) int gx_tev_game_override(PlatGpuState* st) {
+    (void)st;
+    return 0;
+}
+
+/* Compare ops take the sharper threshold, the first ones first, as long as
+ * the setup still fits in six stages. */
 void gx_tev_compile(PlatGpuState* st) {
+    const char* why = NULL;
+    int has_cmp = 0;
+    st->buffer_input_rgb = st->buffer_input_alpha = 0;
+    if (gx_tev_game_override(st)) {
+        return;
+    }
+    for (int s = 0; s < gx.num_tev && s < 16; s++) {
+        has_cmp += (gx.tev[s].c_op > GX_TEV_SUB) + (gx.tev[s].a_op > GX_TEV_SUB);
+    }
+    for (int sharp = 3 * has_cmp; sharp >= 0; sharp--) {
+        if (!tev_compile_pass(st, sharp, &why)) {
+            break;
+        }
+    }
+    if (why != NULL) {
+        static u32 logged[64];
+        int num = gx.num_tev ? gx.num_tev : 1;
+        u32 key = (u32)num << 24 ^ (u32)(why[0] << 16 ^ why[5] << 8) ^ (u32)st->num_stages;
+        for (int i = 0; i < 64; i++) {
+            if (logged[i] == key) {
+                return;
+            }
+            if (logged[i] == 0) {
+                logged[i] = key;
+                PLOG_W("TEV: %d GX stages -> %d PICA stages approximated: %s", num, st->num_stages, why);
+                break;
+            }
+        }
+    }
+}
+
+/* One compile; returns 1 if the result needed more than six stages. */
+static int tev_compile_pass(PlatGpuState* st, int sharp, const char** why) {
     Ctx c;
     memset(&c, 0, sizeof(c));
     c.st = st;
-    memcpy(c.unit_of_map, gx_unit_of_map, sizeof(c.unit_of_map));
+    c.sharp = sharp;
+    for (int r = 0; r < 4; r++) {
+        GXColorS10 v = gx.tev_reg[r];
+        c.kv[r][0] = clamp8(v.r), c.kv[r][1] = clamp8(v.g), c.kv[r][2] = clamp8(v.b), c.kv[r][3] = clamp8(v.a);
+    }
+    memcpy(c.unit_of_stage, gx_unit_of_stage, sizeof(c.unit_of_stage));
     for (int r = 0; r < 4; r++) {
         c.loc_c[r] = c.loc_a[r] = LOC_CONST;
     }
@@ -618,17 +777,28 @@ void gx_tev_compile(PlatGpuState* st) {
         Opnd cc = color_arg(&c, s, gx.tev[s].c_in[2]);
         Opnd d = color_arg(&c, s, gx.tev[s].c_in[3]);
         u8 cop = gx.tev[s].c_op, aop = gx.tev[s].a_op;
-        if (cop > GX_TEV_SUB || aop > GX_TEV_SUB) {
-            approx(&c, "TEV compare op");
-        }
-        int nc = plan(hc, a, b, cc, d, cop > 1 ? GX_TEV_ADD : cop, gx.tev[s].c_bias, gx.tev[s].c_scale, 0);
+        int nc = cop > GX_TEV_SUB ? plan_cmp(&c, hc, a, b, cc, d, a, b, cop, 0)
+                                  : plan(hc, a, b, cc, d, cop, gx.tev[s].c_bias, gx.tev[s].c_scale, 0);
         Opnd aa = alpha_arg(&c, s, gx.tev[s].a_in[0]);
         Opnd ab = alpha_arg(&c, s, gx.tev[s].a_in[1]);
         Opnd ac = alpha_arg(&c, s, gx.tev[s].a_in[2]);
         Opnd ad = alpha_arg(&c, s, gx.tev[s].a_in[3]);
-        int na = plan(ha, aa, ab, ac, ad, aop > 1 ? GX_TEV_ADD : aop, gx.tev[s].a_bias, gx.tev[s].a_scale, 1);
+        int na = aop > GX_TEV_SUB ? plan_cmp(&c, ha, aa, ab, ac, ad, a, b, aop, 1)
+                                  : plan(ha, aa, ab, ac, ad, aop, gx.tev[s].a_bias, gx.tev[s].a_scale, 1);
         nc = legalize(hc, nc, 0);
         na = legalize(ha, na, 1);
+        /* A half that comes out a constant needs no stage: the register holds that constant from here on. */
+        int out_c = gx.tev[s].c_out & 3, out_a = gx.tev[s].a_out & 3;
+        int const_c = nc == 1 && hc[0].func == F_REPLACE && hc[0].s[0].is_const && hc[0].scale == 0;
+        int const_a = na == 1 && ha[0].func == F_REPLACE && ha[0].s[0].is_const && ha[0].scale == 0;
+        if (const_c) {
+            memcpy(c.kv[out_c], hc[0].s[0].val, 3);
+            nc = 0;
+        }
+        if (const_a) {
+            c.kv[out_a][3] = ha[0].s[0].val[3];
+            na = 0;
+        }
         int steps = nc > na ? nc : na;
         /* An operand that reads the previous GX stage's result in a later
          * step of this plan would see this plan's own first step instead:
@@ -661,11 +831,11 @@ void gx_tev_compile(PlatGpuState* st) {
             }
         }
         /* Before this GX stage's output replaces "previous", keep a value a
-         * later stage still needs in the combiner buffer. */
-        int out_c = gx.tev[s].c_out, out_a = gx.tev[s].a_out;
+         * later stage still needs in the combiner buffer (a half with no
+         * stage of its own passes "previous" through unchanged). */
         for (int r = 0; r < 4; r++) {
-            int keep_c = c.loc_c[r] == LOC_PREV && r != out_c && read_later(s + 1, r, 0);
-            int keep_a = c.loc_a[r] == LOC_PREV && r != out_a && read_later(s + 1, r, 1);
+            int keep_c = nc > 0 && c.loc_c[r] == LOC_PREV && r != out_c && read_later(s + 1, r, 0);
+            int keep_a = na > 0 && c.loc_a[r] == LOC_PREV && r != out_a && read_later(s + 1, r, 1);
             if ((keep_c || keep_a) && c.n > 0) {
                 if (c.n > 4) {
                     approx(&c, "combiner buffer needed after stage 4");
@@ -705,19 +875,19 @@ void gx_tev_compile(PlatGpuState* st) {
             emit(&c, pc, pa);
         }
         for (int r = 0; r < 4; r++) {
-            if (c.loc_c[r] == LOC_PREV) {
+            if (c.loc_c[r] == LOC_PREV && nc > 0) {
                 c.loc_c[r] = LOC_CONST; /* overwritten: stale unless buffered (logged above) */
             }
-            if (c.loc_a[r] == LOC_PREV) {
+            if (c.loc_a[r] == LOC_PREV && na > 0) {
                 c.loc_a[r] = LOC_CONST;
             }
         }
-        c.loc_c[out_c & 3] = LOC_PREV;
-        c.loc_a[out_a & 3] = LOC_PREV;
-        if (c.buf_c_reg == (out_c & 3)) {
+        c.loc_c[out_c] = const_c ? LOC_CONST : LOC_PREV;
+        c.loc_a[out_a] = const_a ? LOC_CONST : LOC_PREV;
+        if (c.buf_c_reg == out_c) {
             c.buf_c_reg = -1;
         }
-        if (c.buf_a_reg == (out_a & 3)) {
+        if (c.buf_a_reg == out_a) {
             c.buf_a_reg = -1;
         }
     }
@@ -738,18 +908,6 @@ void gx_tev_compile(PlatGpuState* st) {
         c.n = 6;
     }
     st->num_stages = (u8)c.n;
-    if (c.approx != NULL) {
-        static u32 logged[64];
-        u32 key = (u32)num << 24 ^ (u32)(c.approx[0] << 16) ^ (u32)c.n;
-        for (int i = 0; i < 64; i++) {
-            if (logged[i] == key) {
-                return;
-            }
-            if (logged[i] == 0) {
-                logged[i] = key;
-                PLOG_W("TEV: %d GX stages -> %d PICA stages approximated: %s", num, c.n, c.approx);
-                break;
-            }
-        }
-    }
+    *why = c.approx;
+    return c.overflow;
 }

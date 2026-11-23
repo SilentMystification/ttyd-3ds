@@ -20,7 +20,7 @@
 3. Stops on --until (pass), a [CRASH] line (fail), --timeout, or the game
    closing the connection (fail unless --until already matched).
 
-The full log is also on the SD card: sdmc:/3ds/ttyd/log.txt (and log.old,
+The full log is also on the SD card: sdmc:/3ds/ttyd/log.txt (and log.prev.txt,
 the run before), for ftpd.
 """
 import argparse

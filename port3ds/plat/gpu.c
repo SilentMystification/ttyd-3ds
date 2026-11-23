@@ -202,9 +202,21 @@ static void* rec_put(u16 type, u32 size) {
     return h + 1;
 }
 
+static volatile u32 s_apt_hold;
+static volatile int s_apt_parked, s_apt_discard, s_apt_off;
+
 static void wait_idle(void) {
+    u64 t0 = svcGetSystemTick();
+    int logged = 0;
     while (__atomic_load_n(&s_busy, __ATOMIC_ACQUIRE)) {
-        LightEvent_Wait(&s_done);
+        /* Still waits for as long as it takes: a render thread in the middle of a frame cannot be
+         * abandoned. A timed wait only to say so when it takes long. */
+        if (LightEvent_WaitTimeout(&s_done, 1000000000LL) != 0 && !logged &&
+            svcGetSystemTick() - t0 > 2ull * SYSCLOCK_ARM11) {
+            logged = 1;
+            PLOG_W("gpu: the game thread has waited 2 s for the render thread (hold %u, parked %d, vblank %lu)",
+                   (unsigned)s_apt_hold, s_apt_parked, (unsigned long)plat_vblank_count());
+        }
     }
 }
 
@@ -1410,6 +1422,10 @@ static void render_record(Record* r) {
     u64 tw = svcGetSystemTick();
     C3D_FrameBegin(s_begin_records == 0 ? C3D_FRAME_SYNCDRAW : 0);
     s_begin_wait_acc += svcGetSystemTick() - tw;
+    if (svcGetSystemTick() - tw > SYSCLOCK_ARM11) {
+        PLOG_W("gpu: C3D_FrameBegin took %lu ms (a vblank or GX interrupt was missed, or the process was suspended)",
+               (unsigned long)((svcGetSystemTick() - tw) / (SYSCLOCK_ARM11 / 1000u)));
+    }
     s_begin_records++;
     if (stereo) {
         stereo_prepare();
@@ -1715,9 +1731,6 @@ eye_again:
 #define APT_HOLD_SLEEP 2u
 #define APT_HOLD_EXIT 4u
 static aptHookCookie s_apt_first, s_apt_last;
-static volatile u32 s_apt_hold;
-static volatile int s_apt_parked, s_apt_discard, s_apt_off;
-
 /* Render thread, before a record: 1 = replay it, 0 = drop it (exiting). */
 static int render_gate(void) {
     if (!__atomic_load_n(&s_apt_hold, __ATOMIC_ACQUIRE)) {

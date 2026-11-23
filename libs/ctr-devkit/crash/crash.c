@@ -108,6 +108,12 @@ void crash_wd_hold(bool on) {
     }
 }
 
+/* A thread that keeps running while the game thread makes no progress (the vblank thread) calls
+ * this every tick. The watchdog uses it to tell a hang of the game from a suspension of the whole
+ * process (Luma3DS Rosalina menu): a suspended process shows no liveness either. */
+static volatile u32 s_wd_alive;
+void crash_wd_alive(void) { s_wd_alive++; }
+
 int crash_wd_held(void) { return (int)__atomic_load_n(&s_wd_hold, __ATOMIC_RELAXED); }
 uint32_t crash_frame_count(void) { return s_wd_counter; }
 bool crash_report_file_ok(void) { return s_report_ok; }
@@ -627,9 +633,14 @@ static void hang_report_main(void* arg) {
 static void watchdog_main(void* arg) {
     (void)arg;
     u32 last = s_wd_counter;
+    u32 last_alive = s_wd_alive;
     int stalled = 0;
+    u64 prev = svcGetSystemTick();
     for (;;) {
         svcSleepThread(s_crash_ms ? 100000000LL : 1000000000LL);
+        u64 nowt = svcGetSystemTick();
+        u32 gap_ms = (u32)((nowt - prev) / (SYSCLOCK_ARM11 / 1000u));
+        prev = nowt;
         if (s_wd_quit) {
             return;
         }
@@ -644,14 +655,37 @@ static void watchdog_main(void* arg) {
             continue;
         }
         u32 now = s_wd_counter;
+        u32 alive = s_wd_alive;
+        /* The monitor woke much later than it slept: the process was suspended (Rosalina menu, HOME
+         * Menu, sleep), not hung. Start timing again. */
+        if (gap_ms > 3500u) {
+            log_msg(1, "watchdog: gap %lu ms, treated as suspend", (unsigned long)gap_ms);
+            last = now;
+            last_alive = alive;
+            stalled = 0;
+            continue;
+        }
         /* Not armed before the first frame; a suspended app (HOME Menu,
          * sleep) and a hold (saving) are not hangs. */
         if (s_cfg.watchdog_seconds <= 0 || now == 0 || now != last || s_wd_hold || !aptIsActive()) {
             last = now;
+            last_alive = alive;
             stalled = 0;
             continue;
         }
-        if (++stalled < s_cfg.watchdog_seconds) {
+        /* No frame, and no other thread ran either: the process is suspended from outside or the GPU
+         * wait is dead. Give that six times as long; a game hang with a running vblank thread keeps the
+         * normal limit. */
+        int limit = s_cfg.watchdog_seconds;
+        if (alive == last_alive) {
+            limit *= 6;
+            if (stalled == 0 || stalled == s_cfg.watchdog_seconds) {
+                log_msg(1, "watchdog: no frame and no vblank tick for %d s, limit %d s (suspended from outside?)",
+                        stalled + 1, limit);
+            }
+        }
+        last_alive = alive;
+        if (++stalled < limit) {
             continue;
         }
         s_wd_stalled_s = stalled;

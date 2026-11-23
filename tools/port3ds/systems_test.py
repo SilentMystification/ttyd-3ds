@@ -86,7 +86,7 @@ def prepare_profile(card):
             raise FileNotFoundError(f"fixture {src.name} is missing: run the scenario that makes it first")
         shutil.copy(src, GAME_DIR / "card" / SAVE_GCI)
     shutil.rmtree(GAME_DIR / "shots", ignore_errors=True)
-    for f in ("log.txt", "log.old", "crash.txt", "options.txt"):
+    for f in ("log.txt", "log.prev.txt", "crash.txt", "options.txt"):
         (GAME_DIR / f).unlink(missing_ok=True)
 
 

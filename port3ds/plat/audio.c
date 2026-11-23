@@ -1041,9 +1041,15 @@ static void ndsp_thread(void* arg) {
     for (int i = 0; i < WAVEBUFS; i++) {
         ndspChnWaveBufAdd(0, &s_wbuf[i]);
     }
+    uint64_t prev_wake = svcGetSystemTick();
     for (;;) {
         LightEvent_Wait(&s_frame_event);
         uint64_t t0 = svcGetSystemTick();
+        if (t0 - prev_wake > (uint64_t)SYSCLOCK_ARM11 / 2) {
+            PLOG_W("audio: ndsp thread woke after %lu ms (suspended? the DSP ran dry)",
+                   (unsigned long)((t0 - prev_wake) / (SYSCLOCK_ARM11 / 1000u)));
+        }
+        prev_wake = t0;
         s_wake++;
         apply_due_events();
         if (s_streams_on) {

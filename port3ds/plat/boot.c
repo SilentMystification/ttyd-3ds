@@ -174,6 +174,14 @@ int plat_frame_poll(void) {
         s_boot_marked = 1;
         plat_sd_boot_done(); /* the game loop has begun: SD calls on cores 0 and 2 count as regressions */
     }
+    /* A long gap between two polls: the process was suspended (Rosalina menu) or the game stalled. */
+    static u64 s_last_poll;
+    u64 nowt = svcGetSystemTick();
+    if (s_last_poll != 0 && nowt - s_last_poll > 1500ull * (SYSCLOCK_ARM11 / 1000u)) {
+        PLOG_W("frame: gap %lu ms since the last frame poll (suspend? vblank %lu)",
+               (unsigned long)((nowt - s_last_poll) / (SYSCLOCK_ARM11 / 1000u)), (unsigned long)plat_vblank_count());
+    }
+    s_last_poll = nowt;
     plat_wd_progress();
     plat_devupdate_frame();
     return aptMainLoop() ? 1 : 0;

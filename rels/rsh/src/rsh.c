@@ -1875,6 +1875,15 @@ static void rsh_window_tev(MapTevCallbackInfo* info) {
     }
     // BUG: when no parent is a group (MAPOBJ_FLAG_GROUP) the loop above ends with x0..y1 never set,
     // and they are read uninitialised here.
+#ifdef TARGET_PORT
+    // The GameCube's bounding box counts only pixels inside the scissor (0..fbWidth, 0..efbHeight), so a window
+    // wholly outside it leaves the box empty (0x3FF) and returns below. The port's box is clamped to its whole
+    // EFB, so such a window arrives with x0 >= fbWidth: the clamp below then gives a negative width, a
+    // 12 MB texture and a failed allocation.
+    if (x0 >= gp->fbWidth || y0 >= gp->efbHeight) {
+        return;
+    }
+#endif
     if (x0 == 0x3FF || y0 == 0x3FF || x1 == 0x3FF || y1 == 0x3FF) {
         return;
     }
@@ -1895,7 +1904,17 @@ static void rsh_window_tev(MapTevCallbackInfo* info) {
     height = y1 - y0;
     halfWidth = width / 2;
     halfHeight = height / 2;
+#ifdef TARGET_PORT
+    {
+        smartEntry* texEntry = smartAlloc(GXGetTexBufferSize(halfWidth, halfHeight, GX_TF_RGB5A3, GX_FALSE, 0), 3);
+        if (texEntry == NULL) { // the GameCube reads address 0 here
+            return;
+        }
+        buf = texEntry->address;
+    }
+#else
     buf = smartAlloc(GXGetTexBufferSize(halfWidth, halfHeight, GX_TF_RGB5A3, GX_FALSE, 0), 3)->address;
+#endif
     GXSetTexCopySrc(x0, y0, width, height);
     GXSetTexCopyDst(halfWidth, halfHeight, GX_TF_RGB5A3, GX_TRUE);
     GXCopyTex(buf, GX_FALSE);

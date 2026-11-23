@@ -118,6 +118,19 @@ Found, not removed (the runs above show none of them in their streams, but each 
 - **Saves.** The port's SD save files and Dolphin's memory card start from different contents; a test that loads or saves will differ between builds.
 - **The alarm thread** (`os_misc.c`, the kiosk idle timer of `seq_e3.c` only) compares virtual alarm times against the virtual clock from a host thread.
 
+## Machine-wide limits (emulators and builds)
+
+Agents share one PC, so the run and build scripts cap how much runs at once and keep the emulators from starving everything else:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `AZAHAR_MAX` | 3 | Azahar instances at once (`run_azahar.py`, flock slots in `$XDG_RUNTIME_DIR/ttyd-azahar`) |
+| `DOLPHIN_MAX` | 2 | Dolphin instances at once (`run_dolphin.py`, flock slots in `$XDG_RUNTIME_DIR/ttyd-dolphin`) |
+| `BUILD_MAX` | 2 | `build.sh` builds at once (flock slots in `${XDG_CACHE_HOME:-~/.cache}/ttyd3ds`); a waiting build prints a line |
+| `BUILD_JOBS` | 8 | Ninja parallelism inside the build container (`cmake --build -j`) |
+
+Both emulators start with core dumps disabled (`RLIMIT_CORE` 0, so systemd-coredump keeps nothing) and at `nice` 10. A waiting slot polls every 5 s.
+
 ## Library hooks (for GC3DS_LIBRARY_NOTE.md)
 
 - `port_os_set_time_source(fn)` / `port_os_real_time()` (`os.c`): a replacement for the game's clock; the real clock for platform code.

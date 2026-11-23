@@ -38,14 +38,15 @@ The PICA200 vertex shader computes in **24-bit floats**: 1 sign bit, 7 exponent 
 4. **Seams.**
    - Shared edge vertices must come out identical. Same input bits, same matrix, same instruction order, so the PICA's deterministic arithmetic gives the same result for the same vertex in both meshes.
    - Never round or re-quantise positions per mesh (no per-mesh scale that differs between neighbours). A per-entry `s16` scale is allowed only when it represents every source value **exactly**.
-5. **Hardware rules:**
+5. **Texel ties (owner decision 2026-11-23).** A pixel whose colour differs between the paths while its depth is **bit-identical** in both is the same surface sampling a neighbouring texel: the texture coordinate comes from 24-bit shader maths instead of the CPU's 32-bit maths rounded once, and the pixel lies on a texel boundary (eki_00: one wall row whose texel boundary falls on pixel centres). These are accepted as their own precision class. `vsh_accept.py` reports them as "texel ties" and does not count them as colour differences, order flips or clusters. The seam and z-fighting rules stay strict: an order flip is now a colour difference at a depth difference of 1 to 16 units (a second surface), and any cluster of those, or of seams, still fails.
+6. **Hardware rules:**
    - write every vertex-shader output register exactly once, in full (partial writes hang the GPU);
    - don't use bool uniform b15.
 
 ## Acceptance tests (before the shader path is on by default)
 
 Each runs per scene, CPU path vs shader path, in Azahar first and then on hardware through `ctr-devkit` once it's in:
-1. **Image diff:** fixed frames after a warp, per-pixel difference with a small tolerance for colour rounding. Any cluster of differing pixels along edges or on coplanar surfaces fails.
+1. **Image diff:** fixed frames after a warp, per-pixel difference with a small tolerance for colour rounding. Any cluster of differing pixels along edges or on coplanar surfaces fails; texel ties (rule 5: bit-identical depth) are reported apart and accepted.
 2. **Depth diff:**
    - read back the depth buffer (an EFB depth copy, debug only) for the same frame on both paths;
    - compare per pixel, reporting the maximum and the distribution;

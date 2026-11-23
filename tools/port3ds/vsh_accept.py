@@ -17,8 +17,10 @@ game_log.txt). The tests, per scene:
      between runs (it animates by time), so two CPU-path runs give the noise
      floor; a test run passes when it is within that floor.
   2. depth diff: the same for the depth buffers (24-bit units), over pixels
-     both runs drew; "order flips" are pixels whose colour differs by more
-     than 32 while the depth differs by at most 16 units (another surface won
+     both runs drew; texel ties (colour differing at a bit-identical depth:
+     the same surface sampling a neighbouring texel, PORT_3DS_GPU_OFFLOAD.md)
+     are reported apart; "order flips" are pixels whose colour differs by more
+     than 32 while the depth differs by 1 to 16 units (another surface won
      a near tie: potential z-fighting).
   3. seam test: magenta (the clear colour, untouched by any draw) inside
      geometry, i.e. bounded by drawn pixels within 3 pixels on both sides
@@ -156,8 +158,10 @@ def depth_diff(da, db):
             continue
         hist = [int((dz == 0).sum()), int((dz == 1).sum()), int(((dz >= 2) & (dz < 4)).sum()),
                 int(((dz >= 4) & (dz < 16)).sum()), int(((dz >= 16) & (dz < 256)).sum()), int((dz >= 256).sum())]
-        flips = int(((dc > 32) & (dz <= 16)).sum())
-        res.append(dict(frame=k, max=int(dz.max()), mean=float(dz.mean()), hist=hist, flips=flips,
+        # texel ties (same surface, bit-identical depth) are counted apart, not as order flips
+        flips = int(((dc > 32) & (dz >= 1) & (dz <= 16)).sum())
+        ties = int(((dc > 8) & (dz == 0)).sum())
+        res.append(dict(frame=k, max=int(dz.max()), mean=float(dz.mean()), hist=hist, flips=flips, ties=ties,
                         zero_depth=bool(za.max() == 0 and zb.max() == 0)))
     return res
 
@@ -292,17 +296,25 @@ def static_diff(da, db):
     drawn = ~(np.all(ca == MAGENTA, axis=2) | np.all(cb == MAGENTA, axis=2))
     m = st & drawn
     dcf = np.abs(ca - cb).max(-1)
-    dc = dcf[m]
+    # Texel ties (owner decision 2026-11-23, PORT_3DS_GPU_OFFLOAD.md): a pixel whose colour differs while its
+    # depth is bit-identical in both runs is the same surface sampling a neighbouring texel (24- vs 32-bit
+    # texture-coordinate maths). Reported apart; not colour differences, order flips or clusters.
+    tie = np.zeros_like(m)
+    if za is not None and zb is not None:
+        tie = m & (dcf > 8) & (za[0] == zb[0])
+    mc = m & ~tie
+    dc = dcf[mc]
     out = dict(static=int(m.sum()), of=int(m.size), cmax=int(dc.max()) if dc.size else 0,
-               c8=int((dc > 8).sum()), c32=int((dc > 32).sum()))
-    bigc = m & (dcf > 32)
+               c8=int((dc > 8).sum()), c32=int((dc > 32).sum()), ties=int(tie.sum()),
+               tie_cmax=int(dcf[tie].max()) if tie.any() else 0)
+    bigc = mc & (dcf > 32)
     out["c32_clusters"] = clusters(bigc)[:5] if bigc.sum() < 20000 else [int(bigc.sum())]
     if za is not None and zb is not None:
         dzf = np.abs(za[0] - zb[0])
         dz = dzf[m]
         out.update(zmax=int(dz.max()) if dz.size else 0, z0=int((dz == 0).sum()), z1_3=int(((dz >= 1) & (dz < 4)).sum()),
                    z4_15=int(((dz >= 4) & (dz < 16)).sum()), z16=int((dz >= 16).sum()),
-                   flips=int(((dcf > 32) & (dzf <= 16) & m).sum()))
+                   flips=int(((dcf > 32) & (dzf >= 1) & (dzf <= 16) & m).sum()))
         big = m & (dzf >= 16)
         out["z16_clusters"] = clusters(big)[:5] if big.sum() < 20000 else [int(big.sum())]
     return out
@@ -312,7 +324,7 @@ def summarize_static(r):
     if r is None:
         return "no shots"
     t = (f"{r['static']} static drawn pixels of {r['of']}: colour max {r['cmax']}, > 8: {r['c8']}, > 32: {r['c32']} "
-         f"(largest clusters {r.get('c32_clusters')})")
+         f"(largest clusters {r.get('c32_clusters')}); texel ties {r.get('ties', 0)} (colour max {r.get('tie_cmax', 0)})")
     if "zmax" in r:
         t += (f"; depth max |dz| {r['zmax']}, dz 0: {r['z0']}, 1-3: {r['z1_3']}, 4-15: {r['z4_15']}, >= 16: {r['z16']} "
               f"(largest clusters {r['z16_clusters']}); order flips {r['flips']}")
@@ -337,7 +349,8 @@ def summarize_depth(res):
     return (f"{len(res)} shots: max |dz| {max(r['max'] for r in res)}, mean {np.mean([r['mean'] for r in res]):.2f}; "
             f"dz 0: {h[0] * 100 / tot:.2f}%, 1: {h[1] * 100 / tot:.2f}%, 2-3: {h[2] * 100 / tot:.2f}%, "
             f"4-15: {h[3] * 100 / tot:.3f}%, 16-255: {h[4] * 100 / tot:.3f}%, 256+: {h[5] * 100 / tot:.3f}%; "
-            f"order flips (colour > 32, dz <= 16): total {sum(r['flips'] for r in res)}, worst {max(r['flips'] for r in res)}")
+            f"order flips (colour > 32, 1 <= dz <= 16): total {sum(r['flips'] for r in res)}, worst {max(r['flips'] for r in res)}; "
+            f"texel ties (colour > 8, dz 0): total {sum(r['ties'] for r in res)}")
 
 
 def cmd_report(a):

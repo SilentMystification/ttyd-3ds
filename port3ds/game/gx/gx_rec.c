@@ -989,6 +989,7 @@ void gx_rec_frame(void) {
         s_pipe_waits = 0;
     }
     s_snap_bytes = 0;
+    gx_bbox_stats_log(f);
     if (gx_rec_mode == 3) {
         u32 gm = 0;
         for (int i = 0; i < GXG_COUNT; i++) {

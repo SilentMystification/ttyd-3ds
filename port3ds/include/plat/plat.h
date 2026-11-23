@@ -159,9 +159,13 @@ enum {
     PLAT_PLACE_GX_STATE,       /* GX state tracker and caches */
     PLAT_PLACE_AUDIO_STATE,    /* MusyX voice state and aux working buffers */
     PLAT_PLACE_LOG,            /* log queue and profiler counters */
+    PLAT_PLACE_GX_INDEX,       /* index arenas of the frame records: CPU writes, GPU reads (linear by default) */
     PLAT_PLACE_COUNT
 };
 int plat_qtm_available(void);
+/* The i-th registered placement (0 <= i < the return value, which is the count): its name, base, budget and
+ * tier name. For memory-map dumps and tools; any out pointer may be NULL. */
+int plat_place_info(int i, const char** name, void** base, size_t* bytes, const char** tier);
 
 #ifdef __cplusplus
 }

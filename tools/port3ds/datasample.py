@@ -95,6 +95,10 @@ class DataMap:
             if s.addr <= addr < s.addr + s.size:
                 return (s.name, s.size, "elf:" + (self.image.section(addr) or "?"))
         sec = self.image.section(addr)
+        for name, lo, hi in self.regions:
+            if name.startswith("place_") and lo <= addr < hi:  # a placement (memplace.c), whatever its tier
+                base = lo + ((addr - lo) & ~(PAGE - 1))
+                return (f"{name}+0x{base - lo:x}", min(PAGE, hi - lo), "qtm:" + name if QTM_LO <= addr < QTM_HI else name)
         if QTM_LO <= addr < QTM_HI:
             base = addr & ~(PAGE - 1)
             return (f"qtm+0x{base - QTM_LO:x}", PAGE, "qtm")
@@ -194,7 +198,7 @@ def build(ent, total, top, qtm_mb, min_shared):
         out["qtm"].append({"entry": e["entry"], "n": e["n"], "bytes": e["bytes"], "density": e["n"] / e["bytes"] * 1024,
                            "shared": e["shared"], "cross_core": e["cross_core"], "cores": e["cores"],
                            "region": e["region"], "cum_bytes": cum,
-                           "in_qtm": e["region"] == "qtm"})
+                           "in_qtm": e["region"].startswith("qtm")})
         if cum > qtm_mb * 1048576 * 1.25:
             break
     # hot functions per hot entry

@@ -15,6 +15,7 @@ Exit status 1 if a step failed.
 """
 import argparse
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -30,7 +31,21 @@ OWN_CIA = EXAMPLES / "devupdate/ctrdk-devupdate.cia"
 OTHER_CIA = EXAMPLES / "crash/ctrdk-crash.cia"
 TTYD_CIA = REPO / "build/3ds/game/ttyd.cia"
 results = []
-PORT = int(__import__("os").environ.get("DEVUPDATE_PORT", "5050"))  # another port when another session holds 5050
+PORT = None  # set when the session starts: devupdate.py gives each session its slot's port (5060 + slot index)
+
+
+def adopt_port(profile):
+    """Takes the port the started session listens on (devupdate.py records it in the session's state file)."""
+    global PORT
+    state = profile / "devupdate-session.json"
+    if state.is_file():
+        PORT = json.loads(state.read_text()).get("port", PORT)
+    return PORT
+
+
+def port_args():
+    """--port for devupdate.py: this session's port once the session has started (none before: devupdate.py's default)."""
+    return ["--port", str(PORT)] if PORT is not None else []
 
 
 def step(name, ok, detail=""):
@@ -41,7 +56,7 @@ def step(name, ok, detail=""):
 
 def tool(*argv, timeout=300, quiet=False):
     """devupdate.py with --ip 127.0.0.1: the same command line as for the console."""
-    cmd = [sys.executable, str(TOOL), "--ip", "127.0.0.1", "--port", str(PORT), "--timeout", "30", *argv]
+    cmd = [sys.executable, str(TOOL), "--ip", "127.0.0.1", *port_args(), "--timeout", "30", *argv]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     out = r.stdout + r.stderr
     if not quiet:
@@ -50,9 +65,14 @@ def tool(*argv, timeout=300, quiet=False):
 
 
 def session(action, profile, *extra, timeout=1200):
-    cmd = [sys.executable, str(TOOL), "--port", str(PORT), "azahar-session", action, "--profile", str(profile), *extra]
+    global PORT
+    if action == "start":
+        PORT = None  # devupdate.py picks this session's port (its slot's); a stale port must not be passed
+    cmd = [sys.executable, str(TOOL), *port_args(), "azahar-session", action, "--profile", str(profile), *extra]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     print("    " + (r.stdout + r.stderr).strip().replace("\n", "\n    "), flush=True)
+    if action == "start" and r.returncode == 0:
+        adopt_port(profile)
     return r.returncode, r.stdout + r.stderr
 
 
@@ -236,7 +256,7 @@ def run_ttyd_states(args, profile):
         print(f"devupdate_azahar: == state {name}: {st['note']}", flush=True)
         for old in (log, sdmc / "3ds/ttyd/previous.log"):
             old.unlink(missing_ok=True)
-        (sdmc / "3ds/ttyd/debug3ds.txt").write_text(f"devupdate devupdateport={PORT} fastboot " + st["switches"] + "\n")
+        (sdmc / "3ds/ttyd/debug3ds.txt").write_text("devupdate fastboot " + st["switches"] + "\n")
         if "sweep" in st:
             (sdmc / "3ds/ttyd/sweep.txt").write_text(st["sweep"])
         rc, out = session("start", profile, "--boot", str(TTYD_CIA), "--wait", "240")

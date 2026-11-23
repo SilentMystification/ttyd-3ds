@@ -208,6 +208,20 @@ Stall: a run fails as `FAIL: stall` when the game log has not grown for 20 s (`-
 
 Every run, from any worktree, appends one tab-separated line to `${XDG_CACHE_HOME:-~/.cache}/ttyd3ds/emu_runs.log`: start time, emulator, worktree path, seconds waited for a slot, seconds run, result, switches (120 characters). The result is `PASS: ...`, `FAIL: ...` (timeout, stall, `[CRASH]`, and so on), `OK n frames` (Dolphin), `killed: signal N` when a SIGTERM or SIGINT ended the run (a caller's timeout), `aborted: ...` for an uncaught exception or a `SystemExit` with a message, and `usage error`. Only a SIGKILL cannot be recorded, since the process gets no chance to write: callers must stop runs with SIGTERM. `tools/port3ds/emu_usage.py` summarises the log: per worktree and emulator the runs, total and longest run time and total slot wait, the timeouts and stalls with the seconds they ran, then the 10 longest runs.
 
+### Reaping stuck emulators
+
+A busy slot holds a JSON record (its slot file): owner pid, emulator process group, boot time, declared limit, game log and worktree. A run that waits for a slot checks the busy ones every 5 s and stops the emulator of any run that is:
+
+- past its declared limit + 30 s (`timeout` or `--long` after boot);
+- quiet for 60 s: no game log growth since boot (runs with a game log only; Dolphin has none);
+- orphaned: its owner process is gone.
+
+The reaper kills the emulator's process group, SIGTERM and then SIGKILL after 5 s, and prints `run_azahar: reaped slot N (pid P, worktree W, reason R)` (`run_dolphin:` for Dolphin). It records `reaped: R` in the usage log. It touches only processes registered in a run's slot file whose command line names the emulator. Sessions (`devupdate.py azahar-session`) and plain-pid slots are never reaped.
+
+### devupdate port per slot
+
+Each Azahar run gets its own devupdate port, `5060 + slot index` (`5050`, the console's, plus 10 plus the slot). run_azahar.py passes `devupdateport=N` unless the switches already name a port or `nodevupdate`, and prints `run_azahar: devupdate port N (slot S)`. `devupdate.py azahar-session start` takes its slot's port too (unless `--port` is given), writes it into the game's `debug3ds.txt`, and records it in the session state. `devupdate_azahar.py` adopts that port, so its pushes and pings reach its own instance. `devupdate.py`'s `--port` defaults to `$DEVUPDATE_PORT`, else 5050: to reach a run's instance by hand, use its port.
+
 Both emulators start with core dumps disabled (`RLIMIT_CORE` 0, so systemd-coredump keeps nothing) and at `nice` 10. A waiting slot polls every 5 s.
 
 ## Library hooks (for GC3DS_LIBRARY_NOTE.md)

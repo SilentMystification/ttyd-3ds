@@ -110,12 +110,21 @@ def emulator_preexec():
 
 
 _slot_fd = None
+_slot_path = None
+_slot_info = {}
+
+
+def set_slot_info(**fields):
+    """Updates this run's slot file (boot time, emulator process group, limit): what the reaper reads."""
+    _slot_info.update(fields)
+    if _slot_fd is not None:
+        emu_usage.write_slot_info(_slot_fd, _slot_info)
 
 
 def acquire_slot():
     """Machine-wide limit on Dolphin instances: one flock'd slot file per instance, held until this process ends
     (the OS drops the lock if it dies). DOLPHIN_MAX (default 2) is the number of slots. Same scheme as run_azahar."""
-    global _slot_fd
+    global _slot_fd, _slot_path, _slot_info
     n = int(os.environ.get("DOLPHIN_MAX", "2"))
     run = os.environ.get("XDG_RUNTIME_DIR")
     d = Path(run) / "ttyd-dolphin" if run and os.access(run, os.W_OK) else Path(f"/tmp/ttyd-dolphin-{os.getuid()}")
@@ -124,17 +133,21 @@ def acquire_slot():
     while True:
         used = 0
         for i in range(n):
-            fd = os.open(d / f"dolphin-slot-{i}", os.O_RDWR | os.O_CREAT, 0o666)
+            path = d / f"dolphin-slot-{i}"
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                os.ftruncate(fd, 0)
-                os.write(fd, f"{os.getpid()}\n".encode())
-                _slot_fd = fd
+                _slot_fd, _slot_path = fd, path
+                _slot_info = {"kind": "run", "pid": os.getpid(), "start": time.time(), "boot": None, "pgid": None,
+                              "hint": "dolphin", "limit": None, "log": None, "worktree": str(REPO), "switches": ""}
+                emu_usage.write_slot_info(fd, _slot_info)
                 _usage["slot"] = time.monotonic()
                 return
             except OSError:
                 os.close(fd)
                 used += 1
+                if emu_usage.reap_slot(path, "dolphin", i, emu_usage.record, print):
+                    time.sleep(1)  # the killed emulator's owner lets go of the slot as it exits
         if not told:
             print(f"run_dolphin: waiting for a free Dolphin slot ({used} in use)", flush=True)
             told = True
@@ -372,6 +385,8 @@ def main():
     log = open(LAST / "dolphin_stdout.txt", "w")
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
                             preexec_fn=emulator_preexec)
+    set_slot_info(pgid=proc.pid, boot=time.time(), limit=args.timeout, worktree=str(REPO),
+                  switches=_usage["switches"])
     rsp = None
     result = {"frame": 0, "reads": {}}
     start = time.monotonic()

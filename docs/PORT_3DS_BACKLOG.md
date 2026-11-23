@@ -67,7 +67,7 @@ Updated 2026-11-22. Owner goals: original GameCube frame rates, stereo 3D, all t
 ## Lane F: found along the way
 
 1. **THP movie decoder in C: done (2026-11-22, from aurora, MIT).** Untested in game: the US disc has no movie. Check the timing on hardware. The JP and PAL `dig` map's `demo.thp` plays black and silent today, because the SDK's THP decoder is PowerPC assembly and the port stubs it. The plan forbids stubs. Write a C Motion-JPEG plus THP audio decoder (portable, in the library layer).
-2. **JP ROM font (SJIS).** The port's ROM font is ASCII-only, and JP needs SJIS glyphs. This is the likeliest JP boot problem.
+2. **JP ROM font (SJIS).** Done in synthetic form: `tools/port3ds/gen_sjis_font.py` renders the IPL's SJIS glyph set (24x24 cells, nine 512x512 sheets, the SDK's glyph order) from Noto Sans CJK JP (SIL OFL) at build time, `port3ds/game/os_font.c` serves it for `OS_FONT_ENCODE_SJIS` (the JP build's default encoding), and `fonttest=sjis` draws it in any region build. Pending: a check in the JP game with a JP disc (boot, the progressive-scan prompt and disc-error messages, text widths).
 3. **JP and PAL discs from the owner,** to run plan section 9.1's steps.
 4. **Battle "struck first" black band (gon_02):**
    - Traced to the map object `kuro1`, a black frame around the room. It is identical on disc and in the port, drawn every frame, and nothing hides it. Its bottom bar shows below the floor at the camera position of that moment.

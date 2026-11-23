@@ -248,4 +248,7 @@ void tst_frame(u32 frame) {
     }
     tst_gallery_frame(frame);
     tst_battle_frame(frame);
+#ifdef PORT3DS_GAME_SIDE
+    tst_font_frame(frame);
+#endif
 }

@@ -55,5 +55,7 @@ int tst_stage_start(const char* name);
 int tst_stage_poll(int settle);
 /* ---- test_battle.c: btlauto= ---- */
 void tst_battle_frame(u32 frame);
+/* ---- test_font.c (port only): fonttest=sjis ---- */
+void tst_font_frame(u32 frame);
 
 #endif

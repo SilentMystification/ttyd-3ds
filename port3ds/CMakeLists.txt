@@ -280,6 +280,21 @@ target_include_directories(ttyd_port_game PRIVATE ${TTYD_INCLUDES} "${TTYD_REPO_
 # The GX vertex shader (port3ds/shaders/gx.v.pica), embedded as gx_shbin.
 ctr_add_shader_library(ttyd_gx_shader OUTPUT gx.shbin "${CMAKE_CURRENT_LIST_DIR}/shaders/gx.v.pica")
 dkp_add_embedded_binary_library(ttyd_gx_shader_bin ttyd_gx_shader)
+# The SJIS ROM font (tools/port3ds/gen_sjis_font.py, Noto Sans CJK JP under the SIL OFL; build.sh makes it on the
+# host, where Pillow is) embedded as sjis_font_bin for port3ds/game/os_font.c. Without it the JP build cannot
+# draw its system messages and stops with an error; other regions only lose the fonttest=sjis switch.
+set(TTYD_SJIS_FONT "${TTYD_REPO_DIR}/build/fonts/sjis_font.bin")
+if(EXISTS "${TTYD_SJIS_FONT}")
+    configure_file("${TTYD_SJIS_FONT}" "${TTYD_GEN_DIR}/sjis_font.bin" COPYONLY)
+else()
+    if(TTYD_VERSION STREQUAL G8MJ01)
+        message(FATAL_ERROR "build/fonts/sjis_font.bin is missing: run tools/port3ds/gen_sjis_font.py (needs Pillow)")
+    endif()
+    message(WARNING "build/fonts/sjis_font.bin is missing: the SJIS ROM font is empty (tools/port3ds/gen_sjis_font.py)")
+    file(WRITE "${TTYD_GEN_DIR}/sjis_font.bin" "")
+endif()
+dkp_add_embedded_binary_library(ttyd_sjis_font_bin "${TTYD_GEN_DIR}/sjis_font.bin")
+
 # Output-register discipline (each output written once, in full, outside
 # branches; no b15): the PICA200 hangs otherwise, Azahar does not.
 add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/gx_vsh_check.stamp"
@@ -315,7 +330,7 @@ add_dependencies(ttyd ttyd_rels)
 # --wrap=svcBreak: the crash library turns every svcBreak (libctru and citro3d panics too) into a crash report
 target_link_options(ttyd PRIVATE -Wl,--gc-sections -Wl,--wrap=svcBreak -Wl,--no-enum-size-warning
     -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/ttyd.map)
-target_link_libraries(ttyd PRIVATE ttyd_gx_shader_bin ctrdk_devupdate ctrdk_crash citro3d ctru m)
+target_link_libraries(ttyd PRIVATE ttyd_gx_shader_bin ttyd_sjis_font_bin ctrdk_devupdate ctrdk_crash citro3d ctru z m)
 
 if(TTYD_VERSION STREQUAL G8ME01)
     set(_subtitle "PORT")

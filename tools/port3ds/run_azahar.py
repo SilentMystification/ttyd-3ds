@@ -15,7 +15,7 @@ What it does:
      (QTM mapping, 804 MHz, core 2) applies.
   4. Tails the game log (sdmc-relative --log). Stops on the --until regex
      (pass; --frames N is --until for "game frame N reached"), a "[CRASH]"
-     line, --stall seconds (default 20) without log growth, --timeout, or the
+     line, --stall seconds (default 45) without a heartbeat or log growth, --timeout, or the
      emulator exiting by itself. A run that times out with an --until that
      never matched prints the last log lines.
   5. Always stops Azahar, then copies the game log and Azahar's own log to
@@ -354,8 +354,9 @@ def main():
                     help="seconds the emulator may run once it has a slot (default 60; more needs --long)")
     ap.add_argument("--long", type=float, metavar="SECONDS", default=None,
                     help="a run that genuinely needs more than 60 s: the limit in seconds (max 1800)")
-    ap.add_argument("--stall", type=float, default=20.0,
-                    help="fail (FAIL: stall) after this many seconds without game log growth (default 20; 0 = off)")
+    ap.add_argument("--stall", type=float, default=45.0,
+                    help="fail (FAIL: stall) after this many seconds without a heartbeat or game log growth "
+                    "(default 45; 0 = off; at least 60 s before the first heartbeat)")
     ap.add_argument("--gdb", action="store_true", help="enable Azahar's GDB stub; the guest waits for a debugger")
     ap.add_argument("--gdb-port", type=int, default=24689)
     ap.add_argument("--realtime", action="store_true",

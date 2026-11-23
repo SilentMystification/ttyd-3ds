@@ -48,6 +48,7 @@ static int s_black = 1;
 static void* s_next_fb;
 static u32 s_frames;
 static u64 s_frame_start;
+static u64 s_pause_base; /* plat_paused_ticks() when the frame began: a menu or update pause is not frame time */
 
 static void retrace(void) {
     port_irq_enter();
@@ -476,6 +477,25 @@ void port_debug_frame(u32 frame);
 void port_card_frame(u32 frame);
 void plat_memory_log(const char* when);
 
+/* One log line per map change: "map: <from> -> <to> (entrance <bero>)", "-" for the first map. */
+static void map_log_frame(void) {
+    static char from[16];
+    if (gp == NULL || gp->currentMapName[0] == '\0') {
+        return;
+    }
+    char to[16];
+    memcpy(to, gp->currentMapName, sizeof(to));
+    to[sizeof(to) - 1] = '\0';
+    if (strcmp(from, to) == 0) {
+        return;
+    }
+    char bero[17];
+    memcpy(bero, gp->beroEnterName, sizeof(bero) - 1);
+    bero[sizeof(bero) - 1] = '\0';
+    PLOG_I("map: %s -> %s (entrance %s)", from[0] != '\0' ? from : "-", to, bero[0] != '\0' ? bero : "-");
+    memcpy(from, to, sizeof(from));
+}
+
 static void frame_hooks(void) {
     s_frames++;
     /* determ: exactly one retrace of game time per frame */
@@ -496,11 +516,12 @@ static void frame_hooks(void) {
     }
     warp_switch();
     sweep_frame();
+    map_log_frame();
     if (port_lp_active()) {
         int seq = gp != NULL ? seqGetSeq() : SEQ_UNDEFINED;
         int ready = (seq == SEQ_BATTLE && _battleWorkPointer != NULL && gp->inBattle);
         port_lp_frame(s_frames, seq, ready, gp != NULL ? gp->currentMapName : NULL,
-                      s_frame_start ? plat_ticks() - s_frame_start : 0);
+                      s_frame_start ? plat_ticks() - s_frame_start - (plat_paused_ticks() - s_pause_base) : 0);
     }
     fastboot_frame(s_sweep_state > 1 || s_warp_switch_done);
     if (s_frames % 1800 == 0) {
@@ -512,7 +533,7 @@ static void frame_hooks(void) {
     plat_gpu_stats(&g);
     u64 now = plat_ticks();
     st.frames = s_frames;
-    st.frame_us = s_frame_start ? (u32)((now - s_frame_start) / (PLAT_TICKS_PER_SEC / 1000000u)) : 0;
+    st.frame_us = s_frame_start ? (u32)((now - s_frame_start - (plat_paused_ticks() - s_pause_base)) / (PLAT_TICKS_PER_SEC / 1000000u)) : 0;
     if (st.frame_us > 2000000u) {
         PLOG_W("slow frame %lu: %lu ms (map %s)", (unsigned long)s_frames, (unsigned long)(st.frame_us / 1000u),
                gp != NULL ? gp->currentMapName : "-");
@@ -621,5 +642,6 @@ void VIWaitForRetrace(void) {
         dvd_settle();
     }
     s_frame_start = plat_ticks();
+    s_pause_base = plat_paused_ticks();
     plat_set_phase("game frame");
 }

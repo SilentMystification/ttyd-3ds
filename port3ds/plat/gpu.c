@@ -755,6 +755,8 @@ static u32 vram_largest_kb(void) {
     return 0;
 }
 
+uint32_t plat_gpu_vram_largest_kb(void) { return vram_largest_kb(); }
+
 static void* s_scratch_mem; /* VRAM for the strip copies (scratch_get); NULL: none */
 #define SCRATCH_BYTES (256 * 1024)
 
@@ -802,6 +804,20 @@ void plat_gpu_tex_free(uint32_t handle) {
     t->live = 0;
     t->pending_free = 1;
     t->free_after_frame = s_frame_counter + 3; /* frames in flight */
+    LightLock_Unlock(&s_tex_lock);
+}
+
+void plat_gpu_tex_reclaim(void) {
+    plat_gpu_sync();
+    LightLock_Lock(&s_tex_lock);
+    for (u32 i = 1; i < MAX_TEX; i++) {
+        TexSlot* t = &s_tex[i];
+        /* copy targets are released by the render thread (reap_targets) */
+        if (t->pending_free && t->target == NULL) {
+            C3D_TexDelete(&t->tex);
+            memset(t, 0, sizeof(*t));
+        }
+    }
     LightLock_Unlock(&s_tex_lock);
 }
 

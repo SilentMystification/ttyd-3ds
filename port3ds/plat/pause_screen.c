@@ -12,6 +12,7 @@
 
 #include <3ds.h>
 
+#include "plat/audio.h"
 #include "plat/gpu.h"
 #include "plat_internal.h"
 
@@ -58,6 +59,28 @@ void plat_pause_grey(void) {
 }
 
 void plat_pause_release(void) { s_grey_fb = NULL; }
+
+/* An intentional pause of the game thread (a menu, a devupdate transfer): the watchdog is held, the
+ * top screen is greyed and the sound muted (menus), and the time spent is added up so the game's frame
+ * timing can leave it out (plat_paused_ticks). */
+static uint64_t s_pause_t0;
+static volatile uint64_t s_paused_total;
+uint64_t plat_paused_ticks(void) { return s_paused_total; }
+void plat_pause_add_ticks(uint64_t ticks) { s_paused_total += ticks; }
+
+void plat_pause_begin(void) {
+    plat_wd_hold(1);
+    plat_audio_set_muted(1);
+    plat_pause_grey();
+    s_pause_t0 = svcGetSystemTick();
+}
+
+void plat_pause_end(void) {
+    plat_pause_release();
+    plat_audio_set_muted(0);
+    plat_pause_add_ticks(svcGetSystemTick() - s_pause_t0);
+    plat_wd_hold(0);
+}
 
 /* Test aid (shotbottom): the frozen top screen as shots/pNNNNN.ppm. */
 void plat_pause_dump(int tick) {

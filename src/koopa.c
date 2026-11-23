@@ -27,7 +27,13 @@
 
 // mario_motion.c's MarioJumpData; read here as a plain array of floats (koopa.c addresses it as a far object,
 // which it does only through an array of unknown size).
+#ifdef TARGET_PORT
+extern MarioJumpData marioJumpData; // the port declares the real type (LTO checks it)
+#define KPA_JUMP_DATA marioJumpData.jump
+#else
 extern f32 marioJumpData[];
+#define KPA_JUMP_DATA marioJumpData
+#endif
 
 static void kpa2DMain(void);
 static void kpa3DMain(void);
@@ -527,7 +533,7 @@ static void kpa3DMain(void) {
  * 7.0, 8.1, 8.4 or 10.5 units per frame upward. Returns the initial speed.
  */
 f32 kpaSetJumpPara(void) {
-    f32* jd = marioJumpData;
+    f32* jd = KPA_JUMP_DATA;
     MarioWork* mario = marioGetPtr();
     mario->jumpVelocityY = *jd++;
     mario->jumpAccelerationY = *jd++;

@@ -359,6 +359,12 @@ BOOL partyPaperOn(PartyEntry* party, const char* animName);
 void L_partyClearCont(PartyEntry* party);
 extern s32 partyCtrlNo;
 f32 partyGetHeight(PartyEntry* party);
+#ifdef TARGET_PORT
+// partyNrmToAngle takes its Vec by value in the original (MWCC passes it as a pointer to a copy); the port's
+// definition takes the pointer, which the ARM hard-float ABI needs (a by-value Vec would arrive in s0-s2).
+// party.c and party_move.c declare it themselves on the GameCube build.
+f32 partyNrmToAngle(Vec* n);
+#endif
 void partyInitCamId(PartyEntry* party);
 void partyKeyOff(void);
 void partyKeyOn(void);

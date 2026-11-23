@@ -631,7 +631,11 @@ void FontDrawStringShake(f32 x, f32 y, const char* msg) {
     }
 }
 // FAKE: the prototype this file was compiled with (u16 icon id; icondrv.h has s16/s32), so callers zero-extend the id
+#ifdef TARGET_PORT
+#include "driver/icondrv.h" // the port needs the real prototype (LTO checks it)
+#else
 extern void iconGetWidthHight(u16* width, u16* height, u16 id);
+#endif
 extern void iconDispGxAlpha(Vec* position, s16 flags, u16 iconId, u8 alpha, f32 scale);
 
 /** Draws one glyph at integer x, y in the loaded matrix, outline first when FontDrawEdge is on. */

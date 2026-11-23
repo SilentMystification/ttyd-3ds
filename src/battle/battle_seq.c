@@ -47,9 +47,18 @@
 #define STAGE_WORK(wp) (&(wp)->stageObjectWork)
 
 // external prototypes
+#ifdef TARGET_PORT
+// The port declares the real type (LTO checks it).
+extern BattleWeapon marioDefaultWeapon_Jump;
+extern BattleWeapon marioWeapon_KururinJump;
+extern BattleWeapon marioDefaultWeapon_Hammer;
+#define MARIO_WEAPON(w) (&(w))
+#else
 extern s32 marioDefaultWeapon_Jump[];
 extern s32 marioWeapon_KururinJump[];
 extern s32 marioDefaultWeapon_Hammer[];
+#define MARIO_WEAPON(w) ((BattleWeapon*)(w))
+#endif
 
 // local prototypes
 static USER_FUNC(_set_haikei_entry_scale);
@@ -356,13 +365,13 @@ static void btlseqInit(BattleWork* wp) { // 1:1, needs stmw
 static BattleWeapon* _GetFirstAttackWeapon(s32 type) {
     switch (type) {
         case 1:
-            return (BattleWeapon*)marioDefaultWeapon_Jump;
+            return MARIO_WEAPON(marioDefaultWeapon_Jump);
         case 2:
-            return (BattleWeapon*)marioWeapon_KururinJump;
+            return MARIO_WEAPON(marioWeapon_KururinJump);
         case 3:
-            return (BattleWeapon*)marioDefaultWeapon_Jump;
+            return MARIO_WEAPON(marioDefaultWeapon_Jump);
         case 4:
-            return (BattleWeapon*)marioDefaultWeapon_Hammer;
+            return MARIO_WEAPON(marioDefaultWeapon_Hammer);
         case 5:
             return &marioDefaultWeapon_FirstAttackKaitenHammer;
         case 6:

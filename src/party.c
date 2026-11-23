@@ -2598,7 +2598,9 @@ static inline void partyChgRunMo(PartyEntry* party) {
 // The demo keeps the partner appear-position search here; retail moved it to party_move.c.
 #include "driver/hitdrv.h"
 #include "driver/npcdrv.h"
+#ifndef TARGET_PORT
 extern f32 partyNrmToAngle(Vec* n);
+#endif
 extern s32 marioPlaneGetFlyingDir(void);
 
 /** TRUE when hit is a floor the partner may stand on (not flagged with hit attributes 0x200 or 0x800). */
@@ -3281,8 +3283,10 @@ void partySetCamId(PartyEntry* party, s32 cameraId) {
 
 #include "driver/camdrv.h"
 #include "driver/dispdrv.h"
+#ifndef TARGET_PORT // the port takes the real prototypes from shadowdrv.h (LTO checks them)
 void shadowSetCamId(s32 id, s32 camId);
 void shadowFlagOn(s32 id, u32 flag);
+#endif
 BOOL N_vivianDisplayTailCheck(PartyEntry* party);
 static void partyDisp(CameraId cam, void* param);
 

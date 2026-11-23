@@ -108,6 +108,10 @@ void U_shadowSetMode(s32 id, u8 alpha);
 s32 shadowEntryMode(s32 mode, f32 x, f32 y, f32 z, f32 size);
 void shadowSetVolumeDecay(s32 id, f32 volume, f32 decay, f32 decay2);
 void shadowSetCollision(s32 id, BOOL enable);
+#ifdef TARGET_PORT // party.c declares them with other integer types on the GameCube build (FAKES.md)
+void shadowSetCamId(s32 id, s16 camId);
+void shadowFlagOn(s32 id, u16 flags);
+#endif
 GXTexObj* shadowGetCharShadowTexObj(void);
 GXColor shadowGetCharShadowColor(void);
 s32 shadowGetCharShadowProjection(void);

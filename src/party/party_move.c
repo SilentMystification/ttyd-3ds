@@ -2143,7 +2143,9 @@ static void flyMain(PartyEntry* party) {
     }
 }
 
+#ifndef TARGET_PORT
 extern f32 partyNrmToAngle(Vec* n);
+#endif
 extern s32 marioPlaneGetFlyingDir(void);
 
 #if VERSION >= VERSION_JP

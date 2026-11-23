@@ -11,6 +11,7 @@
 #include "driver/animdrv.h"
 #include "eff/eff_nice.h"
 #include "evt/evt_bero.h"
+#include "evt/evt_cam.h"
 #include "seq/seq_mapchange.h"
 #include "data/mapdata.h"
 #include "driver/bgdrv.h"
@@ -62,7 +63,6 @@ EVT_END()
 u8 rel_bss[0xF10];
 void _load(const char*, const char*, const char*);
 
-void evt_cam_road_reset(s32, s32);
 double cos(double);
 // FAKE: local prototype with an s32 mode (sound.h: SND_OUTPUTMODE, the same int): including sound.h (musyx.h,
 // <math.h>) changes the code of every function in this file.

@@ -1341,7 +1341,11 @@ void msgAnalize(smartEntry* smart, const char* msg) {
                     {
                         entry->value = iconId;
                         // FAKE: called through a u16-parameter cast (target passes clrlwi r5 with no extsh to the s16 parameter)
+#ifdef TARGET_PORT
+                        iconGetWidthHight(&iw, &ih, iconId);
+#else
                         ((void (*)(u16*, u16*, u16))iconGetWidthHight)(&iw, &ih, iconId);
+#endif
                         entry->glyph = MSG_GLYPH_ICON;
                         entry->x = (x + ((0.5f * iw) * iconScale)) + iconOfsX;
 #if VERSION <= VERSION_JP

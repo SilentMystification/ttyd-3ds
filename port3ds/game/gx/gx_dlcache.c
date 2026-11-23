@@ -86,6 +86,7 @@ typedef struct {
     u32 trust_gen;   /* gxtrust: the registry's generation the contents are trusted at (0: not trusted) */
     u32 trust_epoch; /* the registry epoch of the last trust request that failed */
     u32 vs_ok;       /* gx_vtx_version at which same_state last matched (0: never) */
+    u32 vsh_rec;     /* the list's pass-group record index (gx_vsh.c), a hint checked on use */
     u8 vtx_desc[GX_VA_MAX_ATTR];
     u8 cur_pnmtx;
     u8 cur_texmtx[8];
@@ -478,6 +479,7 @@ int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
             }
             if (gx_vsh_on) {
                 /* the pass group decides: the shader draws the stream, or the CPU replays as before */
+                gx_vsh_rec_hint = &e->vsh_rec;
                 if (gx_draw_vsh(e->vsh, e->vsh_reason, e->list, e->nbytes, e->nverts, e_verts(e), e_draws(e), e->ndraws)) {
                     if (gx_perf_on > 0) {
                         gx_perf.dl_verts += e->nverts;

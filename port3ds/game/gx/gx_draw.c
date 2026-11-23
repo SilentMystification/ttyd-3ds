@@ -668,7 +668,7 @@ static void box_add(u16* box, const Out* o) {
 /* Switch gxvshbbox (default 0: eki_00's edge row, PORT_3DS_GX_PERF.md round 3, awaits a decision). 1: a draw made while the bounding box is armed takes the shader path like any
  * other, and the box gets the window positions of its vertices from xf_position on the CPU (the arithmetic
  * transform() uses, so the box is the same); GXReadBoundingBox disarms it (every TTYD read follows its own
- * GXClearBoundingBox). 0: armed draws stay on the CPU path, armed until the next clear (the old rule).
+ * GXClearBoundingBox). 0: armed draws stay on the CPU path; the read disarms the box there too.
  * 2: as 1, plus the old box (every draw since the clear, through transform()) kept beside it and compared
  * at each read (`gxstats` bbox line, and a warning). */
 int gx_opt_vshbbox = 0;
@@ -688,9 +688,6 @@ void gx_bbox_clear(void) {
 
 void gx_bbox_read(u16* out) {
     memcpy(out, gx.bbox, sizeof(gx.bbox));
-    if (gx_opt_vshbbox == 0) {
-        return;
-    }
     s_bbox_reads++;
     if (s_bref_on && memcmp(s_bref, gx.bbox, sizeof(s_bref)) != 0) {
         if (s_bbox_mism++ < 8) {
@@ -698,6 +695,8 @@ void gx_bbox_read(u16* out) {
                    gx.bbox[3], s_bref[0], s_bref[1], s_bref[2], s_bref[3]);
         }
     }
+    /* every TTYD read follows its own clear: disarm, in every mode (with gxvshbbox=0 only the draws between a
+     * clear and its read stay on the CPU; before, the box stayed armed and every later draw did) */
     gx_bbox_active = 0;
 }
 

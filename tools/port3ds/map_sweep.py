@@ -83,7 +83,7 @@ def run(build, todo, story, frames, party, timeout, fastboot=True):
     shutil.rmtree(GAME_DIR / "sweep", ignore_errors=True)
     switches = f"sweep={frames} party={party} " + ("fastboot" if fastboot else "nofastboot") + EXTRA_SWITCHES
     cmd = [sys.executable, str(ROOT / "tools/port3ds/run_azahar.py"), "--build", str(build),
-           "--switches", switches, "--log", "3ds/ttyd/log.txt", "--until", r"sweep: (done|stopped)",
+           "--switches", switches, "--log", "3ds/ttyd/latest.log", "--until", r"sweep: (done|stopped)",
            *emu_usage.time_args(timeout), "--stall", "60"] + EXTRA
     child = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:

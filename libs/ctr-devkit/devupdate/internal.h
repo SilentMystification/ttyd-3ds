@@ -32,6 +32,8 @@ bool du_relaunch_requested(void); /* the relaunch of this title is under way */
 
 /* files.c: the store (callbacks or stdio) and the files command. */
 bool du_files_enabled(void);
+bool du_files_ro_enabled(void);  /* files_ro_dir is set */
+bool du_files_ro_path(char* out, size_t n, const char* rel); /* files_ro_dir + "/" + rel, as du_files_path */
 void du_files_use_direct(bool direct); /* recovery: the stdio store, whatever the app passed */
 int du_store_write(const char* path, uint64_t off, const void* data, size_t n);
 int du_store_append(const char* path, const void* data, size_t n);

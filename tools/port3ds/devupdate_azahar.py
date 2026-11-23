@@ -113,7 +113,7 @@ def common_checks(sdmc, own_cia, own_tid):
 
 def run_example(args, profile):
     sdmc = profile / "data/azahar-emu/sdmc"
-    log = sdmc / "3ds/ctrdk-devupdate/log.txt"
+    log = sdmc / "3ds/ctrdk-devupdate/latest.log"
     for f in (sdmc / "3ds/ctrdk-devupdate/switches.txt", sdmc / "3ds/ctrdk-devupdate/crashnow"):
         f.unlink(missing_ok=True)
     own_tid = cia_tid(OWN_CIA)
@@ -167,7 +167,7 @@ def restart_last(profile, log, word):
 
 def run_ttyd(args, profile, crash):
     sdmc = profile / "data/azahar-emu/sdmc"
-    log = sdmc / "3ds/ttyd/log.txt"
+    log = sdmc / "3ds/ttyd/latest.log"
     if not (sdmc / "3ds/ttyd/game.iso").exists():
         print("devupdate_azahar: the profile has no 3ds/ttyd/game.iso (hard-link iso/game.iso there)")
         return
@@ -223,7 +223,7 @@ def main():
     finally:
         session("stop", profile)
         sdmc = profile / "data/azahar-emu/sdmc"
-        for rel in ("3ds/ctrdk-devupdate/log.txt", "3ds/ctrdk-devupdate/log.old", "3ds/ttyd/log.prev.txt", "3ds/ttyd/log.txt"):
+        for rel in ("3ds/ctrdk-devupdate/latest.log", "3ds/ctrdk-devupdate/previous.log", "3ds/ttyd/previous.log", "3ds/ttyd/latest.log"):
             if (sdmc / rel).exists():
                 shutil.copy(sdmc / rel, args.out / f"{args.app}_{Path(rel).name}")
         for name in ("devupdate-session-azahar.txt",):

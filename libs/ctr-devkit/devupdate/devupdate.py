@@ -10,6 +10,7 @@
     devupdate.py launch 000400000FD88600 [--switches ...]
     devupdate.py bootstrap --cia build/app.cia [--boot devupdate-boot.3dsx] [--switches ...]
     devupdate.py files put a.tpad b.tpad [--dest sub] | get remote [-o local] | ls [dir] | rm path...
+    devupdate.py log [--prev] [-o FILE]
     devupdate.py queue add manifest.json [files...] | list | clear | start | status | pull DIR
 
 The console runs an app with devupdate_start() (or the bootstrap 3dsx).
@@ -25,6 +26,8 @@ bootstrap sends the bootstrap 3dsx with 3dslink to the Homebrew Launcher
 has it jump into the installed title.
 
 files works in one folder the app chose (e.g. sdmc:/3ds/<app>/queue/), with a CRC32 check.
+A path starting "@/" is in the app's read-only folder instead (get and ls only):
+`files get @/latest.log`, `files ls @/`. log prints the game's latest.log tail.
 
 queue runs a list of test runs on the console without anyone there. The manifest
 is JSON, a list or {"defaults": {...}, "entries": [...]}; an entry is
@@ -421,6 +424,25 @@ def cmd_files(args):
         print(f"devupdate: rm {p}: {last}")
         status |= 0 if last == "done" else 1
     return status
+
+
+def cmd_log(args):
+    """The game's latest.log (or previous.log, the last run's with --prev): the last 200 lines, or the whole file with -o."""
+    remote = "@/previous.log" if args.prev else "@/latest.log"
+    try:
+        data = files_get(args, remote)
+    except RuntimeError as e:
+        print(f"devupdate: {remote}: {e}")
+        return 1
+    if args.out:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        print(f"devupdate: {remote} -> {out} ({len(data)} bytes)")
+        return 0
+    for line in data.decode(errors="replace").splitlines()[-200:]:
+        print(line)
+    return 0
 
 
 def queue_lines(entries, shots_switches=None, shots_collect="shots", defaults=None):
@@ -875,6 +897,9 @@ def main():
     p.add_argument("paths", nargs="*")
     p.add_argument("--dest", default="", help="put: a folder under the files folder")
     p.add_argument("-o", "--out", help="get: the local file")
+    p = sub.add_parser("log", help="the game's latest.log (read-only folder): the last 200 lines")
+    p.add_argument("--prev", action="store_true", help="previous.log, the last run's log")
+    p.add_argument("-o", "--out", help="write the whole file here instead of printing the tail")
     p = sub.add_parser("queue", help="a list of test runs the console works through unattended")
     p.add_argument("action", choices=["add", "list", "clear", "start", "status", "pull"])
     p.add_argument("paths", nargs="*", help="add: manifest.json and more files to upload; pull: the folder")
@@ -903,7 +928,8 @@ def main():
         ap.error("give --ip or set N3DS_IP (Azahar: --ip 127.0.0.1)")
     try:
         return {"ping": cmd_ping, "push": cmd_push, "restart": cmd_restart, "report": cmd_report,
-                "launch": cmd_launch, "bootstrap": cmd_bootstrap, "files": cmd_files, "queue": cmd_queue}[args.cmd](args)
+                "launch": cmd_launch, "bootstrap": cmd_bootstrap, "files": cmd_files, "queue": cmd_queue,
+                "log": cmd_log}[args.cmd](args)
     except OSError as e:
         print(f"devupdate: no connection to {args.ip}:{args.port}: {e}")
         return 2

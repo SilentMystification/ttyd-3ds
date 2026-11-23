@@ -128,7 +128,7 @@ def run_port(args, switches, until, timeout, last):
         if faults:
             (last / "hw_faults.json").write_text(json.dumps(faults, indent=1))
             reason += f" [{sum(faults.values())} unmapped accesses, {len(faults)} PCs]"
-    log = sd / "log.txt"
+    log = sd / "latest.log"
     text = log.read_text(errors="replace") if log.exists() else ""
     (last / "game_log.txt").parent.mkdir(parents=True, exist_ok=True)
     (last / "game_log.txt").write_text(text)

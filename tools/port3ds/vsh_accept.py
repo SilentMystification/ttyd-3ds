@@ -61,7 +61,7 @@ def cmd_run(a):
     sw = (f"map={a.scene} " + (f"story={a.story} " if a.story is not None else "") +
           f"gxstats=60 gxclearrgb=FF00FF gxdepthshot shots=1 shotfrom={a.first} shotmax={a.count} " + a.switches)
     args = [sys.executable, str(REPO / "tools/port3ds/run_azahar.py"), "--build", str(a.build), "--log",
-            "3ds/ttyd/log.txt", "--switches", sw, "--until", f"shot shots/{last:05d}.ppm: this record",
+            "3ds/ttyd/latest.log", "--switches", sw, "--until", f"shot shots/{last:05d}.ppm: this record",
             *emu_usage.time_args(a.timeout), "--stall", "180", "--last", str(dest / "azahar")]
     if a.profile is not None:
         args += ["--profile", str(profile)]

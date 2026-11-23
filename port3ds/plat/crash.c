@@ -5,13 +5,13 @@
  * game links with --wrap=svcBreak), the crash screen and the crash exit.
  * See libs/ctr-devkit/README.md. This file connects it to the port:
  *   - report lines go to plat_crash_line (log.c): the log queue is written
- *     first, then each [CRASH] line goes to log.txt, the live log and the
+ *     first, then each [CRASH] line goes to latest.log, the live log and the
  *     bottom console; the library itself appends them to crash.txt (kept
  *     across boots) and the debugger channel;
  *   - the app info is the build string, the phase and the map, and whether
  *     QTM is in use;
  *   - shutdown hooks: the console lock and the GPU before the crash screen,
- *     the DSP after it, the core 1 limit and log.txt before the exit;
+ *     the DSP after it, the core 1 limit and latest.log before the exit;
  *   - switches: wdog=N (default 10), crashwait=N, crashtest=<kind>,
  *     crashframe=N, crashaddr=N;
  *   - with the devupdate switch, a crash hands over to the updater's

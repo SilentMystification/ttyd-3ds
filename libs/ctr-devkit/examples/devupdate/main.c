@@ -31,7 +31,7 @@
 #include "ctrdk/devupdate.h"
 
 #define DIR "sdmc:/3ds/ctrdk-devupdate"
-#define LOG_PATH DIR "/log.txt"
+#define LOG_PATH DIR "/latest.log"
 
 extern u32 __stacksize__; /* libctru: the main thread's stack size (default 32 KiB) */
 
@@ -142,8 +142,8 @@ int main(int argc, char** argv) {
     LightLock_Init(&s_lock);
     mkdir("sdmc:/3ds", 0777);
     mkdir(DIR, 0777);
-    unlink(DIR "/log.old");
-    rename(LOG_PATH, DIR "/log.old");
+    unlink(DIR "/previous.log");
+    rename(LOG_PATH, DIR "/previous.log");
     s_log = fopen(LOG_PATH, "w");
     APT_SetAppCpuTimeLimit(30); /* the server thread runs on core 1 */
 

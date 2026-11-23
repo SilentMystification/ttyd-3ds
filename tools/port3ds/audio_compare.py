@@ -531,7 +531,7 @@ def capture_port(scene, out, build, extra_switches, lle_audio, timeout, seconds,
     if timeout is None:
         # the sink holds emulation to `speed` percent, so the scene takes seconds * 100 / speed; plus boot and margin
         timeout = 45 + seconds * (100.0 / speed if sink else 1.0) * 1.3
-    argv = ["run_azahar.py", "--build", str(build), "--switches", switches, "--log", "3ds/ttyd/log.txt",
+    argv = ["run_azahar.py", "--build", str(build), "--switches", switches, "--log", "3ds/ttyd/latest.log",
             "--until", "audio: wrote audio.wav", *emu_usage.time_args(timeout), "--last", str(last)]
     if sink:
         argv.append("--realtime")
@@ -599,7 +599,7 @@ def cpu_profile(scene, build, extra_switches, out, duration, start):
     switches = " ".join(s for s in (sc["port_switches"], "wdog=900", extra_switches) if s)
     out.mkdir(parents=True, exist_ok=True)
     ra = load_run_azahar()
-    log = ra.PROFILE / "data" / "azahar-emu" / "sdmc" / "3ds" / "ttyd" / "log.txt"
+    log = ra.PROFILE / "data" / "azahar-emu" / "sdmc" / "3ds" / "ttyd" / "latest.log"
     if log.exists():
         log.unlink()
     here = Path(__file__).resolve().parent

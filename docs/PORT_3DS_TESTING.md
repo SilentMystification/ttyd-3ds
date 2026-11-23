@@ -74,7 +74,7 @@ The game reads the disc image from the emulated SD card. Link it there once (a h
 mkdir -p build/azahar-profile/data/azahar-emu/sdmc/3ds/ttyd
 ln -f iso/game.iso build/azahar-profile/data/azahar-emu/sdmc/3ds/ttyd/game.iso
 tools/port3ds/build.sh
-tools/port3ds/run_azahar.py --build build/3ds/game/ttyd.cia --log 3ds/ttyd/log.txt \
+tools/port3ds/run_azahar.py --build build/3ds/game/ttyd.cia --log 3ds/ttyd/latest.log \
     --switches "map=gor_01 shots=100 shotmax=40" \
     --until "shot shots/04000" --timeout 500 --stall 0
 ```
@@ -295,7 +295,8 @@ tools/port3ds/run_hw.py --switches "wdog=30" --until "warp:|title" --timeout 300
 tools/port3ds/run_hw.py --switches "map=gor_01 wdog=30" --until "warp: gor_01" --timeout 300
 ```
 
-`run_hw.py` sends the `.3dsx` with 3dslink, passing the switches as arguments, and then connects to the game's live log on TCP port 17492. A netloaded game opens that port by itself. It prints and saves every line to `build/hw-last/log.txt` and stops like the Azahar runner. The game also writes `sdmc:/3ds/ttyd/log.txt` and keeps the previous run as `log.prev.txt`, so the report of a crash that cut the connection can be fetched with ftpd.
+`run_hw.py` sends the `.3dsx` with 3dslink, passing the switches as arguments, and then connects to the game's live log on TCP port 17492. A netloaded game opens that port by itself. It prints and saves every line to `build/hw-last/log.txt` and stops like the Azahar runner. The game also writes `sdmc:/3ds/ttyd/latest.log` and keeps the previous run as `previous.log`, so the report of a crash that cut the connection can be fetched with ftpd.
+Without FTP: `devupdate.py log [--prev] [-o FILE]` reads the same `latest.log` / `previous.log` over devupdate (`files_ro_dir`, read-only, needs the devupdate server).
 
 A 3dsx gets the memory of the title the Homebrew Launcher runs in, and it does not get the QTM mapping. If the game reports at boot that the heap or linear heap is too small, install the CIA instead (copy `build/3ds/game/ttyd.cia` to the SD card and install it with FBI) and start it from the HOME Menu. A CIA's switches come from `sdmc:/3ds/ttyd/debug3ds.txt`. Its live log needs the `livelog` switch.
 Put `livelog` in `sdmc:/3ds/ttyd/debug3ds.txt`, start the CIA, then run `run_hw.py --no-send --until ...` to attach (`run_hw.py` adds `livelog` itself when it sends a 3dsx).

@@ -21,7 +21,7 @@ from gdbrsp import RSP  # noqa: E402
 import emu_usage  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
-LOG = ROOT / "build/azahar-profile/data/azahar-emu/sdmc/3ds/ttyd/log.txt"
+LOG = ROOT / "build/azahar-profile/data/azahar-emu/sdmc/3ds/ttyd/latest.log"
 
 
 def symbolize(elf, addrs):

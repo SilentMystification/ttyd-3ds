@@ -167,7 +167,8 @@ Switches the game reads (space-separated words in `--switches`):
 | `yieldstats=N` | Every N seconds, a `[THREADS]` line: each OS thread's share of baton-holding time, idle yields, and time slept by `yieldsleep` |
 | `shotbottom=N` | Saves the bottom screen as `shots/bNNNNN.ppm` (320x240, at most 60) every N ticks. A tick is a game frame, or a ~16 ms menu poll while the Options menu is open, so it also catches the open menu (the log line says `menu=1` or `menu=0`). Layout: rows 1-2 HUD, rows 3-30 log; with a menu open, rows 3-14 menu and rows 16-30 log (`plat/menu.c`) |
 | `devmenu` | Enables the developer menu, opened with ZL+SELECT. SELECT alone opens the player Options menu, so a `padscript` that pressed `select` for the old developer menu now opens Options. While the Options menu is open, `padscript` steps advance once per ~16 ms menu poll, not per game frame. Example: `wait*900,select*3,wait*5,right*2,wait*5,select*3` |
-| `devupdate` | Development only: starts the ctr-devkit updater at boot (TCP 5050, `devupdateport=N`, `devupdatetoken=TEXT`), and a crash then goes to recovery mode instead of waiting for START. See "ctr-devkit: crash and devupdate" below |
+| `devupdate` | Starts the ctr-devkit updater at boot (TCP 5050, `devupdateport=N`, `devupdatetoken=TEXT`), and a crash then goes to recovery mode instead of waiting for START. On by default in development builds (`-dev` in the version) unless `nodevupdate` is given; release builds need this switch. See "ctr-devkit: crash and devupdate" below |
+| `nodevupdate` | Turns the updater off in a development build (no effect when `devupdate` is given) |
 
 Sound needs `sdmc:/3ds/dspfirm.cdc` (dumped from a console with DSP1), in the profile's SD card as on the console. Without it the game runs silently with the same sound timing. `--lle-audio` makes Azahar run that firmware itself (its LLE DSP) instead of its own model of it, which is slower but closer to the console. `wavdump=N` saves the first N seconds of the game's mix as `sdmc:/3ds/ttyd/audio.wav`, and the log has the output's peak level every 10 s.
 
@@ -274,7 +275,7 @@ $D --ip $N3DS_IP report --out build/devupdate-last/report.txt   # after a crash 
 $D --ip $N3DS_IP bootstrap --cia build/3ds/game/ttyd.cia --switches devupdate   # first install, no FBI
 ```
 
-- **Switches.** `restart` and `push` switches reach the relaunched game as APT deliver arguments, which `plat_switches_load` puts first. They hold for that one launch; a start from the HOME Menu gets only `debug3ds.txt`. A devupdate relaunch keeps the server on.
+- **Switches.** `restart` and `push` switches reach the relaunched game as APT deliver arguments, which `plat_switches_load` puts first. They hold for that one launch; a start from the HOME Menu gets only `debug3ds.txt`. In a development build the server is on for a HOME Menu start too (unless `nodevupdate`); in a release build it needs the `devupdate` switch. A devupdate relaunch keeps the server on.
 - **Saves.** Before a relaunch the game only waits for a card write in progress. It never touches the files in `sdmc:/3ds/ttyd/`.
 - **Azahar.** The same commands work with `--ip 127.0.0.1` against one long-lived headless instance:
 

@@ -56,6 +56,16 @@ if [ -f "$repo/.git" ]; then
     gitmount="-v $common:$common:ro"
 fi
 
+# The game embeds the SJIS ROM font (CMakeLists.txt). It is rendered on the host, where Pillow is, into
+# build/fonts/ (untracked); the font is downloaded once (pinned, SHA-256 checked).
+if [ "$project" = "." ]; then
+    sjis="$repo/build/fonts/sjis_font.bin"
+    if [ ! -f "$sjis" ] || [ "$repo/tools/port3ds/gen_sjis_font.py" -nt "$sjis" ]; then
+        python3 -I "$repo/tools/port3ds/gen_sjis_font.py" ||
+            echo "build.sh: warning: no SJIS ROM font (needs Python Pillow); the JP build will not configure" >&2
+    fi
+fi
+
 mkdir -p "$repo/$out"
 # shellcheck disable=SC2086
 docker run --rm $gitmount \

@@ -17,7 +17,7 @@ extern "C" {
 #endif
 
 /* ---- Logging (plat/log.c) ----
- * Lines go to sdmc:/3ds/ttyd/log.txt, the live log (TCP 17492, with switch
+ * Lines go to sdmc:/3ds/ttyd/latest.log, the live log (TCP 17492, with switch
  * livelog or when netloaded) and the bottom screen console. Producers only
  * format into a lock-free queue; a writer thread on core 1 does the I/O.
  * Every line starts with #<sequence>, so a gap shows dropped lines. */
@@ -48,7 +48,7 @@ uint64_t plat_rtc_ms_since_1900(void); /* the console's clock */
  * Every thread the port creates installs the exception handler with
  * plat_crash_install_thread(). A crash, plat_fatal() or a watchdog timeout
  * writes [CRASH] lines (registers, stack scan, last phase, current map,
- * build) to log.txt, crash.txt and the live log, then ends the process,
+ * build) to latest.log, crash.txt and the live log, then ends the process,
  * which returns to the HOME Menu or the Homebrew Launcher. */
 void plat_crash_install_thread(void);
 void plat_fatal(const char* fmt, ...) __attribute__((noreturn, format(printf, 1, 2)));

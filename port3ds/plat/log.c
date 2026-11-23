@@ -5,11 +5,11 @@
  *   - Producers (game, render, audio threads) only format a line and copy it
  *     into a slot of a lock-free queue. They make no SD, socket or console
  *     call. A full queue drops the new line and counts it.
- *   - One writer thread at the lowest priority on core 1 writes log.txt,
+ *   - One writer thread at the lowest priority on core 1 writes latest.log,
  *     the replay ring, the live socket and the bottom console, and fsyncs
  *     about once a second. Before it runs, lines are written directly.
  *   - The console is skipped for a batch when more than 128 lines wait (it
- *     is the slowest output and log.txt has every line).
+ *     is the slowest output and latest.log has every line).
  *   - Crash path: the queue is written in the crashing thread, the drain lock
  *     is kept so the writer never runs again, later lines go direct.
  * Every line starts with #<sequence>; a gap means lost lines.
@@ -147,17 +147,11 @@ void plat_log_init(int live) {
     LightEvent_Init(&s_wake, RESET_ONESHOT);
     LightEvent_Init(&s_flushed, RESET_ONESHOT);
 
-    /* Keep the previous run: a crash trace must survive the next boot. */
-    /* A log under 4 KiB is an aborted boot: it must not replace the log of the run before it
-     * (a console lockup leaves the only trace of the freeze in log.txt; the next boot rotates it). */
-    struct stat lst;
-    if (stat("log.txt", &lst) == 0 && lst.st_size < 4096 && stat("log.prev.txt", &lst) == 0) {
-        unlink("log.txt");
-    } else {
-        unlink("log.prev.txt");
-        rename("log.txt", "log.prev.txt");
-    }
-    s_log_fd = open("log.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    /* Keep the previous run: a crash trace must survive the next boot. Every
+     * start moves latest.log to previous.log (replacing it) and starts a new one. */
+    unlink("previous.log");
+    rename("latest.log", "previous.log");
+    s_log_fd = open("latest.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
 
     char lv[16];
     if (plat_switch_value("loglevel", lv, sizeof(lv))) {

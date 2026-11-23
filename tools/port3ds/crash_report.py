@@ -3,7 +3,7 @@
 
     tools/port3ds/crash_report.py build/azahar-last/game_log.txt
     tools/port3ds/crash_report.py path/to/crash.txt --elf build/3ds/game/ttyd.elf
-    tools/port3ds/crash_report.py --ftp 192.168.1.50        # pulls /3ds/ttyd/crash.txt and log.txt
+    tools/port3ds/crash_report.py --ftp 192.168.1.50        # pulls /3ds/ttyd/crash.txt and latest.log
 
 The input is a crash.txt (every crash, appended), a game log, or the two files
 from the console over FTP (ftpd on port 5000). Each report is a run of
@@ -124,7 +124,7 @@ def pull_ftp(ip, port, dest):
     ftp = FTP()
     ftp.connect(ip, port, timeout=15)
     ftp.login()
-    for name in ("crash.txt", "log.txt"):
+    for name in ("crash.txt", "latest.log"):
         path = dest / name
         try:
             with open(path, "wb") as f:
@@ -140,7 +140,7 @@ def pull_ftp(ip, port, dest):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("file", nargs="*", type=Path, help="crash.txt or a log file")
-    ap.add_argument("--ftp", metavar="IP", help="pull /3ds/ttyd/crash.txt and log.txt from the console")
+    ap.add_argument("--ftp", metavar="IP", help="pull /3ds/ttyd/crash.txt and latest.log from the console")
     ap.add_argument("--ftp-port", type=int, default=5000)
     ap.add_argument("--elf", type=Path, help="ELF to use instead of build/elfs/<build>.elf")
     ap.add_argument("--elfdir", type=Path, default=ROOT / "build/elfs")

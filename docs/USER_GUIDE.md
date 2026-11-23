@@ -148,7 +148,7 @@ The port shows these and waits for START. Press START to leave.
 
 - The port has a crash handler. It shows a report on the screen. Press START to exit.
 - It also saves the report to **`sdmc:/3ds/ttyd/crash.txt`**. The file keeps old reports, and new ones are added to the end.
-- The normal log of the last run is **`sdmc:/3ds/ttyd/log.txt`**.
+- The normal log of the last run is **`sdmc:/3ds/ttyd/latest.log`**.
 - A watchdog ends a run that stops responding for 10 seconds, and reports it as a crash.
 
 ### Saves
@@ -164,10 +164,10 @@ The port shows these and waits for START. Press START to leave.
 Please include:
 
 1. What you did, and what you expected.
-2. The build string. It is the first line of `log.txt`, like `TTYD 3DS build #240 f4b3cc42`, and it is shown on the error screens.
+2. The build string. It is the first line of `latest.log`, like `TTYD 3DS build #240 f4b3cc42`, and it is shown on the error screens.
 3. Your console model (New 3DS, New 3DS XL, New 2DS XL) and your Luma3DS version.
 4. Where in the game it happened (the map name is in the status line on the bottom screen).
-5. The files `sdmc:/3ds/ttyd/crash.txt` and `sdmc:/3ds/ttyd/log.txt`.
+5. The files `sdmc:/3ds/ttyd/crash.txt` and `sdmc:/3ds/ttyd/latest.log`.
 6. Do not send your disc image or your save files unless asked. They contain nothing the port needs for a bug report
    except when the bug is about saves.
 

@@ -16,7 +16,7 @@ Status: planned 2026-11-22. Measurements so far come from Azahar, which gives sh
 | game (`os_thread.c`) | 0 | All game logic, **plus all GX translation**: display-list parsing, vertex decode, CPU transform and lighting, texture hashing and conversion, TEV compile, recording |
 | render (`plat/gpu.c`) | 2 (`gpucore`) | Replays the record into citro3d |
 | gxtranslate (`game/gx/gx_rec.c`), only with `gxthread=2` | 2, priority 0x2F (below render) | Translates the recorded GX calls |
-| log writer (`plat/log.c`) | 1 only (priority 0x3F), no fallback | `log.txt` writes |
+| log writer (`plat/log.c`) | 1 only (priority 0x3F), no fallback | `latest.log` writes |
 | sdio (`plat/sdio.c`) | 1 only (priority 0x3E) | Every other SD write and read at run time: options, padrec, shots, wavdump, sweep list |
 | audio (`plat/audio.c`) | 1 | MusyX software mix into one NDSP channel |
 | dvd/io (`plat/disc.c`) | 1 | Disc image reads |

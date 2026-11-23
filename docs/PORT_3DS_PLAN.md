@@ -341,7 +341,7 @@ The port binary contains no game data.
 
 These are taken from the PM64 3DS port and adapted:
 
-- **Log:** a lock-free 1024-slot queue with a writer on core 1. It writes to `sdmc:/3ds/ttyd/log.txt` and to a TCP live log on port 17492, with replay on connect. Lines carry `#seq` numbers, so a gap shows dropped lines. The bottom console also shows the log.
+- **Log:** a lock-free 1024-slot queue with a writer on core 1. It writes to `sdmc:/3ds/ttyd/latest.log` and to a TCP live log on port 17492, with replay on connect. Lines carry `#seq` numbers, so a gap shows dropped lines. The bottom console also shows the log.
 - **Debug switches:** `sdmc:/3ds/ttyd/debug3ds.txt` plus 3dslink arguments: `map=`, `bero=`, `padscript=`, `shots`, `fixedseed`, `fast`, `phase`, `wdog=` and others.
 - **Profiler:** a push/pop phase profiler using `svcGetSystemTick`, with counters (draws, vertices, texture uploads, state changes, cache misses from the ARM11 performance monitor where available). It writes `[PERF]` and `[PHASE]` log lines, and `tools/port3ds/phase_report.py` parses them.
 - **Crash handler:** `threadOnException` on every thread, with a static handler stack. It writes registers, a stack scan with symbols resolved offline from the archived ELF, the last profiler phase, the current map and the build number to the log, `crash.txt` and the live log. Then it calls `svcExitProcess`, which returns to the Homebrew Launcher or HOME Menu.
@@ -365,7 +365,7 @@ Every test is one command that returns a non-zero exit code on failure. All of t
 
 - `tools/port3ds/run_azahar.py --build <3dsx|cia> --switches "map=gor_01 shots exitframe=600" --until "<regex>" --timeout 120`
   - Writes `debug3ds.txt` into Azahar's `sdmc`, sets turbo and vsync in the config (and restores the config afterwards), and starts Azahar with the GDB stub.
-  - Tails `log.txt`. It stops on the regex, a `[CRASH]` line, log silence or the timeout, and always kills the emulator.
+  - Tails `latest.log`. It stops on the regex, a `[CRASH]` line, log silence or the timeout, and always kills the emulator.
   - Collects the log, the screenshots and any `UnmappedAccess` lines from Azahar's own log. Those lines count as failures, because they fault on hardware.
 - `tools/port3ds/run_dolphin.py --map gor_01 --frames 600 --read GlobalWork`
   - Boots the user ISO, or the instrumented decomp build, headless with the GDB stub.
@@ -374,7 +374,7 @@ Every test is one command that returns a non-zero exit code on failure. All of t
   - Warps by writing the same globals the game's own debug warp uses.
 - `tools/port3ds/run_papercut.py`: wraps the paper-cut environment variables shown in section 4.
 - `tools/port3ds/memcompare.py --scene gor_01_idle`: runs the same scene in all three and compares the selected structures, such as `marioGetPtr()`, `GlobalWork`, the event work and the party. It prints field-level differences, using struct layouts taken from the headers through `pycparser` or a generated offset table.
-- `tools/port3ds/push_3ds.py` (needs hardware): finds the console, sends the build with `3dslink`, captures the live log, and fetches `log.txt`, `crash.txt` and Luma dumps over ftpd.
+- `tools/port3ds/push_3ds.py` (needs hardware): finds the console, sends the build with `3dslink`, captures the live log, and fetches `latest.log`, `crash.txt` and Luma dumps over ftpd.
 
 **Test suites**
 

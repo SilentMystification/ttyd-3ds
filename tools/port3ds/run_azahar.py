@@ -306,7 +306,7 @@ def main():
     ap.add_argument("--build", required=True, type=Path, help=".3dsx or .cia to run")
     ap.add_argument("--switches", default="",
                     help="words written to sdmc:/3ds/ttyd/debug3ds.txt (fastboot is added unless nofastboot is given)")
-    ap.add_argument("--log", default="3ds/ttyd/log.txt", help="game log path relative to the SD card root")
+    ap.add_argument("--log", default="3ds/ttyd/latest.log", help="game log path relative to the SD card root")
     ap.add_argument("--until", help="regex in the game log that means success")
     ap.add_argument("--timeout", type=float, default=None,
                     help="seconds the emulator may run once it has a slot (default 60; more needs --long)")

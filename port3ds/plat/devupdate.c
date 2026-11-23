@@ -233,7 +233,7 @@ void plat_devupdate_init(void) {
         cfg.token = s_token;
     }
     cfg.version = plat_build_string();
-    cfg.log_path = "log.txt";
+    cfg.log_path = "latest.log";
     cfg.on_begin = on_begin;
     cfg.on_ready = on_ready;
     cfg.on_resume = on_resume;
@@ -241,6 +241,7 @@ void plat_devupdate_init(void) {
     cfg.on_recovery_exit = on_recovery_exit;
     cfg.log = log_line;
     cfg.files_dir = "queue"; /* sdmc:/3ds/ttyd/queue: uploaded padfiles, queue.txt, results.txt, out/ */
+    cfg.files_ro_dir = "sdmc:/3ds/ttyd"; /* read-only over the PC ("files get @/latest.log"): the game's latest.log and previous.log */
     cfg.store = &s_store;
     int32_t rc = devupdate_start(&cfg);
     if (rc != 0) {

@@ -88,6 +88,10 @@ typedef struct {
      * folder they may touch; the queue keeps queue.txt, state.txt, results.txt
      * and out/ in it. The store callbacks get the app's `user` pointer. */
     const char* files_dir;
+    /* A second folder the PC may only read: "files get @/<path>", "files ls @/<dir>".
+     * put, rm and queue refuse it (error 20). Read with stdio on the server
+     * thread. NULL = none. */
+    const char* files_ro_dir;
     const DevUpdateStore* store;     /* NULL = stdio */
     const char* queue_padfile_key;   /* switch word that gets an entry's padfile; NULL = "padfile" */
     /* Informational messages: level 0 error, 1 warning, 2 info. */

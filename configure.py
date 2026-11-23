@@ -352,6 +352,13 @@ GCDEBUG_RENAMES = [
     "-DPADRead=gcdbg_PADRead",
     "-Drand=gcdbg_rand",
     "-Dsrand=gcdbg_srand",
+    "-DCARDMountAsync=gcdbg_CARDMountAsync",
+    "-DCARDCheckAsync=gcdbg_CARDCheckAsync",
+    "-DCARDFormatAsync=gcdbg_CARDFormatAsync",
+    "-DCARDCreateAsync=gcdbg_CARDCreateAsync",
+    "-DCARDReadAsync=gcdbg_CARDReadAsync",
+    "-DCARDWriteAsync=gcdbg_CARDWriteAsync",
+    "-DCARDSetStatusAsync=gcdbg_CARDSetStatusAsync",
 ]
 if args.gcdebug:
     # the game's own flags plus the renames (cflags_static also builds the main precompiled headers)

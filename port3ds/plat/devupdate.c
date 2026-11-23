@@ -56,11 +56,10 @@ int plat_devupdate_enabled(void) {
         return s_enabled;
     }
     int opt = plat_opt_get(PLAT_OPT_KEY_DEVUPDATE, -1); /* -1: the player never set it */
-    int dev_build = strstr(PORT3DS_VERSION, "-dev") != NULL;
     if (devupdate_launched() || plat_switch_has("devupdate") || opt == 1) {
         s_enabled = 1;
     } else {
-        s_enabled = dev_build && !plat_switch_has("nodevupdate") && opt != 0;
+        s_enabled = plat_is_dev_build() && !plat_switch_has("nodevupdate") && opt != 0;
     }
     return s_enabled;
 }
@@ -71,7 +70,7 @@ int plat_devupdate_wanted(void) {
     if (opt >= 0) {
         return opt;
     }
-    return strstr(PORT3DS_VERSION, "-dev") != NULL && !plat_switch_has("nodevupdate");
+    return plat_is_dev_build() && !plat_switch_has("nodevupdate");
 }
 
 /* "192.168.1.20:5050" while the server runs and the console has an address, else "". */

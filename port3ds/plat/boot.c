@@ -61,6 +61,8 @@ void plat_memory_log(const char* when) {
 uint64_t plat_rtc_ms_since_1900(void) { return osGetTime(); }
 int plat_started_by_netload(void) { return s_netload; }
 const char* plat_build_string(void) { return PORT3DS_BUILD_STRING; }
+/* A development build is one whose PORT3DS_VERSION has "-dev" (cmake/BuildStamp.cmake). */
+int plat_is_dev_build(void) { return strstr(PORT3DS_VERSION, "-dev") != NULL; }
 
 static void cpu_limit_set(u32 value, const char* why) {
     Result r = APT_SetAppCpuTimeLimit(value);

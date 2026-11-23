@@ -11,8 +11,9 @@
  * Two menus share the menu area:
  *  - the player Options menu (plat/options_menu.c), opened with SELECT or by
  *    touching the HUD rows. The game is paused while it is open.
- *  - this file's developer Select menu, only with the switch "devmenu" (or a
- *    build with PORT3DS_DEV_BUILD): ZL+SELECT opens and closes it. L/R change
+ *  - this file's developer Select menu, with the switch "devmenu", the Options
+ *    "Debug mode" setting (on, or auto in a development build), see
+ *    dev_menu_enabled(): ZL+SELECT opens and closes it. L/R change
  *    tab, Up/Down move, Left/Right/A change a value or run an action, B
  *    closes. While it is open the game sees no input but keeps running.
  *
@@ -272,13 +273,20 @@ void plat_updater_draw(const char* title, const char* build, const char* line, i
 void plat_console_row(int row, const char* text) { at(row, text); }
 int plat_console_ready(void) { return s_console_up; }
 
-/* The developer menu is for dev builds and the "devmenu" switch; players get Options. */
+/* The developer menu: the "devmenu" switch, or the Options "Debug mode" setting
+ * (on always, off never, auto = on in development builds only). Players get Options. */
 static int dev_menu_enabled(void) {
-#ifdef PORT3DS_DEV_BUILD
-    return 1;
-#else
-    return plat_switch_has("devmenu");
-#endif
+    if (plat_switch_has("devmenu")) {
+        return 1;
+    }
+    int mode = plat_opt_get(PLAT_OPT_KEY_DEBUGMODE, PLAT_OPT_DEBUG_AUTO);
+    if (mode == PLAT_OPT_DEBUG_ON) {
+        return 1;
+    }
+    if (mode == PLAT_OPT_DEBUG_OFF) {
+        return 0;
+    }
+    return plat_is_dev_build();
 }
 
 int plat_reset_requested(void) {

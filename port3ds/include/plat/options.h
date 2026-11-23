@@ -77,6 +77,12 @@ void plat_options_save(void);
 #define PLAT_OPT_KEY_STEREO3D "stereo3d"
 #define PLAT_OPT_KEY_HUD "hud"
 #define PLAT_OPT_KEY_DEVUPDATE "devupdate" /* developer Select menu: update server on(1)/off(0); unset = the build default */
+/* Debug mode (Options, Debug page): the developer Select menu. PLAT_OPT_DEBUG_*: auto (default) is on in
+ * development builds only, on always, off never (the switch devmenu still opens it). */
+#define PLAT_OPT_KEY_DEBUGMODE "debugmode"
+#define PLAT_OPT_DEBUG_AUTO 0
+#define PLAT_OPT_DEBUG_ON 1
+#define PLAT_OPT_DEBUG_OFF 2
 #define PLAT_OPT_KEY_VOLUME "volume"
 #define PLAT_OPT_KEY_QUALITY "quality"
 #define PLAT_OPT_KEY_LANGUAGE "language"

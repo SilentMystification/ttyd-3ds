@@ -442,6 +442,37 @@ Planner's round-2 brief: put immediate-mode draws on the shader path too, so cha
 
 **Default: `gxvsh=1`.** Every test passes in every scene above, with no oscillation, and no frame is slower than the CPU path (Azahar). Not verified on hardware: the stream attribute layout, fixed attributes, index offsets, the cull mapping (set empirically in Azahar), the bool uniform, and the render-thread cost. `gxvsh=0` is the fallback for A/B and for any hardware problem.
 
+## Round 3: the draws left on the CPU (lighting, texgen sources, the bounding box)
+
+**Census.** In the seven acceptance scenes (gor_01, gon_02, aaa_00, tik_01, hei_01, jin_00, the effects battle) no draw is on the CPU path any more at frame 1200-1260: `xf draws 0`, no matrix index, no lit vertex, no `MTX3x4`, no line or point, no armed bounding box. A sweep of 22 further maps (`gxstats`, the new line `vsh census since boot`, CPU-path draws by reason, story 30, 300 frames each) found where the rest is:
+
+| Reason | Where | CPU-path draws |
+|---|---|---|
+| GX lighting (`L`) | usu_00 (lit map materials, `mapdrv.c` `mapSetMaterial`: colour 0, up to 8 lights, diffuse clamp, spot or no attenuation, ambient from the register, alpha unlit); gor_00 for about 120 frames after the warp | about 3500 a frame in usu_00 |
+| texgen source not a texture coordinate (`r`) | pik_00 (`GX_TG_POS`, `MTX2x4`) | 2458 a frame |
+| bounding box armed (`B`) | from eki_00 on, every later map: `GXClearBoundingBox` armed the box and nothing disarmed it, so every draw stayed on the CPU for the rest of the run | 969 a frame in eki_00, up to 10000 in las_00 |
+| per-vertex matrix index (`P`), immediate (`i`) | win_00 (`himo.c`) | about 90 a frame |
+| `MTX3x4`, lines and points, post-transform matrices | none seen | 0 |
+
+**What moved** (each behind its own switch):
+
+- `gxvshlit=1` (default): colour channel 0 lit in the shader exactly as `light_channel` does it, in eye space: the CPU's 32-bit position and normal matrices as uniforms (the normal normalised in the shader), up to 8 lights packed in mask order, diffuse none/clamp/sign, spot or no attenuation, the result floored to the integer the CPU path truncates to. Cache streams and the immediate ring carry the normal (float). Lit alpha, specular, ambient from the vertex and channel 1 stay on the CPU.
+- `gxvshtg=1` (default): texgen from the position or the normal (object space, as `texgen()`), and `MTX3x4` with the divide by q per vertex (q = 0 left undivided, as on the CPU); the factor is exactly 1 for `MTX2x4`, so existing draws do not change (gor_01 under `determ`: every pixel of 24 shots identical to the build before). Post-transform matrices stay on the CPU.
+- `gxvshbbox` (default 0, see below): an armed draw takes the shader path like any other and the box gets its vertices' window positions from `xf_position`, the position part of `transform()` (shared code, so the same arithmetic); `GXReadBoundingBox` disarms the box (every TTYD read follows its own `GXClearBoundingBox`). `gxvshbbox=2` keeps the old box beside it (every draw since the clear, through `transform()`) and compares at each read.
+- **Not moved:** the matrix palette (win_00's 90 small immediate draws): 10 clip-row sets are 40 uniforms, which with the lights exceed the 96; lines and points (none seen).
+
+**Acceptance** (`vsh_accept.py` method, 24 shots from frame 1140, `determ`, so two runs of one build are identical and any difference is the change):
+
+| Scene | Switch | Static pixels: colour max / depth max | Order flips (static) | Seams | Flicker | Frame (`gxstats` on) |
+|---|---|---|---|---|---|---|
+| usu_00 | `gxvshlit` 0 -> 1 | 2 / 4 units | 0 | 0 / 0 | 0 | 235 -> **102** ms |
+| pik_00 | `gxvshtg` 0 -> 1 | 1 / 4 | 0 | 0 / 0 | 0 | 172 -> **140** ms |
+| eki_00 | `gxvshbbox` 0 -> 1 | 65 (86 px > 8) / 4 | 6 | 0 / 0 | 0 | 50 -> **33** ms |
+| gor_01 | round 3 build vs the build before | identical (every pixel) | | | | |
+
+- The box itself is exact: `gxvshbbox=2` in eki_00, 46 reads, **0 mismatches**.
+- eki_00's 86 differing static pixels are one row along a wall edge (y 388-391) and one pixel, stable over all 24 frames: the edge between two faces is owned by the other face, from the 24-bit transform. That is the shader path's own precision, which eki_00 now gets because its map no longer stays on the CPU; the offload rules fail a cluster along an edge, so `gxvshbbox` stays 0 until the owner judges it (1 fixes the never-disarmed box and takes eki_00 from 50 to 33 ms).
+
 ## Risks of the cache
 
 - **Hash collisions.** A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.

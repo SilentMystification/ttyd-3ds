@@ -163,11 +163,13 @@ void* plat_gpu_stream_alloc(uint32_t bytes);            /* linear memory, 16-byt
 void plat_gpu_stream_commit(const void* p, uint32_t bytes); /* the CPU wrote it: flushed before the record goes to the GPU */
 void plat_gpu_stream_free(void* p);                     /* freed once no frame in flight can read it */
 
-enum { PLAT_VSH_ORTHO = 1u }; /* PlatGpuVshConst.flags: the projection is orthographic */
+enum { PLAT_VSH_ORTHO = 1u, PLAT_VSH_LIT = 2u }; /* PlatGpuVshConst.flags: orthographic projection; GX lighting
+                                                   (the last plat_gpu_vsh_light block applies) */
 
 typedef struct {
     float clip[4][4];   /* clip x, y, z, w = row . (x, y, z, 1), GX clip space (unrotated) */
-    float tex[6][4];    /* texture unit u: s row 2u, t row 2u + 1, applied to (slot value, 1, 1) */
+    float tex[9][4];    /* texture unit u: s, t, q rows 3u..3u + 2, applied to the source (q row 0 0 0 1: no divide) */
+    float tgsrc[3][4];  /* texture unit u's source weights: x position, y normal, z the slot (s, t, 1, 1); w 1: divide by q */
     float clrmix[4];    /* per component: 1 takes the vertex colour, 0 takes matclr */
     float matclr[4];    /* 0..255 */
     uint32_t flags;
@@ -175,16 +177,19 @@ typedef struct {
 } PlatGpuVshConst;
 
 /* Stream layout word: which attributes are s16 (else float), the number of
- * texture slots, the stride. The attributes lie in this order: the float
- * ones (position, then slots 0..2), the s16 ones (same order), the colour
- * (u8 x 4), so each is naturally aligned; the stride is a multiple of 4. */
+ * texture slots, whether a normal is there, the stride. The attributes lie in
+ * this order: the float ones (position, slots 0..2, the normal), the s16 ones
+ * (position and slots, same order), the colour (u8 x 4), so each is naturally
+ * aligned; the stride is a multiple of 4. */
 #define PLAT_VSH_POS_S16 0x1u
 #define PLAT_VSH_NSLOTS(l) (((l) >> 1) & 3u)
 #define PLAT_VSH_SLOT_S16(i) (0x8u << (i))
+#define PLAT_VSH_NRM 0x40u /* float x3 normal (v5) */
 #define PLAT_VSH_STRIDE(l) (((l) >> 8) & 0xFFu)
 
-/* Byte offsets of position, colour and slots 0..2 (-1: none); returns the stride. */
-static inline uint32_t plat_vsh_layout(uint32_t pos_s16, uint32_t nslots, uint32_t slot_s16_mask, int32_t off[5]) {
+/* Byte offsets of position, colour, slots 0..2 and the normal (-1: none); returns the stride. */
+static inline uint32_t plat_vsh_layout_n(uint32_t pos_s16, uint32_t nslots, uint32_t slot_s16_mask, uint32_t nrm,
+                                         int32_t off[6]) {
     uint32_t o = 0;
     for (int pass = 0; pass < 2; pass++) { /* 0: floats, 1: s16 */
         if ((pos_s16 != 0) == (pass == 1)) {
@@ -199,17 +204,58 @@ static inline uint32_t plat_vsh_layout(uint32_t pos_s16, uint32_t nslots, uint32
                 o += pass ? 4u : 8u;
             }
         }
+        if (pass == 0) {
+            off[5] = nrm ? (int32_t)o : -1;
+            o += nrm ? 12u : 0u;
+        }
     }
     off[1] = (int32_t)o;
     o += 4;
     return (o + 3u) & ~3u;
 }
 
-static inline uint32_t plat_vsh_layout_word(uint32_t pos_s16, uint32_t nslots, uint32_t slot_s16_mask) {
-    int32_t off[5];
-    uint32_t stride = plat_vsh_layout(pos_s16, nslots, slot_s16_mask, off);
-    return (pos_s16 ? PLAT_VSH_POS_S16 : 0u) | (nslots & 3u) << 1 | (slot_s16_mask & 7u) << 3 | stride << 8;
+static inline uint32_t plat_vsh_layout(uint32_t pos_s16, uint32_t nslots, uint32_t slot_s16_mask, int32_t off[5]) {
+    int32_t o6[6];
+    uint32_t stride = plat_vsh_layout_n(pos_s16, nslots, slot_s16_mask, 0, o6);
+    for (int i = 0; i < 5; i++) {
+        off[i] = o6[i];
+    }
+    return stride;
 }
+
+static inline uint32_t plat_vsh_layout_word_n(uint32_t pos_s16, uint32_t nslots, uint32_t slot_s16_mask, uint32_t nrm) {
+    int32_t off[6];
+    uint32_t stride = plat_vsh_layout_n(pos_s16, nslots, slot_s16_mask, nrm, off);
+    return (pos_s16 ? PLAT_VSH_POS_S16 : 0u) | (nslots & 3u) << 1 | (slot_s16_mask & 7u) << 3 | (nrm ? PLAT_VSH_NRM : 0u) |
+           stride << 8;
+}
+
+static inline uint32_t plat_vsh_layout_word(uint32_t pos_s16, uint32_t nslots, uint32_t slot_s16_mask) {
+    return plat_vsh_layout_word_n(pos_s16, nslots, slot_s16_mask, 0);
+}
+
+/* GX lighting of colour channel 0 in the shader (gxvshlit): eye-space position
+ * and normal rows (the CPU's position and normal matrices; the normal is
+ * normalised in the shader), the ambient colour, the diffuse and attenuation
+ * selectors, and up to 8 lights in eye space, packed in mask order. */
+#define PLAT_VSH_LIGHTS 8
+typedef struct {
+    float eye[3][4];   /* eye position = row . (x, y, z, 1) */
+    float nrm[3][4];   /* eye normal = row . (nx, ny, nz, 0); identity rows when the vertex has no normal */
+    float amb[4];      /* ambient colour 0..255 (rgb), w unused */
+    float dmode[4];    /* diffuse: x floor (0 clamp, -1e30 sign), y weight of n.l, z = 1 - y (GX_DF_NONE) */
+    float amode[4];    /* attenuation: x weight of the spot term (1 spot, 0 none), y = 1 - x */
+    uint32_t count;    /* lights used */
+    uint32_t pad[3];
+    struct {
+        float pos[4];
+        float dir[4];
+        float color[4]; /* 0..255 */
+        float a[4];     /* a0, a1, a2 */
+        float k[4];     /* k0, k1, k2 */
+    } light[PLAT_VSH_LIGHTS];
+} PlatGpuVshLight;
+void plat_gpu_vsh_light(const PlatGpuVshLight* l, uint32_t id);
 
 /* Scale word of a draw: bits 0-7 the position's power-of-two exponent k
  * (value = s16 x 2^-k; 0 for floats); byte 1 + u for texture unit u: bits 0-1

@@ -465,7 +465,7 @@ int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
             }
             if (gx_vsh_on) {
                 /* the pass group decides: the shader draws the stream, or the CPU replays as before */
-                if (gx_draw_vsh(e->vsh, e->vsh_reason, e->list, e->nbytes, e->nverts)) {
+                if (gx_draw_vsh(e->vsh, e->vsh_reason, e->list, e->nbytes, e->nverts, e_verts(e), e_draws(e), e->ndraws)) {
                     if (gx_perf_on > 0) {
                         gx_perf.dl_verts += e->nverts;
                     }

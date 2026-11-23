@@ -395,6 +395,53 @@ It takes about 1 to 3 minutes and exits 1 on any failure. Without the disc image
   2. Reach file select with `wait*850` followed by repeated `a*3,wait*150`, with `shots=100` to see it.
   3. Rogueport has a save block, so saving mid-game is a cheap test.
 
+### Systems tests
+
+`tools/port3ds/systems_test.py` runs the systems scenarios of backlog lane B item 6 in Azahar, one `run_azahar.py` run each (headless, under the Azahar slot lock), in order, and prints each check with PASS or FAIL. Exit status 0 when every scenario passes.
+
+```sh
+tools/port3ds/systems_test.py                       # all of them, in order
+tools/port3ds/systems_test.py --list
+tools/port3ds/systems_test.py reset_load copy_delete  # some (a scenario's card comes from an earlier one)
+tools/port3ds/systems_test.py adhoc --card slots1234 --switches "shots=20" --padscript "@pad([(950,'start',3)])" \
+    --until "gwdump f=1500 "                        # explore: pad() takes (frame, keys, frames held) events
+```
+
+- **Profile.** Its own Azahar profile, `build/systems-profile/` (the disc is hard-linked in on first use). Before each run the SD card's `card/` folder is emptied or set to a fixture, and old shots and logs are removed.
+- **Input.** Each scenario is a `padscript` under `determ`, so a run repeats frame for frame (the same scenario gave the same RNG state at the same frame in every run so far). The game also gets `syslog` and `gwdump=30`. The presses are at fixed game frames, fitted with shots (`adhoc`); a change that moves the game's timing (the `determ` card model's durations moved the file select by about 250 frames) needs them refitted. A press that comes too early, while a message is still printing or a prompt is still opening, is ignored.
+- **Fixtures.** A scenario that passes and leaves a card saves it as `build/systems-test/cards/<name>.gci`; later scenarios start from it (`slot1`, `slots12`, `slots123`, `slots1234`).
+- **Results.** `build/systems-test/<scenario>/`: the game and Azahar logs, the shots as PNG, the card after the run; `results.json` for all.
+- **Checks.** Every scenario fails on a `run_azahar.py` failure (crash, stall, Azahar fault lines) and on `[CRASH]`, `ERROR` or `fatal` lines in the game log.
+
+| Scenario | Starts from | What it does | Checks |
+|---|---|---|---|
+| `save_new` | no save file | Title, "Create a Save File now?" Yes, New Game in file 1, name, the new file is saved; `warpingame map=gor_01 story=30` warps to Rogueport, `marioat=` puts Mario under the save block, A jumps into it and saves (the first save shows the save-block tutorial); then B+X+START held 1 s | the card check created the file; slot 1 written twice (new file, save block) and nothing else; `OSResetSystem` (the soft reset; the port quits with a relaunch request); the GCI valid, big-endian, header and slot 1 checksums good, slots 2 to 4 empty |
+| `reset_load` | `slot1` | Boot again (the soft reset ends the process, so the next boot is the reset's restart), "The Save File has been loaded.", file 1, "Start with File 1?" Yes | the game continues on `gor_01` at story 30; story flag hashes (GSWF, GSW) equal the saved game's; Mario within 10 units of the saved position; nothing written to the card |
+| `save_slot2`, `save_slot3`, `save_slot4` | `slot1`, `slots12`, `slots123` | New Game in that file (the cursor starts on the last file used), name, the new-file save, soft reset | only that slot written; the slots before it still valid; the ones after it empty |
+| `copy_delete` | `slots1234` | Copy Data: file 1 onto file 2 ("overwrite?" Yes); Erase Data: file 3 (Yes) | file 2's data equals file 1's (main and backup copies); file 3 empty; files 1 and 4 unchanged; the file select's shots after each step |
+| `game_over` | no card | `map=hei_01 story=30 battle=4 btlauto=fail hp=1`: Mario at 1 HP loses to the Goomba | sequence battle → game over → title (the game over screen returns to the title by itself); GAME OVER shots drawn |
+| `pause_tabs` | no card | `map=gor_01 story=30`: START, then Mario, Party, Items, Badges, Journal: A into each, B out, right to the next; B closes | each tab entered (the pause menu's state from `syslog`) with a shot; right from Journal wraps to Mario; closed |
+| `mail_journal` | no card | `storyjump story=30` (the story setups up to 30, which deliver two mails): Items, important items, Mailbox SP, the mail list, read the first mail; Journal: Map, Crystal Stars, Tattle Log, Badges | two mails delivered; the mail list and the open mail (shots); four Journal pages with shots |
+
+Test switches added for these (port only, `port3ds/game/test_systems.c` and `vi.c`):
+
+| Switch | Effect |
+|---|---|
+| `warpingame` | With `map=`: the warp waits for a game started from the file select (the new game's prologue map), so the save slot and name are that file's, instead of starting its own new game at the title |
+| `storyjump` | With `map=` and `story=N`: the warp's new game runs the setup of every story point up to N (the event tables of `event.c`, as the E3 scenario select does: items, mail, partners, flags) instead of only setting GSW 0 |
+| `marioat=x,y,z` | Once the map has been up `marioatwait=N` frames (default 30), puts Mario there through `evt_mario_set_pos`. Once per run |
+| `hp=N` | At the same point, sets Mario's HP |
+| `syslog` | Logs `sys:` lines on change: the sequence, the pause menu (open, `active`, tab, the Items, Badges, Journal and Party pages' states, the mail count) and Mario's HP |
+
+`card.c` now logs each create, write and format (`card: write offset ... length ... result ...`) and each delete.
+
+Results (Azahar, US build, 2026-11-23, with the `determ` card model): **9 of 9 scenarios pass**, from an empty card, 41 minutes on a shared machine (1 to 10 minutes each, mostly the wait for an Azahar slot and software rendering). Found:
+
+- **Mario 5 units off after a load.** The save block save stores Mario's position (`savePlayerPos`, 185, 0, -55 in the GCI) and the map change puts him there (`seq_mapchange.c`), but the first record after the load (9 frames after the map is up) has him at 180, 0, -55. Not yet compared with Dolphin, so it may be the game's own (the partner placed beside him, or the save block's collision); `reset_load` allows 10 units.
+- `test_gci.py selftest` no longer linked: `card.c` calls `tst_rngtrace_wanted`, `tst_cur_frame` and `tst_log`, which its host stubs lacked (fixed in the stubs).
+
+Behaviour seen, as on the GameCube: a file made by New Game is saved at once and lists as "New" until saved in play; the yes/no of "Create a Save File now?" and "Start with File 1?" start on Yes, the name check, overwrite and erase prompts on No; the game over screen returns to the title by itself; the soft reset quits the port (relaunch request), so a restart is the next boot.
+
 ### Options
 
 Player settings live in `sdmc:/3ds/ttyd/options.txt` as `key=value` lines ending in `#end`. Deleting the file resets everything to defaults.

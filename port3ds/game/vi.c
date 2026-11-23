@@ -31,6 +31,7 @@
 #include "plat/hud.h"
 #include "plat/input.h"
 #include "plat/plat.h"
+#include "plat/sweep.h"
 #include "port3ds/os_internal.h"
 #include "test_mode.h"
 #include "version.h"
@@ -258,6 +259,8 @@ static void sweep_read(void) {
     if (s_sweep_frames <= 0) {
         return;
     }
+    /* the game's map names for the sweep: stg battle-background hosts (test_gallery.c) */
+    plat_sweep_register_entry_hook(tst_stage_host);
     FILE* f = fopen("sweep.txt", "r");
     if (f == NULL) {
         PLOG_E("sweep: no sweep.txt");
@@ -301,9 +304,9 @@ static void sweep_frame(void) {
         }
         s_sweep_warp = s_sweep_maps[s_sweep_i];
         if (mapDataPtr(s_sweep_warp) == NULL) {
-            /* the stg battle stages are no map-change targets: enter them through a battle on a host map */
+            /* names that are no map-change targets (the registered sweep entry hook) are entered through a battle on a host map */
             int story = s_sweep_story[s_sweep_i];
-            s_sweep_warp = tst_stage_host(s_sweep_maps[s_sweep_i], &story);
+            s_sweep_warp = plat_sweep_entry_host(s_sweep_maps[s_sweep_i], &story);
             if (s_sweep_warp == NULL) {
                 PLOG_I("sweep: %s not in the map table", s_sweep_maps[s_sweep_i]);
                 s_sweep_i++;

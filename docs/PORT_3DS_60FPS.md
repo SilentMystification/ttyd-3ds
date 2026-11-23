@@ -195,6 +195,8 @@ Render thread (tid 9), busy 36% (gor_01) and 21% (battle) of the stops: waiting 
 | 9 | **Render record headroom**: gor_01 uses 409 of 512 KB | (4.) | avoids segments (each now costs a submit, no longer a vblank) | low |
 | 10 | **Debug overhead** | (2.) | < 1-2%: nothing to do | — |
 
+Target 2 is done (`textrust`, PORT_3DS_GX_PERF.md "Texture trust"): hashes per frame 62-189 -> 0 in four steady scenes, game-thread busy -4 to -6% in Azahar, shots identical, `texverify` 0 stale.
+
 Not a target: the game's own frame pacing (6.).
 
 ## Step 2: hardware baseline (owner session, through `ctr-devkit`)

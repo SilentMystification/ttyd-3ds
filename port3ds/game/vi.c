@@ -547,6 +547,15 @@ static void frame_hooks(void) {
         st.map[sizeof(st.map) - 1] = '\0';
     }
     plat_hud_frame(&st);
+    /* Switch framemark=N (tests, run_azahar.py --frames N): one log line once frame N's hooks are done (its
+     * gwdump records are already out), so a run can end on it without a hand-written regex. */
+    static int s_framemark = -1; /* -1 unread, 0 off */
+    if (s_framemark < 0) {
+        s_framemark = plat_switch_int("framemark", 0);
+    }
+    if (s_framemark > 0 && s_frames == (u32)s_framemark) {
+        PLOG_I("frame %u reached", (unsigned)s_frames);
+    }
 }
 
 static void wait_retrace_raw(void) {

@@ -64,7 +64,7 @@ def point_switches(p, d):
     frames = p.get("frames", d["frames"])
     shots = p.get("shots", d["shots"])
     every = d["every"]
-    sw = [f"storyjump={p['storyjump']}", "determ", f"gwdump={every}", "shotat=" + ",".join(map(str, shots))]
+    sw = [f"storyjump={p['storyjump']}", "determ", "nodevupdate", f"gwdump={every}", "shotat=" + ",".join(map(str, shots))]
     pad = p.get("padscript")
     if pad == "mash":
         sw.append("padscript=" + mash(d.get("mash_from", 640), frames))

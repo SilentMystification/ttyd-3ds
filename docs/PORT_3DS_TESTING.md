@@ -205,6 +205,7 @@ It writes the map list to the SD card, runs the game with `sweep=N`, and reads t
 tools/port3ds/story_sweep.py                          # every point of tools/port3ds/story_points.json
 tools/port3ds/story_sweep.py --only ch1_,ending_      # names starting with these
 tools/port3ds/story_sweep.py --report                 # re-classify and rebuild table.md and index.html
+tools/port3ds/story_sweep.py --points tools/port3ds/story_points_visual.json   # the 9 points of the known visual differences, to the frame of each (about 15 min)
 ```
 
 A full input replay of the story does not exist, so the story is checked at checkpoints.

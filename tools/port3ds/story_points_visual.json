@@ -1,0 +1,199 @@
+{
+ "comment": "Re-check of the 7 visual differences the story sweep found (docs/PORT_3DS_TESTING.md \"Story sweep results\"): the same points as story_points.json, each run only as far as the frame of the known difference. Use: story_sweep.py --points tools/port3ds/story_points_visual.json",
+ "defaults": {
+  "frames": 1100,
+  "shots": [
+   700,
+   850,
+   1000,
+   1080
+  ],
+  "every": 20
+ },
+ "points": [
+  {
+   "name": "prologue_stg0_13_1",
+   "chapter": "prologue",
+   "kind": "scene",
+   "title": "Thousand-Year Door",
+   "storyjump": "STG0_13.1",
+   "row": "0.18",
+   "map": "tik_05",
+   "bero": "e_bero",
+   "story": 16,
+   "party": [
+    1,
+    11
+   ],
+   "padscript": "mash",
+   "frames": 1100,
+   "shots": [
+    1100
+   ]
+  },
+  {
+   "name": "ch1_stg1_00",
+   "chapter": "ch1",
+   "kind": "start",
+   "title": "Petal Meadows",
+   "storyjump": "STG1_00",
+   "row": "1.0",
+   "map": "sys_01",
+   "bero": "stg_1",
+   "story": 22,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 1300,
+   "shots": [
+    1300
+   ]
+  },
+  {
+   "name": "ch1_stg1_01a",
+   "chapter": "ch1",
+   "kind": "scene",
+   "title": "Petalburg (1st Time)",
+   "storyjump": "STG1_01a",
+   "row": "1.3",
+   "map": "nok_00",
+   "bero": "w_bero",
+   "story": 25,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 720,
+   "shots": [
+    720
+   ]
+  },
+  {
+   "name": "ch1_stg1_16",
+   "chapter": "ch1",
+   "kind": "boss",
+   "title": "Hooktail",
+   "storyjump": "STG1_16",
+   "row": "1.33",
+   "map": "gon_11",
+   "bero": "w_bero",
+   "story": 54,
+   "party": [
+    2,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect",
+   "frames": 1100,
+   "shots": [
+    1100
+   ]
+  },
+  {
+   "name": "ch3_stg3_06",
+   "chapter": "ch3",
+   "kind": "scene",
+   "title": "1st Match",
+   "storyjump": "STG3_06",
+   "row": "3.7",
+   "map": "tou_03",
+   "bero": null,
+   "story": 132,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 1400,
+   "shots": [
+    900,
+    1400
+   ]
+  },
+  {
+   "name": "ch5_stg5_19_01",
+   "chapter": "ch5",
+   "kind": "scene",
+   "title": "Entering the Grotto",
+   "storyjump": "STG5_19_01",
+   "row": "5.18",
+   "map": "dou_00",
+   "bero": "w_bero",
+   "story": 242,
+   "party": [
+    3,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 1100,
+   "shots": [
+    1100
+   ]
+  },
+  {
+   "name": "ch8_stg8_04",
+   "chapter": "ch8",
+   "kind": "boss",
+   "title": "Gloomtail",
+   "storyjump": "STG8_04",
+   "row": "8.6",
+   "map": "las_26",
+   "bero": "w_bero",
+   "story": 387,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect",
+   "frames": 1100,
+   "shots": [
+    1100
+   ]
+  },
+  {
+   "name": "ch8_stg8_end",
+   "chapter": "ch8",
+   "kind": "scene",
+   "title": "After the Battle",
+   "storyjump": "STG8_END",
+   "row": "8.29",
+   "map": "las_29",
+   "bero": "owari",
+   "story": 401,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 1100,
+   "shots": [
+    1100
+   ]
+  },
+  {
+   "name": "ending_stg9_00_12",
+   "chapter": "ending",
+   "kind": "ending",
+   "title": "Moon",
+   "storyjump": "STG9_00.12",
+   "row": "9.12",
+   "map": "tik_00",
+   "bero": null,
+   "story": 403,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 1000,
+   "shots": [
+    850,
+    1000
+   ]
+  }
+ ]
+}

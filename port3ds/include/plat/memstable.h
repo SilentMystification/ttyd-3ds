@@ -69,6 +69,15 @@ typedef struct {
 /* Counts since the previous call (ranges and covered_kb: now). */
 void plat_memstable_stats(PlatMemStableStats* out);
 
+/* An observer of every report, called on the reporting thread before the
+ * report is applied and without the registry's lock held, so it may block
+ * (a consumer that reads the memory on another thread can wait there until
+ * it is done with it). One hook; NULL removes it. Covered or not, every
+ * report reaches it (n may be 0 for an empty report, which is skipped). */
+enum { PLAT_MEMSTABLE_FILL = 1, PLAT_MEMSTABLE_WRITE, PLAT_MEMSTABLE_RELEASE };
+typedef void (*PlatMemStableHook)(int kind, const void* p, uint32_t n);
+void plat_memstable_set_hook(PlatMemStableHook fn);
+
 #ifdef __cplusplus
 }
 #endif

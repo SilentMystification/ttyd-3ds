@@ -178,6 +178,137 @@ typedef struct {
 
 extern GxState gx;
 
+/* ---- GX calls by value ----
+ * One id per state call. Display lists the game records hold them as port
+ * opcodes (gx_state.c, LEB128 words); the translator thread's record
+ * (gx_rec.c) holds them as plain words. gx_apply_call runs one through the
+ * public GX function, on the thread that translates. Ids up to
+ * REC_SetTevIndirect are the ones display lists can hold; the rest are only
+ * recorded for the translator. */
+enum {
+    REC_SetVtxDesc = 1,
+    REC_ClearVtxDesc,
+    REC_SetVtxAttrFmt,
+    REC_SetArray,
+    REC_LoadPosMtx,
+    REC_LoadNrmMtx,
+    REC_LoadTexMtx,
+    REC_SetCurrentMtx,
+    REC_SetTexCoordGen2,
+    REC_SetNumTexGens,
+    REC_SetNumChans,
+    REC_SetChanCtrl,
+    REC_SetChanAmbColor,
+    REC_SetChanMatColor,
+    REC_LoadLightObj,
+    REC_SetNumTevStages,
+    REC_SetTevOrder,
+    REC_SetTevColorIn,
+    REC_SetTevAlphaIn,
+    REC_SetTevColorOp,
+    REC_SetTevAlphaOp,
+    REC_SetTevColor,
+    REC_SetTevColorS10,
+    REC_SetTevKColor,
+    REC_SetTevKColorSel,
+    REC_SetTevKAlphaSel,
+    REC_SetTevSwapMode,
+    REC_SetTevSwapModeTable,
+    REC_SetTevDirect,
+    REC_LoadTexObj,
+    REC_LoadTlut,
+    REC_SetAlphaCompare,
+    REC_SetBlendMode,
+    REC_SetZMode,
+    REC_SetZCompLoc,
+    REC_SetColorUpdate,
+    REC_SetAlphaUpdate,
+    REC_SetCullMode,
+    REC_SetFog,
+    REC_SetScissor,
+    REC_SetViewport,
+    REC_SetProjection,
+    REC_SetLineWidth,
+    REC_SetNumIndStages,
+    REC_SetTevIndirect,
+    /* translator record only */
+    REC_SetZScaleOffset,
+    REC_SetScissorBoxOffset,
+    REC_SetIndTexOrder,
+    REC_SetIndTexCoordScale,
+    REC_SetIndTexMtx,
+    REC_SetDstAlpha,
+    REC_SetPixelFmt,
+    REC_SetZTexture,
+    REC_SetCopyClear,
+    REC_SetDispCopySrc,
+    REC_SetDispCopyDst,
+    REC_SetDispCopyYScale,
+    REC_SetTexCopySrc,
+    REC_SetTexCopyDst,
+    REC_CopyTex,
+    REC_CopyDisp,
+    REC_DrawDone,
+    REC_SetDrawSync,
+    REC_ClearBoundingBox,
+    REC_COUNT
+};
+/* Runs call `id` with its words through the public GX function (the caller translates). */
+void gx_apply_call(u32 id, const u32* w);
+/* The game thread's shadow of what it reads back (gx_rec.c's gx_game). */
+void gx_shadow_call(u32 id, const u32* w);
+
+/* ---- gx_rec.c: recording GX calls for a translator (switch gxthread) ----
+ *   0 (default): every GX call is translated where it is made (the game thread);
+ *   1: the game thread records the calls and translates the record itself at
+ *      the fences (the frame's draw sync, GXDrawDone, read-backs): proves the
+ *      record without threads;
+ *   2: a translator thread on core 2 translates the record while the game
+ *      thread goes on; the same fences wait for it;
+ *   3: verify: as 1, plus checks (getters against the translated state, list
+ *      bytes and memory reports between a call's recording and its translation).
+ * `gx` is the translator's state. The game thread reads back from `gx_game`,
+ * a shadow kept from the calls it records. */
+extern int gx_rec_mode;
+extern __thread int gx_tls_translator; /* this thread translates (the translator thread, or a fence's inline replay) */
+/* gxthread=2: the game thread is translating its calls itself (the start of a frame, gx_rec.c's split) */
+extern int gx_rec_direct;
+static inline int gx_rec_on(void) { return gx_rec_mode != 0 && !gx_tls_translator && !gx_rec_direct; }
+void gx_rec_direct_list(void); /* a list translated directly: counts towards the split */
+void gx_rec_switch(void);
+extern GxState gx_game;
+/* The state a getter reads: the shadow while recording, else the translated state. */
+static inline GxState* gx_g(void) { return gx_rec_on() ? &gx_game : &gx; }
+void gx_rec_init(void);
+void gx_rec_call(u32 id, const u32* w, u32 n);
+/* Fences: everything recorded so far is translated when they return. */
+enum { GXF_SYNC, GXF_DRAWDONE, GXF_READBACK, GXF_RELEASE, GXF_FULL, GXF_VERIFY, GXF_COUNT };
+void gx_rec_fence(int why);
+/* A fence, then the caller translates directly until gx_rec_excl_end (GXInit, read-backs). */
+void gx_rec_excl_begin(int why);
+void gx_rec_excl_end(void);
+/* gx_pipe.c side */
+void gx_rec_list(const void* list, u32 nbytes, const void* caller);
+void gx_rec_prim(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* slots, u32 nslots);
+void gx_rec_raw(const PPCWGPipe* slots, u32 nslots);
+void gx_rec_frame(void); /* game thread, GXCopyDisp: per-frame counters */
+void gx_rec_log(u32 frames);
+void gx_rec_frame_start(void); /* game thread, GXInvalidateVtxCache: the retrace wait ended */
+void gx_rec_sync_mark(void);   /* game thread, gxthread=0: GXReadDrawSync */
+/* verify mode: the memory a translated call reads (what: GXV_READ_*) */
+enum { GXV_READ_LIST, GXV_READ_ARRAY, GXV_READ_TEX, GXV_READ_TLUT, GXV_READ_COUNT };
+void gx_rec_check_read(const void* p, u32 n, int what);
+/* Getters: in verify mode the shadow they read is checked against the translated state. */
+enum { GXG_VTXDESC, GXG_VAT, GXG_PROJ, GXG_VIEWPORT, GXG_SCISSOR, GXG_CULL, GXG_COPYSRC, GXG_COUNT };
+void gx_rec_getter_check(int which);
+static inline void gx_rec_getter(int which) {
+    if (gx_rec_mode == 3 && !gx_tls_translator) {
+        gx_rec_getter_check(which);
+    }
+}
+/* gx_misc.c: GXCopyDisp's body, on the translating thread */
+void gx_copy_disp(void* dest, GXBool clear, const void* caller);
+
 /* ---- gx_pipe.c ---- */
 /* Write-gather pipe: 8-byte slots (GXVert.h on ports). */
 extern volatile PPCWGPipe* port_gx_wg_ptr;
@@ -186,6 +317,10 @@ void gx_pipe_reset(void);
 /* Display list recording (GXBeginDisplayList .. GXEndDisplayList). */
 int gx_dl_recording(void);
 void gx_dl_put(const void* bytes, u32 n);
+/* Translator side of the recorded pipe calls (gx_rec.c). */
+void gx_call_list(const void* list, u32 nbytes, const void* caller);
+void gx_draw_prim(u8 primfmt, u16 nverts, const void* caller, const u32* words, u32 nwords);
+void gx_run_raw(const u32* words, u32 nwords);
 /* Port opcodes for state calls inside a display list (0xC0..0xFF). */
 enum {
     GXDL_OP_PORT = 0xC0,
@@ -229,12 +364,14 @@ void gx_tev_compile(PlatGpuState* st);
 /* ---- dl encoding helpers (gx_state.c) ---- */
 void gx_dl_replay_port_op(const u8** p, const u8* end);
 
-/* gx_pipe.c: a GXBegin not yet closed by GXEnd (see gx_end_open_primitive). */
+/* gx_pipe.c: a GXBegin not yet closed by GXEnd (see gx_end_open_primitive). The
+ * primitive is the game thread's: a translating thread never closes it. */
 extern int gx_prim_open;
 void gx_end_open_primitive(const void* caller);
+static inline int gx_prim_is_open(void) { return gx_prim_open && !gx_tls_translator; }
 #define GX_CLOSE_PRIMITIVE()                                     \
     do {                                                         \
-        if (gx_prim_open) {                                      \
+        if (gx_prim_is_open()) {                                 \
             gx_end_open_primitive(__builtin_return_address(0)); \
         }                                                        \
     } while (0)
@@ -259,6 +396,9 @@ typedef struct {
     u32 builds_same; /* version changes with the state build_state reads unchanged (no rebuild) */
     /* u64 times in system ticks */
     u64 t_frame, t_dl, t_dl_decode, t_imm, t_imm_decode, t_state, t_xform, t_emit, t_cache;
+    /* game thread: waits in GXDrawDone and at the frame's submit, and the gap from the end of GXCopyDisp to the
+     * next frame's first GXInvalidateVtxCache (DEMOBeforeRender), which is the draw-sync check and the retrace wait */
+    u64 t_sync, t_present, t_idle;
 } GxPerf;
 extern GxPerf gx_perf;
 extern int gx_perf_on; /* -1 until the first frame reads the switch */
@@ -268,6 +408,7 @@ u32 gx_perf_frame_no(void);
 /* Fast content hash (word at a time). */
 u32 gx_hash32(const void* data, u32 n, u32 seed);
 #define GX_PERF_T() (gx_perf_on > 0 ? plat_ticks() : 0)
+extern u64 gx_perf_drawdone_end; /* tick GXCopyDisp returned (0: counted) */
 
 /* Equality of n bytes a word at a time (ARMv6 loads unaligned words), for the
  * small compares on hot paths: newlib's memcmp goes byte by byte unless both
@@ -315,6 +456,8 @@ static inline void gx_dlc_track(int attr, u32 idx) {
 }
 void gx_dlcache_frame(void);
 void gx_dlcache_log(u32 frames);
+#include "plat/memstable.h"
+u32 gx_dlcache_spans(const void* list, u32 nbytes, PlatMemSpan* sp, u32 max);
 
 /* One draw of a cached list (a captured primitive): vertices [first, first + count). */
 typedef struct {

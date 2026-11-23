@@ -28,6 +28,16 @@ static uint32_t s_n;
 static LightLock s_lock = 1; /* the value LightLock_Init sets: unlocked */
 static uint32_t s_gen = 1, s_epoch = 1;
 static uint32_t s_fills, s_writes, s_releases, s_revokes, s_dropped;
+static PlatMemStableHook s_hook;
+
+void plat_memstable_set_hook(PlatMemStableHook fn) { __atomic_store_n(&s_hook, fn, __ATOMIC_RELEASE); }
+
+static inline void observe(int kind, const void* p, uint32_t n) {
+    PlatMemStableHook h = __atomic_load_n(&s_hook, __ATOMIC_ACQUIRE);
+    if (h != NULL) {
+        h(kind, p, n);
+    }
+}
 
 uint32_t plat_memstable_epoch(void) { return __atomic_load_n(&s_epoch, __ATOMIC_ACQUIRE); }
 uint32_t plat_memstable_gen(void) { return __atomic_load_n(&s_gen, __ATOMIC_ACQUIRE); }
@@ -106,6 +116,7 @@ void plat_memstable_fill(const void* p, uint32_t n) {
     if (n == 0) {
         return;
     }
+    observe(PLAT_MEMSTABLE_FILL, p, n);
     span_of(p, n, &a, &b);
     LightLock_Lock(&s_lock);
     s_fills++;
@@ -137,6 +148,9 @@ void plat_memstable_fill(const void* p, uint32_t n) {
 
 void plat_memstable_write(const void* p, uint32_t n) {
     uintptr_t a, b;
+    if (n != 0) {
+        observe(PLAT_MEMSTABLE_WRITE, p, n);
+    }
     if (n == 0 || __atomic_load_n(&s_n, __ATOMIC_RELAXED) == 0) {
         return; /* nothing covered: no trust can depend on it (a later fill bumps the epoch) */
     }
@@ -152,6 +166,9 @@ void plat_memstable_write(const void* p, uint32_t n) {
 
 void plat_memstable_release(const void* p, uint32_t n) {
     uintptr_t a, b;
+    if (n != 0) {
+        observe(PLAT_MEMSTABLE_RELEASE, p, n);
+    }
     if (n == 0 || __atomic_load_n(&s_n, __ATOMIC_RELAXED) == 0) {
         return;
     }

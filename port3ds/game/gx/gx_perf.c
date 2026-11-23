@@ -19,6 +19,7 @@
 
 GxPerf gx_perf;
 int gx_perf_on = -1;
+u64 gx_perf_drawdone_end;
 
 static GxPerf s_sum;
 static u32 s_frames, s_every;
@@ -185,6 +186,16 @@ void gx_perf_frame(void) {
            (unsigned long)(a->v_tg_3x4 / f), (unsigned long)(a->v_tg_other / f), (unsigned long)(a->v_tg_pos / f),
            (unsigned long)(a->v_tg_nrm / f), (unsigned long)(a->v_tg_tex / f), (unsigned long)(a->v_tg_color / f),
            (unsigned long)(a->v_tg_post / f), (unsigned long)(a->v_tg_normalize / f));
+    if (!gx_rec_mode) { /* with a translator the game thread's counters are gx_rec.c's */
+        u32 frame = us(a->t_frame, f), idle = us(a->t_idle, f), gxt = us(a->t_dl + a->t_imm, f);
+        u32 waits = us(a->t_sync + a->t_present, f);
+        u32 busy = frame > idle ? frame - idle : 0;
+        u32 other = busy > gxt + waits ? busy - gxt - waits : 0;
+        PLOG_I("gxstats   game us: frame %lu busy %lu (gx %lu, waits %lu: drawdone %lu present %lu, other %lu) idle %lu",
+               (unsigned long)frame, (unsigned long)busy, (unsigned long)gxt, (unsigned long)waits,
+               (unsigned long)us(a->t_sync, f), (unsigned long)us(a->t_present, f), (unsigned long)other,
+               (unsigned long)idle);
+    }
     gx_dlcache_log(f);
     gx_vsh_log(f);
     memset(&s_sum, 0, sizeof(s_sum));

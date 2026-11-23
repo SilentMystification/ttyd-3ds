@@ -487,6 +487,9 @@ static void script_frame(void) {
 static int s_warped;
 
 static void warp_new_game(int story, int party) {
+    if (tst_storyjump_apply()) {
+        return; /* storyjump=: the story point's own set-up (test_mode.c) */
+    }
     psndStopAllFadeOut();
     psndSFXAllOff();
     stg0_00_init();
@@ -504,6 +507,8 @@ static void warp_switch(void) {
     static char map[16], bero[16];
     if (state < 0) {
         char v[40];
+        const char* sj_map;
+        const char* sj_bero;
         state = 0;
         if (tst_sw_value("map", v, sizeof(v)) && v[0] != '\0') {
             char* comma = strchr(v, ',');
@@ -515,6 +520,12 @@ static void warp_switch(void) {
             }
             strncpy(map, v, 15);
             map[15] = '\0';
+            state = 1;
+        } else if (tst_storyjump_target(&sj_map, &sj_bero)) { /* storyjump= alone: the point's map */
+            strncpy(map, sj_map, 15);
+            map[15] = '\0';
+            strncpy(bero, sj_bero, 15);
+            bero[15] = '\0';
             state = 1;
         }
     }

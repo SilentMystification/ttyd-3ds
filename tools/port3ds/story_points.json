@@ -1,0 +1,1365 @@
+{
+ "comment": "Story checkpoints for tools/port3ds/story_sweep.py. Each point is a row of the game's own story table (src/event.c, stageN_evt, the table the E3 scenario select uses), applied with the test switch storyjump=<textId>[.n]: story = the GSW 0 value set (the previous row's id), party = the row's partner and follower, map/bero = where it starts (informative; storyjump picks them). padscript 'mash' = A every 30 frames from frame 640. Generated from the table; edit by hand freely.",
+ "defaults": {
+  "frames": 1800,
+  "shots": [
+   720,
+   900,
+   1100,
+   1400,
+   1700
+  ],
+  "every": 20
+ },
+ "points": [
+  {
+   "name": "prologue_stg0_00",
+   "chapter": "prologue",
+   "kind": "scene",
+   "title": "Prologue",
+   "storyjump": "STG0_00",
+   "row": "0.0",
+   "map": "aaa_00",
+   "bero": "prologue",
+   "story": 0,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "prologue_stg0_03_1",
+   "chapter": "prologue",
+   "kind": "scene",
+   "title": "Rogueport (Arrival)",
+   "storyjump": "STG0_03.1",
+   "row": "0.4",
+   "map": "gor_00",
+   "bero": "",
+   "story": 3,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "prologue_stg0_05",
+   "chapter": "prologue",
+   "kind": "scene",
+   "title": "1000 X-Nauts (Before)",
+   "storyjump": "STG0_05",
+   "row": "0.6",
+   "map": "gor_00",
+   "bero": null,
+   "story": 4,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "prologue_stg0_08",
+   "chapter": "prologue",
+   "kind": "scene",
+   "title": "Stolen Coins",
+   "storyjump": "STG0_08",
+   "row": "0.9",
+   "map": "gor_02",
+   "bero": "w_bero",
+   "story": 7,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "prologue_stg0_11",
+   "chapter": "prologue",
+   "kind": "boss",
+   "title": "3 Goomba Goons",
+   "storyjump": "STG0_11",
+   "row": "0.13",
+   "map": "tik_01",
+   "bero": "dokan_2",
+   "story": 11,
+   "party": [
+    1,
+    11
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "prologue_stg0_13_1",
+   "chapter": "prologue",
+   "kind": "scene",
+   "title": "Thousand-Year Door",
+   "storyjump": "STG0_13.1",
+   "row": "0.18",
+   "map": "tik_05",
+   "bero": "e_bero",
+   "story": 16,
+   "party": [
+    1,
+    11
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "prologue_stg0_19",
+   "chapter": "prologue",
+   "kind": "boss",
+   "title": "Blooper Battle",
+   "storyjump": "STG0_19",
+   "row": "0.23",
+   "map": "tik_02",
+   "bero": "w_bero_1",
+   "story": 20,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch1_stg1_00",
+   "chapter": "ch1",
+   "kind": "start",
+   "title": "Petal Meadows",
+   "storyjump": "STG1_00",
+   "row": "1.0",
+   "map": "sys_01",
+   "bero": "stg_1",
+   "story": 22,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 2400,
+   "shots": [
+    720,
+    1000,
+    1300,
+    1600,
+    1900,
+    2300
+   ]
+  },
+  {
+   "name": "ch1_stg1_01a",
+   "chapter": "ch1",
+   "kind": "scene",
+   "title": "Petalburg (1st Time)",
+   "storyjump": "STG1_01a",
+   "row": "1.3",
+   "map": "nok_00",
+   "bero": "w_bero",
+   "story": 25,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch1_stg1_05",
+   "chapter": "ch1",
+   "kind": "scene",
+   "title": "Bristle",
+   "storyjump": "STG1_05",
+   "row": "1.7",
+   "map": "hei_05",
+   "bero": "w_bero",
+   "story": 29,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch1_stg1_09",
+   "chapter": "ch1",
+   "kind": "scene",
+   "title": "Hooktail Castle",
+   "storyjump": "STG1_09",
+   "row": "1.12",
+   "map": "gon_01",
+   "bero": "w_bero_1",
+   "story": 34,
+   "party": [
+    2,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch1_stg1_13_01",
+   "chapter": "ch1",
+   "kind": "scene",
+   "title": "50 Seconds to Escape",
+   "storyjump": "STG1_13_01",
+   "row": "1.21",
+   "map": "gon_06",
+   "bero": "e_bero",
+   "story": 43,
+   "party": [
+    2,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch1_stg1_16",
+   "chapter": "ch1",
+   "kind": "boss",
+   "title": "Hooktail",
+   "storyjump": "STG1_16",
+   "row": "1.33",
+   "map": "gon_11",
+   "bero": "w_bero",
+   "story": 54,
+   "party": [
+    2,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch1_stg1_18",
+   "chapter": "ch1",
+   "kind": "peach",
+   "title": "Peach: Caught",
+   "storyjump": "STG1_18",
+   "row": "1.36",
+   "map": "aji_10",
+   "bero": null,
+   "story": 56,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch1_stg1_19_01",
+   "chapter": "ch1",
+   "kind": "bowser",
+   "title": "Bowser: Bowser Castle",
+   "storyjump": "STG1_19_01",
+   "row": "1.39",
+   "map": "kpa_00",
+   "bero": "",
+   "story": 59,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch1_stg1_19_02_1",
+   "chapter": "ch1",
+   "kind": "bowser",
+   "title": "Bowser: Kammy Enters",
+   "storyjump": "STG1_19_02.1",
+   "row": "1.42",
+   "map": "kpa_01",
+   "bero": "event",
+   "story": 61,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch2_stg2_00",
+   "chapter": "ch2",
+   "kind": "start",
+   "title": "Boggly Woods",
+   "storyjump": "STG2_00",
+   "row": "2.0",
+   "map": "sys_01",
+   "bero": "stg_2",
+   "story": 70,
+   "party": [
+    2,
+    10
+   ],
+   "padscript": "mash",
+   "frames": 2400,
+   "shots": [
+    720,
+    1000,
+    1300,
+    1600,
+    1900,
+    2300
+   ]
+  },
+  {
+   "name": "ch2_stg2_03_03",
+   "chapter": "ch2",
+   "kind": "scene",
+   "title": "Flurrie Intro",
+   "storyjump": "STG2_03_03",
+   "row": "2.6",
+   "map": "win_03",
+   "bero": "",
+   "story": 76,
+   "party": [
+    2,
+    10
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch2_stg2_07",
+   "chapter": "ch2",
+   "kind": "boss",
+   "title": "Mario vs. Shadow Sirens",
+   "storyjump": "STG2_07",
+   "row": "2.15",
+   "map": "win_00",
+   "bero": "e_bero",
+   "story": 84,
+   "party": [
+    2,
+    10
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch2_stg2_12_01",
+   "chapter": "ch2",
+   "kind": "scene",
+   "title": "A Dark Figure",
+   "storyjump": "STG2_12_01",
+   "row": "2.21",
+   "map": "mri_04",
+   "bero": "",
+   "story": 90,
+   "party": [
+    5,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch2_stg2_18_1",
+   "chapter": "ch2",
+   "kind": "scene",
+   "title": "Punies vs. Jabbies",
+   "storyjump": "STG2_18.1",
+   "row": "2.32",
+   "map": "mri_08",
+   "bero": "w_bero",
+   "story": 98,
+   "party": [
+    5,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch2_stg2_24",
+   "chapter": "ch2",
+   "kind": "boss",
+   "title": "Boss Battle",
+   "storyjump": "STG2_24",
+   "row": "2.49",
+   "map": "mri_01",
+   "bero": "e_bero",
+   "story": 110,
+   "party": [
+    5,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch2_stg2_25_02",
+   "chapter": "ch2",
+   "kind": "peach",
+   "title": "Peach: Shall We Dance?",
+   "storyjump": "STG2_25_02",
+   "row": "2.53",
+   "map": "aji_17",
+   "bero": "w_bero",
+   "story": 113,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch2_stg2_25_04",
+   "chapter": "ch2",
+   "kind": "bowser-stage",
+   "title": "Bowser: Action Stage",
+   "storyjump": "STG2_25_04",
+   "row": "2.55",
+   "map": "kpa_02",
+   "bero": "",
+   "story": 115,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch3_stg3_00",
+   "chapter": "ch3",
+   "kind": "start",
+   "title": "Welcome to Glitzville",
+   "storyjump": "STG3_00",
+   "row": "3.0",
+   "map": "tou_20",
+   "bero": "start",
+   "story": 126,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 2400,
+   "shots": [
+    720,
+    1000,
+    1300,
+    1600,
+    1900,
+    2300
+   ]
+  },
+  {
+   "name": "ch3_stg3_03",
+   "chapter": "ch3",
+   "kind": "scene",
+   "title": "Grubba",
+   "storyjump": "STG3_03",
+   "row": "3.4",
+   "map": "tou_05",
+   "bero": "n_bero",
+   "story": 129,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch3_stg3_06",
+   "chapter": "ch3",
+   "kind": "scene",
+   "title": "1st Match",
+   "storyjump": "STG3_06",
+   "row": "3.7",
+   "map": "tou_03",
+   "bero": null,
+   "story": 132,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch3_stg3_21",
+   "chapter": "ch3",
+   "kind": "boss",
+   "title": "1st Match with Rawk Hawk",
+   "storyjump": "STG3_21",
+   "row": "3.45",
+   "map": "tou_08",
+   "bero": "dokan",
+   "story": 156,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch3_stg3_32",
+   "chapter": "ch3",
+   "kind": "boss",
+   "title": "Boss Battle",
+   "storyjump": "STG3_32",
+   "row": "3.53",
+   "map": "tou_03",
+   "bero": "w_bero",
+   "story": 163,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch3_stg3_33_02",
+   "chapter": "ch3",
+   "kind": "peach",
+   "title": "Peach: Incognito",
+   "storyjump": "STG3_33_02",
+   "row": "3.56",
+   "map": "aji_09",
+   "bero": "s_bero",
+   "story": 166,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch3_stg3_33_06",
+   "chapter": "ch3",
+   "kind": "bowser",
+   "title": "Bowser: Treasure?",
+   "storyjump": "STG3_33_06",
+   "row": "3.60",
+   "map": "mri_01",
+   "bero": "player",
+   "story": 170,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch4_stg4_00",
+   "chapter": "ch4",
+   "kind": "start",
+   "title": "Welcome to Stage 4",
+   "storyjump": "STG4_00",
+   "row": "4.0",
+   "map": "sys_01",
+   "bero": "stg_4",
+   "story": 177,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 2400,
+   "shots": [
+    720,
+    1000,
+    1300,
+    1600,
+    1900,
+    2300
+   ]
+  },
+  {
+   "name": "ch4_stg4_01",
+   "chapter": "ch4",
+   "kind": "scene",
+   "title": "The Mayor's a Pig!",
+   "storyjump": "STG4_01",
+   "row": "4.2",
+   "map": "usu_00",
+   "bero": "e_bero",
+   "story": 179,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch4_stg4_08",
+   "chapter": "ch4",
+   "kind": "scene",
+   "title": "Steeple Demo (EXT.)",
+   "storyjump": "STG4_08",
+   "row": "4.14",
+   "map": "gra_06",
+   "bero": "sw_bero",
+   "story": 192,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch4_stg4_10",
+   "chapter": "ch4",
+   "kind": "boss",
+   "title": "Doopliss Battle",
+   "storyjump": "STG4_10",
+   "row": "4.21",
+   "map": "jin_04",
+   "bero": "s_bero",
+   "story": 199,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch4_stg4_11",
+   "chapter": "ch4",
+   "kind": "scene",
+   "title": "Superbombbomb Lost",
+   "storyjump": "STG4_11",
+   "row": "4.23",
+   "map": "usu_00",
+   "bero": "evt_majo3",
+   "story": 201,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch4_stg4_15",
+   "chapter": "ch4",
+   "kind": "boss",
+   "title": "Doopliss Battle 2",
+   "storyjump": "STG4_15",
+   "row": "4.32",
+   "map": "jin_04",
+   "bero": "s_bero",
+   "story": 210,
+   "party": [
+    6,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch4_stg4_15_05_1",
+   "chapter": "ch4",
+   "kind": "peach",
+   "title": "Peach: TEC's Quiz",
+   "storyjump": "STG4_15_05.1",
+   "row": "4.37",
+   "map": "aji_17",
+   "bero": "w_bero",
+   "story": 215,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch4_stg4_15_07",
+   "chapter": "ch4",
+   "kind": "bowser-stage",
+   "title": "Bowser: Action Stage",
+   "storyjump": "STG4_15_07",
+   "row": "4.40",
+   "map": "kpa_03",
+   "bero": "",
+   "story": 216,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch5_stg5_00",
+   "chapter": "ch5",
+   "kind": "start",
+   "title": "Logbook",
+   "storyjump": "STG5_00",
+   "row": "5.0",
+   "map": "sys_01",
+   "bero": "stg_5",
+   "story": 229,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 2400,
+   "shots": [
+    720,
+    1000,
+    1300,
+    1600,
+    1900,
+    2300
+   ]
+  },
+  {
+   "name": "ch5_stg5_10",
+   "chapter": "ch5",
+   "kind": "scene",
+   "title": "Haunted",
+   "storyjump": "STG5_10",
+   "row": "5.1",
+   "map": "muj_20",
+   "bero": null,
+   "story": 230,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch5_stg5_11",
+   "chapter": "ch5",
+   "kind": "scene",
+   "title": "Deserted Island",
+   "storyjump": "STG5_11",
+   "row": "5.2",
+   "map": "muj_00",
+   "bero": null,
+   "story": 231,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch5_stg5_19_01",
+   "chapter": "ch5",
+   "kind": "scene",
+   "title": "Entering the Grotto",
+   "storyjump": "STG5_19_01",
+   "row": "5.18",
+   "map": "dou_00",
+   "bero": "w_bero",
+   "story": 242,
+   "party": [
+    3,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch5_stg5_33",
+   "chapter": "ch5",
+   "kind": "boss",
+   "title": "Cortez and the Treasure",
+   "storyjump": "STG5_33",
+   "row": "5.35",
+   "map": "muj_12",
+   "bero": "w_bero",
+   "story": 252,
+   "party": [
+    3,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch5_stg5_42",
+   "chapter": "ch5",
+   "kind": "scene",
+   "title": "Pirates vs. X-Nauts",
+   "storyjump": "STG5_42",
+   "row": "5.43",
+   "map": "muj_00",
+   "bero": "",
+   "story": 259,
+   "party": [
+    3,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch5_stg5_45",
+   "chapter": "ch5",
+   "kind": "peach",
+   "title": "Peach: Potion Puzzle",
+   "storyjump": "STG5_45",
+   "row": "5.46",
+   "map": "aji_06",
+   "bero": "s_bero",
+   "story": 262,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch5_stg5_49_1",
+   "chapter": "ch5",
+   "kind": "bowser",
+   "title": "Bowser: Bowser vs. X-Nauts",
+   "storyjump": "STG5_49.1",
+   "row": "5.51",
+   "map": "usu_00",
+   "bero": "event",
+   "story": 267,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch6_stg6_00",
+   "chapter": "ch6",
+   "kind": "start",
+   "title": "Start",
+   "storyjump": "STG6_00",
+   "row": "6.0",
+   "map": "sys_01",
+   "bero": "stg_6",
+   "story": 281,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 2400,
+   "shots": [
+    720,
+    1000,
+    1300,
+    1600,
+    1900,
+    2300
+   ]
+  },
+  {
+   "name": "ch6_stg6_01",
+   "chapter": "ch6",
+   "kind": "scene",
+   "title": "The Conductor",
+   "storyjump": "STG6_01",
+   "row": "6.1",
+   "map": "rsh_04_a",
+   "bero": "e_bero",
+   "story": 282,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch6_stg6_27",
+   "chapter": "ch6",
+   "kind": "scene",
+   "title": "Riverside Station",
+   "storyjump": "STG6_27",
+   "row": "6.28",
+   "map": "hom_00",
+   "bero": "hom_touchaku",
+   "story": 309,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch6_stg6_39",
+   "chapter": "ch6",
+   "kind": "scene",
+   "title": "Smorg (1st Encounter)",
+   "storyjump": "STG6_39",
+   "row": "6.40",
+   "map": "eki_00",
+   "bero": "e_bero",
+   "story": 321,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch6_stg6_48",
+   "chapter": "ch6",
+   "kind": "boss",
+   "title": "Smorg Miasma",
+   "storyjump": "STG6_48",
+   "row": "6.52",
+   "map": "rsh_06_a",
+   "bero": "w_bero",
+   "story": 331,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch6_stg6_49",
+   "chapter": "ch6",
+   "kind": "scene",
+   "title": "Poshley Heights",
+   "storyjump": "STG6_49",
+   "row": "6.53",
+   "map": "rsh_01_a",
+   "bero": "w_bero",
+   "story": 332,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch6_stg6_55",
+   "chapter": "ch6",
+   "kind": "peach",
+   "title": "Peach: Grodus & X-Naut",
+   "storyjump": "STG6_55",
+   "row": "6.59",
+   "map": "aji_10",
+   "bero": null,
+   "story": 339,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch6_stg6_55_03",
+   "chapter": "ch6",
+   "kind": "bowser-stage",
+   "title": "Bowser: Action Stage",
+   "storyjump": "STG6_55_03",
+   "row": "6.62",
+   "map": "kpa_05",
+   "bero": "",
+   "story": 342,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch6_stg6_55_04",
+   "chapter": "ch6",
+   "kind": "bowser",
+   "title": "Bowser: Rawk Hawk",
+   "storyjump": "STG6_55_04",
+   "row": "6.63",
+   "map": "kpa_07",
+   "bero": "",
+   "story": 343,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch7_stg7_00",
+   "chapter": "ch7",
+   "kind": "start",
+   "title": "Start",
+   "storyjump": "STG7_00",
+   "row": "7.0",
+   "map": "sys_01",
+   "bero": "stg_7",
+   "story": 351,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 2400,
+   "shots": [
+    720,
+    1000,
+    1300,
+    1600,
+    1900,
+    2300
+   ]
+  },
+  {
+   "name": "ch7_stg7_01",
+   "chapter": "ch7",
+   "kind": "scene",
+   "title": "Fahr Outpost (1st Visit)",
+   "storyjump": "STG7_01",
+   "row": "7.1",
+   "map": "bom_01",
+   "bero": "w_bero",
+   "story": 352,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch7_stg7_06",
+   "chapter": "ch7",
+   "kind": "scene",
+   "title": "To the Moon",
+   "storyjump": "STG7_06",
+   "row": "7.12",
+   "map": "moo_00",
+   "bero": null,
+   "story": 357,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch7_stg7_08",
+   "chapter": "ch7",
+   "kind": "scene",
+   "title": "Elite X-Nauts",
+   "storyjump": "STG7_08",
+   "row": "7.15",
+   "map": "aji_00",
+   "bero": "w_bero",
+   "story": 360,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch7_stg7_20",
+   "chapter": "ch7",
+   "kind": "boss",
+   "title": "Lord Crump Defeated",
+   "storyjump": "STG7_20",
+   "row": "7.30",
+   "map": "aji_14",
+   "bero": "w_bero",
+   "story": 372,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch7_stg7_25_00",
+   "chapter": "ch7",
+   "kind": "bowser",
+   "title": "Bowser: Poshley Heights",
+   "storyjump": "STG7_25_00",
+   "row": "7.31",
+   "map": "pik_01",
+   "bero": null,
+   "story": 373,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch7_stg7_26",
+   "chapter": "ch7",
+   "kind": "scene",
+   "title": "The Hideout Explodes",
+   "storyjump": "STG7_26",
+   "row": "7.35",
+   "map": "aji_07",
+   "bero": "s_bero",
+   "story": 376,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch8_stg8_00",
+   "chapter": "ch8",
+   "kind": "start",
+   "title": "Start",
+   "storyjump": "STG8_00",
+   "row": "8.0",
+   "map": "sys_01",
+   "bero": "stg_8",
+   "story": 381,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 2400,
+   "shots": [
+    720,
+    1000,
+    1300,
+    1600,
+    1900,
+    2300
+   ]
+  },
+  {
+   "name": "ch8_stg8_01",
+   "chapter": "ch8",
+   "kind": "scene",
+   "title": "1000 Dry Bones",
+   "storyjump": "STG8_01",
+   "row": "8.1",
+   "map": "las_05",
+   "bero": "w_bero",
+   "story": 382,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch8_stg8_04",
+   "chapter": "ch8",
+   "kind": "boss",
+   "title": "Gloomtail",
+   "storyjump": "STG8_04",
+   "row": "8.6",
+   "map": "las_26",
+   "bero": "w_bero",
+   "story": 387,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch8_stg8_07",
+   "chapter": "ch8",
+   "kind": "scene",
+   "title": "Beldam Confrontation",
+   "storyjump": "STG8_07",
+   "row": "8.9",
+   "map": "las_09",
+   "bero": "majyorin_evt",
+   "story": 390,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ch8_stg8_15",
+   "chapter": "ch8",
+   "kind": "boss",
+   "title": "Grodus",
+   "storyjump": "STG8_15",
+   "row": "8.18",
+   "map": "las_28",
+   "bero": "w_bero",
+   "story": 399,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch8_stg8_15_1",
+   "chapter": "ch8",
+   "kind": "boss",
+   "title": "Bowser",
+   "storyjump": "STG8_15.1",
+   "row": "8.19",
+   "map": "las_28",
+   "bero": "koopa_evt",
+   "story": 400,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch8_stg8_16",
+   "chapter": "ch8",
+   "kind": "boss",
+   "title": "The Return of the Queen",
+   "storyjump": "STG8_16",
+   "row": "8.20",
+   "map": "las_29",
+   "bero": "w_bero",
+   "story": 400,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "extra": "btlauto=perfect"
+  },
+  {
+   "name": "ch8_stg8_end",
+   "chapter": "ch8",
+   "kind": "scene",
+   "title": "After the Battle",
+   "storyjump": "STG8_END",
+   "row": "8.29",
+   "map": "las_29",
+   "bero": "owari",
+   "story": 401,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash"
+  },
+  {
+   "name": "ending_stg9_00",
+   "chapter": "ending",
+   "kind": "ending",
+   "title": "Epilogue",
+   "storyjump": "STG9_00",
+   "row": "9.0",
+   "map": "gor_11",
+   "bero": null,
+   "story": 402,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 2400,
+   "shots": [
+    720,
+    1000,
+    1300,
+    1600,
+    1900,
+    2300
+   ]
+  },
+  {
+   "name": "ending_stg9_00_2",
+   "chapter": "ending",
+   "kind": "ending",
+   "title": "Sail Away",
+   "storyjump": "STG9_00.2",
+   "row": "9.2",
+   "map": "muj_21",
+   "bero": null,
+   "story": 403,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 2400,
+   "shots": [
+    720,
+    1000,
+    1300,
+    1600,
+    1900,
+    2300
+   ]
+  },
+  {
+   "name": "ending_stg9_00_12",
+   "chapter": "ending",
+   "kind": "ending",
+   "title": "Moon",
+   "storyjump": "STG9_00.12",
+   "row": "9.12",
+   "map": "tik_00",
+   "bero": null,
+   "story": 403,
+   "party": [
+    0,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 2400,
+   "shots": [
+    720,
+    1000,
+    1300,
+    1600,
+    1900,
+    2300
+   ]
+  },
+  {
+   "name": "ending_stg9_01",
+   "chapter": "ending",
+   "kind": "ending",
+   "title": "End Credits",
+   "storyjump": "STG9_01",
+   "row": "9.15",
+   "map": "end_00",
+   "bero": "",
+   "story": 403,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 2400,
+   "shots": [
+    720,
+    1000,
+    1300,
+    1600,
+    1900,
+    2300
+   ]
+  },
+  {
+   "name": "ending_stg9_02",
+   "chapter": "ending",
+   "kind": "ending",
+   "title": "Return to Rogueport",
+   "storyjump": "STG9_02",
+   "row": "9.16",
+   "map": "gor_00",
+   "bero": "",
+   "story": 404,
+   "party": [
+    1,
+    0
+   ],
+   "padscript": "mash",
+   "frames": 2400,
+   "shots": [
+    720,
+    1000,
+    1300,
+    1600,
+    1900,
+    2300
+   ]
+  }
+ ]
+}

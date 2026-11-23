@@ -167,6 +167,12 @@ Switches the game reads (space-separated words in `--switches`):
 | `gxthreadrel=0/1` | 1 (default): a memory release reported while translation is pending is a fence. 0 is for verify experiments only |
 | `gxthreadkb=N` | Record ring size in KB (default 4096) |
 | `gxnull=1` | Measuring only: GX calls are recorded as with `gxthread=1` and the record is dropped at each fence, so nothing is translated, drawn or shown (the screen stays black) while the fences and read-backs still answer. With `gxthreadstats=N` the game thread's busy time is the game's own work plus recording: the floor GX translation sits on (PORT_3DS_60FPS.md, "Step 1 results") |
+| `gpufence=0/1` | 1 (default): before the game thread refills a render record's vertex and index arenas, it waits until the GPU has finished that record (the render thread publishes it once its next `C3D_FrameBegin` has drained the GPU queue), and `plat_gpu_sync` waits for the GPU, not only the render thread. 0: the old hand-over (render thread idle only) |
+| `gpusyncall=1` | Every render record (segments and mid-frame syncs too) waits for a vblank, the behaviour before Step 1; default 0: only a frame's first record |
+| `gxflushrender=0/1` | 1 (default): the record's stream ranges are flushed from the CPU cache by the render thread before it replays them; 0: by the recording thread at submit |
+| `gxstatedelta=0/1` | 1 (default): state changes are recorded as the changed words; 0: every state in full |
+| `gxurow=0/1` | 1 (default): the render thread skips shader uniform rows equal to the value it set last in the record; 0: every row is set every time |
+| `gxsync` | No render thread: records are replayed on the game thread |
 | `gpucore=N` | Render thread core (default 2 on New 3DS, 1 on old) |
 | `yieldsleep[=us]` | When `OSYieldThread` finds no other ready OS thread, sleeps `us` µs (default 100) instead of returning at once. This stops the DVD manager's `proc_main` spinning on core 0. Default off until measured on hardware |
 | `yieldstats=N` | Every N seconds, a `[THREADS]` line: each OS thread's share of baton-holding time, idle yields, and time slept by `yieldsleep` |

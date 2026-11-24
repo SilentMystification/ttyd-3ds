@@ -112,6 +112,12 @@ ttyd_game_objects(ttyd_dol ${TTYD_DOL_SOURCES})
 # The decomp's main() runs inside the port's main() (port3ds/plat/boot.c).
 set_source_files_properties("${TTYD_REPO_DIR}/src/main.c" TARGET_DIRECTORY ttyd_dol
     PROPERTIES COMPILE_DEFINITIONS "main=ttyd_main")
+# marioChkJabara reads `a` (the turn count) after marioGetRub returned -1 without setting it (stick at rest). On the
+# GameCube the stack slot happens to hold a value below 1, so the Spring Jump never starts; on ARM it holds garbage
+# and Mario with the Ultra Boots turned a press of A into a Spring Jump or missed the jump (docs/PORT_3DS_TESTING.md,
+# "Story sweep"). Zero-initialise this file's locals.
+set_source_files_properties("${TTYD_REPO_DIR}/src/motion/mot_jabara.c" TARGET_DIRECTORY ttyd_dol
+    PROPERTIES COMPILE_OPTIONS "-ftrivial-auto-var-init=zero")
 ttyd_game_objects(ttyd_musyx ${TTYD_MUSYX_SOURCES})
 
 # Static RELs: each REL's objects are partially linked into one object with

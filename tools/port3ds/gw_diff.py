@@ -121,8 +121,8 @@ def prepare_card(spec):
 def run_port(args, switches):
     log = REPO / "build" / "gw-diff" / "port"
     cmd = [sys.executable, str(REPO / "tools/port3ds/run_azahar.py"), "--build", str(args.cia),
-           "--switches", switches, "--frames", str(args.frames), *emu_usage.time_args(args.timeout),
-           "--stall", "60", "--last", str(log)]
+            "--switches", switches, "--frames", str(args.frames), *emu_usage.time_args(args.timeout),
+            "--stall", "60", "--allow-hw-faults", "--last", str(log)]
     print("gw_diff: port:", " ".join(cmd[2:]))
     r = subprocess.run(cmd, cwd=REPO)
     path = log / "game_log.txt"

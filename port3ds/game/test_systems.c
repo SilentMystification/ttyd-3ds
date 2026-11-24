@@ -10,7 +10,7 @@
  *
  * Side content (tools/port3ds/side_test.py, docs "Side content tests"), at the marioat point too, once:
  * items=ID[,ID...]  gives each item (pouchGetItem; ids in hex with 0x, else decimal).
- * coins=N  sets the coins.  piantas=N  sets the Pianta Parlor's tokens.
+ * coins=N  sets the coins.  piantas=N  sets the Pianta Parlor's tokens, held (taken out, as inside the parlor).
  * gsw=I:V[,I:V...]  sets GSW bytes (swByteSet).  gswf=I[,I...]  sets GSWF flags (swSet). These two are set
  *   earlier, while the warp's first map loads, so its set-up script sees them.
  * marioat=hit:<name>[,dy[,dx,dz]]  puts Mario at the named hit object's centre (hitObjGetPos) plus that offset;
@@ -315,8 +315,10 @@ static void apply(u32 frame) {
         tst_log("sys: coins set to %d", s_coins);
     }
     if (s_piantas >= 0 && yuwp != NULL) {
+        /* held, as after walking into the parlor: the counter counts (monteCountDisp) only with the tokens out */
         yuwp->tokens = s_piantas;
         yuwp->dispTokens = (u32)s_piantas;
+        yuwp->flags |= PARLOR_FLAG_TOKENS_OUT;
         tst_log("sys: piantas set to %d", s_piantas);
     }
     {
@@ -596,6 +598,7 @@ static void log_window(s32 id, int select, u32 frame) {
     if (d == NULL || d->tag == NULL) {
         return;
     }
+    select = (w->type == 5); /* msgdrv's choice window type (selectWindow_Main) */
     s_msgwin[id].seen = 1;
     if (s_msgwin[id].tag != d->tag) {
         s_msgwin[id].tag = d->tag;
@@ -669,6 +672,19 @@ static void log_side(u32 frame) {
             }
         }
     }
+    if (seqGetSeq() == SEQ_GAME && marioGetPtr() != NULL && tst_sw_has("hitlog")) {
+        /* hitlog: the hit objects in front of Mario (what A acts on) and under him, on change */
+        static HitEntry *last_front, *last_fronta, *last_on;
+        MarioWork* m = marioGetPtr();
+        if (m->hitobjFront != last_front || m->hitobjFrontA != last_fronta || m->hitobjStandOn != last_on) {
+            last_front = m->hitobjFront;
+            last_fronta = m->hitobjFrontA;
+            last_on = m->hitobjStandOn;
+            tst_log("sys: hits front %s fronta %s on %s at frame %lu", last_front ? hitGetName(last_front) : "-",
+                    last_fronta ? hitGetName(last_fronta) : "-", last_on ? hitGetName(last_on) : "-",
+                    (unsigned long)frame);
+        }
+    }
     if (seqGetSeq() == SEQ_GAME && marioGetPtr() != NULL) {
         v = (int)marioGetPtr()->currMotionId;
         if (v != last_motion) {
@@ -690,8 +706,9 @@ static void track_windows(u32 frame) {
             if (!(e->flags & EVENT_ACTIVE)) {
                 continue;
             }
-            log_window(e->printWindowId, 0, frame);
+            /* the choice first: a stale printWindowId can name the same (reused) window */
             log_window(e->selectWindowId, 1, frame);
+            log_window(e->printWindowId, 0, frame);
         }
     }
     for (i = 0; i < WIN_IDS; i++) {

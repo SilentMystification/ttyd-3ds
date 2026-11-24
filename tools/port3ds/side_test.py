@@ -311,6 +311,57 @@ def _plane(ctx):
     ctx.check(shot, f"glide shot: {rel(shot)}")
 
 
+# Pianta Parlor Plane Game (yuu_00), warped in directly with 20 Piantas held (piantas=: as after paying at the
+# parlor). The game turns Mario into the plane by itself; with no input he glides straight and lands. A on the two
+# result screens, then "Play again?" (10 Piantas): down, A = quit, and the pipe takes him back to the parlor.
+@scenario("parlor_plane", "map=yuu_00 story=30 party=1 piantas=20 mash=10 msgkeys=sysyuu_00_00:down.a "
+          "shots=60 shotfrom=900", pad=st.pad([(1620 + 40 * i, "a", 3) for i in range(3)]), until=until_frame(1860),
+          doc="Pianta Parlor Plane Game: one round, the result screens, quit back to gor_03")
+def _parlor_plane(ctx):
+    s = motion_after(ctx, MOT_PLANE)
+    ctx.check(s is not None, f"the game made Mario a plane (motion 0x18 at {s})")
+    land = motion_after(ctx, MOT_STAY, (s or 0) + 1)
+    ctx.check(land is not None, f"landed at {land}")
+    p = values(ctx.log, "piantas")
+    ctx.check(len(p) >= 2 and p[-1][1] > 20, f"Piantas paid out after the round ({[v for f, v in p]})")
+    chose(ctx, "sysyuu_00_00", 1, "(play again? No) ")
+    ctx.check("yuu_00 -> gor_03 (entrance A_dokan_02)" in map_changes(ctx.log), "back to the parlor (gor_03)")
+    shot = shot_after(ctx, (s or 0) + 60, 80)
+    ctx.check(shot, f"flight shot: {rel(shot)}")
+
+
+# Paper Game (yuu_03), warped in with 20 Piantas: with no input the wind blows Mario off the course (a lost
+# round), the result screens (mash), "Play again?" down, A = quit, back to the parlor.
+@scenario("parlor_paper", "map=yuu_03 story=30 party=1 piantas=20 mash=10 msgkeys=sysyuu_03_00:down.a "
+          "shots=60 shotfrom=960", until=until_frame(1500),
+          doc="Pianta Parlor Paper Game: one (lost) round, quit back to gor_03")
+def _parlor_paper(ctx):
+    fall = motion_after(ctx, 0xA)
+    ctx.check(fall is not None and fall > 900, f"blown off the course: falling (motion 0xa) at {fall}")
+    seen(ctx, "sysyuu_03_00", "'Play again?'")
+    chose(ctx, "sysyuu_03_00", 1, "(No) ")
+    ctx.check("yuu_03 -> gor_03 (entrance A_dokan_02)" in map_changes(ctx.log), "back to the parlor (gor_03)")
+    shot = shot_after(ctx, 960, 60)
+    ctx.check(shot, f"course shot: {rel(shot)}")
+
+
+# Tube Game (yuu_02), warped in with 20 Piantas: Mario starts as the tube, rolls right for 200 frames, then START:
+# the minigame pause window, "Quit?" (the cursor starts on No): up, A, and back to the parlor. Its round is a
+# 180 s timer, too long for a short run, so the test quits through the pause window.
+@scenario("parlor_tube", "map=yuu_02 story=30 party=1 piantas=20 mash=10 msgkeys=sysyuu_all_02:up.a "
+          "shots=60 shotfrom=1100", pad=st.pad([(1100, "cr", 200), (1400, "start", 3)]), until=until_frame(1800),
+          doc="Pianta Parlor Tube Game: roll, pause, quit back to gor_03")
+def _parlor_tube(ctx):
+    ctx.check(motion_after(ctx, MOT_ROLL) is not None, "Mario is the tube in the game (motion 0x16)")
+    seen(ctx, "sysyuu_all_01", "the pause window")
+    chose(ctx, "sysyuu_all_02", 0, "(quit) ")
+    ctx.check("yuu_02 -> gor_03 (entrance A_dokan_02)" in map_changes(ctx.log), "back to the parlor (gor_03)")
+    back = [f for a, b, f, m in st.seq_path(ctx.log) if b == 2 and m == "gor_03"]
+    ctx.check(back, f"gor_03 up in the field (frame {back[0] if back else '-'})")
+    shot = shot_after(ctx, 1140, 60)
+    ctx.check(shot, f"rolling shot: {rel(shot)}")
+
+
 def run_scenario(build, sc):
     dest = OUT / sc["name"]
     shutil.rmtree(dest, ignore_errors=True)

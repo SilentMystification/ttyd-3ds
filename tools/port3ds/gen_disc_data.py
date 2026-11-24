@@ -45,6 +45,7 @@ ENTRIES = {
     "mapdrv_texture_0": ("dol", "texture_0", 0x100),
     "torch_obj2_texture": ("dol", "torch_obj2_texture", 0x3F0),
     "torch_obj22t_texture": ("dol", "torch_obj22t_texture", 0x3F0),
+    "cubeDN": ("dol", "cubeDN", 0x1338),
     "win_texture_0": ("win", "texture_0", 0x1380),
 }
 

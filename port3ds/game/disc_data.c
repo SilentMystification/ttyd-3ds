@@ -43,6 +43,16 @@ void port_disc_data_register(void* dst, const char* rel, int section, unsigned i
     s_entries[s_count++] = (Entry){dst, rel, section, offset, size};
 }
 
+static void (*s_fixups[8])(void);
+static int s_nfixups;
+
+void port_disc_data_add_fixup(void (*fn)(void)) {
+    if (s_nfixups >= (int)(sizeof(s_fixups) / sizeof(s_fixups[0]))) {
+        plat_fatal("disc data: too many fixups");
+    }
+    s_fixups[s_nfixups++] = fn;
+}
+
 static u32 be32(const u8* p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }
 
 static u32 dol_file_offset(u32 addr, u32 size) {
@@ -95,6 +105,9 @@ void port_disc_data_fill(void) {
             plat_fatal("disc data: %s %08lx (%lu bytes) not found in the image", e->rel[0] ? e->rel : "main.dol",
                        (unsigned long)e->offset, (unsigned long)e->size);
         }
+    }
+    for (int i = 0; i < s_nfixups; i++) {
+        s_fixups[i]();
     }
     PLOG_I("disc data: %d arrays read from the image", s_count);
 }

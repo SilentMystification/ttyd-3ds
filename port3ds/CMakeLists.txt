@@ -267,19 +267,18 @@ target_include_directories(ttyd_port_game PRIVATE ${TTYD_INCLUDES} "${TTYD_REPO_
 ctr_add_shader_library(ttyd_gx_shader OUTPUT gx.shbin "${CMAKE_CURRENT_LIST_DIR}/shaders/gx.v.pica")
 dkp_add_embedded_binary_library(ttyd_gx_shader_bin ttyd_gx_shader)
 # The SJIS ROM font (tools/port3ds/gen_sjis_font.py, Noto Sans CJK JP under the SIL OFL; build.sh makes it on the
-# host, where Pillow is) embedded as sjis_font_bin for port3ds/game/os_font.c. Without it the JP build cannot
-# draw its system messages and stops with an error; other regions only lose the fonttest=sjis switch.
+# host, where Pillow is) is a resource file, not part of the binary: it is copied to <build dir>/res/ (release.py
+# packages that folder; the player copies it to sdmc:/3ds/ttyd/res/) and read at run time by port3ds/plat/res.c.
+# Without it the JP build stops with a message naming the file; other regions only lose the fonttest=sjis switch.
 set(TTYD_SJIS_FONT "${TTYD_REPO_DIR}/build/fonts/sjis_font.bin")
 if(EXISTS "${TTYD_SJIS_FONT}")
-    configure_file("${TTYD_SJIS_FONT}" "${TTYD_GEN_DIR}/sjis_font.bin" COPYONLY)
+    configure_file("${TTYD_SJIS_FONT}" "${CMAKE_BINARY_DIR}/res/sjis_font.bin" COPYONLY)
 else()
     if(TTYD_VERSION STREQUAL G8MJ01)
         message(FATAL_ERROR "build/fonts/sjis_font.bin is missing: run tools/port3ds/gen_sjis_font.py (needs Pillow)")
     endif()
-    message(WARNING "build/fonts/sjis_font.bin is missing: the SJIS ROM font is empty (tools/port3ds/gen_sjis_font.py)")
-    file(WRITE "${TTYD_GEN_DIR}/sjis_font.bin" "")
+    message(WARNING "build/fonts/sjis_font.bin is missing: no res/sjis_font.bin (tools/port3ds/gen_sjis_font.py)")
 endif()
-dkp_add_embedded_binary_library(ttyd_sjis_font_bin "${TTYD_GEN_DIR}/sjis_font.bin")
 
 # Output-register discipline (each output written once, in full, outside
 # branches; no b15): the PICA200 hangs otherwise, Azahar does not.
@@ -338,10 +337,15 @@ target_link_options(ttyd PRIVATE -Wl,--gc-sections -Wl,--wrap=svcBreak -Wl,--wra
 if(TTYD_LTO)
     target_link_options(ttyd PRIVATE -flto=auto -O2)
 endif()
-target_link_libraries(ttyd PRIVATE ttyd_gx_shader_bin ttyd_sjis_font_bin ctrdk_devupdate ctrdk_crash citro3d ctru z m)
+target_link_libraries(ttyd PRIVATE ttyd_gx_shader_bin ctrdk_devupdate ctrdk_crash citro3d ctru z m)
 # The image must end below 0x01000000 (PORT_IS_ADDR, sound-id flag bits): fail the build, not the boot.
 add_custom_command(TARGET ttyd POST_BUILD
     COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/check_image_end.py"
+            "${CMAKE_NM}" "$<TARGET_FILE:ttyd>"
+    VERBATIM)
+# No game image data is compiled in (docs/RELEASE.md): the list of allowed image arrays is empty.
+add_custom_command(TARGET ttyd POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/check_image_arrays.py"
             "${CMAKE_NM}" "$<TARGET_FILE:ttyd>"
     VERBATIM)
 

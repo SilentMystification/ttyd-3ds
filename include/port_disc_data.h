@@ -10,7 +10,11 @@
 void port_disc_data_register(void* dst, const char* rel, int section, unsigned int offset, unsigned int size);
 
 #define PORT_DISC_DATA_REGISTER(var, ...) port_disc_data_register(var, __VA_ARGS__)
-#define PORT_DISC_DATA(var, key)                                             \
+/* A function that runs once after every array is filled (byte swaps and the like). */
+void port_disc_data_add_fixup(void (*fn)(void));
+#define PORT_DISC_DATA_FIXUP(fn)                                              \
+    __attribute__((constructor)) static void port_disc_fixup_##fn(void) { port_disc_data_add_fixup(fn); }
+#define PORT_DISC_DATA(var, key)                                           \
     __attribute__((constructor)) static void port_disc_register_##var(void) { \
         PORT_DISC_DATA_REGISTER(var, PORT_DISC_##key);                       \
     }

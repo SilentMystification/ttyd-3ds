@@ -11,11 +11,13 @@
  * Side content (tools/port3ds/side_test.py, docs "Side content tests"), at the marioat point too, once:
  * items=ID[,ID...]  gives each item (pouchGetItem; ids in hex with 0x, else decimal).
  * coins=N  sets the coins.  piantas=N  sets the Pianta Parlor's tokens.
- * gsw=I:V[,I:V...]  sets GSW bytes (swByteSet).  gswf=I[,I...]  sets GSWF flags (swSet).
+ * gsw=I:V[,I:V...]  sets GSW bytes (swByteSet).  gswf=I[,I...]  sets GSWF flags (swSet). These two are set
+ *   earlier, while the warp's first map loads, so its set-up script sees them.
  * marioat=hit:<name>[,dy[,dx,dz]]  puts Mario at the named hit object's centre (hitObjGetPos) plus that offset;
  *   hit:npc<i> is NPC slot i's position instead. hitpos=name,...  logs hit objects' centres; npcpos logs every
  *   NPC's slot, name (hex) and position (both at the marioat point).
- * marioat2=<as marioat>@F  a second placement at game frame F (in the field), e.g. after a door.
+ * marioat2=<as marioat>@F (also marioat3, marioat4)  more placements at game frame F (in the field), e.g. after a
+ *   door.
  * syslog also logs on change: coins, the held items, Pianta tokens, GSW 0, Mario's motion id (in the field),
  *   each message or choice window an event opens ("sys: msg <tag>"; a choice also "sys: select <tag> -> N" when
  *   it closes), and the GSW bytes / GSWF flags listed in swwatch=I,fI,... ("sys: gsw I = V", "sys: gswf I = V").
@@ -168,7 +170,8 @@ typedef struct {
     u32 frame;
     EvtWord script[8];
 } Place;
-static Place s_place[2];
+#define PLACES 4
+static Place s_place[PLACES];
 
 static void parse_place(Place* pl, char* v) {
     const char* p = v;
@@ -237,12 +240,16 @@ static void read_switches(void) {
         parse_place(&s_place[0], v);
         s_at = 1;
     }
-    if (tst_sw_value("marioat2", v, sizeof(v)) && v[0] != '\0') {
-        char* at = strchr(v, '@');
-        if (at != NULL) {
-            *at = '\0';
-            parse_place(&s_place[1], v);
-            s_place[1].frame = (u32)atoi_simple(at + 1);
+    for (i = 1; i < PLACES; i++) {
+        char key[12];
+        sprintf(key, "marioat%d", i + 1);
+        if (tst_sw_value(key, v, sizeof(v)) && v[0] != '\0') {
+            char* at = strchr(v, '@');
+            if (at != NULL) {
+                *at = '\0';
+                parse_place(&s_place[i], v);
+                s_place[i].frame = (u32)atoi_simple(at + 1);
+            }
         }
     }
     s_hp = tst_sw_int("hp", -1);
@@ -283,16 +290,22 @@ static void read_switches(void) {
     }
 }
 
-static void apply(u32 frame) {
+/* gsw= and gswf=: set while the warp's map loads (after its new game cleared the flags), so the map's own
+ * set-up script sees them */
+static void apply_flags(u32 frame) {
     int i;
     for (i = 0; i < s_gsw_n; i++) {
         swByteSet(s_gsw[i][0], s_gsw[i][1]);
-        tst_log("sys: set gsw %d = %d", s_gsw[i][0], s_gsw[i][1]);
+        tst_log("sys: set gsw %d = %d at frame %lu", s_gsw[i][0], s_gsw[i][1], (unsigned long)frame);
     }
     for (i = 0; i < s_gswf_n; i++) {
         swSet(s_gswf[i]);
-        tst_log("sys: set gswf %d", s_gswf[i]);
+        tst_log("sys: set gswf %d at frame %lu", s_gswf[i], (unsigned long)frame);
     }
+}
+
+static void apply(u32 frame) {
+    int i;
     for (i = 0; i < s_items_n; i++) {
         BOOL ok = pouchGetItem((ItemType)s_items[i]);
         tst_log("sys: give item 0x%x %s", s_items[i], ok ? "ok" : "failed");
@@ -681,8 +694,18 @@ void tst_systems_frame(u32 frame) {
         track_windows(frame);
     }
     autopilot(frame);
-    if (s_place[1].used && frame >= s_place[1].frame && seqGetSeq() == SEQ_GAME) {
-        place(&s_place[1], frame);
+    {
+        static int flags_done;
+        int i;
+        if (!flags_done && seqGetSeq() == SEQ_MAP_CHANGE && tst_warp_frames() > 0) {
+            flags_done = 1;
+            apply_flags(frame);
+        }
+        for (i = 1; i < PLACES; i++) {
+            if (s_place[i].used && frame >= s_place[i].frame && seqGetSeq() == SEQ_GAME) {
+                place(&s_place[i], frame);
+            }
+        }
     }
     if (s_state != 1) {
         return;

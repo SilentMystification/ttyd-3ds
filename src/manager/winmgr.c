@@ -679,6 +679,14 @@ void winMgrHelpDraw(WinMgrEntry* entry) {
  * newItem is shown first, above a divider (the item being picked up when the bag is full).
  * Free with winMgrSelectDelete.
  */
+// A type that is an item id list is a pointer: negative as an s32 on the GameCube (0x80000000 and up). The port's
+// heap addresses are positive, so there any value above the last list type (18) is a list.
+#ifdef TARGET_PORT
+#define WINMGR_TYPE_IS_LIST(t) ((u32)(t) > 0xFF)
+#else
+#define WINMGR_TYPE_IS_LIST(t) ((t) < 0)
+#endif
+
 WinMgrSelect* winMgrSelectEntry(EvtWord type, s32 newItem, BOOL cancelable) {
     s32 n;
     WinMgrDesc* desc;
@@ -708,7 +716,7 @@ WinMgrSelect* winMgrSelectEntry(EvtWord type, s32 newItem, BOOL cancelable) {
     if (cancelable) {
         sel->flags |= WINMGR_SELECT_CANCELABLE;
     }
-    if (n < 0) {
+    if (WINMGR_TYPE_IS_LIST(n)) {
         n = 0;
     }
     d = select_desc_tbl[n].descriptors;
@@ -975,7 +983,7 @@ WinMgrSelect* winMgrSelectEntry(EvtWord type, s32 newItem, BOOL cancelable) {
             }
             break;
         default:
-            if (type < 0) {
+            if (WINMGR_TYPE_IS_LIST(type)) {
                 s32 count;
                 s32* it;
                 list = (s32*)type;

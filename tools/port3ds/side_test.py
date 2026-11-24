@@ -165,6 +165,56 @@ def _quiz(ctx):
     ctx.check(shot, f"shot of the quiz: {rel(shot)}")
 
 
+ITEM_MUSHROOM = 0x94
+
+# Rogueport (gor_01) item shop in house 02, story 30, 100 coins; the shop and item tutorials marked as seen
+# (GSWF 0, 235). Mario stands at the shop door, pushes up and presses A (the door opens, he walks in), is put on
+# the Mushroom shelf (A_item_01), presses A: "Mushroom, 5 coins?" Yes. Then he is put in front of the counter,
+# walks right to the shopkeeper (NPC slot 2), A: the counter menu, down to Sell, the item list (A: the Mushroom),
+# "2 coins?" Yes.
+@scenario("shop", "map=gor_01 story=30 party=1 gswf=0,235 mash=10 marioat=hit:A_ie_02_f1_doa01,-37,0,30 "
+          "marioat2=hit:A_item_01,0@1000 marioat3=hit:npc2,0,0,60@1300 "
+          "msgkeys=gor_shop1_24:a,gor_shop1_24:a,gor_shop1_24:down.a,gor_shop1_23:down.a shots=60 shotfrom=1000",
+          pad=st.pad([(710, "cu", 4), (720, "a", 3), (1030, "cu", 3), (1040, "a", 3), (1330, "cr", 12),
+                      (1350, "a", 3)]),
+          until=until_frame(1800), doc="Rogueport shop: walk in, buy a Mushroom (5 coins), sell it back (2 coins)")
+def _shop(ctx):
+    coins = values(ctx.log, "coins")
+    its = items(ctx.log)
+    ctx.check(any(v == 100 for f, v in coins), f"100 coins after the warp ({[v for f, v in coins]})")
+    buy = [(f, v) for f, v in coins if v == 95]
+    ctx.check(buy, "the Mushroom bought: 100 -> 95 coins")
+    ctx.check(any(ITEM_MUSHROOM in l for f, l in its), f"a Mushroom in the held items ({its})")
+    chose(ctx, "gor_shop1_23", 1, "(the counter menu: Sell) ")
+    ctx.check(coins and coins[-1][1] == 97, f"the Mushroom sold: 95 -> 97 coins (last {last(coins)})")
+    ctx.check(its and its[-1][1] == [], f"no held item after the sale ({its[-1] if its else '-'})")
+    shot = shot_after(ctx, buy[0][0] if buy else 0, 120)
+    ctx.check(shot, f"shot in the shop: {rel(shot)}")
+
+
+ITEM_SHROOM_FRY = 0xB3
+
+# Zess T. (gor_01, house 01), story 30, the Contact Lens delivered (GSWF 1188: she cooks), a Mushroom given.
+# Mario opens house 01's door (up, A), is put in front of her (NPC slot 4), up, A: her greeting, "Cook?" Yes,
+# the item list (A: the Mushroom), "Cook the Mushroom?" Yes, the cooking scene, the Shroom Fry.
+@scenario("cook", "map=gor_01 story=30 party=1 gswf=1188 items=0x94 mash=10 marioat=hit:A_ie_01_doa01,-43,0,30 "
+          "marioat2=hit:npc4,0,0,40@1000 shots=60 shotfrom=1000",
+          pad=st.pad([(710, "cu", 4), (720, "a", 3), (1030, "cu", 3), (1040, "a", 3)]),
+          until=until_frame(2550), doc="cooking with Zess T.: a Mushroom cooked into a Shroom Fry")
+def _cook(ctx):
+    its = items(ctx.log)
+    ctx.check(any(l == [ITEM_MUSHROOM] for f, l in its), f"the Mushroom given ({its[:3]})")
+    seen(ctx, "gor_01_cook_000", "Zess T.'s first-time greeting")
+    sel = [n for f, t, n in selects(ctx.log) if t == "gor_01_select"]
+    ctx.check(sel[:2] == [0, 0], f"'Cook?' and 'Cook the Mushroom?' answered Yes ({sel})")
+    ctx.check(any(l == [] for f, l in its), "the Mushroom taken")
+    got = [f for f, l in its if l == [ITEM_SHROOM_FRY]]
+    ctx.check(got, f"a Shroom Fry (0xb3) in the held items (frame {got[0] if got else '-'})")
+    seen(ctx, "gor_01_cook_023", "the closing message")
+    shot = shot_after(ctx, got[0] if got else 0, 80)
+    ctx.check(shot, f"shot of the dish: {rel(shot)}")
+
+
 def run_scenario(build, sc):
     dest = OUT / sc["name"]
     shutil.rmtree(dest, ignore_errors=True)
@@ -214,7 +264,9 @@ def main():
         print(out.strip().splitlines()[-1] if out.strip() else "")
         for l in log.splitlines():
             if "sys: " in l or "map: " in l or "msgkeys" in l or "battle: " in l or "warp: " in l:
-                print(" ", l.split("] ", 1)[-1] if "] " in l else l)
+                k = min(i for i in (l.find(w) for w in ("sys: ", "map: ", "msgkeys", "battle: ", "warp: "))
+                        if i >= 0)
+                print(" ", l[k:])
         for l in st.error_lines(log)[:5]:
             print("  ERROR:", l)
         print(f"adhoc: rc {rc}, {secs:.0f}s, {len(shots)} shots in {dest / 'shots'}")

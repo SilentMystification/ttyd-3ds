@@ -29,9 +29,10 @@
 #define CELL (W / GRID)
 #define GRID_VERTS (GRID * GRID * 6)
 #define CMD_BYTES (1u * QB_MIB)
-#define R_VTX 64
-#define R_IDX 128
-#define R_TEX 16
+/* Draws per timing list (quick: few, for emulators, whose software renderer is slow). */
+#define R_VTX (g_opt.quick ? 4 : 64)
+#define R_IDX (g_opt.quick ? 4 : 128)
+#define R_TEX (g_opt.quick ? 2 : 16)
 #define TIMEOUT_NS 2000000000LL
 
 typedef struct {
@@ -466,7 +467,7 @@ static void test_vbo(MemId m) {
     }
     n = list_end(&b);
     t = list_time(b, n, 3);
-    rec_time("gpu_read", "vbo_x64", m, &t, (u64)VB_BYTES * R_VTX);
+    rec_time("gpu_read", "vbo_rep", m, &t, (u64)VB_BYTES * R_VTX);
 }
 
 static void test_ibo(MemId m) {
@@ -495,7 +496,7 @@ static void test_ibo(MemId m) {
     }
     n = list_end(&b);
     t = list_time(b, n, 3);
-    rec_time("gpu_read", "ibo_x128", m, &t, (u64)IB_BYTES * R_IDX);
+    rec_time("gpu_read", "ibo_rep", m, &t, (u64)IB_BYTES * R_IDX);
 }
 
 static void test_tex(MemId m) {
@@ -525,7 +526,7 @@ static void test_tex(MemId m) {
     }
     n = list_end(&b);
     t = list_time(b, n, 3);
-    rec_time("gpu_read", "tex_x16", m, &t, (u64)RT_BYTES * R_TEX);
+    rec_time("gpu_read", "tex_rep", m, &t, (u64)RT_BYTES * R_TEX);
 }
 
 /* The command list itself in memory m: an immediate-mode grid (the vertex
@@ -684,7 +685,7 @@ static void test_writes(MemId m) {
     }
     words = list_end(&b);
     t = list_time(b, words, 3);
-    rec_time("gpu_write", "rendertarget_x16", m, &t, (u64)RT_BYTES * R_TEX);
+    rec_time("gpu_write", "rendertarget_rep", m, &t, (u64)RT_BYTES * R_TEX);
 }
 
 void gpu_suite(void) {

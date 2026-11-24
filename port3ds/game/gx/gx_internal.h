@@ -284,6 +284,17 @@ void gx_rec_init(void);
 void gx_rec_call(u32 id, const u32* w, u32 n);
 extern int gx_dl_has_ops;
 void gx_rec_state_list(const void* list); /* a list the game built holds state calls */
+/* Switch gxstatecache (default 0; PORT_3DS_GX_PERF.md, "Core-2 round 2", stage 2):
+ *   1: a state call whose words equal the last ones applied for the same piece of state returns before it
+ *      touches anything (no version change, so no rebuild), and compiled TEV setups are kept and reused;
+ *   2: as 1, and every reused TEV result is compiled again and compared.
+ * gx_dd_apply_same: 1 when `gx` already holds call `id` with these words (the caller returns); else the words are
+ * noted and the caller applies them. Every setter that writes a piece of state the table covers asks first. */
+extern int gx_opt_statecache;
+int gx_dd_apply_same(u32 id, const u32* w, u32 n);
+void gx_dd_apply_forget(void); /* `gx` was changed behind the setters (gx_state_init) */
+void gx_tev_memo_log(u32 frames);
+
 /* Fences: everything recorded so far is translated when they return. */
 enum { GXF_SYNC, GXF_DRAWDONE, GXF_READBACK, GXF_RELEASE, GXF_FULL, GXF_VERIFY, GXF_COUNT };
 void gx_rec_fence(int why);
@@ -375,6 +386,8 @@ void gx_tex_decode_rgba8(const u8* src, u32 w, u32 h, u32 fmt, const u16* tlut, 
 /* ---- gx_tev.c ---- */
 /* Fills the combiner part of `st` from the TEV state. */
 void gx_tev_compile(PlatGpuState* st);
+/* The same through a table of compiled setups (switch gxstatecache): the key is every byte the compile reads. */
+void gx_tev_compile_memo(PlatGpuState* st);
 
 /* ---- dl encoding helpers (gx_state.c) ---- */
 void gx_dl_replay_port_op(const u8** p, const u8* end);

@@ -49,6 +49,16 @@ static void rec(u32 id, const u32* words, u32 n) {
  * the game thread records for a translator (gx_rec.c) it goes into that
  * record. RECT: a call display lists do not hold (it applies at once while a
  * list is being recorded, as before), recorded only for the translator. */
+/* gxstatecache: the call is being applied here; when `gx` holds these words already there is nothing to do */
+#define DD_APPLY(id, ...)                                                            \
+    do {                                                                             \
+        if (gx_opt_statecache) {                                                     \
+            const u32 dw_[] = {__VA_ARGS__};                                         \
+            if (gx_dd_apply_same(REC_##id, dw_, sizeof(dw_) / sizeof(dw_[0]))) {     \
+                return;                                                              \
+            }                                                                        \
+        }                                                                            \
+    } while (0)
 #define REC(id, ...)                                         \
     do {                                                     \
         GX_CLOSE_PRIMITIVE();                                \
@@ -62,6 +72,7 @@ static void rec(u32 id, const u32* words, u32 n) {
             gx_rec_call(REC_##id, w_, sizeof(w_) / sizeof(w_[0])); \
             return;                                          \
         }                                                    \
+        DD_APPLY(id, __VA_ARGS__);                           \
     } while (0)
 #define REC0(id)                         \
     do {                                 \
@@ -74,6 +85,9 @@ static void rec(u32 id, const u32* words, u32 n) {
             gx_rec_call(REC_##id, NULL, 0); \
             return;                      \
         }                                \
+        if (gx_opt_statecache) {         \
+            gx_dd_apply_same(REC_##id, NULL, 0); \
+        }                                \
     } while (0)
 #define RECT(id, ...)                                        \
     do {                                                     \
@@ -83,6 +97,7 @@ static void rec(u32 id, const u32* words, u32 n) {
             gx_rec_call(REC_##id, w_, sizeof(w_) / sizeof(w_[0])); \
             return;                                          \
         }                                                    \
+        DD_APPLY(id, __VA_ARGS__);                           \
     } while (0)
 
 static inline void touch(void) {
@@ -974,6 +989,14 @@ void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
             gx_rec_call(REC_LoadTexObj, words, sizeof(words) / 4);
             return;
         }
+        if (gx_opt_statecache) {
+            u32 words[1 + sizeof(GxTexObj) / 4];
+            words[0] = (u32)id;
+            memcpy(words + 1, obj, sizeof(GxTexObj));
+            if (gx_dd_apply_same(REC_LoadTexObj, words, sizeof(words) / 4)) {
+                return; /* this object is the one loaded on the map */
+            }
+        }
         gx.tex_map[id] = *(GxTexObj*)obj;
         gx.tex_map_valid[id] = 1;
         touch();
@@ -994,6 +1017,14 @@ void GXLoadTlut(GXTlutObj* tlut_obj, u32 tlut_name) {
         return;
     }
     if (tlut_name < 20) {
+        if (gx_opt_statecache) {
+            u32 words[1 + sizeof(GxTlutObj) / 4];
+            words[0] = tlut_name;
+            memcpy(words + 1, tlut_obj, sizeof(GxTlutObj));
+            if (gx_dd_apply_same(REC_LoadTlut, words, sizeof(words) / 4)) {
+                return;
+            }
+        }
         gx.tlut[tlut_name] = *(GxTlutObj*)tlut_obj;
         touch();
     }
@@ -1234,6 +1265,7 @@ void gx_shadow_call(u32 id, const u32* w) {
 void gx_state_init(u16 efb_w, u16 efb_h) {
     gx_opts_init();
     memset(&gx, 0, sizeof(gx));
+    gx_dd_apply_forget(); /* the setters' table described the state before this */
     gx.efb_w = efb_w;
     gx.efb_h = efb_h;
     GXClearVtxDesc();

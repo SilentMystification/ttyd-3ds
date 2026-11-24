@@ -285,7 +285,11 @@ static void build_state(void) {
         tu->wrap_t = wrap[t->wrap_t % 3];
         gx_tex_unit_sampler(tu, t, map); /* min/mag filter, mip filter, LOD bias (the texfilter option) */
     }
-    gx_tev_compile(st);
+    if (gx_opt_statecache) {
+        gx_tev_compile_memo(st);
+    } else {
+        gx_tev_compile(st);
+    }
 
     /* what the transform needs per vertex (gxunlit) */
     s_need_both = 0;
@@ -1904,4 +1908,112 @@ void gx_draw_frame_begin(void) {
     gx_stat_draws = gx_stat_vertices = gx_stat_copies = 0;
     s_built_version = 0xFFFFFFFFu; /* every frame starts with a full state */
     s_snap_valid = 0;
+}
+
+/* ---- Compiled TEV setups, kept (switch gxstatecache) ----
+ * gx_tev_compile is a function of the stages in use (gx.tev[0 .. num_tev)), the four TEV registers, the four
+ * konst colours, the swap table and the texture unit each stage samples (gx_unit_of_stage); the game's override
+ * (gx_tev_game_override) reads a subset of the same. Its result is the combiner part of the PICA state: the six
+ * stages, their count and the buffer inputs. The key holds all of those bytes and is compared in full on a hit,
+ * so a reused result is the compile's result for the same input. Direct-mapped, two probes; a setup of more
+ * stages than the key holds is compiled every time. gxstatecache=2 compiles every hit again and compares. */
+#define TEVM_SLOTS 512
+#define TEVM_KEY 320
+#define TEVM_OUT offsetof(PlatGpuState, buffer_color)
+typedef struct {
+    u32 hash;
+    u16 klen;
+    u8 used, pad;
+    u8 key[TEVM_KEY];
+    u8 out[TEVM_OUT];
+} TevMemo;
+static TevMemo* s_tevm;
+static u32 s_tevm_hits, s_tevm_misses, s_tevm_big, s_tevm_bad;
+
+void gx_tev_compile_memo(PlatGpuState* st) {
+    if (s_tevm == NULL) {
+        s_tevm = calloc(TEVM_SLOTS, sizeof(TevMemo));
+        if (s_tevm == NULL) {
+            gx_tev_compile(st);
+            return;
+        }
+    }
+    u8 key[TEVM_KEY];
+    u32 n = gx.num_tev ? gx.num_tev : 1;
+    if (n > 16) {
+        n = 16;
+    }
+    u32 klen = 4 + n * sizeof(gx.tev[0]) + sizeof(gx.tev_reg) + sizeof(gx.tev_kcolor) + sizeof(gx.swap_table) + n;
+    if (klen > TEVM_KEY) {
+        s_tevm_big++;
+        gx_tev_compile(st);
+        return;
+    }
+    u8* k = key;
+    k[0] = gx.num_tev;
+    k[1] = k[2] = k[3] = 0;
+    k += 4;
+    memcpy(k, gx.tev, n * sizeof(gx.tev[0]));
+    k += n * sizeof(gx.tev[0]);
+    memcpy(k, gx.tev_reg, sizeof(gx.tev_reg));
+    k += sizeof(gx.tev_reg);
+    memcpy(k, gx.tev_kcolor, sizeof(gx.tev_kcolor));
+    k += sizeof(gx.tev_kcolor);
+    memcpy(k, gx.swap_table, sizeof(gx.swap_table));
+    k += sizeof(gx.swap_table);
+    for (u32 i = 0; i < n; i++) {
+        *k++ = (u8)gx_unit_of_stage[i];
+    }
+    u32 h = gx_hash32(key, klen, 0x7E5Du);
+    TevMemo* m = NULL;
+    for (u32 p = 0; p < 2; p++) {
+        TevMemo* c = &s_tevm[(h + p * 0x9E37u) & (TEVM_SLOTS - 1)];
+        if (c->used && c->hash == h && c->klen == klen && gx_mem_equal(c->key, key, klen)) {
+            m = c;
+            break;
+        }
+    }
+    if (m != NULL) {
+        s_tevm_hits++;
+        if (gx_opt_statecache == 2) {
+            PlatGpuState chk;
+            memset(&chk, 0, sizeof(chk));
+            gx_tev_compile(&chk);
+            if (!gx_mem_equal(&chk, m->out, TEVM_OUT)) {
+                if (s_tevm_bad++ == 0) {
+                    PLOG_W("gxstatecache verify: a kept TEV result differs from a fresh compile (%u GX stages)", gx.num_tev);
+                }
+                memcpy(m->out, &chk, TEVM_OUT);
+            }
+        }
+        memcpy(st, m->out, TEVM_OUT);
+        return;
+    }
+    s_tevm_misses++;
+    /* compiled into a clean state, so the kept bytes do not depend on what the caller's state held */
+    PlatGpuState fresh;
+    memset(&fresh, 0, sizeof(fresh));
+    gx_tev_compile(&fresh);
+    memcpy(st, &fresh, TEVM_OUT);
+    m = &s_tevm[h & (TEVM_SLOTS - 1)];
+    if (m->used) {
+        TevMemo* alt = &s_tevm[(h + 0x9E37u) & (TEVM_SLOTS - 1)];
+        if (!alt->used) {
+            m = alt;
+        }
+    }
+    m->used = 1;
+    m->hash = h;
+    m->klen = (u16)klen;
+    memcpy(m->key, key, klen);
+    memcpy(m->out, &fresh, TEVM_OUT);
+}
+
+void gx_tev_memo_log(u32 frames) {
+    u32 f = frames ? frames : 1;
+    PLOG_I("gxthread   statecache: TEV setups per frame: %lu reused, %lu compiled, %lu too long for the key; verify "
+           "mismatches %lu (total)",
+           (unsigned long)(s_tevm_hits / f), (unsigned long)(s_tevm_misses / f), (unsigned long)(s_tevm_big / f),
+           (unsigned long)s_tevm_bad);
+    s_tevm_hits = s_tevm_misses = s_tevm_big = 0;
 }

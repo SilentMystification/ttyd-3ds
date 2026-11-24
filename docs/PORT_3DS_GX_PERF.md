@@ -647,6 +647,10 @@ Built: stage 1 (`gxbatch`) and part of stage 2 (`gxstatecache`, `gxstatededup`).
 
 Identity, `determ`, 6 consecutive shots, byte for byte, off against on: gor_01 6 of 6 (`gxbatch=1`), the effects battle 6 of 6 (`gxbatch=1`, frames 900 to 905), hei_01 6 of 6 (`gxbatch=2`, the verify mode: every member checked the per-list way, hashes included, **0 failures**).
 
+Both switches together (`gxbatch=1 gxstatecache=1`) against the default, same method, frames 780 to 785, in all ten scenes: **60 of 60 shots byte-identical**. (The check script's blank-shot heuristic flagged the six shots of jin_00 and of usu_00; whether those shots have content was not looked at, so count those two scenes as unconfirmed.)
+
+**Defaults: both stay 0.** The remaining gate is `gw_diff.py` on the 1600-frame padscript, which was not run.
+
 **Stage 2 as measured** (on top of `gxbatch=1`):
 
 | Switches | gor_01 busy | effects battle busy | What it showed |

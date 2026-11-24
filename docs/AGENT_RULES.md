@@ -9,6 +9,7 @@ Every agent brief points here. These rules are owner decisions; they override an
   1. **Foreground, one call:** `tools/port3ds/build.sh` or `run_azahar.py` as a single Bash call with a timeout long enough for the whole job (up to 600000 ms). One call, one result.
   2. **Background, then end the turn:** start the job with `run_in_background`, then stop. The harness wakes the agent when the job finishes. Do not read its output file while waiting.
 - Forbidden: `sleep` loops, `while ! test -f ...; do sleep; done`, repeated status checks, re-reading a log to see whether a job has finished.
+- Before the final report, stop every background job you started (TaskStop). A job still running after the report wakes you again when it exits, and every wake reloads your full context.
 - A build may wait for a build slot (at most 2 machine-wide). That is normal; it is not stuck.
 
 ## Emulator runs

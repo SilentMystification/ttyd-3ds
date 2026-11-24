@@ -29,6 +29,8 @@ From devupdate (`push --switches`, `restart ...`), 3dslink arguments, or `sdmc:/
 | `chase=N` | loads per latency point (262144) |
 | `nocore1` `nocore2` | leave a core out |
 | `nopte` | skip the page-table walk at the end |
+| `gpucore=N` | core of the GPU feeder threads in `contend` (default 1; 0 in emulators) |
+| `devupdateport=N` | devupdate port (default 5050) |
 | `norun` | only start (to pull old results) |
 | `autoexit` | exit after the run (emulator tests) |
 
@@ -86,19 +88,21 @@ LDM readers on two cores at once for the window: the same buffer, two FCRAM buff
 
 citro3d state and draws, but the harness records its own command lists and submits each one alone with `GX_ProcessCommandList` (not citro3d's frame queue). Times are CPU ticks from the submission to the GSP completion event (value, us) and GSP's own perf log, op start to IRQ (aux, us; `GSPGPU_SetPerfLogMode`). There is no GPU timestamp register; these are the closest. Each wait has a 2 s timeout, so a command GSP refuses shows as "failed or timed out" rather than a hang.
 
+The `size` field of a timing row is the bytes the list or transfer reads (or writes), so the note's MB/s is that over the wall time. citro3d's GX queue is unbound (`GX_BindQueue(NULL)`) so each transfer goes straight to GSP.
+
 Every GPU result is read back by the CPU (after `GSPGPU_InvalidateDataCache`) and compared to a known pattern: `gpu_check` rows count the wrong pixels (0 = correct). The check accepts the image as-is or flipped (the note says which), since the comparison is about memory, not orientation.
 
 | Test | Source / destination | Pattern |
 |---|---|---|
-| `vbo`, `vbo_x64` | vertex buffer in the region; 32x32 grid of flat-coloured quads into a 256x256 VRAM target; timing: 64 draws shrunk to 8x8 pixels (vertex fetch, not fill) | each 8x8 cell its colour, within 2 |
-| `ibo`, `ibo_x128` | index buffer (u16) in the region, vertices in linear | same |
-| `tex`, `tex_x16` | 256x256 RGBA8 texture in the region, one full-target quad, nearest; timing: 16 quads | each pixel equals its texel |
+| `vbo`, `vbo_rep` | vertex buffer in the region; 32x32 grid of flat-coloured quads into a 256x256 VRAM target; timing: 64 draws (4 with `quick`) shrunk to 8x8 pixels (vertex fetch, not fill) | each 8x8 cell its colour, within 2 |
+| `ibo`, `ibo_rep` | index buffer (u16) in the region, vertices in linear; timing: 128 draws | same |
+| `tex`, `tex_rep` | 256x256 RGBA8 texture in the region, one full-target quad, nearest; timing: 16 quads | each pixel equals its texel |
 | `cmdlist` | the command list itself in the region: an immediate-mode grid (vertex data inside the list, ~300 KiB) recorded in linear and copied there | grid |
 | `texcopy_src`, `dispxfer_src` | `GX_TextureCopy` / `GX_DisplayTransfer` reading the region | bytes / texels |
 | `fill` | `GX_MemoryFill` of 1 MiB in the region | every word |
 | `texcopy` | 1 MiB from linear into the region | bytes |
 | `dispxfer` | 256x256 tiled to linear, into the region | texels |
-| `rendertarget_x16` | colour buffer in the region (texture in VRAM) | texels |
+| `rendertarget`, `rendertarget_rep` | colour buffer in the region (texture in VRAM) | texels |
 
 ### Coherency (`coherency`)
 
@@ -129,28 +133,24 @@ Owner question: can QTM add bandwidth by taking traffic off the FCRAM bus? Victi
 | `c2:heap`, `c2:qtm` | core 2 LDM-reading 4 MiB of heap / 2 MiB of QTM |
 | `c0+2:heap`, `c0+2:qtm` | cores 0 and 2 reading (GPU victims only) |
 
+The GPU feeder threads run on core 1 at a priority above the CPU workers (`gpucore=N` moves them). In an emulator they run on core 0, because Azahar delivers GSP completions only to threads on core 0; there the feeder shares core 0 with the core-0 victims, so the emulator's CPU slowdowns under GPU aggressors (about 3.8x) are an artefact.
+
 `contend` is the slowdown factor (1.00 = unaffected); `contend_raw` has the raw victim number (us, ns or MB/s), the aggressor's own achieved MB/s as aux, and the victim's performance counters in the note when they are available. GPU aggressors do not run against GPU victims (one GPU), nor CPU aggressors on a victim's own core.
 
 How to read it: if `c0_read_heap4M` slows under `gpu_tex:lin` but not under `gpu_tex:qtm`, moving textures to QTM gives the CPU FCRAM bandwidth back. If `gpu_tex_lin` slows under `c0+2:heap` but not under `c0+2:qtm`, CPU data in QTM gives the GPU FCRAM bandwidth back.
 
-### Performance counters (`perf`) and the counter API
+### Performance counters (`perf`), the devkit module and the game's `pmu=N`
 
-User mode cannot read the ARM11 MPCore performance monitor (CP15 c15 is privileged), so the harness does not try. It uses the kernel's `svcControlPerformanceCounter` through the new devkit module `ctrdk/perf.h` (library `ctrdk_perf`): PMN0 = D-cache read misses, PMN1 = external requests, CCNT, and the SCU counters (external reads/writes, line-fill misses per core, port busy). `perf available` says whether the kernel allowed it; `cycles_per_tick` per core should be 3.0 at 804 MHz if CCNT counts that core; `pmn0/pmn1/scu0_per_line_*` are the events per 32-byte line of a 16 MiB read of heap and of QTM.
+User mode cannot read the ARM11 MPCore performance monitor (CP15 c15 is privileged, and the core has no user-enable bit). The new devkit module `ctrdk/perf.h` (library `ctrdk_perf`, `libs/ctr-devkit/perf/`) gets in two ways and picks the first that works:
 
-For the game, per frame:
+1. the kernel's `svcControlPerformanceCounter` (SVC 0x3E): CCNT, PMN0, PMN1 of the calling core and the SCU counters (external reads/writes, line-fill misses per core, port busy), 64-bit;
+2. `svcBackdoor` (SVC 0x7B, implemented by Luma): a few CP15 instructions in kernel mode on the calling core; CCNT, PMN0, PMN1, 32-bit (deltas wrap correctly up to 5.3 s at 804 MHz).
 
-```c
-#include "ctrdk/perf.h"           /* link ctrdk_perf; RSF: ControlPerformanceCounter: 62 */
-ctrdk_perf_init(NULL);            /* once */
-CtrdkPerfSample a, b, d; char line[160];
-ctrdk_perf_read(&a);              /* frame start, on the thread to measure */
-/* ... frame ... */
-ctrdk_perf_read(&b);
-ctrdk_perf_diff(&a, &b, &d);
-ctrdk_perf_format(&d, line, sizeof line);   /* "core0 cyc=.. drmiss=.. ext=.. scu_rd=.." */
-```
+Events (two at a time per core, plus cycles): D-cache read/write miss, I-cache miss, data-dependency and instruction-buffer stalls, LSU-full stall, branch mispredict, external request, main TLB miss, eviction, instructions. Each core is reprogrammed lazily at its next read after `ctrdk_perf_set_events`; a delta across an event change is marked invalid. In Azahar neither way exists: `ctrdk_perf_available()` is false and every call is a no-op.
 
-The game's RSF (`port3ds/rsf/ttyd.rsf`) allows the SVC.
+qtmbench: `perf available` (and `info.pmu`, which names the way in); `cycles_per_tick` per core should be 3.0 at 804 MHz if CCNT counts that core; `pmn0/pmn1/scu0_per_line_*` are D-cache read misses, external requests and SCU external reads per 32-byte line of a 16 MiB read of heap and of QTM.
+
+The game: switch `pmu=N` (`port3ds/plat/pmu.c`, `include/plat/pmu.h`) logs every N frames one `pmu frame ...` line with, per frame, for the game thread (frame to frame, with `scu_rd`/`scu_wr`), the GX translator's busy spans, the `GXCopyDisp` translation (`present`) and the render thread's replay, each with its core: cycles, the two events, spans. These are the points `gxthreadstats` times. `pmuev=rotate` (default) switches to the next event pair each line; `pmuev=drmiss,ext` fixes one. In Azahar the log says `pmu: not available` once. The game's RSF allows `ControlPerformanceCounter` (Backdoor was already allowed).
 
 ### Mapping (`map`)
 
@@ -160,11 +160,10 @@ The game's RSF (`port3ds/rsf/ttyd.rsf`) allows the SVC.
 
 ## What only the console can tell
 
-Azahar runs every path (all `gpu_check` rows 0, the JSON and tables, devupdate), but:
+Azahar runs it (checked 2026-11-24, `quick`, in four runs of under a minute: `cpu_*`/`cache`/`conc`, `gpu`/`coherency`, `contend`, the mapping report). It shows that the paths work: every `gpu_check` row for linear and VRAM is 0, P3D reads from QTM (vertex buffer, index buffer, texture) and rendering into QTM are correct, the JSON and tables are written and `qtm_bench.py show/diff` read them. It does not show:
 
-- every timing (bandwidth, latency, cache maintenance, GPU times, slowdowns): Azahar does not model caches, buses or memory timing;
-- coherency: Azahar has no CPU cache, so stale reads never happen there; the `%stale` rows are only meaningful on the console;
-- `perf`: Azahar does not implement `svcControlPerformanceCounter`;
-- `pte`: skipped in emulators;
-- whether GSP accepts QTM addresses for command lists and transfers on real firmware;
-- core 1's 80% time slicing, core 2, and the HOME Menu's share.
+- any timing (bandwidth, latency, cache maintenance, GPU times, slowdowns): Azahar models no caches, buses or memory timing (every working set reads at the same speed; GSP's perf log returns nonsense);
+- coherency: Azahar has no CPU cache, so stale reads never happen there;
+- GX transfers that touch QTM: in Azahar, `GX_TextureCopy`, `GX_DisplayTransfer` and `GX_MemoryFill` with a QTM source or destination do nothing (the `*_src/qtm`, `*_dst/qtm` and QTM coherency rows fail or read "did not deliver"), and a command list at a QTM address crashes Azahar (skipped there). Whether GSP and the PICA accept QTM for these is the console's answer;
+- `perf` and `pte`;
+- core 1's 80% time slicing, core 2 and the HOME Menu's share; GSP completions to threads on cores 1 and 2.

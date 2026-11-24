@@ -61,6 +61,7 @@ Then the measurement items from `PORT_3DS_BACKLOG.md` lane D, all through `devup
    - It runs all tests at launch (about 1-2 minutes; the top screen shows the suite) and ends with `QTMBENCH DONE`, then idles with devupdate up. Do not touch the console while it runs.
    - Pull: `tools/port3ds/qtm_bench.py pull` (results in `build/qtmbench/<time>/`). Or the whole loop: `tools/port3ds/qtm_bench.py run`.
    - Check: `info.emulator` is `no`; `cores` lists core 1 and core 2; `map/perm/qtm` is 3 (RW); every `gpu_check` row is `0 badpx`; `map/pte/*` rows decode (if the console stops at "page tables", reboot it: everything else is already saved; rerun with `$D restart nopte`).
+   - ARM11 counters in the game: `$D push build/3ds/game/ttyd.cia --switches "map=gor_01 gxthread=2 gxthreadstats=60 pmu=60" --wait 120`, then `$D log`. Expect `pmu: on via svcControlPerformanceCounter` (or `via svcBackdoor`) and one `pmu frame ...` line per 60 frames beside the `gxthread` lines; `pmu: not available (rc ...)` means neither way works under this Luma.
    - Note for the QTM planning: `cpu_bw` and `cpu_lat` QTM against heap/linear, the `coherency` rows (non-zero `%stale` = flushes required), and the `contend` matrix.
 9. **Rosalina profiles** (`pc_sample.py`) of Mario's house, Rogueport and a battle, plus a `cpulimit` 0 / 30 / 80 comparison.
 10. **Sleep and HOME.** Expect the `gpu: suspend|sleep ... / gpu: resume` log lines and `cpu limit: 30% (HOME pressed, early ...)`.

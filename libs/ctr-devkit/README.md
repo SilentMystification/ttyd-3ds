@@ -7,6 +7,8 @@ Developer tools for any libctru homebrew on the Nintendo 3DS. MIT licence (see `
 | `crash` | Crash and hang handler: one versioned report for CPU exceptions, fatals, `svcBreak` and a hang watchdog. It writes to your log and a report file, shows a crash screen on both displays, dumps every thread's registers on a hang, and ends the process cleanly |
 | `devupdate` | **Development only.** Installs a CIA over the network while the title runs, relaunches it with test switches, and keeps a crashed process reachable (recovery mode) |
 | `devupdate/devupdate.py` | The PC side (Python 3, standard library only): `push`, `ping`, `restart`, `report`, `launch`, `bootstrap`, `files`, `queue`, `azahar-session` |
+| `perf` | ARM11 performance counters (CCNT, two events per core, SCU counters) through `svcControlPerformanceCounter` or Luma's `svcBackdoor`, for per-frame logging (`include/ctrdk/perf.h`) |
+| `qtmbench` | New 3DS memory benchmark CIA (QTM vs FCRAM vs VRAM, CPU and GPU, coherency, contention); see `docs/PORT_3DS_QTM_BENCH.md` in this repository |
 | `examples/crash`, `examples/devupdate` | Standalone example apps (3dsx and CIA). The devupdate example built as a 3dsx is the generic bootstrap `devupdate-boot.3dsx` |
 
 ## Building
@@ -30,7 +32,7 @@ include(path/to/ctr-devkit/cmake/CtrDevkitApp.cmake)
 ctrdk_add_app(app TITLE "My App" UNIQUE_ID 0xFD8xx PRODUCT_CODE CTR-N-XXXX)   # app.3dsx + app.cia
 ```
 
-Pick a homebrew-range unique ID (`0xF8000`-`0xFFFFF`) that no other title on the console uses. The examples use `0xFD888` (crash) and `0xFD889` (devupdate). The TTYD port uses `0xFD886` and its probe `0xFD887`.
+Pick a homebrew-range unique ID (`0xF8000`-`0xFFFFF`) that no other title on the console uses. The examples use `0xFD888` (crash) and `0xFD889` (devupdate), qtmbench `0xFD88C`. The TTYD port uses `0xFD886` and its probe `0xFD887`.
 
 ## crash
 

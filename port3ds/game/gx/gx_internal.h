@@ -284,6 +284,18 @@ void gx_rec_init(void);
 void gx_rec_call(u32 id, const u32* w, u32 n);
 extern int gx_dl_has_ops;
 void gx_rec_state_list(const void* list); /* a list the game built holds state calls */
+/* Switch gxstatecache (default 0; PORT_3DS_GX_PERF.md, "Core-2 round 2", stage 2):
+ *   1: a state call whose words equal the last ones applied for the same piece of state returns before it
+ *      touches anything (no version change, so no rebuild), and compiled TEV setups are kept and reused;
+ *   2: as 1, and every reused TEV result is compiled again and compared.
+ * gx_dd_apply_same: 1 when `gx` already holds call `id` with these words (the caller returns); else the words are
+ * noted and the caller applies them. Every setter that writes a piece of state the table covers asks first. */
+extern int gx_opt_statecache;
+extern int gx_opt_statededup; /* switch gxstatededup (default 0): the early return of unchanged state calls */
+int gx_dd_apply_same(u32 id, const u32* w, u32 n);
+void gx_dd_apply_forget(void); /* `gx` was changed behind the setters (gx_state_init) */
+void gx_tev_memo_log(u32 frames);
+
 /* Fences: everything recorded so far is translated when they return. */
 enum { GXF_SYNC, GXF_DRAWDONE, GXF_READBACK, GXF_RELEASE, GXF_FULL, GXF_VERIFY, GXF_COUNT };
 void gx_rec_fence(int why);
@@ -375,6 +387,8 @@ void gx_tex_decode_rgba8(const u8* src, u32 w, u32 h, u32 fmt, const u16* tlut, 
 /* ---- gx_tev.c ---- */
 /* Fills the combiner part of `st` from the TEV state. */
 void gx_tev_compile(PlatGpuState* st);
+/* The same through a table of compiled setups (switch gxstatecache): the key is every byte the compile reads. */
+void gx_tev_compile_memo(PlatGpuState* st);
 
 /* ---- dl encoding helpers (gx_state.c) ---- */
 void gx_dl_replay_port_op(const u8** p, const u8* end);
@@ -555,5 +569,39 @@ int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nb
                 const GxDlcDraw* d, u32 nd);
 int gx_pipe_in_list(void);
 void gx_pipe_cur_list(const void** list, u32* nbytes); /* the display list being run */
+
+/* ---- gxbatch (gx_dlcache.c): prebuilt batches of cached lists (PORT_3DS_GX_PERF.md, "Core-2 round 2") ----
+ * A run of consecutive cache hits under one GX state is built once into a batch: its members, the vertex state
+ * they were validated under, the GPU draws they merge into and their indices in linear memory. A list call that
+ * continues the open batch is a compare; the batch's draws are recorded when it ends, so every other thing that
+ * records into the back end calls gx_batch_flush first. */
+extern int gx_batch_pending; /* a batch is open or a run is being collected */
+void gx_batch_flush_slow(void);
+static inline void gx_batch_flush(void) {
+    if (gx_batch_pending) {
+        gx_batch_flush_slow();
+    }
+}
+int gx_batch_recent(u32 bat);  /* batch `bat` (index + 1) was drawn this frame or in the last two */
+/* Member k of batch `bat`: its list and where its pass-group record index is kept; 0 past the end. */
+int gx_batch_member(u32 bat, u32 k, const void** list, u32* nbytes, u32** hint);
+/* gx_vsh.c */
+extern u32 gx_vsh_dec_epoch;
+int gx_vsh_rec_decided(u32* hint, const void* list, u32 nbytes, u32 bat);
+void* gx_vsh_batch_route(u32 pnmtx, u32 bat, const void* list0, u32 nbytes0, u32* hint0);
+void gx_vsh_batch_count(void* group, u32 n, u32 verts, u32 idx);
+/* gx_draw.c: what the last gx_draw_vsh recorded (ok 0: it drew nothing through the shader path) */
+typedef struct {
+    u8 ok;
+    u8 unit_attr[3];
+    const void* stream;
+    u32 layout, scales, cull;
+} GxVshLast;
+extern GxVshLast gx_vsh_last;
+/* The state part of gx_draw_vsh for a whole batch: PICA state, uniforms, the group's route. 1: the batch may
+ * draw (its uniform block is recorded, *group and *cull are set); 0: draw the members one by one. */
+int gx_draw_batch_begin(const u8 unit_attr[3], u32 bat, const void* list0, u32 nbytes0, u32* hint0, void** group,
+                        u32* cull);
+void gx_draw_batch_end(void* group, u32 n, u32 verts, u32 idx);
 
 #endif

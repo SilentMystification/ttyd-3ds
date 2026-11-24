@@ -656,6 +656,8 @@ typedef struct {
     u8 decision;   /* 1: shader path this frame */
     u8 touched;
     u16 pending;   /* this frame's new streak (minimum over the groups it was in) */
+    u16 bat;       /* gxbatch: the batch (index + 1) that last relied on this record; while that batch is in use the
+                      record is not evicted (its last_frame is not kept up by batch draws) */
     u32 last_frame;
 } Rec;
 
@@ -686,6 +688,15 @@ static void tables_alloc(void) {
     }
 }
 static u32 s_ntouch;
+/* gxbatch: a batch drawn in a group (one touch for all its members). Members' streaks are left alone while the
+ * group's set stays eligible (they are at or above K and would only grow); gx_vsh_frame zeroes them when it does
+ * not. */
+#define BTOUCH_MAX 2048
+static struct {
+    u16 bat, group;
+} s_btouch[BTOUCH_MAX];
+static u32 s_nbtouch;
+u32 gx_vsh_dec_epoch = 1; /* bumped whenever a record's decision changes or a record is replaced */
 static struct {
     f32 vp[6];
     u16 groups[GROUPS]; /* not all used: a frame's groups per viewport */
@@ -815,7 +826,7 @@ static u32 rec_for(const void* list, u32 nbytes) {
             return got;
         }
         u32 age = r->list == NULL ? ~0u : now - r->last_frame;
-        if (age > 2 && age >= oldest && !r->touched) {
+        if (age > 2 && age >= oldest && !r->touched && !(r->bat != 0 && gx_batch_recent(r->bat))) {
             oldest = age;
             victim = i;
         }
@@ -825,6 +836,9 @@ static u32 rec_for(const void* list, u32 nbytes) {
         return 0;
     }
     Rec* r = &s_rec[victim];
+    if (r->list != NULL) {
+        gx_vsh_dec_epoch++; /* a record a batch may have relied on is gone */
+    }
     memset(r, 0, sizeof(*r));
     r->list = list;
     r->nbytes = nbytes;
@@ -973,6 +987,78 @@ void gx_vsh_count_shader(u32 nverts, u32 nidx) {
     s_st.idx_vsh += nidx;
 }
 
+/* ---- gxbatch (gx_dlcache.c): one route for a prebuilt batch of cached lists ---- */
+
+/* The record of `list` if it exists (never made or replaced here), 0 if not; *hint as in rec_for. */
+static u32 rec_find(u32* hint, const void* list, u32 nbytes) {
+    if (hint != NULL && *hint != 0 && s_rec[*hint - 1].list == list && s_rec[*hint - 1].nbytes == nbytes) {
+        return *hint;
+    }
+    u32 h = ((u32)(uintptr_t)list * 0x9E3779B1u ^ nbytes * 0x85EBCA77u) >> 7;
+    for (u32 p = 0; p < REC_PROBE; p++) {
+        u32 i = (h + p) & (RECS - 1);
+        if (s_rec[i].list == list && s_rec[i].nbytes == nbytes) {
+            if (hint != NULL) {
+                *hint = i + 1;
+            }
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
+/* Does the list's record say "shader"? Then batch `bat` (index + 1) relies on it. */
+int gx_vsh_rec_decided(u32* hint, const void* list, u32 nbytes, u32 bat) {
+    u32 r = rec_find(hint, list, nbytes);
+    if (r == 0 || !s_rec[r - 1].decision) {
+        return 0;
+    }
+    s_rec[r - 1].bat = (u16)bat;
+    return 1;
+}
+
+/* Routes a whole batch as gx_vsh_route would route each member (all eligible, all records decided): returns
+ * the group when its path this frame is the shader, and then the group is committed (its first record, the
+ * batch's touch); NULL when the members must be routed one by one (nothing was changed that the per-list route
+ * would not change too). */
+void* gx_vsh_batch_route(u32 pnmtx, u32 bat, const void* list0, u32 nbytes0, u32* hint0) {
+    Group* g = group_for(pnmtx);
+    if (g == NULL || s_nbtouch == BTOUCH_MAX) {
+        return NULL;
+    }
+    if (g->first_rec != 0 ? !g->path : !g->elig) {
+        return NULL;
+    }
+    if (g->first_rec == 0) {
+        u32 r = rec_find(hint0, list0, nbytes0);
+        if (r == 0 || !s_rec[r - 1].decision) {
+            return NULL;
+        }
+        s_rec[r - 1].last_frame = gx_perf_frame_no();
+        g->first_rec = r;
+        g->first_list = list0;
+        g->path = 1;
+    }
+    g->lists = 1;
+    s_btouch[s_nbtouch].bat = (u16)bat;
+    s_btouch[s_nbtouch].group = (u16)(g - s_grp);
+    s_nbtouch++;
+    return g;
+}
+
+/* The batch drew n members (verts, idx in total) in group `group`: the per-draw counters of gx_vsh_route. */
+void gx_vsh_batch_count(void* group, u32 n, u32 verts, u32 idx) {
+    Group* g = group;
+    g->n_vsh += n;
+    s_st.draws_vsh += n;
+    s_st.verts_vsh += verts;
+    s_st.idx_vsh += idx;
+    if (decal_like()) {
+        s_st.decal_draws += n;
+        s_st.decal_vsh += n;
+    }
+}
+
 static const char* reason_letters = "imPTlsoBLcCfrpg";
 
 static void census_log(void) {
@@ -1065,8 +1151,32 @@ void gx_vsh_frame(void) {
                 s_st.switches_down++;
             }
             rc->decision = d;
+            gx_vsh_dec_epoch++;
         }
     }
+    /* gxbatch: a batch drawn in a set that did not stay eligible: its members' streaks drop to 0, as each
+     * member's own touch would have made them (the minimum over the sets a list was drawn in) */
+    for (u32 i = 0; i < s_nbtouch; i++) {
+        if (set_elig[find(s_btouch[i].group)]) {
+            continue;
+        }
+        const void* list;
+        u32 nbytes, *hint;
+        for (u32 k = 0; gx_batch_member(s_btouch[i].bat, k, &list, &nbytes, &hint); k++) {
+            u32 r = rec_find(hint, list, nbytes);
+            if (r == 0) {
+                continue;
+            }
+            Rec* rc = &s_rec[r - 1];
+            rc->streak = 0;
+            if (rc->decision) {
+                rc->decision = 0;
+                s_st.switches_down++;
+                gx_vsh_dec_epoch++;
+            }
+        }
+    }
+    s_nbtouch = 0;
     s_st.groups += s_ngroups;
     if (s_decal_this_frame) {
         s_st.decal_frames++;

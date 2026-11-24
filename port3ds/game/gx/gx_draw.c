@@ -285,7 +285,11 @@ static void build_state(void) {
         tu->wrap_t = wrap[t->wrap_t % 3];
         gx_tex_unit_sampler(tu, t, map); /* min/mag filter, mip filter, LOD bias (the texfilter option) */
     }
-    gx_tev_compile(st);
+    if (gx_opt_statecache) {
+        gx_tev_compile_memo(st);
+    } else {
+        gx_tev_compile(st);
+    }
 
     /* what the transform needs per vertex (gxunlit) */
     s_need_both = 0;
@@ -671,16 +675,50 @@ static void transform(const GxVertex* v, Out* o) {
     }
 }
 
-static void box_add(u16* box, const Out* o) {
-    s32 x = (s32)o->wx, y = (s32)o->wy;
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x > gx.efb_w - 1) x = gx.efb_w - 1;
-    if (y > gx.efb_h - 1) y = gx.efb_h - 1;
-    if (x < box[0]) box[0] = (u16)x;
-    if (y < box[1]) box[1] = (u16)y;
-    if (x > box[2]) box[2] = (u16)x;
-    if (y > box[3]) box[3] = (u16)y;
+/* The bounding box (GXReadBoundingBox) is made per draw: the window positions of the draw's vertices give a
+ * box (BoxAcc, not clamped), and box_commit adds the part of it inside the scissor rectangle to the GX box.
+ * On the GameCube only pixels that pass the scissor count, so a draw that lies outside it leaves the box as it
+ * was (empty: 1023, 1023, 0, 0). Clamping each vertex to the EFB instead gave a draw right of the screen a
+ * box on the last column (rsh_00_c: left = 638, and a 12 MB allocation from it). The box of a draw partly
+ * inside is its vertices' box cut to the scissor: at least what the GameCube's pixels give. */
+typedef struct {
+    s32 x0, y0, x1, y1;
+} BoxAcc;
+#define BOX_ACC_EMPTY ((BoxAcc){0x7FFFFFFF, 0x7FFFFFFF, -0x7FFFFFFF - 1, -0x7FFFFFFF - 1})
+
+static inline void acc_add(BoxAcc* a, const Out* o) {
+    f32 fx = o->wx, fy = o->wy;
+    if (!(fx > -1.0e6f)) fx = -1.0e6f; /* also NaN */
+    if (fx > 1.0e6f) fx = 1.0e6f;
+    if (!(fy > -1.0e6f)) fy = -1.0e6f;
+    if (fy > 1.0e6f) fy = 1.0e6f;
+    s32 x = (s32)fx, y = (s32)fy;
+    if (x < a->x0) a->x0 = x;
+    if (y < a->y0) a->y0 = y;
+    if (x > a->x1) a->x1 = x;
+    if (y > a->y1) a->y1 = y;
+}
+
+static void box_commit(u16* box, const BoxAcc* a) {
+    if (a->x0 > a->x1) {
+        return; /* no vertex in front of the eye */
+    }
+    /* the scissor rectangle as build_state makes it, inside the EFB; inclusive here */
+    s32 sx0 = (s32)gx.scissor[0] - gx.scissor_off[0], sy0 = (s32)gx.scissor[1] - gx.scissor_off[1];
+    s32 sx1 = sx0 + (s32)gx.scissor[2] - 1, sy1 = sy0 + (s32)gx.scissor[3] - 1;
+    if (sx0 < 0) sx0 = 0;
+    if (sy0 < 0) sy0 = 0;
+    if (sx1 > gx.efb_w - 1) sx1 = gx.efb_w - 1;
+    if (sy1 > gx.efb_h - 1) sy1 = gx.efb_h - 1;
+    if (a->x1 < sx0 || a->x0 > sx1 || a->y1 < sy0 || a->y0 > sy1 || sx1 < sx0 || sy1 < sy0) {
+        return; /* the draw is outside the scissor: no pixel of it counts */
+    }
+    s32 x0 = a->x0 < sx0 ? sx0 : a->x0, y0 = a->y0 < sy0 ? sy0 : a->y0;
+    s32 x1 = a->x1 > sx1 ? sx1 : a->x1, y1 = a->y1 > sy1 ? sy1 : a->y1;
+    if (x0 < box[0]) box[0] = (u16)x0;
+    if (y0 < box[1]) box[1] = (u16)y0;
+    if (x1 > box[2]) box[2] = (u16)x1;
+    if (y1 > box[3]) box[3] = (u16)y1;
 }
 
 /* ---- Switch gxbbox: the box of a cached list on the shader path (PORT_3DS_60FPS.md, bounding box) ----
@@ -713,7 +751,7 @@ static struct {
 enum { BX_EXACT, BX_HIT, BX_MISS, BX_HULL, BX_HULL_FB, BX_CORN, BX_CORN_FB, BX_IMM };
 
 typedef struct {
-    f32 key[25];  /* position matrix, projection, viewport, EFB size the box was made under */
+    f32 key[31];  /* position matrix, projection, viewport, EFB size, scissor the box was made under */
     u16 box[4];
     u8 key_ok, one_mtx, hull_done, pad;
     u32 nhull, nall;
@@ -735,18 +773,25 @@ static void bbx_key(f32* k, u32 pn) {
     memcpy(k + 19, gx.vp, 4 * sizeof(f32));
     k[23] = gx.efb_w;
     k[24] = gx.efb_h;
+    for (int i = 0; i < 4; i++) {
+        k[25 + i] = (f32)gx.scissor[i];
+    }
+    k[29] = (f32)gx.scissor_off[0];
+    k[30] = (f32)gx.scissor_off[1];
 }
 
 static void bbx_exact(u16* box, const GxVertex* v, const GxDlcDraw* d, u32 nd, u32* nv) {
     Out o;
     f32 p[3];
     for (u32 i = 0; i < nd; i++) {
+        BoxAcc a = BOX_ACC_EMPTY;
         for (u32 j = d[i].first; j < d[i].first + d[i].count; j++) {
             xf_position(&v[j], &o, p);
             if (o.front) {
-                box_add(box, &o);
+                acc_add(&a, &o);
             }
         }
+        box_commit(box, &a);
         *nv += d[i].count;
     }
 }
@@ -910,7 +955,7 @@ static int bbx_list(void** slot, const GxVertex* v, const GxDlcDraw* d, u32 nd) 
     u32 nv = 0;
     int path;
     if (s_bbx_mode == BBX_CACHE) {
-        f32 k[25];
+        f32 k[31];
         bbx_key(k, pn);
         if (b->key_ok && memcmp(k, b->key, sizeof(k)) == 0) {
             path = BX_HIT;
@@ -931,11 +976,12 @@ static int bbx_list(void** slot, const GxVertex* v, const GxDlcDraw* d, u32 nd) 
         Out o;
         f32 p[3];
         int behind = 0;
+        BoxAcc acc = BOX_ACC_EMPTY; /* the list's box: the scissor is applied to the whole list here */
         if (s_bbx_mode == BBX_HULL && b->hull_done == 1) {
             for (u32 i = 0; i < b->nhull && !behind; i++) {
                 xf_position(&v[b->hull[i]], &o, p);
                 behind = !o.front;
-                box_add(box, &o);
+                acc_add(&acc, &o);
             }
             nv = b->nhull;
             path = BX_HULL;
@@ -948,7 +994,7 @@ static int bbx_list(void** slot, const GxVertex* v, const GxDlcDraw* d, u32 nd) 
                 c.pos[2] = k & 4 ? b->hi[2] : b->lo[2];
                 xf_position(&c, &o, p);
                 behind = !o.front;
-                box_add(box, &o);
+                acc_add(&acc, &o);
             }
             nv = 8;
             path = BX_CORN;
@@ -957,11 +1003,11 @@ static int bbx_list(void** slot, const GxVertex* v, const GxDlcDraw* d, u32 nd) 
             path = BX_HULL;
         }
         if (behind) {
-            box[0] = box[1] = 1023;
-            box[2] = box[3] = 0;
             nv = 0;
             bbx_exact(box, v, d, nd, &nv);
             path = path == BX_HULL ? BX_HULL_FB : BX_CORN_FB;
+        } else {
+            box_commit(box, &acc);
         }
         if (box[0] < gx.bbox[0]) gx.bbox[0] = box[0];
         if (box[1] < gx.bbox[1]) gx.bbox[1] = box[1];
@@ -1075,6 +1121,7 @@ static int s_bref_on;
 static u32 s_bbox_reads, s_bbox_mism;
 
 void gx_bbox_clear(void) {
+    gx_batch_flush(); /* draws from here on count for the box */
     gx.bbox[0] = 1023;
     gx.bbox[1] = 1023;
     gx.bbox[2] = 0;
@@ -1109,18 +1156,25 @@ void gx_bbox_counts(u32* reads, u32* mism) {
     *mism = s_bbox_mism;
 }
 
-static void bbox_add(const Out* o) {
-    if (!o->front) {
+/* A CPU-path draw's box: its vertices as transform() gave them, committed once per draw. */
+static void bbox_draw_out(const Out* o, u32 n) {
+    if (!gx_bbox_active && !s_bref_on) {
         return;
     }
+    BoxAcc a = BOX_ACC_EMPTY;
+    for (u32 i = 0; i < n; i++) {
+        if (o[i].front) {
+            acc_add(&a, &o[i]);
+        }
+    }
     if (gx_bbox_active) {
-        box_add(gx.bbox, o);
+        box_commit(gx.bbox, &a);
         if (s_bx_ref_on) {
-            box_add(s_bx_ref, o);
+            box_commit(s_bx_ref, &a);
         }
     }
     if (s_bref_on) {
-        box_add(s_bref, o);
+        box_commit(s_bref, &a);
     }
 }
 
@@ -1132,20 +1186,27 @@ static void bbox_shader_draw(const GxVertex* v, u32 n) {
     u64 t0 = GX_PERF_T();
     Out o;
     f32 p[3];
+    BoxAcc a = BOX_ACC_EMPTY, ar = BOX_ACC_EMPTY;
     for (u32 i = 0; i < n; i++) {
         xf_position(&v[i], &o, p);
         if (gx_bbox_active && o.front) {
-            box_add(gx.bbox, &o);
-            if (s_bx_ref_on) {
-                box_add(s_bx_ref, &o);
-            }
+            acc_add(&a, &o);
         }
         if (s_bref_on) {
             transform(&v[i], &o);
             if (o.front) {
-                box_add(s_bref, &o);
+                acc_add(&ar, &o);
             }
         }
+    }
+    if (gx_bbox_active) {
+        box_commit(gx.bbox, &a);
+        if (s_bx_ref_on) {
+            box_commit(s_bx_ref, &a);
+        }
+    }
+    if (s_bref_on) {
+        box_commit(s_bref, &ar);
     }
     if (gx_perf_on > 0) {
         gx_perf.bbox_draws++;
@@ -1553,8 +1614,40 @@ static int draw_vsh_imm(u8 prim, const GxVertex* v, u32 n, const void* ident, u3
     return 1;
 }
 
+GxVshLast gx_vsh_last;
+
+int gx_draw_batch_begin(const u8 unit_attr[3], u32 bat, const void* list0, u32 nbytes0, u32* hint0, void** group,
+                        u32* cull) {
+    ensure_state();
+    if (empty_target()) {
+        return 0;
+    }
+    vsh_state();
+    if (s_vsh_reasons != 0 || gx_bbox_active || s_bref_on || gx.cull == GX_CULL_ALL || s_dump ||
+        unit_attr[0] != s_vsh_unit_attr[0] || unit_attr[1] != s_vsh_unit_attr[1] || unit_attr[2] != s_vsh_unit_attr[2]) {
+        return 0;
+    }
+    void* g = gx_vsh_batch_route(gx.cur_pnmtx, bat, list0, nbytes0, hint0);
+    if (g == NULL) {
+        return 0;
+    }
+    if (s_vsh_lit) {
+        plat_gpu_vsh_light(&s_vsh_light, s_vsh_light_id);
+    }
+    plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
+    *group = g;
+    *cull = vsh_cull();
+    return 1;
+}
+
+void gx_draw_batch_end(void* group, u32 n, u32 verts, u32 idx) {
+    gx_vsh_batch_count(group, n, verts, idx);
+    gx_stat_draws += n;
+}
+
 int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nbytes, u32 nverts, const GxVertex* v,
                 const GxDlcDraw* d, u32 nd) {
+    gx_vsh_last.ok = 0;
     ensure_state();
     if (empty_target()) {
         gx_bbx_hint = NULL;
@@ -1596,6 +1689,9 @@ int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nb
     }
     plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
     plat_gpu_vsh_draw(gx_vsh_stream_base(s), s->layout, scales, vsh_cull(), s->idx, s->nidx);
+    gx_vsh_last = (GxVshLast){(u8)(!gx_bbox_active && !s_bref_on && !s_dump),
+                              {s_vsh_unit_attr[0], s_vsh_unit_attr[1], s_vsh_unit_attr[2]},
+                              gx_vsh_stream_base(s), s->layout, scales, vsh_cull()};
     gx_vsh_count_shader(nverts, s->nidx);
     gx_stat_draws++;
     return 1;
@@ -1605,6 +1701,7 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
     if (n == 0) {
         return;
     }
+    gx_batch_flush(); /* an open batch's draws come before this one */
     ensure_state();
     if (gx_vsh_on && !gx_vsh_noted) {
         int in_list = gx_pipe_in_list();
@@ -1648,8 +1745,8 @@ routed:
     u64 t1 = GX_PERF_T();
     for (u32 i = 0; i < n; i++) {
         transform(&v[i], &s_out[i]);
-        bbox_add(&s_out[i]);
     }
+    bbox_draw_out(s_out, n);
     if (gx_bbox_active) {
         s_bx.cpu_draws++; /* the box came with the CPU transform */
         s_bx.cpu_verts += n;
@@ -1811,4 +1908,112 @@ void gx_draw_frame_begin(void) {
     gx_stat_draws = gx_stat_vertices = gx_stat_copies = 0;
     s_built_version = 0xFFFFFFFFu; /* every frame starts with a full state */
     s_snap_valid = 0;
+}
+
+/* ---- Compiled TEV setups, kept (switch gxstatecache) ----
+ * gx_tev_compile is a function of the stages in use (gx.tev[0 .. num_tev)), the four TEV registers, the four
+ * konst colours, the swap table and the texture unit each stage samples (gx_unit_of_stage); the game's override
+ * (gx_tev_game_override) reads a subset of the same. Its result is the combiner part of the PICA state: the six
+ * stages, their count and the buffer inputs. The key holds all of those bytes and is compared in full on a hit,
+ * so a reused result is the compile's result for the same input. Direct-mapped, two probes; a setup of more
+ * stages than the key holds is compiled every time. gxstatecache=2 compiles every hit again and compares. */
+#define TEVM_SLOTS 512
+#define TEVM_KEY 320
+#define TEVM_OUT offsetof(PlatGpuState, buffer_color)
+typedef struct {
+    u32 hash;
+    u16 klen;
+    u8 used, pad;
+    u8 key[TEVM_KEY];
+    u8 out[TEVM_OUT];
+} TevMemo;
+static TevMemo* s_tevm;
+static u32 s_tevm_hits, s_tevm_misses, s_tevm_big, s_tevm_bad;
+
+void gx_tev_compile_memo(PlatGpuState* st) {
+    if (s_tevm == NULL) {
+        s_tevm = calloc(TEVM_SLOTS, sizeof(TevMemo));
+        if (s_tevm == NULL) {
+            gx_tev_compile(st);
+            return;
+        }
+    }
+    u8 key[TEVM_KEY];
+    u32 n = gx.num_tev ? gx.num_tev : 1;
+    if (n > 16) {
+        n = 16;
+    }
+    u32 klen = 4 + n * sizeof(gx.tev[0]) + sizeof(gx.tev_reg) + sizeof(gx.tev_kcolor) + sizeof(gx.swap_table) + n;
+    if (klen > TEVM_KEY) {
+        s_tevm_big++;
+        gx_tev_compile(st);
+        return;
+    }
+    u8* k = key;
+    k[0] = gx.num_tev;
+    k[1] = k[2] = k[3] = 0;
+    k += 4;
+    memcpy(k, gx.tev, n * sizeof(gx.tev[0]));
+    k += n * sizeof(gx.tev[0]);
+    memcpy(k, gx.tev_reg, sizeof(gx.tev_reg));
+    k += sizeof(gx.tev_reg);
+    memcpy(k, gx.tev_kcolor, sizeof(gx.tev_kcolor));
+    k += sizeof(gx.tev_kcolor);
+    memcpy(k, gx.swap_table, sizeof(gx.swap_table));
+    k += sizeof(gx.swap_table);
+    for (u32 i = 0; i < n; i++) {
+        *k++ = (u8)gx_unit_of_stage[i];
+    }
+    u32 h = gx_hash32(key, klen, 0x7E5Du);
+    TevMemo* m = NULL;
+    for (u32 p = 0; p < 2; p++) {
+        TevMemo* c = &s_tevm[(h + p * 0x9E37u) & (TEVM_SLOTS - 1)];
+        if (c->used && c->hash == h && c->klen == klen && gx_mem_equal(c->key, key, klen)) {
+            m = c;
+            break;
+        }
+    }
+    if (m != NULL) {
+        s_tevm_hits++;
+        if (gx_opt_statecache == 2) {
+            PlatGpuState chk;
+            memset(&chk, 0, sizeof(chk));
+            gx_tev_compile(&chk);
+            if (!gx_mem_equal(&chk, m->out, TEVM_OUT)) {
+                if (s_tevm_bad++ == 0) {
+                    PLOG_W("gxstatecache verify: a kept TEV result differs from a fresh compile (%u GX stages)", gx.num_tev);
+                }
+                memcpy(m->out, &chk, TEVM_OUT);
+            }
+        }
+        memcpy(st, m->out, TEVM_OUT);
+        return;
+    }
+    s_tevm_misses++;
+    /* compiled into a clean state, so the kept bytes do not depend on what the caller's state held */
+    PlatGpuState fresh;
+    memset(&fresh, 0, sizeof(fresh));
+    gx_tev_compile(&fresh);
+    memcpy(st, &fresh, TEVM_OUT);
+    m = &s_tevm[h & (TEVM_SLOTS - 1)];
+    if (m->used) {
+        TevMemo* alt = &s_tevm[(h + 0x9E37u) & (TEVM_SLOTS - 1)];
+        if (!alt->used) {
+            m = alt;
+        }
+    }
+    m->used = 1;
+    m->hash = h;
+    m->klen = (u16)klen;
+    memcpy(m->key, key, klen);
+    memcpy(m->out, &fresh, TEVM_OUT);
+}
+
+void gx_tev_memo_log(u32 frames) {
+    u32 f = frames ? frames : 1;
+    PLOG_I("gxthread   statecache: TEV setups per frame: %lu reused, %lu compiled, %lu too long for the key; verify "
+           "mismatches %lu (total)",
+           (unsigned long)(s_tevm_hits / f), (unsigned long)(s_tevm_misses / f), (unsigned long)(s_tevm_big / f),
+           (unsigned long)s_tevm_bad);
+    s_tevm_hits = s_tevm_misses = s_tevm_big = 0;
 }

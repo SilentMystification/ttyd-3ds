@@ -170,6 +170,7 @@ void GXDrawDone(void) {
         return;
     }
     u64 t0 = GX_PERF_T();
+    gx_batch_flush();
     plat_gpu_sync();
     if (gx_perf_on > 0) {
         gx_perf.t_sync += plat_ticks() - t0;
@@ -214,10 +215,12 @@ void GXPeekARGB(u16 x, u16 y, u32* color) {
     gx_pipe_reset();
     if (gx_rec_on()) {
         gx_rec_excl_begin(GXF_READBACK); /* the back end's record is the translator's */
+        gx_batch_flush();
         *color = plat_gpu_peek_argb(x, y);
         gx_rec_excl_end();
         return;
     }
+    gx_batch_flush();
     *color = plat_gpu_peek_argb(x, y);
 }
 
@@ -254,6 +257,12 @@ void GXProject(f32 x, f32 y, f32 z, const f32 mtx[3][4], const f32* pm, const f3
             const u32 w_[] = {__VA_ARGS__};                        \
             gx_rec_call(REC_##id, w_, sizeof(w_) / sizeof(w_[0])); \
             return;                                                \
+        }                                                          \
+        if (gx_opt_statededup) {                                   \
+            const u32 dw_[] = {__VA_ARGS__};                       \
+            if (gx_dd_apply_same(REC_##id, dw_, sizeof(dw_) / sizeof(dw_[0]))) { \
+                return;                                            \
+            }                                                      \
         }                                                          \
     } while (0)
 
@@ -338,6 +347,7 @@ void GXCopyTex(void* dest, GXBool clear) {
         return;
     }
     gx_stat_copies++;
+    gx_batch_flush(); /* an open batch's draws come before the copy */
     if (gx_draw_dumping()) {
         PLOG_I("gxdump copy %u,%u %ux%u to %p %ux%u fmt %u clear %d from %p after %lu draws", gx.copy_src[0],
                gx.copy_src[1], gx.copy_src[2], gx.copy_src[3], dest, w, h, gx.copy_tex_fmt, clear,
@@ -404,6 +414,7 @@ void gx_copy_disp(void* dest, GXBool clear, const void* caller) {
     }
     (void)dest;
     gx_pipe_reset();
+    gx_batch_flush();
     u64 t0 = GX_PERF_T();
     plat_gpu_frame_end(gx.copy_src[2] ? gx.copy_src[2] : 640, gx.copy_src[3] ? gx.copy_src[3] : 480);
     u64 t_present = gx_perf_on > 0 ? plat_ticks() - t0 : 0;

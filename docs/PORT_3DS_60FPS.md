@@ -199,6 +199,18 @@ Target 2 is done (`textrust`, PORT_3DS_GX_PERF.md "Texture trust"): hashes per f
 
 Not a target: the game's own frame pacing (6.).
 
+### Ranked levers after Core-2 round 2 (2026-11-24)
+
+Owner goal: GX translation should disappear, not move to core 2 (plan and results: PORT_3DS_GX_PERF.md, "Core-2 round 2"). Target 4 above is built as `gxbatch` (core-0 busy -6% to -30% in the ten scenes, byte-identical shots) and the TEV part of the state work as `gxstatecache` (-5% to -8% more). Azahar ms, gor_01, `gxthread=0`: busy 67.8 -> 48.0 -> 44.5, against the `gxnull` floor of 26.2.
+
+| # | Lever | Evidence | Expected | State |
+|---|---|---|---|---|
+| 1 | **State rebuilds by class** (dirty bits set inline by the setters that change a value; textures, pixel pipeline, scissor rebuilt only when dirty; `plat_gpu_set_state` told what changed) | about 545 real rebuilds a frame in gor_01 remain; the state path was about 29% of the game thread before, TEV compile (7%) is now gone | most of the 18 ms between 44.5 and the floor in gor_01 | not built. The table-based early return (`gxstatededup`) is a measured loss (+14%) |
+| 2 | **Game logic floor** (`gxnull`: 26 ms in gor_01, 10-16 ms elsewhere, Azahar) | Step 1 results 3. | port-side SDK replacements (lever 7 of Step 3) | needs the hardware ratio first |
+| 3 | **Render thread writes PICA registers itself** (stage 3) | 15 ms of work in gor_01, 535 draws; `C3D_UpdateUniforms` scans 96 rows per draw | about half of the render work; matters on hardware (36-66 us per citro3d draw) | not built |
+| 4 | **Immediate mode in PICA form** (stage 4) | 369 primitives of 3.8 vertices in gor_01: the cost is per primitive (state, route), so lever 1 comes first | 2-5% | not built |
+| 5 | **Pipelined translation** (`gxthread=2 gxpipeline=1`) | its reason was the per-list work, now mostly gone | re-measure once lever 1 is in; delete `gx_rec.c` if it no longer wins anywhere | open |
+
 ### Future lever, measured: the bounding box (`gxbbox`, 2026-11-23)
 
 TTYD reads `GXReadBoundingBox` in four places: NPCs drawn into an offscreen buffer (`npcdrv.c`), the paper pose (`animdrv.c`), the scissor action command (`sac_scissor.c`) and the unused E3 sequence. Every read follows its own `GXClearBoundingBox`, and the port disarms the box at the read. While the box is armed, a draw on the shader path gets its box from `xf_position` on the CPU (`gxvshbbox=1`). A CPU-path draw gets the box from the transform it does anyway.

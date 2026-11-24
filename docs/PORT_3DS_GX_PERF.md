@@ -504,6 +504,165 @@ The pause menu keeps 30 hashes a frame: 46 of its 76 textures are trusted, the o
 
 **Verify sweep** (`texverify=1 texstats=30`, to frame 841, 1101 for the battle; `trusted` counts the trust decisions the hash re-checked): gor_01 **0 stale** (about 160 trusted decisions per frame checked), gon_02 battle 0 (88 per frame), usu_00 0 (96), pik_00 0 (114), aaa_00 0 (62), the pause menu 0 (94 per frame at the end, 46 steady), `gallery.py fx --items 0-8 --gap 40` (effects on gor_01) 0 (152 per frame). No `texverify:` line in any log. A full-length sweep (frame 1500, `fx 0-20`) was not run: the owner asked for short runs.
 
+## Core-2 round 2: plan (2026-11-23)
+
+Owner goal: GX translation is GPU work done on the CPU, and the bulk of it should disappear. The end state is not "translation on core 2". It is "almost no per-frame translation on any core".
+
+### Profile that justifies it
+
+Azahar, build `2eee30a9`, `gor_01` story 30, default switches (`gxthread=0`), `pc_sample.py` on a private port, 238 stops from frame 721 (a share is +-3 points: a ranking, not a measurement). One percent of the game thread's stops is about 0.84 ms of the 83.6 ms frame.
+
+| Game thread, by work | Functions (self) | Share |
+|---|---|---|
+| **Cached list hit, per call** | `gx_call_list` with the inlined `gx_dlcache_call` and `gx_draw_vsh` 14.7, `memcpy` of indices into the record about 6, `gx_vsh_route` 3.4, `rec_for` 1.7, `GXCallDisplayList` 1.7, `plat_gpu_vsh_draw` 1.3 | **about 29%** |
+| **State rebuild, per state change** | `plat_gpu_set_state` 5.9 (two 700-byte compares and the delta scan), `ensure_state`/`build_state` 4.6, TEV compile 7.1 (`tev_compile_pass`, `plan`, `color_arg`, `alpha_arg`), `memset` 2.5, `vsh_prepare` 1.3, the state lists' port opcodes and setters about 6 (`run_commands`, `gx_apply_call`, `GXSet*`) | **about 29%** |
+| Immediate mode | `draw_from_reader` 3.4, `gx_draw_vertices` 2.1 | about 6% |
+| Waiting (retrace, submit) | `svcArbitrateAddressNoTimeout` | 12.6% |
+| Game code | `C_MTXConcat` 4.2, `hitCheckVecFilter` 3.8, `mapDisp` 2.1, others | about 23% |
+
+Render thread: 37% busy. `gspSubmitGxCommand` 11.3, `GPUCMD_Add` 8.4, `C3D_UpdateUniforms` 4.6 (it scans all 96 uniform rows at every draw), `vsh_apply_const` 4.2, `memcpy` 2.9.
+
+Counters per frame (`gxstats`, same scene): 5252 list calls (5007 cache hits, 245 state lists), 5378 shader draws that merge into **535** GPU draws, 545 state builds giving 405 different PICA states, 463 uniform blocks, 369 immediate primitives with 1402 vertices.
+
+What this says:
+
+1. A hit costs about 5 us (Azahar) of pure bookkeeping, 5000 times a frame: a hash lookup, a vertex-state compare (the map sets its arrays before every mesh, so `gx_vtx_version` changes and every hit runs the full compare), LRU links, a pass-group record lookup and touch, and a copy of its indices into the frame record. None of it produces anything new: the same 535 runs of lists come every frame.
+2. The state path is as large as the hit path. Every setter bumps the state version, the next draw rebuilds all of the PICA state (TEV compile included) and compares 700 bytes twice to find that most of it is what it was.
+3. With `gxthread=2` both costs move to core 2 and get two more hops (record a call, consume it). That is why core 2 is the wall there. Making the hops cheaper does not remove the work; removing the work makes the hops unnecessary.
+
+### End state
+
+| Thread | Per frame |
+|---|---|
+| Game (core 0) | GX calls do the minimum. A setter compares and stores. A list call is a pointer compare against the prebuilt batch it is expected to continue. `GXEnd` writes its vertices straight into linear memory in PICA layout. At each state change or batch end, a few words go into the frame's command stream. |
+| Render (core 2) | Copies prebuilt PICA register blocks into the GPU command buffer, submits, presents, draws the stereo eyes. No citro3d state calls per draw. Final step: the game thread writes the PICA words itself and the render thread only submits them. |
+| Translator (`gxthread=2`) | Gone. `gx_rec.c` (the call ring, the shadow state, the array snapshots, the fences for late reads) exists to move translation; with translation at pointer cost it only adds two hops. It stays as a switch until stage 5 is the default on hardware, then it is deleted. |
+
+### Stages (each behind its own switch, default flips only by the acceptance rules below)
+
+**Stage 1, `gxbatch`: prebuilt batches of cached lists.** A *batch* is a run of consecutive cache hits with no GX state, matrix or vertex-state change between them (the packed lists of one map mesh). It is built once and holds:
+
+- the member lists (address, size, cache entry and its generation);
+- the vertex state the members were validated under (description, formats of the formats used, current matrices, array bases and strides), one copy for the batch;
+- the GPU draws the members merge into today (stream, layout, scale word, index range), with the **indices of all members concatenated once in linear memory** (`gxbatchkb`, default 512 KB);
+- running totals per member (vertices, indices), so a batch that ends early draws a prefix.
+
+Per frame, a list call that continues the active batch costs: three version compares, the bounding-box flag, and a compare of the list's address and size with the next member. The batch is validated once when it opens:
+
+- no cache entry changed since the batch last checked (one global epoch, bumped by any entry drop, rebuild or stream free; on a change the members' generations are checked once);
+- every member is trusted at the registry's current generation (`gxtrust`); a batch with a member that is not trusted is never used, its members take today's path and are hashed as today;
+- the vertex state equals the batch's copy (one compare per batch, not per list);
+- the texture-coordinate mapping of the state (which GX attribute feeds each PICA unit) is the one the batch's scale words were built for;
+- every member's pass-group record says "shader" (one global epoch for decisions, bumped by every switch and record eviction).
+
+When the batch ends (a state change is seen at the next draw, another list comes, or the frame ends) its draws go into the record as `CMD_VSH_DRAWP` (stream, layout, scales, cull, index pointer, count): no index copy, one command per merged draw. Anything that fails a check takes today's per-list path unchanged, and that path is also where batches are formed.
+
+- **Pass groups (offload rule 1).** Unchanged decisions. A batch is used only when all its members already take the shader path, in a group whose path this frame is the shader. It records one touch (batch, group). At the frame's end a touch whose group set stayed eligible needs nothing: every member's streak is already at or above K and only grows. A touch whose set became ineligible is expanded into its members' touches, so their streaks drop to 0 exactly as today, and the decision epoch changes. Records of a live batch are not evicted.
+- **Precision and texel rules.** Nothing changes: the same streams, the same uniform rows from the same 32-bit products, the same index order. The GPU gets the same vertices in the same order under the same state, so the output must be byte-identical to `gxbatch=0`, not merely within the offload tolerances.
+- **Stereo.** The record stays eye-independent. `CMD_VSH_DRAWP` is a scene or layer draw to `stereo_split` like `CMD_VSH_DRAW`; the 2D tail replays twice from the same prebuilt indices.
+- **`gxthread`, pipelining.** Batches are owned by whichever thread translates, like the cache. They work in every `gxthread` mode; pipelined, the translator gets the same saving.
+- **Bounding box.** A batch is not used while the box is armed (those draws need positions on the CPU).
+- **Memory.** Linear: the index pool (512 KB; gor_01 draws 55 K indices a frame, 110 KB). Ranges of dropped batches are reused after 3 presented frames, as streams are. Heap: 2048 batch slots and the member arrays, allocated with `gx_big_alloc`. No VRAM. Batches unused for two frames are dropped least recently used first when the pool or the slots run out; if nothing can be dropped the run is not batched.
+
+**Stage 2, `gxstatecache`: state work only when state changes, and compiled state reused.**
+
+- A setter whose arguments equal the last ones stored for the same piece of state returns at once (the table `gxthreaddedup` uses for the record, applied where the call is made; 70-74% of state calls in the measured scenes). No version bump, no rebuild.
+- A setter that does change something marks its class dirty: TEV and texture order, textures, pixel pipeline (alpha test, blend, depth, colour mask, fog), scissor and viewport, channels and texgens.
+- `build_state` rebuilds only dirty classes into the kept state. The TEV class is looked up in a table of compiled results keyed by the TEV bytes (the key is stored and compared in full, so there is no hash risk): the compile runs once per TEV setup, not once per use.
+- `plat_gpu_set_state` gets the dirty classes and writes the changed words without comparing the whole state.
+- The uniform block (`vsh_prepare`) rebuilds its clip rows only when a matrix or the projection changed, and its texture rows only when a texgen or texture matrix changed.
+
+**Stage 3, `gxdirect`: the render thread writes PICA registers itself.** For shader-path draws the replay stops calling `C3D_FVUnifSet`, `C3D_UpdateUniforms` and `C3D_DrawElements`. Uniform rows are written as `GPUREG_VSH_FLOATUNIFORM` writes, and each prebuilt draw as the register words citro3d's `C3D_DrawElements` emits (the words are fixed per draw and are stored with the batch). The attribute-buffer setup per (stream segment, layout) is stored the same way. Then the PICA state itself: one prebuilt register block per distinct state, copied instead of rebuilt through citro3d setters; citro3d's own shadow is marked dirty when the replay goes back to a CPU-path draw, a clear or a copy. Prebuilt blocks are copied into the command buffer, not called with `GPUREG_CMDBUF_JUMP`: a jump and its return cost as many words as a draw, and jumps are unverified on hardware.
+
+**Stage 4, `gximmdirect`: immediate mode written in PICA form.** `GXEnd` converts the pipe writes straight into the frame's vertex ring (float position, float texture slots, u8 colour, float normal), with indexed attributes gathered from their arrays at that moment, and no `GxVertex` in between. Because the arrays are read on the game thread at `GXEnd`, the array snapshots and their fences are no longer needed.
+
+**Stage 5: one hop.** The game thread writes the frame's PICA command list (double-buffered linear memory) from the prebuilt blocks; the render thread splits it at clears, copies and the stereo boundary, submits and presents. The stereo split uses a side table the writer fills at each state change (colour and depth writes, viewport depth range), and a full state block is written at each layer boundary so the 2D tail is self-contained for the second eye. `gx_rec.c` and `gxthread` are deleted.
+
+### What cannot be prebuilt, with its measured share (gor_01 unless noted)
+
+| Work | Count per frame | Share now | After |
+|---|---|---|---|
+| Immediate-mode vertices (CPU-skinned characters, effects, windows) | 369 primitives, 1402 vertices (battle: 204 and 792; pause menu: 334 and 1388) | about 6% of the game thread (battle: 8% in `draw_from_reader`) | one conversion pass per vertex (stage 4) |
+| Lists in memory the registry does not cover (CPU-written arrays: shadows, some effects) | about 225 hits (5%) are hashed every frame | inside the hit path | unchanged: hashed, then drawn through the per-list path |
+| State lists (the map's material lists of port opcodes) | 245 | about 6% | setters that change nothing return early (stage 2); the rest is real state change |
+| Matrices and uniform rows (camera and objects move) | 463 blocks | `vsh_prepare` 1.3% | 16 multiplies and 4 rows per object; stays |
+| CPU-path draws (groups counting up to K) | 82 just after a map loads, 0 in the steady state | under 1% | unchanged |
+| Game code that feeds GX (`C_MTXConcat`, `mapDisp`, material set-up) | | about 8% | not GX; lever 7 of PORT_3DS_60FPS.md |
+
+### Expected cost left (estimates from the profile shares, Azahar ms; to be replaced by measurements per stage)
+
+| Scene | core-0 busy now | of which GX | GX after stage 1 | after stages 1+2 | after 1+2+4 | render work now -> stage 3 |
+|---|---|---|---|---|---|---|
+| gor_01 | 70.8 | 44.6 | about 26 | about 12 | about 10 | 14 -> about 7 |
+| gor_00 | 37.5 | 21.4 | about 13 | about 6 | about 5 | |
+| battle (`btlauto`) | 35.8 | 24.9 | about 17 | about 9 | about 7 | |
+| aaa_00 | 34.5 | 23.4 | about 14 | about 7 | about 6 | |
+| pause menu | 18.5 | 8.9 (immediate only) | 8.9 | about 6 | about 4 | |
+
+So core 0 would land near the `gxnull` floor (26 ms in gor_01, 10-16 ms elsewhere) plus about a quarter of today's translation. Whether that is 16.7 ms on the console is Step 2's question (the game-logic floor itself is 1.6 frames in gor_01 in Azahar's time).
+
+### Alternatives considered
+
+| Alternative | Why not (or why later) |
+|---|---|
+| Cheaper hops only (fewer record words per hit, direct `GPUCMD` writes in the replay, fewer uniform uploads) while keeping per-list translation | Round 1 did this (state deltas, uniform rows, flushes): the replay got cheaper, frames did not. The per-list work stays 5000 times a frame. The replay part is kept as stage 3 |
+| `GPUREG_CMDBUF_JUMP` to prebuilt command lists | A jump and return are about 6 register writes, a merged draw is 14: no gain for single draws, and jumps have never run on our hardware. Possible later for whole static sub-scenes |
+| A trust window (no validation for N frames) | Breaks "behaves like the original": the registry's generation already gives a free check |
+| Caching whole frames or whole objects (state included) keyed by the object | Needs game knowledge (which calls belong to an object); the batch gives the same reuse from the GX call stream alone |
+| A 64-bit signature of the whole GX state to look up finished PICA states | Works, but a collision draws a wrong state; the per-class table with full key compare is exact and nearly as cheap |
+| Moving the replay to core 0 or 1 | Measured worse (PORT_3DS_MULTICORE.md) |
+
+### Acceptance (per stage, before its default flips)
+
+1. `determ` shots byte-identical to the switch off: 6 consecutive shots in gor_01, the effects battle and the scenes below.
+2. `vsh_accept.py` in the ten scenes of PORT_3DS_MULTICORE.md (gor_01, gon_02, aaa_00, tik_01, hei_01, jin_00, the effects battle, eki_00, usu_00, pik_00), switch off against on.
+3. `gw_diff.py` equal on the 1600-frame padscript.
+4. `gxcache=2` sweep with the switch on: 0 mismatched, 0 stale.
+5. Same-build A/B in the ten scenes: core-0 busy, translator, render and frame ms; the default flips only if no scene gets slower, hei_01 included.
+
+## Core-2 round 2: results (2026-11-24)
+
+Built: stage 1 (`gxbatch`) and part of stage 2 (`gxstatecache`, `gxstatededup`). Stages 3 to 5 are not built. All numbers are Azahar's (ratios, not console times), default `gxthread=0`, from `tools/port3ds/gx_perf_ab.py` (same build, switch off against on, windows ending at frames 722 to 841, one run per cell). The runs used `--long 140` to `280`: the warp is about 40 s of wall time in, and the machine ran other agents' builds.
+
+**Stage 1, `gxbatch=1`** (`gx_dlcache.c`, `gx_vsh.c`, `gx_draw.c`, `CMD_VSH_DRAWP` in `plat/gpu.c`):
+
+| Scene | frame off -> on (ms) | core-0 busy off -> on (ms) | render work (ms) | batches, lists drawn through them per frame |
+|---|---|---|---|---|
+| gor_01 | 80.5 -> 50.9 | 67.8 -> **48.0** (-29%) | 15.3 -> 15.3 | 245, 4782 |
+| gon_02 | 44.1 -> 39.9 | 38.1 -> **28.1** (-26%) | 6.8 -> 6.9 | 132, 2514 |
+| aaa_00 | 48.1 -> 33.4 | 33.8 -> **23.6** (-30%) | 8.1 -> 8.1 | 190, 2600 |
+| tik_01 | 33.4 -> 22.0 | 19.9 -> **16.1** (-19%) | 4.5 -> 4.5 | 49, 933 |
+| hei_01 | 33.6 -> 33.6 | 23.6 -> **22.3** (-6%) | 6.0 -> 6.1 | 140, 471 |
+| jin_00 | 41.1 -> 33.4 | 32.2 -> **24.8** (-23%) | 6.3 -> 6.3 | 127, 2012 |
+| effects battle | 44.9 -> 39.6 | 38.4 -> **28.5** (-26%) | 7.0 -> 7.0 | 132, 2514 |
+| eki_00 | 33.4 -> 29.3 | 20.0 -> **17.1** (-15%) | 6.0 -> 5.9 | 110, 772 |
+| usu_00 | 66.9 -> 50.2 | 56.9 -> **41.2** (-28%) | 12.7 -> 12.7 | 142, 3790 |
+| pik_00 | 83.6 -> 66.9 | 80.0 -> **56.8** (-29%) | 15.7 -> 15.7 | 363, 5794 |
+
+- No scene is slower; hei_01 keeps its frame (vblank-bound) and its busy time drops.
+- There is no translator in this layout (`gxthread=0`), so the translator column of the brief is 0. The pipelined layout (`gxthread=2 gxpipeline=1`) was not measured again.
+- The render thread is unchanged: it already drew merged draws; the batch only stops the index copies and the per-list work on the recording side.
+- In gor_01, 4782 of 5007 cache hits go through 245 batches; the other 225 are lists in memory the registry does not cover (hashed on the per-list path as before). In the steady state no batch is formed, killed or refused (one "vertex state" refusal per window).
+- Counters: a `gxbatch frame N:` line every `gxthreadstats` frames.
+
+Identity, `determ`, 6 consecutive shots, byte for byte, off against on: gor_01 6 of 6 (`gxbatch=1`), the effects battle 6 of 6 (`gxbatch=1`, frames 900 to 905), hei_01 6 of 6 (`gxbatch=2`, the verify mode: every member checked the per-list way, hashes included, **0 failures**).
+
+Both switches together (`gxbatch=1 gxstatecache=1`) against the default, same method, frames 780 to 785, in all ten scenes: **60 of 60 shots byte-identical**. (The check script's blank-shot heuristic flagged the six shots of jin_00 and of usu_00; whether those shots have content was not looked at, so count those two scenes as unconfirmed.)
+
+**Defaults: both stay 0.** The remaining gate is `gw_diff.py` on the 1600-frame padscript, which was not run.
+
+**Stage 2 as measured** (on top of `gxbatch=1`):
+
+| Switches | gor_01 busy | effects battle busy | What it showed |
+|---|---|---|---|
+| `gxbatch=1` | 48.2 | 28.7 | |
+| + `gxstatecache=1` (compiled TEV setups kept; the key is compared in full) | **44.5** (-8%) | **27.2** (-5%) | every build reuses a kept setup (545 reused, 0 compiled per frame in gor_01); `gxstatecache=2` compiled each again: 0 mismatches |
+| + `gxstatecache=1 gxstatededup=1` (setters whose words are in force return early) | 55.1 (**+14%**) | 32.0 (+11%) | 17441 of 23564 state calls per frame return early, but the table lookup and compare on 23.5 K calls cost more than the setters they skip, and the state builds stay at 545 a frame: the calls that remain are real changes. A loss; it stays off |
+
+So the plan's "a setter compares and stores" does not pay through the record's dedup table. What is left of the state path is about 545 real rebuilds a frame: texture lookups, the pixel-pipeline fields, and `plat_gpu_set_state`'s compares. The next step there is the plan's per-class dirty bits with the compare inline in each setter, not built.
+
+**Not built:** per-class state rebuild, stage 3 (render thread writing PICA registers), stage 4 (immediate mode written in PICA form), stage 5 (one hop, `gx_rec.c` removed). **Not run:** `gw_diff.py` on the 1600-frame padscript, `vsh_accept.py` (the byte-identical `determ` shots are the stricter image test), the pipelined layout with the new switches, a PC-sample profile with the switches on. `gxcache=2` and `gxbatch` exclude each other; `gxbatch=2` is the batch's own check.
+
 ## Risks of the cache
 
 - **Hash collisions.** A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.

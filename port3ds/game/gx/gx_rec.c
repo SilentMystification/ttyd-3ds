@@ -474,33 +474,68 @@ static int is_state_list(const void* list) {
     return 0;
 }
 
+/* 1: table `tbl` (at generation `gen`) holds call `id` with these words; else it notes them. */
+static int dd_same(DdSlot* tbl, u32 gen, u32 id, const u32* w, u32 n) {
+    int sl = n != 0 && n <= DD_WORDS ? dd_slot(id, w) : -1;
+    if (sl >= 0) {
+        DdSlot* d = &tbl[sl];
+        if (d->gen == gen && d->id == id && d->n == n && gx_mem_equal(d->w, w, n * 4)) {
+            return 1;
+        }
+        d->gen = gen;
+        d->id = (u8)id;
+        d->n = (u8)n;
+        memcpy(d->w, w, n * 4);
+        if (id == REC_SetChanCtrl || id == REC_SetChanAmbColor || id == REC_SetChanMatColor) {
+            /* channel selectors overlap (COLOR0A0 covers COLOR0 and ALPHA0): only this one stays valid */
+            int base = sl - (int)w[0];
+            for (int c = 0; c < 6; c++) {
+                if (c != (int)w[0]) {
+                    tbl[base + c].gen = 0;
+                }
+            }
+        }
+    } else if (id == REC_ClearVtxDesc) {
+        for (int a = 0; a < 32; a++) {
+            tbl[a].gen = 0; /* the vertex description slots */
+        }
+    }
+    return 0;
+}
+
+/* ---- The same table where calls are applied (switch gxstatecache) ----
+ * `gx` holds what the setters last wrote, so a setter called again with the words in force has nothing to do:
+ * it returns before the state version changes, and the next draw does not rebuild the PICA state for it. The
+ * table is kept by the setters themselves (gx_state.c's REC macros ask before they write), on whichever thread
+ * applies calls; with a translator the record's own table has dropped most repeats already. */
+int gx_opt_statecache;
+int gx_opt_statededup;
+static DdSlot* s_dda;
+static u32 s_dda_gen = 1;
+static u32 s_dda_skipped, s_dda_calls;
+
+int gx_dd_apply_same(u32 id, const u32* w, u32 n) {
+    s_dda_calls++;
+    if (dd_same(s_dda, s_dda_gen, id, w, n)) {
+        s_dda_skipped++;
+        return 1;
+    }
+    return 0;
+}
+
+void gx_dd_apply_forget(void) {
+    if (s_dda != NULL && ++s_dda_gen == 0) {
+        memset(s_dda, 0, DD_SLOTS * sizeof(DdSlot));
+        s_dda_gen = 1;
+    }
+}
+
 void gx_rec_call(u32 id, const u32* w, u32 n) {
     if (s_dedup) {
         s_dd_calls++;
-        int sl = n <= DD_WORDS ? dd_slot(id, w) : -1;
-        if (sl >= 0) {
-            DdSlot* d = &s_dd[sl];
-            if (d->gen == s_dd_gen && d->id == id && d->n == n && gx_mem_equal(d->w, w, n * 4)) {
-                s_dd_skipped++;
-                return; /* the translator's state holds it already */
-            }
-            d->gen = s_dd_gen;
-            d->id = (u8)id;
-            d->n = (u8)n;
-            memcpy(d->w, w, n * 4);
-            if (id == REC_SetChanCtrl || id == REC_SetChanAmbColor || id == REC_SetChanMatColor) {
-                /* channel selectors overlap (COLOR0A0 covers COLOR0 and ALPHA0): only this one stays valid */
-                int base = sl - (int)w[0];
-                for (int c = 0; c < 6; c++) {
-                    if (c != (int)w[0]) {
-                        s_dd[base + c].gen = 0;
-                    }
-                }
-            }
-        } else if (id == REC_ClearVtxDesc) {
-            for (int a = 0; a < 32; a++) {
-                s_dd[a].gen = 0; /* the vertex description slots */
-            }
+        if (dd_same(s_dd, s_dd_gen, id, w, n)) {
+            s_dd_skipped++;
+            return; /* the translator's state holds it already */
         }
     }
     u32* c = put(id, n);
@@ -995,6 +1030,12 @@ void gx_rec_frame(void) {
         s_pipe_waits = 0;
     }
     s_snap_bytes = 0;
+    if (gx_opt_statecache) {
+        PLOG_I("gxthread   statecache: %lu of %lu applied state calls per frame returned early (unchanged)",
+               (unsigned long)(s_dda_skipped / f), (unsigned long)(s_dda_calls / f));
+        s_dda_skipped = s_dda_calls = 0;
+        gx_tev_memo_log(f);
+    }
     gx_bbox_stats_log(f);
     if (gx_rec_mode == 3) {
         u32 gm = 0;
@@ -1017,6 +1058,16 @@ void gx_rec_frame(void) {
 
 void gx_rec_init(void) {
     t_game = 1;
+    if (s_dda == NULL) {
+        int sc = plat_switch_int("gxstatecache", 0);
+        s_dda = sc >= 1 && sc <= 2 ? calloc(DD_SLOTS, sizeof(DdSlot)) : NULL;
+        gx_opt_statecache = s_dda != NULL ? sc : 0;
+        gx_opt_statededup = gx_opt_statecache && plat_switch_int("gxstatededup", 0) != 0;
+        if (gx_opt_statecache) {
+            PLOG_I("gxstatecache=%d: unchanged state calls return early, compiled TEV setups are reused%s",
+                   gx_opt_statecache, gx_opt_statecache == 2 ? " (verify)" : "");
+        }
+    }
     int mode = plat_switch_int("gxthread", 0);
     if (mode < 0 || mode > 3) {
         mode = 0;

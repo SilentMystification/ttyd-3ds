@@ -1,5 +1,8 @@
 // Map object (mobj) driver: blocks, item boxes, switches and the other interactive map objects:
 // their update, hit checks and drawing.
+#ifdef TARGET_PORT
+#include "port_disc_data.h"
+#endif
 #include "driver/mobjdrv.h"
 #include "driver/mapdrv.h"
 #include "driver/npcdrv.h"
@@ -101,6 +104,10 @@ void* cubeDDT[26] = {
 };
 
 /* GX display list data: six unpacked index lists of 205 words (count, then one index record per vertex) */
+#ifdef TARGET_PORT
+u32 cubeDN[1230] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h), then fixed up by portCubeDNToNative
+PORT_DISC_DATA(cubeDN, cubeDN)
+#else
 u32 cubeDN[1230] = {
     0x00000004, 0x00000005, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x00060005,
     0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x00020005, 0xFFFFFFFF, 0xFFFFFFFF,
@@ -257,12 +264,17 @@ u32 cubeDN[1230] = {
     0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
     0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000
 };
+#endif
 #ifdef TARGET_PORT
 // cubeDN holds MapRawDL lists written as u32 words: a count, then 6 words per MapVtxRec (12 s16 indices, two per
-// word, the first in the high half). Read as s16 on a little-endian machine the halves swap, so they are put in
-// the GameCube's order once, at start-up.
-__attribute__((constructor)) static void portCubeDNToNative(void) {
+// word, the first in the high half). The words come off the disc big-endian, so they are byte-swapped first. Read
+// as s16 on a little-endian machine the halves swap, so they are put in the GameCube's order once, right after
+// the disc data is filled.
+static void portCubeDNToNative(void) {
     s32 list, j;
+    for (j = 0; j < (s32)(sizeof(cubeDN) / sizeof(cubeDN[0])); j++) {
+        cubeDN[j] = __builtin_bswap32(cubeDN[j]);
+    }
     for (list = 0; list < 6; list++) {
         u32* p = &cubeDN[list * 205];
         s32 words = (s32)p[0] * (s32)(sizeof(MapVtxRec) / sizeof(u32));
@@ -271,6 +283,7 @@ __attribute__((constructor)) static void portCubeDNToNative(void) {
         }
     }
 }
+PORT_DISC_DATA_FIXUP(portCubeDNToNative)
 #endif
 
 /** Mesh of the full collision cube: all six faces. */

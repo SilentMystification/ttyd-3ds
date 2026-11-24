@@ -8,7 +8,8 @@ Writes ttyd-3ds-<version>-<region>.cia and .3dsx, SHA256SUMS and README.md
 appended unless the tree is clean and HEAD is tagged v<version>. A dirty tree
 is refused without --allow-dirty. The checklist is docs/RELEASE.md.
 
-The artifacts hold code and generated placeholder art only; the game's data is
+The artifacts hold code and generated placeholder art only (the port's own resource files, the JP font, ship in
+res/ next to them); the game's data is
 read from the player's own disc at run time (docs/PORT_3DS_PLAN.md 6.1). The
 packager checks that no artifact is a disc image or unreasonably large.
 """
@@ -94,11 +95,18 @@ def main():
             if len(data) > 64 << 20:
                 sys.exit(f"release.py: {dst.name} is {len(data)} bytes: too big for code and placeholder art")
 
+    # The port's own resource files (the JP ROM font) ship in res/, outside the binaries; the same files for every
+    # region, taken from the first region's build.
+    res_src = REPO / "build" / "3ds" / REGIONS[regions[0]] / "res"
+    if not (res_src / "sjis_font.bin").is_file():
+        sys.exit(f"release.py: {res_src / 'sjis_font.bin'} was not built (tools/port3ds/gen_sjis_font.py needs Pillow)")
+    shutil.copytree(res_src, out / "res")
+
     shutil.copyfile(REPO / "docs" / "USER_GUIDE.md", out / "README.md")
-    files = sorted(p for p in out.iterdir() if p.name != "SHA256SUMS")
-    (out / "SHA256SUMS").write_text("".join(f"{sha256(p)}  {p.name}\n" for p in files))
-    for p in sorted(out.iterdir()):
-        print(f"  {p.stat().st_size:>10}  {p.name}")
+    files = sorted(p for p in out.rglob("*") if p.is_file() and p.name != "SHA256SUMS")
+    (out / "SHA256SUMS").write_text("".join(f"{sha256(p)}  {p.relative_to(out).as_posix()}\n" for p in files))
+    for p in files:
+        print(f"  {p.stat().st_size:>10}  {p.relative_to(out).as_posix()}")
     print((out / "SHA256SUMS").read_text(), end="")
 
 

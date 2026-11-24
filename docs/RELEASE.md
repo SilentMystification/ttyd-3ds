@@ -11,7 +11,11 @@ The log banner and the error screen show `<version>-dev+<shorthash>` for any bui
 
 ## Standing rule: no game assets in the binaries
 
-The CIA, the 3dsx and every release package contain no game assets. Models, textures, maps, sound, text and the executable's data arrays are read from the player's own disc image at run time. The binaries hold compiled code (the decompiled game, the SDK, MusyX and the port) and the port's own data (the generated JP ROM font, placeholder banner, icon and sound, the per-region arena value). New data the port needs from the game is read from the disc image, never embedded. The build's image-array check (a fixed list of about 7 KB of small arrays in the decompiled sources) must not grow, and `release.py` refuses artifacts that look like a disc image.
+The CIA, the 3dsx and every release package contain no game assets. Models, textures, maps, sound, text and the executable's data arrays are read from the player's own disc image at run time. The binaries hold compiled code (the decompiled game, the SDK, MusyX and the port), the system metadata of the CIA (placeholder banner, icon and sound) and the per-region arena value. New data the port needs from the game is read from the disc image, never embedded.
+
+- **Image arrays: the allowed list is empty.** The decomp's image arrays (`mapdrv.c` texture_0, `eff_torch.c` torch textures, `mobjdrv.c` cubeDN, `win_04.c` texture_0, the memory card art) are declared without contents under `TARGET_PORT` and filled at boot from the disc image (`include/port_disc_data.h`, `tools/port3ds/gen_disc_data.py`). `tools/port3ds/check_image_arrays.py` runs after every link and fails the build if an image array is initialised data in the ELF (its `ALLOWED` list is empty). A new one needs a `PORT_DISC_DATA` entry instead.
+- **The port's own resources live outside the binary**, in a `res/` folder: the generated JP ROM font `res/sjis_font.bin` (about 250 KB). The build writes it to `build/3ds/<game dir>/res/`, `release.py` packages `res/` next to the CIA and 3dsx, and the player copies it to `sdmc:/3ds/ttyd/res/` (`port3ds/plat/res.c`; the loader also finds `sdmc:/3ds/ttyd/queue/res/`, where `devupdate.py files put sjis_font.bin --dest res` leaves it). If the JP build cannot find it, it stops with a message naming the file.
+- `release.py` refuses artifacts that look like a disc image.
 
 ## Checklist
 
@@ -27,6 +31,7 @@ The CIA, the 3dsx and every release package contain no game assets. Models, text
 5. **Tag:** `git tag -a v<version> -m "TTYD 3DS <version>"`. Tags are made by the owner; nothing is pushed without them.
 6. **Artifacts:** `python3 tools/port3ds/release.py`. It refuses a dirty tree. It builds US, JP and PAL (`build.sh . -DREGION=...`) into `build/release/<version>/`:
    - `ttyd-3ds-<version>-{us,jp,pal}.{cia,3dsx}`;
+   - `res/sjis_font.bin`, the resource folder the player copies to `sdmc:/3ds/ttyd/res/` (needed by the JP build; harmless for the others);
    - `SHA256SUMS`;
    - `README.md`, a copy of USER_GUIDE.md.
 
@@ -36,7 +41,7 @@ The CIA, the 3dsx and every release package contain no game assets. Models, text
 
 ## What the artifacts contain
 
-Code compiled from the decomp and the port, and generated placeholder banner, icon and sound (`make_placeholder_art.py`). No game data: the port reads textures, models, maps and sounds from the player's own `game.iso`. `release.py` checks only that an artifact is not a disc image and is not oversized, so do not add files to the CIA without reading PORT_3DS_PLAN.md section 6.1.
+Code compiled from the decomp and the port, and generated placeholder banner, icon and sound (`make_placeholder_art.py`); the port's own resource files (the JP font) sit next to them in `res/`, not inside. No game data: the port reads textures, models, maps and sounds from the player's own `game.iso`. `release.py` checks only that an artifact is not a disc image and is not oversized, so do not add files to the CIA without reading PORT_3DS_PLAN.md section 6.1.
 
 One number depends on the disc: the GameCube arena's high end (`PORT_GAME_ARENA_HI`, where the IPL puts the FST, from the disc's FST size). The build does not read a disc for it: it comes from the committed `ARENA_HI` table in `tools/port3ds/gen_disc_data.py`. The US value (`0x817EE1A0`) was computed from the US disc and equals the one measured in Dolphin; **JP and PAL are unknown** (`None`) until filled.
 

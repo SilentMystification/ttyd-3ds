@@ -12,13 +12,15 @@
  * ANSI (G8ME01, G8MP01) is that 5x7 font. The Japanese release uses the SJIS
  * encoding: a font with the IPL's glyph set and layout (24x24 cells, nine
  * 512x512 sheets) rendered by tools/port3ds/gen_sjis_font.py from Noto Sans
- * CJK JP (SIL OFL), embedded as sjis_font_bin. OSSetFontEncode switches to it
+ * CJK JP (SIL OFL), read at run time from the resource file res/sjis_font.bin (plat/res.h; shipped next to the
+ * binary, not inside it). OSSetFontEncode switches to it
  * in any build (the fonttest=sjis switch).
  */
 #include <dolphin/os.h>
 #include <string.h>
 
 #include "plat/plat.h"
+#include "plat/res.h"
 #include "version.h"
 
 #define CELL 24
@@ -34,9 +36,9 @@ static OSFontHeader* s_font;      /* ANSI */
 static OSFontHeader* s_font_sjis; /* SJIS */
 static u16 s_encode = 0xFFFF;     /* current encoding; 0xFFFF until first asked */
 
-/* The SJIS font (tools/port3ds/gen_sjis_font.py), embedded by CMakeLists.txt; empty when not generated. */
-extern const u8 sjis_font_bin[];
-extern const u8 sjis_font_bin_end[];
+/* The SJIS font (tools/port3ds/gen_sjis_font.py), the resource file res/sjis_font.bin; NULL until read. */
+#define SJIS_FONT_FILE "sjis_font.bin"
+static const u8* sjis_font_bin;
 #define SJIS_SHEETS 9
 
 /* 5x7 glyphs for 0x20..0x7E, one byte per row, bit 4 = leftmost column. */
@@ -175,7 +177,10 @@ u16 OSSetFontEncode(u16 encode) {
  * size P (u32 each), Z u16 Zenkaku2Code, then the zlib stream of the OSFontHeader + widths (H) and 2-bit sheets (S). */
 int uncompress(u8* dest, unsigned long* destLen, const u8* source, unsigned long sourceLen); /* zlib */
 
+static void sjis_font_need(void);
+
 static u32 blob_u32(int i) {
+    sjis_font_need();
     const u8* p = sjis_font_bin + 4 + i * 4;
     return p[0] | p[1] << 8 | p[2] << 16 | (u32)p[3] << 24;
 }
@@ -184,14 +189,18 @@ static u32 blob_u32(int i) {
 #define BLOB_Z blob_u32(2)
 #define BLOB_P blob_u32(3)
 
-static int sjis_font_present(void) {
-    return (u32)(sjis_font_bin_end - sjis_font_bin) > 20 && memcmp(sjis_font_bin, "SJF2", 4) == 0;
-}
-
 static void sjis_font_need(void) {
-    if (!sjis_font_present()) {
-        plat_fatal("the SJIS ROM font is missing: run tools/port3ds/gen_sjis_font.py and rebuild");
+    if (sjis_font_bin != NULL) {
+        return;
     }
+    size_t n = 0;
+    const u8* p = plat_res_get(SJIS_FONT_FILE, &n);
+    if (p == NULL || n <= 20 || memcmp(p, "SJF2", 4) != 0) {
+        plat_fatal("The Japanese system font file is missing or damaged:\n%s\n"
+                   "Copy the res folder from the release package to sdmc:/3ds/ttyd/res/",
+                   plat_res_path(SJIS_FONT_FILE));
+    }
+    sjis_font_bin = p;
 }
 
 /* Glyph index of a one- or two-byte Shift-JIS code: OSFont.c's GetFontCode. */
@@ -217,6 +226,7 @@ static int sjis_glyph(u32 code) {
         return 0x2BE + (int)((code >> 8) - 0x88) * 188 + j;
     }
     if (code >= 0x8140 && code < 0x879E) {
+        sjis_font_need();
         u32 i = ((code >> 8) - 0x81) * 188 + (u32)j;
         if (i < BLOB_Z) {
             const u8* zen = sjis_font_bin + 20 + i * 2;

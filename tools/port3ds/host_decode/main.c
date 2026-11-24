@@ -368,6 +368,7 @@ static int cmd_discdata(void) {
     ADD(mapdrv_texture_0);
     ADD(torch_obj2_texture);
     ADD(torch_obj22t_texture);
+    ADD(cubeDN);
     ADD(win_texture_0);
     char msg[256];
     if (host_guard_run(fill_fn, NULL, msg, sizeof(msg)) || !fill_fn_done) {

@@ -335,8 +335,8 @@ The port binary contains no game data.
     - `win_04.c` `texture_0` (4,992 bytes);
     - `mapdrv.c` `texture_0` (256 bytes);
     - `eff_torch.c` `torch_obj2_texture` and `torch_obj22t_texture` (2,032 bytes);
-    - `mobjdrv.c` `cubeDN` (4,920 bytes).
-- **Enforcement.** The port build checks the list, so no new image array is compiled in.
+    - `mobjdrv.c` `cubeDN` (4,920 bytes; byte-swapped after the fill by a `PORT_DISC_DATA_FIXUP`).
+- **Enforcement.** `tools/port3ds/check_image_arrays.py` runs after the link, with an empty list of allowed arrays, so no image array is compiled in.
 - **`dspSlave`** (GameCube DSP code) is not needed.
 ## 7. Developer tools inside the port
 

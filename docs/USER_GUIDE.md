@@ -28,7 +28,8 @@ real hardware is unverified.
    - in FBI choose Remote Install, then Receive URLs over the network, and send the file from a computer.
 3. Make the folder `sdmc:/3ds/ttyd/` on the SD card if it is not there yet. The port also makes it on first start.
 4. Copy your disc image to **`sdmc:/3ds/ttyd/game.iso`**. The name must be exactly `game.iso`.
-5. Start **TTYD 3DS** from the HOME Menu.
+5. Copy the **`res`** folder from the release package to **`sdmc:/3ds/ttyd/res/`** (so that `sdmc:/3ds/ttyd/res/sjis_font.bin` exists). The Japanese build needs it for its system font and stops with a message naming the file if it is missing; the US and PAL builds do not use it.
+6. Start **TTYD 3DS** from the HOME Menu.
 
 The CIA is the supported way to run the port. It sets the memory mode and the clock speed that the game needs.
 The `.3dsx` file for the Homebrew Launcher may be refused for lack of memory. If you see "Not enough memory",

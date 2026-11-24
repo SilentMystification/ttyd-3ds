@@ -84,6 +84,7 @@ AccessControlInfo:
     ClearTimer: 29
     CloseHandle: 35
     ConnectToPort: 45
+    ControlPerformanceCounter: 62   # ctr-devkit perf (ARM11 PMU/SCU counters)
     ControlMemory: 1
     CreateAddressArbiter: 33
     CreateEvent: 23

@@ -55,7 +55,14 @@ Order matters: each step proves something the next one relies on.
 
 Then the measurement items from `PORT_3DS_BACKLOG.md` lane D, all through `devupdate`:
 
-8. **The probe as a CIA:** QTM vs heap vs linear bandwidth from each core, and GPU reads from QTM.
+8. **QTM benchmark (qtmbench CIA, title `000400000FD88C00`).** Details and how to read the results: `PORT_3DS_QTM_BENCH.md`.
+   - Build: `tools/port3ds/build.sh libs/ctr-devkit/qtmbench` (gives `build/3ds/qtmbench/qtmbench.cia`).
+   - First install: press Y in the Homebrew Launcher, then `$D bootstrap --cia build/3ds/qtmbench/qtmbench.cia`. Later runs: `$D push build/3ds/qtmbench/qtmbench.cia --wait 90` from any devupdate title, or `$D launch 000400000FD88C00` while another devupdate title runs.
+   - It runs all tests at launch (about 1-2 minutes; the top screen shows the suite) and ends with `QTMBENCH DONE`, then idles with devupdate up. Do not touch the console while it runs.
+   - Pull: `tools/port3ds/qtm_bench.py pull` (results in `build/qtmbench/<time>/`). Or the whole loop: `tools/port3ds/qtm_bench.py run`.
+   - Check: `info.emulator` is `no`; `cores` lists core 1 and core 2; `map/perm/qtm` is 3 (RW); every `gpu_check` row is `0 badpx`; `map/pte/*` rows decode (if the console stops at "page tables", reboot it: everything else is already saved; rerun with `$D restart nopte`).
+   - ARM11 counters in the game: `$D push build/3ds/game/ttyd.cia --switches "map=gor_01 gxthread=2 gxthreadstats=60 pmu=60" --wait 120`, then `$D log`. Expect `pmu: on via svcControlPerformanceCounter` (or `via svcBackdoor`) and one `pmu frame ...` line per 60 frames beside the `gxthread` lines; `pmu: not available (rc ...)` means neither way works under this Luma.
+   - Note for the QTM planning: `cpu_bw` and `cpu_lat` QTM against heap/linear, the `coherency` rows (non-zero `%stale` = flushes required), and the `contend` matrix.
 9. **Rosalina profiles** (`pc_sample.py`) of Mario's house, Rogueport and a battle, plus a `cpulimit` 0 / 30 / 80 comparison.
 10. **Sleep and HOME.** Expect the `gpu: suspend|sleep ... / gpu: resume` log lines and `cpu limit: 30% (HOME pressed, early ...)`.
 11. **Copy targets:** open the START pause menu in `gor_01`. The background must show the captured field. Also run `vramfail=1` once, to check the strip fallback's `GX_TextureCopy` ordering on hardware.

@@ -3,20 +3,22 @@
 #
 # ctrdk_add_app(<target>
 #     TITLE <text> UNIQUE_ID <0x...> PRODUCT_CODE <CTR-N-XXXX>
-#     [DESCRIPTION <text>] [AUTHOR <text>] [OUTPUT_NAME <name>])
+#     [DESCRIPTION <text>] [AUTHOR <text>] [OUTPUT_NAME <name>] [RSF <file>])
 #
 # Builds <name>.3dsx (devkitPro's 3dsxtool and smdhtool) and, when makerom
 # and bannertool are on PATH, <name>.cia next to the ELF of executable
 # <target>. The art is the placeholder set in cmake/art/; the CIA uses
-# cmake/app.rsf. UNIQUE_ID must be a homebrew-range ID (0xF8000-0xFFFFF)
+# cmake/app.rsf unless RSF names another (e.g. one with New 3DS settings). UNIQUE_ID must be a homebrew-range ID (0xF8000-0xFFFFF)
 # that no other installed title uses.
 
-set(CTRDK_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+# A cache variable, so the functions also find it from a project that pulled
+# ctr-devkit in with add_subdirectory (the standalone example builds).
+set(CTRDK_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}" CACHE INTERNAL "ctr-devkit cmake/ folder")
 find_program(CTRDK_MAKEROM makerom)
 find_program(CTRDK_BANNERTOOL bannertool)
 
 function(ctrdk_add_app target)
-    cmake_parse_arguments(ARG "" "TITLE;UNIQUE_ID;PRODUCT_CODE;DESCRIPTION;AUTHOR;OUTPUT_NAME" "" ${ARGN})
+    cmake_parse_arguments(ARG "" "TITLE;UNIQUE_ID;PRODUCT_CODE;DESCRIPTION;AUTHOR;OUTPUT_NAME;RSF" "" ${ARGN})
     foreach(req TITLE UNIQUE_ID PRODUCT_CODE)
         if(NOT ARG_${req})
             message(FATAL_ERROR "ctrdk_add_app(${target}): ${req} is required")
@@ -30,6 +32,9 @@ function(ctrdk_add_app target)
     endif()
     if(NOT ARG_OUTPUT_NAME)
         set(ARG_OUTPUT_NAME "${target}")
+    endif()
+    if(NOT ARG_RSF)
+        set(ARG_RSF "${CTRDK_CMAKE_DIR}/app.rsf")
     endif()
     set(art "${CTRDK_CMAKE_DIR}/art")
     set(out "${CMAKE_CURRENT_BINARY_DIR}/${ARG_OUTPUT_NAME}")
@@ -50,11 +55,11 @@ function(ctrdk_add_app target)
     add_custom_command(
         OUTPUT "${out}.cia"
         COMMAND "${CTRDK_MAKEROM}" -f cia -o "${out}.cia" -target t -exefslogo
-                -elf "$<TARGET_FILE:${target}>" -rsf "${CTRDK_CMAKE_DIR}/app.rsf"
+                -elf "$<TARGET_FILE:${target}>" -rsf "${ARG_RSF}"
                 -icon "${out}.smdh" -banner "${out}.bnr"
                 "-DAPP_TITLE=${ARG_TITLE}" "-DAPP_PRODUCT_CODE=${ARG_PRODUCT_CODE}"
                 "-DAPP_UNIQUE_ID=${ARG_UNIQUE_ID}"
-        DEPENDS ${target} "${CTRDK_CMAKE_DIR}/app.rsf" "${out}.smdh" "${out}.bnr"
+        DEPENDS ${target} "${ARG_RSF}" "${out}.smdh" "${out}.bnr"
         VERBATIM
         COMMENT "Building ${ARG_OUTPUT_NAME}.cia")
     add_custom_target(${target}_cia ALL DEPENDS "${out}.cia")

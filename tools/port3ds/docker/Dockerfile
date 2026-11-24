@@ -37,5 +37,20 @@ RUN set -eu; \
     /opt/ctrtools/bin/ctrtool 2>&1 | head -1; \
     /opt/ctrtools/bin/bannertool 2>&1 | head -1
 
+# ccache (bookworm packages, pinned by SHA-256; apt is not used because it hangs in this build network):
+# build.sh points CMake's compiler launcher at it and mounts the shared cache from the host.
+RUN set -eu; \
+    cd /tmp; \
+    M=http://deb.debian.org/debian/pool/main; \
+    curl -fsSL -o zstd.deb "$M/libz/libzstd/libzstd1_1.5.4+dfsg2-5_amd64.deb"; \
+    echo "6315b5ac38b724a710fb96bf1042019398cb656718b1522279a5185ed39318fa  zstd.deb" | sha256sum -c -; \
+    curl -fsSL -o hiredis.deb "$M/h/hiredis/libhiredis0.14_0.14.1-3_amd64.deb"; \
+    echo "61f25d841052ad6cd6adfa9fad050345ea1047abc6ea79f931ab1a9ed55af3ae  hiredis.deb" | sha256sum -c -; \
+    curl -fsSL -o ccache.deb "$M/c/ccache/ccache_4.8+really4.7.5-1_amd64.deb"; \
+    echo "d6562e03b90d4bbe299966117aef44975f57bea8270c233b1d71f1e6ba157e7d  ccache.deb" | sha256sum -c -; \
+    dpkg -i zstd.deb hiredis.deb ccache.deb; \
+    rm -f zstd.deb hiredis.deb ccache.deb; \
+    ccache --version | head -1
+
 ENV PATH=/opt/ctrtools/bin:$PATH
 WORKDIR /work

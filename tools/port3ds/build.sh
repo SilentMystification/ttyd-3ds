@@ -1,21 +1,42 @@
 #!/bin/sh
 # Build a 3DS CMake project inside the pinned build container.
 #
-#   tools/port3ds/build.sh [project] [cmake -D options...]
+#   tools/port3ds/build.sh [--dev] [project] [cmake -D options...]
 #   tools/port3ds/build.sh . -DREGION=PAL     (the game for one region; US by default)
+#   tools/port3ds/build.sh --dev              (fast dev build: LTO and GX -O3 off)
 #
 # project is a directory under port3ds/ ("probe" builds port3ds/probe; the
 # default "." builds the game in port3ds/), or a path from the repository
 # root ("libs/ctr-devkit" builds the ctr-devkit examples). Output goes to
 # build/3ds/<last path component>/.
+#
+# --dev (or TTYD_DEV=1) configures a separate build directory (build/3ds/<name>-dev)
+# with -DTTYD_LTO=OFF -DTTYD_GX_O3=OFF, so the release directory keeps its LTO build.
+# Explicit -D options after it still win. Dev builds do not archive the ELF.
+#
+# TTYD_CCACHE=1 sends compile jobs through ccache (cache shared in ${XDG_CACHE_HOME:-~/.cache}/ttyd3ds/ccache).
+# Off by default: a warm-cache build was NOT byte-identical to a no-ccache build of the same commit (see docs).
+# BUILD_JOBS unset: all host threads when no other build holds a build slot, else 8.
+#
 # The image is built from tools/port3ds/docker/Dockerfile on first use and
 # tagged with a hash of the Dockerfile, so a changed Dockerfile rebuilds it.
+#
+# Each phase prints its wall time to stderr ("build.sh: time ..."); the compile,
+# link and packaging split comes from ninja's log (build/3ds/<name>/.ninja_log).
 #
 # Windows uses tools/port3ds/build.ps1, which runs the same container.
 
 set -eu
 
+now_ms() { date +%s%3N; }
+secs() { [ "$1" -lt 0 ] && set -- 0; printf '%d.%03ds' $(($1 / 1000)) $(($1 % 1000)); }
+
+t_start=$(now_ms)
 repo=$(cd "$(dirname "$0")/../.." && pwd)
+
+dev=0
+if [ "${TTYD_DEV:-0}" = 1 ]; then dev=1; fi
+if [ "${1:-}" = --dev ]; then dev=1; shift; fi
 project=${1:-.}
 [ $# -gt 0 ] && shift
 
@@ -38,6 +59,11 @@ if [ "$project" = "." ]; then
     done
 fi
 out="build/3ds/$name"
+if [ "$dev" = 1 ]; then
+    out="$out-dev"
+    # Dev defaults come first, so explicit -D options after them override.
+    set -- -DTTYD_LTO=OFF -DTTYD_GX_O3=OFF "$@"
+fi
 
 [ -f "$repo/$src/CMakeLists.txt" ] || { echo "build.sh: no CMakeLists.txt in $src" >&2; exit 2; }
 
@@ -68,8 +94,9 @@ fi
 
 # Machine-wide limit on concurrent builds (BUILD_MAX, default 2): one flock'd slot file per build, held on fd 9
 # until this script ends (the OS drops the lock if it dies). Each build runs ninja with BUILD_JOBS cores.
+# BUILD_JOBS unset: all host threads when no other build holds a slot, else 8.
 build_max=${BUILD_MAX:-2}
-build_jobs=${BUILD_JOBS:-8}
+build_jobs=${BUILD_JOBS:-}
 lockdir="${XDG_CACHE_HOME:-$HOME/.cache}/ttyd3ds"
 mkdir -p "$lockdir"
 told=
@@ -92,22 +119,82 @@ while :; do
     fi
     sleep 5
 done
+t_lock=$(now_ms)
+
+if [ -z "$build_jobs" ]; then
+    busy=
+    j=0
+    while [ "$j" -lt "$build_max" ]; do
+        if [ "$j" != "$i" ]; then
+            exec 8>"$lockdir/build-slot-$j"
+            flock -n 8 || busy=1
+            exec 8>&-
+        fi
+        j=$((j + 1))
+    done
+    # Alone: all host threads but two (desktop and emulators stay responsive). Beside another build: 6.
+    if [ -z "$busy" ]; then build_jobs=$(( $(nproc) - 2 )); else build_jobs=6; fi
+    [ "$build_jobs" -ge 1 ] || build_jobs=1
+fi
+
+# ccache (TTYD_CCACHE=0 turns it off): compile jobs go through ccache, whose cache is shared by all
+# checkouts in ${XDG_CACHE_HOME:-~/.cache}/ttyd3ds/ccache. A fresh worktree or a checkout of another
+# commit recompiles only the sources whose preprocessed text is new to the cache. Only the compile
+# lines are wrapped; LTO and link are not.
+ccmount=
+if [ "${TTYD_CCACHE:-0}" = 1 ]; then
+    # One cache for every checkout: sources are always at /work inside the container, so worktrees share hits.
+    ccdir="${XDG_CACHE_HOME:-$HOME/.cache}/ttyd3ds/ccache"
+    mkdir -p "$ccdir"
+    # Sources are always /work inside the container, so paths match across checkouts: BASEDIR and
+    # NOHASHDIR only make that explicit (the directory is not part of the hash).
+    ccmount="-v $ccdir:/ccache -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=10G -e CCACHE_BASEDIR=/work -e CCACHE_NOHASHDIR=true"
+    set -- -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_ASM_COMPILER_LAUNCHER=ccache "$@"
+else
+    # The launcher is a cached CMake variable: clear it, or an earlier ccache build keeps using it.
+    set -- -DCMAKE_C_COMPILER_LAUNCHER= -DCMAKE_ASM_COMPILER_LAUNCHER= "$@"
+fi
 
 mkdir -p "$repo/$out"
+ninja_log="$repo/$out/.ninja_log"
+t_docker=$(now_ms)
 # shellcheck disable=SC2086
-docker run --rm $gitmount \
+docker run --rm $gitmount $ccmount \
+    --cpu-shares 256 \
     --user "$(id -u):$(id -g)" \
     -e HOME=/tmp \
     -e "BUILD_JOBS=$build_jobs" \
+    -e "TTYD_T_HOST=$t_docker" \
     -v "$repo:/work" \
     -w /work \
     "$tag" \
-    sh -c 's=$1; o=$2; shift 2; cmake -S "$s" -B "$o" -G Ninja -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/3DS.cmake "$@" >/dev/null && cmake --build "$o" -j "$BUILD_JOBS"' \
+    sh -c 's=$1; o=$2; shift 2; t0=$(date +%s%3N); echo "build.sh: container start $((t0 - TTYD_T_HOST)) ms after docker run" >&2; cmake -S "$s" -B "$o" -G Ninja -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/3DS.cmake "$@" >/dev/null || exit $?; t1=$(date +%s%3N); echo "build.sh: cmake configure $((t1 - t0)) ms" >&2; nice -n 10 cmake --build "$o" -j "$BUILD_JOBS"; rc=$?; t2=$(date +%s%3N); echo "build.sh: cmake build $((t2 - t1)) ms" >&2; exit $rc' \
     sh "$src" "$out" "$@"
+t_done=$(now_ms)
+
+# Phase split from ninja's log: only entries whose output was written by this run (mtime, in seconds).
+# Ninja times (start, end) are ms from its own start, so only differences are used.
+if [ -f "$ninja_log" ]; then
+    awk -v t="$((t_docker / 1000))" '
+        NF >= 4 && $3 / 1000000000 >= t {
+            s = $1 + 0; e = $2 + 0; o = $4
+            if (substr(o, 1, 1) == "/") next    # ninja lists each output twice (relative and /work/ path)
+            if (o == "ttyd.elf") link = e - s
+            else if (o ~ /\.(cia|3dsx)$/) pkg += e - s
+            else if (o ~ /^rel\//) { if (rs == "" || s < rs) rs = s; if (e > re) re = e }
+            else if (o ~ /\.o$/) { if (cs == "" || s < cs) cs = s; if (e > ce) ce = e }
+        }
+        END {
+            printf "build.sh: ninja split (ms): compile span %d, rel_link span %d, link+post-build %d, makerom/3dsxtool %d\n",
+                ce - cs, re - rs, link, pkg
+        }' "$ninja_log" >&2
+fi
+echo "build.sh: time: lock wait $(secs $((t_lock - t_start))), docker start+cmake+build $(secs $((t_done - t_docker))), total $(secs $((t_done - t_start)))" >&2
+echo "build.sh: jobs $build_jobs" >&2
 
 # Archive the game's ELF by build string, so tools/port3ds/crash_report.py can
 # resolve the addresses of a crash report from any earlier build.
-if [ "${name%%_*}" = game ] && [ -f "$repo/$out/ttyd.elf" ] && [ -f "$repo/$out/generated/port3ds_build.h" ]; then
+if [ "$dev" = 0 ] && [ "${name%%_*}" = game ] && [ -f "$repo/$out/ttyd.elf" ] && [ -f "$repo/$out/generated/port3ds_build.h" ]; then
     id=$(sed -n 's/.*PORT3DS_BUILD_STRING "#\([0-9]*\) \([0-9a-f]*\).*/\1_\2/p' "$repo/$out/generated/port3ds_build.h")
     # JP and PAL builds of the same commit get a region suffix (<build>_jp.elf).
     [ "$name" != game ] && id="${id}_${name#game_}"

@@ -33,6 +33,30 @@ Both scripts build in the image from `tools/port3ds/docker/Dockerfile`:
 
 The image tag is the first 12 hex digits of the Dockerfile's SHA-256, so editing the Dockerfile rebuilds the image.
 
+Build options (`build.sh`):
+
+- `--dev` (or `TTYD_DEV=1`): a separate directory `build/3ds/<name>-dev` configured with `-DTTYD_LTO=OFF -DTTYD_GX_O3=OFF`. The release directory keeps LTO. Later `-D` options still win. Dev builds do not archive the ELF.
+- `TTYD_CCACHE=1`: compile jobs go through ccache, with one cache shared by all checkouts in `${XDG_CACHE_HOME:-~/.cache}/ttyd3ds/ccache`. Off by default: a warm-cache build was not byte-identical to a no-ccache build of the same commit (loadable image differs; two no-ccache builds were identical).
+- `BUILD_JOBS` unset: host threads minus 2 when no other build holds a slot, 6 otherwise. The container runs at low priority (`nice`, `--cpu-shares 256`).
+- Each phase prints its wall time to stderr. The split comes from ninja's log.
+
+Measured on a 16-thread host with other builds running (times in seconds, docker phase only unless noted; "lock wait" is excluded):
+
+| Build | Time |
+|---|---|
+| Release, no-change rebuild | ~3 (total with slot wait 33) |
+| Release, touch `port3ds/plat/menu.c` | 164 (compile 1, LTO link ~71 incl. post-build, CIA packaging ~80) |
+| Release, touch `src/main.c` | 191 (compile 0.2, link ~71, CIA packaging ~118) |
+| Release, cold full build | 214 |
+| Dev (`--dev`), cold full build | 232 |
+| Dev, touch `port3ds/plat/menu.c` | 135 (link 4.4) |
+| Dev, touch `src/main.c` | 72 |
+| Fresh worktree, full build, no ccache | 401 |
+| Fresh worktree, full build, ccache cold | 422 |
+| Fresh worktree, full build, ccache warm | 225 |
+
+`makerom` (CIA packaging) is the largest cost after compilation. LTO at `-flto=auto` already uses every core: ninja has no jobserver, so GCC's auto count is the host thread count, and the flags are unchanged.
+
 Compiler options for the game (both on by default since the declaration mismatches were fixed; PORT_3DS_60FPS.md, "Step 1 results"): `tools/port3ds/build.sh . -DTTYD_LTO=ON` (link-time optimisation of the DOL code, MusyX and the port; the static RELs stay plain) and `-DTTYD_GX_O3=ON` (`-O3` on `port3ds/game/gx/*.c`). They stay in the build directory's cache: pass `=OFF` for the plain -O2 build.
 
 On Windows the sources are copied into the Docker volume `ttyd3ds-work` with rsync and built there, because bind mounts are slow. `iso/`, `orig/`, `build/` and `.git/` are not copied.

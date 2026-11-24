@@ -291,6 +291,7 @@ void gx_rec_state_list(const void* list); /* a list the game built holds state c
  * gx_dd_apply_same: 1 when `gx` already holds call `id` with these words (the caller returns); else the words are
  * noted and the caller applies them. Every setter that writes a piece of state the table covers asks first. */
 extern int gx_opt_statecache;
+extern int gx_opt_statededup; /* switch gxstatededup (default 0): the early return of unchanged state calls */
 int gx_dd_apply_same(u32 id, const u32* w, u32 n);
 void gx_dd_apply_forget(void); /* `gx` was changed behind the setters (gx_state_init) */
 void gx_tev_memo_log(u32 frames);

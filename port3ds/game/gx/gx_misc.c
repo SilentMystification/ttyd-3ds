@@ -258,7 +258,7 @@ void GXProject(f32 x, f32 y, f32 z, const f32 mtx[3][4], const f32* pm, const f3
             gx_rec_call(REC_##id, w_, sizeof(w_) / sizeof(w_[0])); \
             return;                                                \
         }                                                          \
-        if (gx_opt_statecache) {                                   \
+        if (gx_opt_statededup) {                                   \
             const u32 dw_[] = {__VA_ARGS__};                       \
             if (gx_dd_apply_same(REC_##id, dw_, sizeof(dw_) / sizeof(dw_[0]))) { \
                 return;                                            \

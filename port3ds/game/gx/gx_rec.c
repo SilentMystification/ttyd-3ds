@@ -504,6 +504,7 @@ static int dd_same(DdSlot* tbl, u32 gen, u32 id, const u32* w, u32 n) {
  * table is kept by the setters themselves (gx_state.c's REC macros ask before they write), on whichever thread
  * applies calls; with a translator the record's own table has dropped most repeats already. */
 int gx_opt_statecache;
+int gx_opt_statededup;
 static DdSlot* s_dda;
 static u32 s_dda_gen = 1;
 static u32 s_dda_skipped, s_dda_calls;
@@ -1055,6 +1056,7 @@ void gx_rec_init(void) {
         int sc = plat_switch_int("gxstatecache", 0);
         s_dda = sc >= 1 && sc <= 2 ? calloc(DD_SLOTS, sizeof(DdSlot)) : NULL;
         gx_opt_statecache = s_dda != NULL ? sc : 0;
+        gx_opt_statededup = gx_opt_statecache && plat_switch_int("gxstatededup", 0) != 0;
         if (gx_opt_statecache) {
             PLOG_I("gxstatecache=%d: unchanged state calls return early, compiled TEV setups are reused%s",
                    gx_opt_statecache, gx_opt_statecache == 2 ? " (verify)" : "");

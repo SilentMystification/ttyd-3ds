@@ -52,7 +52,7 @@ static void rec(u32 id, const u32* words, u32 n) {
 /* gxstatecache: the call is being applied here; when `gx` holds these words already there is nothing to do */
 #define DD_APPLY(id, ...)                                                            \
     do {                                                                             \
-        if (gx_opt_statecache) {                                                     \
+        if (gx_opt_statededup) {                                                     \
             const u32 dw_[] = {__VA_ARGS__};                                         \
             if (gx_dd_apply_same(REC_##id, dw_, sizeof(dw_) / sizeof(dw_[0]))) {     \
                 return;                                                              \
@@ -85,7 +85,7 @@ static void rec(u32 id, const u32* words, u32 n) {
             gx_rec_call(REC_##id, NULL, 0); \
             return;                      \
         }                                \
-        if (gx_opt_statecache) {         \
+        if (gx_opt_statededup) {         \
             gx_dd_apply_same(REC_##id, NULL, 0); \
         }                                \
     } while (0)
@@ -989,7 +989,7 @@ void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
             gx_rec_call(REC_LoadTexObj, words, sizeof(words) / 4);
             return;
         }
-        if (gx_opt_statecache) {
+        if (gx_opt_statededup) {
             u32 words[1 + sizeof(GxTexObj) / 4];
             words[0] = (u32)id;
             memcpy(words + 1, obj, sizeof(GxTexObj));
@@ -1017,7 +1017,7 @@ void GXLoadTlut(GXTlutObj* tlut_obj, u32 tlut_name) {
         return;
     }
     if (tlut_name < 20) {
-        if (gx_opt_statecache) {
+        if (gx_opt_statededup) {
             u32 words[1 + sizeof(GxTlutObj) / 4];
             words[0] = tlut_name;
             memcpy(words + 1, tlut_obj, sizeof(GxTlutObj));

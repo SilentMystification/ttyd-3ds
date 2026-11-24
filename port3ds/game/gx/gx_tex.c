@@ -105,6 +105,7 @@ typedef struct {
     u32 handle;
     u16 w, h;
     u8 fmt;
+    u32 last_frame; /* last frame the slot was made or sampled */
 } CopyEntry;
 static CopyEntry s_copies[64];
 
@@ -812,6 +813,7 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
         if (s_copies[i].addr == t->image && s_copies[i].handle != 0) {
             *out_w = s_copies[i].w;
             *out_h = s_copies[i].h;
+            s_copies[i].last_frame = s_frame;
             s_last.copy = 1;
             return s_copies[i].handle;
         }
@@ -1099,6 +1101,13 @@ void gx_tex_frame_end(void) {
             entry_free(&s_cache[i]);
         }
     }
+    for (int i = 0; i < (int)(sizeof(s_copies) / sizeof(s_copies[0])); i++) {
+        if (s_copies[i].handle && s_frame - s_copies[i].last_frame > EVICT_FRAMES) {
+            plat_gpu_tex_free(s_copies[i].handle);
+            s_copies[i].handle = 0;
+            s_copies[i].addr = NULL;
+        }
+    }
     s_uploads = 0;
 }
 
@@ -1131,6 +1140,23 @@ u32 gx_tex_copy_target(const void* addr, u16 w, u16 h, u8 fmt) {
          * every other copy format is kept as RGBA8 (RGB5A3's 3-bit alpha has no PICA equivalent) */
         slot->handle = plat_gpu_tex_create_target(pw, ph, fmt == GX_TF_RGB565 ? PLAT_TEXFMT_RGB565 : PLAT_TEXFMT_RGBA8);
         if (slot->handle == 0) {
+            /* out of memory: drop every copy target not used this frame, release them now, retry once */
+            u32 n = 0, kb = 0;
+            for (int i = 0; i < (int)(sizeof(s_copies) / sizeof(s_copies[0])); i++) {
+                CopyEntry* o = &s_copies[i];
+                if (o != slot && o->handle != 0 && o->last_frame != s_frame) {
+                    kb += (u32)o->w * o->h * (o->fmt == GX_TF_RGB565 ? 2 : 4) / 1024;
+                    n++;
+                    plat_gpu_tex_free(o->handle);
+                    o->handle = 0;
+                    o->addr = NULL;
+                }
+            }
+            PLOG_I("GX: copy target memory low: evicted %u stale copy slots, %u KB", (unsigned)n, (unsigned)kb);
+            plat_gpu_tex_reclaim();
+            slot->handle = plat_gpu_tex_create_target(pw, ph, fmt == GX_TF_RGB565 ? PLAT_TEXFMT_RGB565 : PLAT_TEXFMT_RGBA8);
+        }
+        if (slot->handle == 0) {
             plat_fatal("GX: no memory for a %ux%u copy texture", w, h);
         }
     }
@@ -1138,6 +1164,7 @@ u32 gx_tex_copy_target(const void* addr, u16 w, u16 h, u8 fmt) {
     slot->w = pw;
     slot->h = ph;
     slot->fmt = fmt;
+    slot->last_frame = s_frame;
     return slot->handle;
 }
 

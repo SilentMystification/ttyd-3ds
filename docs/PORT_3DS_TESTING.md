@@ -556,6 +556,75 @@ Results (Azahar, US build, 2026-11-23, with the `determ` card model): **9 of 9 s
 
 Behaviour seen, as on the GameCube: a file made by New Game is saved at once and lists as "New" until saved in play; the yes/no of "Create a Save File now?" and "Start with File 1?" start on Yes, the name check, overwrite and erase prompts on No; the game over screen returns to the title by itself; the soft reset quits the port (relaunch request), so a restart is the next boot.
 
+### Side content tests
+
+`tools/port3ds/side_test.py` runs the side-content scenarios of backlog lane B item 5 in Azahar. It works like `systems_test.py`: one `run_azahar.py` run per scenario, under `determ` with `syslog` and `gwdump=30`. It has its own profile (`build/side-profile/`, no save file) and its own results (`build/side-test/<scenario>/`, `results.json`). Exit status 0 when every scenario passes.
+
+```sh
+tools/port3ds/side_test.py                  # all, in order
+tools/port3ds/side_test.py quiz shop        # some
+tools/port3ds/side_test.py --list
+tools/port3ds/side_test.py adhoc --switches "map=gor_03 story=30 hitpos=A_mot_a npcpos hitlog" --until "gwdump f=720 "
+```
+
+How a scenario works:
+
+1. It starts a new game on the map (`map=`, `story=`).
+2. It sets up flags, items, coins and Piantas.
+3. It places Mario next to the thing to use. `marioat=` accepts a hit object name or an NPC slot, and `marioat2=`...`marioat4=` add more placements at later frames, for example after a door.
+4. A short padscript walks him in and presses A.
+5. The dialogue autopilot answers the windows: `mash` presses A through the messages, and `msgkeys` picks choices by their message tag. A choice is moved with the D-pad.
+
+The checks read the `sys:` lines:
+
+- the message tags shown (`sys: msg <tag>`);
+- the choices made (`sys: select <tag> -> N`);
+- the coins and held items;
+- Mario's motion id;
+- the watched story flags (`swwatch=`);
+- the sequence and map changes.
+
+| Scenario | Set-up | What it does | Checks |
+|---|---|---|---|
+| `quiz` | `hei_07` (Shhwonk Fortress), story 30 | A at the Thwomp statue, "take the quiz?" Yes, question 1 (answer 0), "final answer?" Yes, question 2 (cursor down twice: answer 2) | greeting, both questions shown, choices 0 and 2, "right answer" twice, no wrong-answer message |
+| `shop` | `gor_01`, story 30, 100 coins, shop and item tutorials seen (GSWF 0, 235) | door of house 02, A on the Mushroom shelf, Yes; the shopkeeper, Sell, the Mushroom, Yes | 100 → 95 coins and a Mushroom; counter menu choice 1 (Sell); 95 → 97 coins and no item |
+| `cook` | `gor_01`, story 30, Contact Lens delivered (GSWF 1188), a Mushroom | door of house 01, talk to Zess T., Cook? Yes, the Mushroom, Yes | greeting, both Yes, Mushroom taken, a Shroom Fry (0xB3), closing message |
+| `trouble` | `gor_02`, story 30, the Trouble Center lecture heard (GSWF 5374) | door of house 04, A at the board, the list (no mash; stick down twice), trouble 3, Yes; the third stall seller, his four questions | trouble 3's text, GSW 1420 (active trouble) 0 → 3 → 0, GSWF 5377 (solved), 100 → 120 coins, "trouble solved" |
+| `paper_tube` | `gor_02` open ground, Paper and Tube Curses | R held 30 frames; R + five stick circles (45° steps, 2 frames each); B | motion 0x15 (paper), back to 0, 0x16 (tube), back to 0 after B |
+| `boat` | `gor_02`, Boat Curse, on the panel (hit `Ship_Change01`) | Y; B every 20 frames | motion 0x19 (boat), then 0 (docked) |
+| `plane` | `gon_01`, story 60, Plane Curse, on the panel (hit `a_hi`) | Y | motion 0x18 (plane), then 0 (landed) |
+| `parlor_plane` | `yuu_00` warped in, 20 Piantas held | the game makes Mario the plane; A on the result screens; "Play again?" down, A | motion 0x18, Piantas paid out, choice 1 (No), pipe to `gor_03` |
+| `parlor_paper` | `yuu_03` warped in, 20 Piantas | no input: the wind blows Mario off (a lost round); "Play again?" No | the fall, choice 1, pipe to `gor_03` |
+| `parlor_tube` | `yuu_02` warped in, 20 Piantas | roll right; START (the minigame pause window), "Quit?" up, A. The round itself is a 180 s timer, too long for a short run | motion 0x16, the pause window, choice 0, `gor_03` up |
+| `pit` | `jon_00` through its entry pipe, floor 1 | Mario on the floor's enemy (NPC slot 0): battle with `btlauto=perfect`; on the risen pipe, stick down | battle started and won, GSW 1321 (floor) 0 → 1, GSW 33 (deepest) 2, `jon_00` loaded again, floor 2's battle starts |
+
+Test switches added for these (port only, `port3ds/game/test_systems.c`):
+
+| Switch | Effect |
+|---|---|
+| `items=ID,...` | Gives each item (`pouchGetItem`; `0x` hex or decimal), at the `marioat` point |
+| `coins=N`, `piantas=N` | Sets the coins; sets the Pianta Parlor's tokens, held as inside the parlor (taken out: the counter only counts then) |
+| `gsw=I:V,...`, `gswf=I,...` | Sets GSW bytes and GSWF flags while the warp's first map loads, so its set-up script sees them |
+| `marioat=hit:<name>[,dy,dx,dz]` | Mario at a hit object's centre plus the offset; `hit:npc<i>` is NPC slot i's position |
+| `marioat2=...@F` (`3`, `4`) | More placements at game frame F, in the field |
+| `hitpos=name,...`, `npcpos` | Logs hit object centres, and every NPC's slot, name (Shift-JIS as hex) and position, to find where things are |
+| `hitlog` | Logs, on change, the hit objects in front of Mario (what A acts on) and under him |
+| `mash=N` | A every N frames while a message window waits or Mario's controls are off (an event runs) |
+| `msgkeys=<tag>:<k>.<k>,...` | When a window with that tag opens, presses those keys (`a b x y l r z start up down left right`, `w` none) every `msgstep` frames from `msgdelay` frames after it opens; each entry is used once, in order |
+| `nomash=F1-F2,...` | Frames without mash, for a menu the padscript drives (the trouble list) |
+| `swwatch=I,fI,...` | Logs those GSW bytes / GSWF flags on change |
+
+With `syslog` the log also has coins, held items, Pianta tokens, GSW 0, Mario's motion id, the talk target NPC, each event message or choice window (`sys: msg <tag>`, `(choice)` for msgdrv's type 5) and each choice's answer.
+
+Results (Azahar, US build, 2026-11-24): **10 of 11 pass**, 32 to 122 s each.
+
+Found:
+
+- **Port bug, fixed: Zess T.'s cooking list.** `evt_win_item_select` with an item table (Zess T.'s ingredient list, the Contact Lens hand-over) passes a pointer as the list type. `winMgrSelectEntry` (`src/manager/winmgr.c`) tests for that with `type < 0`. That is true for GameCube heap addresses (0x80000000 and up) and false on the port. The pointer then indexed `select_desc_tbl`: Azahar logged unmapped reads at 0x06037D78, and the list never opened, so the cooking stopped after "Cook?". On the port, any type above 0xFF is now a list (`TARGET_PORT` only; the GameCube build still matches 100%).
+- **Open, `parlor_tube`: the Tube Game's quit crashes in `gor_03`.** START, then "Quit?" Yes. The pipe takes Mario back to `gor_03`, and at game frame 1688, 40 frames into the map load, the port stops with `GX: no memory for a 164x210 copy texture` (`GXCopyTex`, called from `dispDraw`). The log at the crash shows linear memory free 139 KiB and QTM on. It happens the same way in every run so far (3 of 3). The Plane Game and Paper Game return to `gor_03` without it. The log and shots are in `build/side-test/parlor_tube/`.
+- **Not covered.** Bunny Teresa's table in `gor_03` (`A_hako_tele_01/02`): none of the placements tried put it in front of Mario (`hitlog` shows `A_hako_dai` or a wall), so the scenarios warp into the minigame maps instead of paying at the table. The Pit runs floor 1's battle and the pipe to floor 2 only; floor 1's battle takes about 3400 frames with `btlauto`.
+- **Behaviour seen, as the game's scripts say.** The Tube Game's "Quit?" choice starts on No. With no input the Paper Game's wind blows Mario off at about frame 1010. The Plane Game's result screens wait for A while Mario's controls are on, so `mash` does not press it; the padscript does.
+
 ### Options
 
 Player settings live in `sdmc:/3ds/ttyd/options.txt` as `key=value` lines ending in `#end`. Deleting the file resets everything to defaults.

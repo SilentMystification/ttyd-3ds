@@ -428,7 +428,8 @@ static struct {
  * msgkeys=<tag>:<k>.<k>...,<tag>:...  when a message or choice window with that tag opens, presses those keys
  *   (a b x y l r z start up down left right; w = no key) one every msgstep=N frames (default 12, held 2) from
  *   msgdelay=N frames after it opened (default 24); mash waits meanwhile. Each entry is used once, in order, so a
- *   tag that opens three times can have three entries. The D-pad moves the cursor of a choice window. */
+ *   tag that opens three times can have three entries. The D-pad moves the cursor of a choice window.
+ * nomash=F1-F2,...  frame ranges without mash, for menus the padscript drives. */
 #define RULES_MAX 24
 #define RULE_KEYS 8
 static struct {
@@ -529,6 +530,31 @@ static int msg_waiting(void) {
     return 0;
 }
 
+/* nomash=F1-F2[,F3-F4...]: game frame ranges where mash presses nothing (the padscript drives a menu) */
+static int nomash(u32 frame) {
+    static int n = -1;
+    static int r[16];
+    int i;
+    if (n < 0) {
+        char v[96], *p;
+        n = 0;
+        if (tst_sw_value("nomash", v, sizeof(v))) {
+            for (p = v; *p != '\0'; p++) {
+                if (*p == '-') {
+                    *p = ',';
+                }
+            }
+            n = parse_ints(v, r, 16) / 2;
+        }
+    }
+    for (i = 0; i < n; i++) {
+        if (frame >= (u32)r[2 * i] && frame <= (u32)r[2 * i + 1]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void autopilot(u32 frame) {
     static int was_on;
     u32 keys = 0;
@@ -553,7 +579,7 @@ static void autopilot(u32 frame) {
                 keys = s_rules[s_run].keys[k];
             }
         }
-    } else if (s_mash > 0 && frame % (u32)s_mash < 2 && (msg_waiting() || marioKeyOffChk())) {
+    } else if (s_mash > 0 && frame % (u32)s_mash < 2 && !nomash(frame) && (msg_waiting() || marioKeyOffChk())) {
         keys = PAD_BUTTON_A;
     }
     tst_set_keys(keys);

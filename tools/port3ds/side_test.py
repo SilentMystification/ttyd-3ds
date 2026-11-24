@@ -215,6 +215,102 @@ def _cook(ctx):
     ctx.check(shot, f"shot of the dish: {rel(shot)}")
 
 
+# Trouble Center (gor_02, house 04), story 30, its lecture marked as heard (GSWF 5374). Mario opens the door,
+# is put in front of the board (A_i04_keizi), walks up to it, A: the trouble list (no mash meanwhile), stick down
+# twice, A: trouble 3 (the Fire Flower price check), "Accept?" Yes: GSW 1420 (active trouble) = 3. Then he is put
+# in front of the third stall seller (NPC slot 9), A: the trouble's talk, four choices, 20 coins, GSWF 5377 (solved).
+@scenario("trouble", "map=gor_02 story=30 party=1 gswf=5374 swwatch=1420,f5377 mash=10 nomash=1060-1220 "
+          "marioat=hit:A_ie_04_doa01,-29,0,30 marioat2=hit:A_i04_keizi,-84,0,31@1000 marioat3=hit:npc9,0,0,40@1700 "
+          "shots=60 shotfrom=1060",
+          pad=st.pad([(710, "cu", 4), (720, "a", 3), (1030, "cu", 15), (1060, "a", 3), (1120, "cd", 3),
+                      (1140, "cd", 3), (1160, "a", 3), (1730, "cu", 3), (1740, "a", 3)]),
+          until=until_frame(2250), doc="Trouble Center: accept trouble 3 at the board, solve it, 20 coins")
+def _trouble(ctx):
+    seen(ctx, "irai_help_03", "trouble 3's description (picked from the list)")
+    chose(ctx, "irai_01", 0, "(accept: Yes) ")
+    active = watched(ctx.log, "gsw 1420")
+    ctx.check([v for f, v in active] == [0, 3, 0], f"active trouble 0 -> 3 -> 0 (GSW 1420: {active})")
+    seen(ctx, "irai_03_00", "the seller's trouble talk")
+    solved = watched(ctx.log, "gswf 5377")
+    ctx.check(solved and solved[-1][1] == 1, f"trouble 3 solved (GSWF 5377: {solved})")
+    coins = values(ctx.log, "coins")
+    ctx.check(coins and coins[-1][1] == 120, f"20 coins reward: 100 -> {last(coins)}")
+    seen(ctx, "sys_request_finish", "'Trouble solved'")
+    shot = shot_after(ctx, 1080, 120)
+    ctx.check(shot, f"shot of the trouble list: {rel(shot)}")
+
+
+MOT_STAY, MOT_SLIT, MOT_ROLL, MOT_PLANE, MOT_SHIP = 0x0, 0x15, 0x16, 0x18, 0x19
+# the stick turned in a circle in 45-degree steps (2 frames each) with R held: marioGetRub counts turns
+CIRCLE = ["cu", "cu+cr", "cr", "cr+cd", "cd", "cd+cl", "cl", "cl+cu"]
+
+
+def circles(t, n):
+    ev = []
+    for c in range(n):
+        for k in CIRCLE:
+            ev.append((t, "r+" + k, 2))
+            t += 2
+    return ev, t
+
+
+def motions(ctx):
+    return [(f, v) for f, v in values(ctx.log, "motion")]
+
+
+def motion_after(ctx, want, frame=0):
+    f = [fr for fr, v in motions(ctx) if v == want and fr >= frame]
+    return f[0] if f else None
+
+
+_tube, _t = circles(820, 5)
+# Paper (R held: thin paper Mario) and tube (paper, then R held while the stick turns three circles; B unrolls).
+# The Paper and Tube Curses are given; open ground in gor_02.
+@scenario("paper_tube", "map=gor_02 story=30 party=1 items=2,3 marioat=-150,0,50 shots=30 shotfrom=720",
+          pad=st.pad([(720, "r", 30)] + _tube + [(_t, "r", 10), (980, "b", 3)]), until=until_frame(1110),
+          doc="transformations: paper (R) and tube (R + stick circles), back to standing")
+def _paper_tube(ctx):
+    p = motion_after(ctx, MOT_SLIT)
+    ctx.check(p is not None and p <= 725, f"R held at frame 720: paper mode (motion 0x15) at {p}")
+    back = motion_after(ctx, MOT_STAY, p or 0)
+    ctx.check(back is not None and back < 820, f"R released: standing again (motion 0) at {back}")
+    t = motion_after(ctx, MOT_ROLL)
+    ctx.check(t is not None and 820 < t < 900, f"R + stick circles: tube mode (motion 0x16) at {t}")
+    end = motion_after(ctx, MOT_STAY, t or 10 ** 9)
+    ctx.check(end is not None and end > 980, f"B: unrolled, standing again at {end}")
+    for f, what in ((p, "paper"), (t, "tube")):
+        shot = shot_after(ctx, (f or 0) + 10, 40)
+        ctx.check(shot, f"{what} shot: {rel(shot)}")
+
+
+# Boat: the Boat Curse given, Mario put on the Rogueport harbour's boat panel (gor_02 hit Ship_Change01), Y: the
+# curse's transformation scene, then the paper boat on the water; B (pressed every 20 frames) docks him at the panel.
+@scenario("boat", "map=gor_02 story=30 party=1 items=5 marioat=hit:Ship_Change01,65 shots=30 shotfrom=720",
+          pad=st.pad([(720, "y", 3)] + [(880 + 20 * i, "b", 3) for i in range(12)]), until=until_frame(1200),
+          doc="transformation: boat at the gor_02 boat panel (Y), docked again (B)")
+def _boat(ctx):
+    s = motion_after(ctx, MOT_SHIP)
+    ctx.check(s is not None and s <= 725, f"Y on the panel: boat (motion 0x19) at {s}")
+    end = motion_after(ctx, MOT_STAY, (s or 0) + 1)
+    ctx.check(end is not None and end > 880, f"B at the panel: docked, standing at {end}")
+    shot = shot_after(ctx, 960, 60)
+    ctx.check(shot, f"boat shot: {rel(shot)}")
+
+
+# Plane: the Plane Curse given, Mario put on Hooktail Castle's plane panel (gon_01 hit a_hi; story 60, after the
+# castle's opening scene), Y: the transformation scene, the glide, the landing (standing again).
+@scenario("plane", "map=gon_01 story=60 party=1 items=4 marioat=hit:a_hi,10 shots=30 shotfrom=720",
+          pad=st.pad([(720, "y", 3)]), until=until_frame(1110),
+          doc="transformation: paper plane from the gon_01 plane panel (Y), glide and landing")
+def _plane(ctx):
+    s = motion_after(ctx, MOT_PLANE)
+    ctx.check(s is not None and s <= 725, f"Y on the panel: plane (motion 0x18) at {s}")
+    end = motion_after(ctx, MOT_STAY, (s or 0) + 1)
+    ctx.check(end is not None and end > (s or 0) + 120, f"landed, standing at {end}")
+    shot = shot_after(ctx, 930, 60)
+    ctx.check(shot, f"glide shot: {rel(shot)}")
+
+
 def run_scenario(build, sc):
     dest = OUT / sc["name"]
     shutil.rmtree(dest, ignore_errors=True)

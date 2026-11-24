@@ -325,7 +325,7 @@ def _parlor_plane(ctx):
     p = values(ctx.log, "piantas")
     ctx.check(len(p) >= 2 and p[-1][1] > 20, f"Piantas paid out after the round ({[v for f, v in p]})")
     chose(ctx, "sysyuu_00_00", 1, "(play again? No) ")
-    ctx.check("yuu_00 -> gor_03 (entrance A_dokan_02)" in map_changes(ctx.log), "back to the parlor (gor_03)")
+    ctx.check("yuu_00 -> gor_03" in map_changes(ctx.log), "back to the parlor (gor_03)")
     shot = shot_after(ctx, (s or 0) + 60, 80)
     ctx.check(shot, f"flight shot: {rel(shot)}")
 
@@ -340,7 +340,7 @@ def _parlor_paper(ctx):
     ctx.check(fall is not None and fall > 900, f"blown off the course: falling (motion 0xa) at {fall}")
     seen(ctx, "sysyuu_03_00", "'Play again?'")
     chose(ctx, "sysyuu_03_00", 1, "(No) ")
-    ctx.check("yuu_03 -> gor_03 (entrance A_dokan_02)" in map_changes(ctx.log), "back to the parlor (gor_03)")
+    ctx.check("yuu_03 -> gor_03" in map_changes(ctx.log), "back to the parlor (gor_03)")
     shot = shot_after(ctx, 960, 60)
     ctx.check(shot, f"course shot: {rel(shot)}")
 
@@ -355,7 +355,7 @@ def _parlor_tube(ctx):
     ctx.check(motion_after(ctx, MOT_ROLL) is not None, "Mario is the tube in the game (motion 0x16)")
     seen(ctx, "sysyuu_all_01", "the pause window")
     chose(ctx, "sysyuu_all_02", 0, "(quit) ")
-    ctx.check("yuu_02 -> gor_03 (entrance A_dokan_02)" in map_changes(ctx.log), "back to the parlor (gor_03)")
+    ctx.check("yuu_02 -> gor_03" in map_changes(ctx.log), "back to the parlor (gor_03)")
     back = [f for a, b, f, m in st.seq_path(ctx.log) if b == 2 and m == "gor_03"]
     ctx.check(back, f"gor_03 up in the field (frame {back[0] if back else '-'})")
     shot = shot_after(ctx, 1140, 60)

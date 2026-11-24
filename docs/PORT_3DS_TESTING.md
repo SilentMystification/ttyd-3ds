@@ -583,7 +583,14 @@ Test switches added for these (port only, `port3ds/game/test_systems.c`):
 
 With `syslog` the log also has coins, held items, Pianta tokens, GSW 0, Mario's motion id, the talk target NPC, each event message or choice window (`sys: msg <tag>`, `(choice)` for msgdrv's type 5) and each choice's answer.
 
-Results are below.
+Results (Azahar, US build, 2026-11-24): **10 of 11 pass**, 32 to 122 s each.
+
+Found:
+
+- **Port bug, fixed: Zess T.'s cooking list.** `evt_win_item_select` with an item table (Zess T.'s ingredient list, the Contact Lens hand-over) passes a pointer as the list type. `winMgrSelectEntry` (`src/manager/winmgr.c`) tests for that with `type < 0`. That is true for GameCube heap addresses (0x80000000 and up) and false on the port. The pointer then indexed `select_desc_tbl`: Azahar logged unmapped reads at 0x06037D78, and the list never opened, so the cooking stopped after "Cook?". On the port, any type above 0xFF is now a list (`TARGET_PORT` only; the GameCube build still matches 100%).
+- **Open, `parlor_tube`: the Tube Game's quit crashes in `gor_03`.** START, then "Quit?" Yes. The pipe takes Mario back to `gor_03`, and at game frame 1688, 40 frames into the map load, the port stops with `GX: no memory for a 164x210 copy texture` (`GXCopyTex`, called from `dispDraw`). The log at the crash shows linear memory free 139 KiB and QTM on. It happens the same way in every run so far (3 of 3). The Plane Game and Paper Game return to `gor_03` without it. The log and shots are in `build/side-test/parlor_tube/`.
+- **Not covered.** Bunny Teresa's table in `gor_03` (`A_hako_tele_01/02`): none of the placements tried put it in front of Mario (`hitlog` shows `A_hako_dai` or a wall), so the scenarios warp into the minigame maps instead of paying at the table. The Pit runs floor 1's battle and the pipe to floor 2 only; floor 1's battle takes about 3400 frames with `btlauto`.
+- **Behaviour seen, as the game's scripts say.** The Tube Game's "Quit?" choice starts on No. With no input the Paper Game's wind blows Mario off at about frame 1010. The Plane Game's result screens wait for A while Mario's controls are on, so `mash` does not press it; the padscript does.
 
 ### Options
 

@@ -362,6 +362,33 @@ def _parlor_tube(ctx):
     ctx.check(shot, f"rolling shot: {rel(shot)}")
 
 
+# Pit of 100 Trials: warp into jon_00 through its entry pipe (dokan_2), floor 1 (GSW 1321 = 0). Mario is put on
+# the floor's enemy (NPC slot 0, a Gloomba): a first strike and the battle, run by btlauto=perfect. Back in the
+# field the exit pipe rises (about 3 s); Mario is put on it (hit a_dokan_1), stick down: floor 2 (GSW 1321 = 1,
+# deepest floor GSW 33 = 2), the same map loaded again, and floor 2's enemy starts its battle.
+@scenario("pit", "map=jon_00,dokan_2 story=30 party=1 btlauto=perfect swwatch=1321,33 "
+          "marioat2=hit:npc0,0@800 marioat3=hit:a_dokan_1,40@4400 shots=60 shotfrom=820",
+          pad=st.pad([(4440, "cd", 30)]), until=until_frame(4800), timeout=900,
+          doc="Pit of 100 Trials: floor 1 battle (btlauto), the pipe, floor 2 and its battle")
+def _pit(ctx):
+    path = st.seq_path(ctx.log)
+    battles = [f for a, b, f, m in path if (a, b) == (2, 4) and m == "jon_00"]
+    ends = [f for a, b, f, m in path if (a, b) == (4, 2) and m == "jon_00"]
+    ctx.check(battles, f"floor 1 battle started (frame {battles[0] if battles else '-'})")
+    ctx.check(re.search(r"btlauto: action command ends at frame \d+, result 2", ctx.log),
+              "btlauto: action commands succeeded")
+    ctx.check(ends, f"battle won, back on floor 1 (frame {ends[0] if ends else '-'})")
+    floor = watched(ctx.log, "gsw 1321")
+    ctx.check([v for f, v in floor] == [0, 1], f"the pipe: floor 1 -> 2 (GSW 1321: {floor})")
+    deep = watched(ctx.log, "gsw 33")
+    ctx.check(deep and deep[-1][1] == 2, f"deepest floor 2 (GSW 33: {deep})")
+    reload = [f for a, b, f, m in path if (a, b) == (2, 3) and m == "jon_00"]
+    ctx.check(reload, f"jon_00 loaded again for floor 2 (frame {reload[0] if reload else '-'})")
+    ctx.check(len(battles) >= 2, f"floor 2's enemy: its battle started (frames {battles})")
+    shot = shot_after(ctx, (battles[0] if battles else 0) + 200, 60)
+    ctx.check(shot, f"battle shot: {rel(shot)}")
+
+
 def run_scenario(build, sc):
     dest = OUT / sc["name"]
     shutil.rmtree(dest, ignore_errors=True)

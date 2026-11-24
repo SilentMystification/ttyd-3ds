@@ -105,6 +105,7 @@ static GxT gx_finish(GSPGPU_Event ev, Result rc, u64 t0) {
 }
 
 static bool gpu_dead(void) { return s_timeouts >= 3; }
+void gpu_clear_timeouts(void) { s_timeouts = 0; }
 
 static GxT gx_texcopy(void* dst, const void* src, u32 n) {
     u64 t0 = gx_start(GSPGPU_EVENT_PPF);
@@ -286,6 +287,9 @@ bool gpu_init(void) {
         info("gpu", "C3D_Init failed");
         return false;
     }
+    /* C3D_Init binds citro3d's GX queue (32 entries, emptied only by
+     * C3D_FrameBegin); every GX_* call here goes straight to GSP instead. */
+    GX_BindQueue(NULL);
     s_dvlb = DVLB_ParseFile((u32*)qtmbench_shbin, qtmbench_shbin_size);
     shaderProgramInit(&s_prog);
     shaderProgramSetVsh(&s_prog, &s_dvlb->DVLE[0]);
@@ -532,6 +536,11 @@ static void test_tex(MemId m) {
 /* The command list itself in memory m: an immediate-mode grid (the vertex
  * data is inside the list), recorded in linear memory and copied to m. */
 static void test_cmdlist(MemId m) {
+    if (g_opt.emulator && m == MEM_QTM) {
+        /* Azahar (2026-11) segfaults on a command list at a QTM address. */
+        rec("gpu_check", "cmdlist", g_mem[m].name, -1, 0, NAN, "badpx", NAN, "skipped in the emulator (crashes Azahar)");
+        return;
+    }
     list_begin(s_rt_vram, false);
     C3D_ImmDrawBegin(GPU_TRIANGLES);
     for (u32 i = 0; i < GRID_VERTS; i++) {
@@ -752,8 +761,13 @@ static void coh_one(MemId m, u32 n) {
         count_ab(dst, words, A, B, &na, &nb);
         snprintf(note, sizeof(note), "new %lu old %lu of %lu words%s", (unsigned long)na, (unsigned long)nb,
                  (unsigned long)words, t.ok ? "" : " (copy failed)");
+        bool delivered = t.ok && na + nb == words; /* else the copy itself failed */
+        if (t.ok && !delivered) {
+            snprintf(note, sizeof(note), "GPU copy did not deliver: new %lu old %lu of %lu words", (unsigned long)na,
+                     (unsigned long)nb, (unsigned long)words);
+        }
         rec("coherency", flush ? "cpu_wr_flush_gpu_rd" : "cpu_wr_gpu_rd_noflush", g_mem[m].name, -1, n,
-            t.ok ? 100.0 * nb / words : NAN, "%stale", NAN, note);
+            delivered ? 100.0 * nb / words : NAN, "%stale", NAN, note);
         cache_flush(p, n);
     }
     /* GPU writes, CPU reads, without and with an invalidate. */
@@ -765,14 +779,15 @@ static void coh_one(MemId m, u32 n) {
     for (u32 i = 0; i < words; i++) {
         stale += p[i] != 0x5EED5EEDu;
     }
-    snprintf(note, sizeof(note), "%lu of %lu words still old%s", (unsigned long)stale, (unsigned long)words,
-             t.ok ? "" : " (fill failed)");
-    rec("coherency", "gpu_wr_cpu_rd_noinval", g_mem[m].name, -1, n, t.ok ? 100.0 * stale / words : NAN, "%stale",
-        NAN, note);
     cache_inval(p, n);
-    stale = count_ne(p, words, 0x5EED5EEDu);
-    snprintf(note, sizeof(note), "%lu of %lu words old", (unsigned long)stale, (unsigned long)words);
-    rec("coherency", "gpu_wr_inval_cpu_rd", g_mem[m].name, -1, n, t.ok ? 100.0 * stale / words : NAN, "%stale", NAN,
+    u32 stale2 = count_ne(p, words, 0x5EED5EEDu);
+    bool filled = t.ok && stale2 == 0; /* else the fill itself did not reach memory */
+    snprintf(note, sizeof(note), "%lu of %lu words still old%s", (unsigned long)stale, (unsigned long)words,
+             !t.ok ? " (fill failed)" : filled ? "" : " (the fill did not reach memory)");
+    rec("coherency", "gpu_wr_cpu_rd_noinval", g_mem[m].name, -1, n, filled ? 100.0 * stale / words : NAN, "%stale",
+        NAN, note);
+    snprintf(note, sizeof(note), "%lu of %lu words old", (unsigned long)stale2, (unsigned long)words);
+    rec("coherency", "gpu_wr_inval_cpu_rd", g_mem[m].name, -1, n, t.ok ? 100.0 * stale2 / words : NAN, "%stale", NAN,
         note);
     memset(p, 0, n);
     cache_flush(p, n);

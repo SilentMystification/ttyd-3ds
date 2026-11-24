@@ -135,7 +135,7 @@ static bool aggr_start(AggrRun* r, Aggr a) {
         r->g.kind = kind[i];
         r->g.mem = mem[i];
         r->g.stop = &r->stop;
-        r->gt = spawn_on_core(s_gpu_core, gpu_loop_main, &r->g, PRIO_WORK);
+        r->gt = spawn_on_core(s_gpu_core, gpu_loop_main, &r->g, PRIO_WORK - 1);
         r->on = r->gt != NULL;
         return r->on;
     }
@@ -259,7 +259,7 @@ static VResult measure(Victim v) {
         if (s_gpu_core < 0) {
             return res;
         }
-        Thread t = spawn_on_core(s_gpu_core, gpu_loop_main, &g, PRIO_WORK);
+        Thread t = spawn_on_core(s_gpu_core, gpu_loop_main, &g, PRIO_WORK - 1);
         if (t == NULL) {
             return res;
         }
@@ -352,7 +352,11 @@ void contend_suite(void) {
         return;
     }
     status("contention matrix");
-    s_gpu_core = g_opt.core1 ? 1 : (g_opt.core2 ? 2 : -1);
+    /* Azahar delivers GSP completions only to threads on core 0 (2026-11): there
+     * the feeder runs on core 0, above the workers. */
+    s_gpu_core = g_opt.gpu_core >= 0 ? g_opt.gpu_core
+                 : g_opt.emulator    ? 0
+                                     : (g_opt.core1 ? 1 : (g_opt.core2 ? 2 : -1));
     info("contend_gpu_core", "%d (GPU feeder threads; -1 = none, GPU rows skipped)", s_gpu_core);
     /* the chains: heap 4..8 MiB, QTM 1..2 MiB (the GPU loads use QTM 0..1 MiB) */
     s_chain_heap = chase_build((u32*)(g_mem[MEM_HEAP].base + 4 * QB_MIB), 4 * QB_MIB,
@@ -367,6 +371,18 @@ void contend_suite(void) {
     for (int m = MEM_LINEAR; m < MEM_COUNT; m++) {
         ok_tex[m] = gpu_load_prepare(GLOAD_TEX, (MemId)m);
         ok_vtx[m] = gpu_load_prepare(GLOAD_VTX, (MemId)m);
+    }
+    /* each load once from this thread: it works, and its time alone */
+    for (int m = MEM_LINEAR; m < MEM_COUNT; m++) {
+        for (int k = 0; k < 2; k++) {
+            bool ok = k == 0 ? ok_tex[m] : ok_vtx[m];
+            if (!ok) {
+                continue;
+            }
+            double us = gpu_load_once(k == 0 ? GLOAD_TEX : GLOAD_VTX, (MemId)m);
+            rec("contend_raw", k == 0 ? "load_tex" : "load_vtx", g_mem[m].name, -1, gpu_load_bytes(k == 0 ? GLOAD_TEX : GLOAD_VTX),
+                us < 0 ? NAN : us, "us", NAN, us < 0 ? "timed out" : "one run, no aggressor");
+        }
     }
     /* NDSP once, to know whether it starts at all (needs sdmc:/3ds/dspfirm.cdc) */
     s_ndsp_ok = ndsp_start();
@@ -394,6 +410,13 @@ void contend_suite(void) {
                 (a == A_GPU_VTX_QTM && !ok_vtx[MEM_QTM])) {
                 continue;
             }
+            if (g_opt.emulator && (a == A_GPU_VTX_LIN || a == A_GPU_VTX_QTM)) {
+                /* Azahar stalls for minutes on this pairing (2026-11); console only */
+                rec("contend_raw", k_vict_name[v], k_aggr_name[a], -1, 0, NAN, k_vict_unit[v], NAN,
+                    "skipped in the emulator");
+                continue;
+            }
+            gpu_clear_timeouts();
             AggrRun ar;
             if (!aggr_start(&ar, (Aggr)a)) {
                 rec("contend_raw", k_vict_name[v], k_aggr_name[a], -1, 0, NAN, k_vict_unit[v], NAN,

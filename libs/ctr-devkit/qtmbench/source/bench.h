@@ -48,6 +48,7 @@ typedef struct {
     u32 chase_loads;     /* loads per latency point */
     u32 window_ms;       /* concurrency / contention measuring window */
     bool core1, core2;   /* cores usable for tests */
+    int gpu_core;        /* core of the GPU feeder threads in contend; -1 = core 1 */
     bool pte;            /* walk the page tables (svcBackdoor) at the end */
     char only[64];       /* comma list of suites, "" = all */
     bool autoexit;
@@ -137,6 +138,7 @@ typedef enum { GLOAD_TEX, GLOAD_VTX, GLOAD_DT, GLOAD_COUNT } GLoad;
 bool gpu_load_prepare(GLoad kind, MemId src);
 double gpu_load_once(GLoad kind, MemId src);
 u32 gpu_load_bytes(GLoad kind);
+void gpu_clear_timeouts(void); /* the contention cells start fresh */
 
 /* contend.c ------------------------------------------------------------ */
 void contend_suite(void);

@@ -19,6 +19,7 @@
  *   trials=N      trials per bandwidth point (default 3)
  *   window=ms     concurrency and contention window (default 250)
  *   chase=N       loads per latency point (default 262144)
+ *   gpucore=N     core of the GPU feeder threads in contend (default 1)
  *   devupdateport=N  the devupdate server port (default 5050)
  *   nocore1 nocore2 nopte norun autoexit
  */
@@ -200,6 +201,7 @@ int main(int argc, char** argv) {
     g_opt.window_ms = (u32)sw_int("window", g_opt.quick ? 30 : 250);
     g_opt.chase_loads = ((u32)sw_int("chase", g_opt.quick ? 8192 : 262144) + 7) & ~7u;
     g_opt.pte = !sw_has("nopte");
+    g_opt.gpu_core = (int)sw_int("gpucore", -1);
     g_opt.autoexit = sw_has("autoexit");
     sw_value("only", g_opt.only, sizeof(g_opt.only));
     if (g_opt.trials < 1) {

@@ -620,7 +620,48 @@ So core 0 would land near the `gxnull` floor (26 ms in gor_01, 10-16 ms elsewher
 4. `gxcache=2` sweep with the switch on: 0 mismatched, 0 stale.
 5. Same-build A/B in the ten scenes: core-0 busy, translator, render and frame ms; the default flips only if no scene gets slower, hei_01 included.
 
- A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.
+## Core-2 round 2: results (2026-11-24)
+
+Built: stage 1 (`gxbatch`) and part of stage 2 (`gxstatecache`, `gxstatededup`). Stages 3 to 5 are not built. All numbers are Azahar's (ratios, not console times), default `gxthread=0`, from `tools/port3ds/gx_perf_ab.py` (same build, switch off against on, windows ending at frames 722 to 841, one run per cell). The runs used `--long 140` to `280`: the warp is about 40 s of wall time in, and the machine ran other agents' builds.
+
+**Stage 1, `gxbatch=1`** (`gx_dlcache.c`, `gx_vsh.c`, `gx_draw.c`, `CMD_VSH_DRAWP` in `plat/gpu.c`):
+
+| Scene | frame off -> on (ms) | core-0 busy off -> on (ms) | render work (ms) | batches, lists drawn through them per frame |
+|---|---|---|---|---|
+| gor_01 | 80.5 -> 50.9 | 67.8 -> **48.0** (-29%) | 15.3 -> 15.3 | 245, 4782 |
+| gon_02 | 44.1 -> 39.9 | 38.1 -> **28.1** (-26%) | 6.8 -> 6.9 | 132, 2514 |
+| aaa_00 | 48.1 -> 33.4 | 33.8 -> **23.6** (-30%) | 8.1 -> 8.1 | 190, 2600 |
+| tik_01 | 33.4 -> 22.0 | 19.9 -> **16.1** (-19%) | 4.5 -> 4.5 | 49, 933 |
+| hei_01 | 33.6 -> 33.6 | 23.6 -> **22.3** (-6%) | 6.0 -> 6.1 | 140, 471 |
+| jin_00 | 41.1 -> 33.4 | 32.2 -> **24.8** (-23%) | 6.3 -> 6.3 | 127, 2012 |
+| effects battle | 44.9 -> 39.6 | 38.4 -> **28.5** (-26%) | 7.0 -> 7.0 | 132, 2514 |
+| eki_00 | 33.4 -> 29.3 | 20.0 -> **17.1** (-15%) | 6.0 -> 5.9 | 110, 772 |
+| usu_00 | 66.9 -> 50.2 | 56.9 -> **41.2** (-28%) | 12.7 -> 12.7 | 142, 3790 |
+| pik_00 | 83.6 -> 66.9 | 80.0 -> **56.8** (-29%) | 15.7 -> 15.7 | 363, 5794 |
+
+- No scene is slower; hei_01 keeps its frame (vblank-bound) and its busy time drops.
+- There is no translator in this layout (`gxthread=0`), so the translator column of the brief is 0. The pipelined layout (`gxthread=2 gxpipeline=1`) was not measured again.
+- The render thread is unchanged: it already drew merged draws; the batch only stops the index copies and the per-list work on the recording side.
+- In gor_01, 4782 of 5007 cache hits go through 245 batches; the other 225 are lists in memory the registry does not cover (hashed on the per-list path as before). In the steady state no batch is formed, killed or refused (one "vertex state" refusal per window).
+- Counters: a `gxbatch frame N:` line every `gxthreadstats` frames.
+
+Identity, `determ`, 6 consecutive shots, byte for byte, off against on: gor_01 6 of 6 (`gxbatch=1`), the effects battle 6 of 6 (`gxbatch=1`, frames 900 to 905), hei_01 6 of 6 (`gxbatch=2`, the verify mode: every member checked the per-list way, hashes included, **0 failures**).
+
+**Stage 2 as measured** (on top of `gxbatch=1`):
+
+| Switches | gor_01 busy | effects battle busy | What it showed |
+|---|---|---|---|
+| `gxbatch=1` | 48.2 | 28.7 | |
+| + `gxstatecache=1` (compiled TEV setups kept; the key is compared in full) | **44.5** (-8%) | **27.2** (-5%) | every build reuses a kept setup (545 reused, 0 compiled per frame in gor_01); `gxstatecache=2` compiled each again: 0 mismatches |
+| + `gxstatecache=1 gxstatededup=1` (setters whose words are in force return early) | 55.1 (**+14%**) | 32.0 (+11%) | 17441 of 23564 state calls per frame return early, but the table lookup and compare on 23.5 K calls cost more than the setters they skip, and the state builds stay at 545 a frame: the calls that remain are real changes. A loss; it stays off |
+
+So the plan's "a setter compares and stores" does not pay through the record's dedup table. What is left of the state path is about 545 real rebuilds a frame: texture lookups, the pixel-pipeline fields, and `plat_gpu_set_state`'s compares. The next step there is the plan's per-class dirty bits with the compare inline in each setter, not built.
+
+**Not built:** per-class state rebuild, stage 3 (render thread writing PICA registers), stage 4 (immediate mode written in PICA form), stage 5 (one hop, `gx_rec.c` removed). **Not run:** `gw_diff.py` on the 1600-frame padscript, `vsh_accept.py` (the byte-identical `determ` shots are the stricter image test), the pipelined layout with the new switches, a PC-sample profile with the switches on. `gxcache=2` and `gxbatch` exclude each other; `gxbatch=2` is the batch's own check.
+
+## Risks of the cache
+
+- **Hash collisions.** A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.
 - **Memory.** Up to 8 MB of regular heap by default, plus 1.3 MB of static tables and about 1 MB of capture buffers. If `malloc` fails, the entry is dropped and counted (`alloc-fail`); the list is still drawn. gon_02 reached the budget, and LRU kept up (`full 0`).
 - **Validation cost.** The cache saves less than the decode because every hit is fully checked (see Results). Large indexed meshes get cheaper per vertex; tiny lists stay dominated by per-call costs.
 - **Not covered by a test here:** a list rewritten in place, or an array rewritten between frames, in a real scene. None changed in the four measured scenes. The code paths (changed, then dynamic after 4 changes) ran only in the verify mode's comparisons, not with real changes. A dedicated test would draw a list, change one byte of it and of its array, and expect `changed 1` and the new picture.

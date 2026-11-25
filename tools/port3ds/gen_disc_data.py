@@ -57,8 +57,8 @@ US_ARENA_HI = 0x817EE1A0  # G8ME01: MEM_TOP - the disc's max FST size (rounded u
 # release versions and use the US stand-in.
 ARENA_HI = {
     "G8ME01": US_ARENA_HI,
-    "G8MJ01": None,  # JP: fill from the JP disc (gen_disc_data.py --print-arena iso/G8MJ01.iso)
-    "G8MP01": None,  # PAL: fill from the PAL disc (gen_disc_data.py --print-arena iso/G8MP01.iso)
+    "G8MJ01": 0x817EE740,  # JP: from the JP disc (gen_disc_data.py --print-arena iso/G8MJ01.iso), 2026-11-24
+    "G8MP01": 0x817E8020,  # PAL: from the PAL disc (gen_disc_data.py --print-arena iso/G8MP01.iso), 2026-11-24
 }
 
 

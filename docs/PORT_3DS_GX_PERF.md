@@ -706,6 +706,25 @@ Same-build A/B, `tools/port3ds/gx_perf_ab.py`, windows ending at frames 722 to 8
 
 `tools/port3ds/determ_ab.py` (new): `determ` shots of two switch sets of one build, compared byte for byte, with a content line per shot (share of pixels off the commonest colour, number of colours), so a blank shot is visible.
 
+### `gxdirty` remaining gates (2026-11-24, with `gxbatch=1 gxstatecache=1` as the defaults)
+
+Build `ff42ccc` (the new defaults), release, `gxthread=0`, `gxdirty=0` against `gxdirty=1`, no other switch:
+
+- **`gw_diff.py` on the 1600-frame padscript** (`map=gor_01 story=30 determ gwdump=10` and the A2 padscript, two Azahar runs to frame 1600, `--logs`): `gw_diff: A 160 records, B 160 records` / `gw_diff: 160 records equal (f 10..1600, fields compared: 23)`.
+- **`determ`** (`determ_ab.py`, shots 780 to 785) in the six scenes not run before: gon_02, tik_01, jin_00, eki_00, usu_00, pik_00 **6 of 6 byte-identical each** (36 of 36). Every shot has content (69 to 87% of pixels off the commonest colour, 10 500 to 78 000 colours).
+- **Same-build A/B** (`gx_perf_ab.py`, windows ending at frames 722 to 841, one run per cell):
+
+| Scene | frame A -> B (ms) | core-0 busy A -> B (ms) | render (ms) |
+|---|---|---|---|
+| gon_02 | 39.0 -> 29.4 | 27.2 -> **22.8** (-16%) | 6.9 -> 6.9 |
+| tik_01 | 20.4 -> 16.7 | 15.7 -> **12.8** (-18%) | 4.5 -> 4.4 |
+| jin_00 | 33.4 -> 33.4 | 23.9 -> **20.0** (-16%) | 6.3 -> 6.3 |
+| eki_00 | 19.5 -> 16.7 | 16.0 -> **12.8** (-20%) | 6.0 -> 5.9 |
+| usu_00 | 50.2 -> 37.1 | 39.3 -> **31.4** (-20%) | 12.8 -> 12.8 |
+| pik_00 | 66.9 -> 50.2 | 54.3 -> **44.9** (-17%) | 15.7 -> 15.7 |
+
+No scene is slower. With the four scenes above, `gxdirty=1` is now measured in all ten scenes. **Not run:** `vsh_accept.py`, the `gxcache=2` sweep with `gxdirty=1`, `gxthread=2` with `gxdirty`. Default stays 0 (owner's decision).
+
 ## Risks of the cache
 
 - **Hash collisions.** A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.

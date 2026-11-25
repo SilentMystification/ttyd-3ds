@@ -11,6 +11,7 @@ Every agent brief points here. These rules are owner decisions; they override an
 - Forbidden: `sleep` loops, `while ! test -f ...; do sleep; done`, repeated status checks, re-reading a log to see whether a job has finished.
 - Before the final report, stop every background job you started (TaskStop). A job still running after the report wakes you again when it exits, and every wake reloads your full context.
 - A build may wait for a build slot (at most 2 machine-wide). That is normal; it is not stuck.
+- Test builds: `tools/port3ds/build.sh --no-cia` (3dsx only, saves 70-100 s of makerom). Build the CIA only when the task needs it.
 
 ## Emulator runs
 

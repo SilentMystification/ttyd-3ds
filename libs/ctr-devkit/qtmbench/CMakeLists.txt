@@ -28,7 +28,7 @@ add_executable(qtmbench
     source/contend.c
     source/kern.s)
 target_compile_options(qtmbench PRIVATE $<$<COMPILE_LANGUAGE:C>:-O2 -g -Wall -Wextra -Werror -Wno-unused-parameter>)
-target_link_libraries(qtmbench PRIVATE qtmbench_shader_bin ctrdk_devupdate ctrdk_crash ctrdk_perf citro3d ctru m)
+target_link_libraries(qtmbench PRIVATE qtmbench_shader_bin ctrdk_devupdate ctrdk_crash ctrdk_perf ctrdk_gpuprobe citro3d ctru m)
 ctrdk_wrap_svcbreak(qtmbench)
 ctrdk_build_stamp(qtmbench)
 

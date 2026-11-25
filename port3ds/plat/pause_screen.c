@@ -29,8 +29,8 @@ static void grey_buffer(u8* fb, u16 w, u16 h, int bpp) {
     }
 }
 
-void plat_pause_grey(void) {
-    plat_gpu_sync();
+/* The grey itself. The caller has made sure that the render thread and the GPU are idle. */
+static void pause_grey_idle(void) {
     gspWaitForVBlank();
     gspWaitForVBlank(); /* the last frame's transfer has landed and been shown */
     GSPGPU_FramebufferFormat fmt = gfxGetScreenFormat(GFX_TOP);
@@ -58,6 +58,11 @@ void plat_pause_grey(void) {
     PLOG_I("pause: top screen greyed (%d eye%s)", eyes, eyes > 1 ? "s" : "");
 }
 
+void plat_pause_grey(void) {
+    plat_gpu_sync();
+    pause_grey_idle();
+}
+
 void plat_pause_release(void) { s_grey_fb = NULL; }
 
 /* An intentional pause of the game thread (a menu, a devupdate transfer): the watchdog is held, the
@@ -72,6 +77,21 @@ void plat_pause_begin(void) {
     plat_wd_hold(1);
     plat_audio_set_muted(1);
     plat_pause_grey();
+    s_pause_t0 = svcGetSystemTick();
+}
+
+/* The updater's pause, from its server thread. idle: the game thread is parked at a frame boundary after its own
+ * plat_gpu_sync, so the GPU is idle and the top screen is greyed without another sync. Not idle (the game
+ * thread did not get there: a long load, or a hung GPU): no sync, no grey. plat_gpu_sync waits for the GPU
+ * without a limit and would stop the update behind a hung one. */
+void plat_pause_begin_updater(int idle) {
+    plat_wd_hold(1);
+    plat_audio_set_muted(1);
+    if (idle) {
+        pause_grey_idle();
+    } else {
+        PLOG_W("pause: the game thread is not at a frame boundary, the top screen is not greyed");
+    }
     s_pause_t0 = svcGetSystemTick();
 }
 

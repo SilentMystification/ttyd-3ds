@@ -177,7 +177,7 @@ static void on_begin(void* user) {
         PLOG_I("devupdate: the game thread paused after %d ms (phase \"%s\", options menu %d, save busy %d)", waited,
                plat_get_phase(), plat_options_menu_is_open(), s_save_busy != NULL ? s_save_busy() : 0);
     }
-    plat_pause_begin(); /* the shared debug pause: watchdog held (no frames is not a hang), sound muted, top screen greyed */
+    plat_pause_begin_updater(s_paused); /* the shared debug pause: watchdog held (no frames is not a hang), sound muted, top screen greyed (only with the game thread parked: the GPU is idle then) */
     plat_cpu_limit_transfer(1);
 }
 
@@ -293,6 +293,7 @@ void plat_devupdate_init(void) {
     }
     cfg.version = plat_build_string();
     cfg.log_path = "latest.log";
+    cfg.report_path = "crash.txt"; /* the crash module appends its report here (plat/crash.c) */
     cfg.on_begin = on_begin;
     cfg.on_ready = on_ready;
     cfg.on_resume = on_resume;

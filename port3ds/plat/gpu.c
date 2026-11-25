@@ -81,6 +81,7 @@ typedef struct {
     } dirty[32];
     u32 ndirty;
     u32 seq; /* submit number (gpufence) */
+    u32 frame; /* game frame (s_frame_counter) at submit, for the gpudump files */
 } Record;
 
 /* GPU fence for the records (switch gpufence, default 1). The game thread refills a record's vertex and index
@@ -116,6 +117,15 @@ const char* plat_gpu_phase_line(void) {
     return buf;
 }
 
+/* plat/gpudump.c */
+void plat_gpudump_init(void);
+void plat_gpudump_record(u32 seq, u32 frame, const void* verts, u32 vert_bytes, const void* idx, u32 idx_bytes);
+void plat_gpudump_hang(u32 seq, u32 done, u32 game_frame, const char* phase_line);
+int plat_gpudump_test_hang(u32 frame);
+static void gpudump_note(void);
+
+static volatile int s_fence_overdue; /* a fence wait passed its first 2 s timeout and is still waiting */
+
 static void gpu_fence_wait(u32 seq) {
     while ((s32)(__atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE) - seq) < 0) {
         LightEvent_Clear(&s_fence_ev);
@@ -127,8 +137,13 @@ static void gpu_fence_wait(u32 seq) {
             PLOG_W("gpu: fence wait for seq %lu: done seq %lu, busy %d, game frame %lu, render phase %lu (rec %lu)",
                    (unsigned long)seq, (unsigned long)__atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE),
                    (int)s_busy, (unsigned long)s_frame_counter, (unsigned long)s_rphase, (unsigned long)s_rseq);
+            __atomic_store_n(&s_fence_overdue, 1, __ATOMIC_RELEASE);
+            /* First timeout: the command list of the record the GPU is stuck on, to sdmc:/3ds/ttyd/gpuhang/ */
+            plat_gpudump_hang(seq, __atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE), s_frame_counter,
+                              plat_gpu_phase_line());
         }
     }
+    __atomic_store_n(&s_fence_overdue, 0, __ATOMIC_RELEASE);
 }
 
 typedef struct {
@@ -287,6 +302,7 @@ static void submit(int present) {
     Record* r = &s_rec[s_cur];
     r->present = present;
     r->seq = ++s_submit_seq;
+    r->frame = s_frame_counter;
     stream_take_dirty(r); /* the streams this record draws: the render thread flushes them */
     wait_idle(); /* the render thread finished the previous record */
     if (s_threaded) {
@@ -1292,6 +1308,7 @@ static void copy_to_texture(u16 x, u16 y, u16 w, u16 h, u32 handle, u32 dst_w, u
                        (unsigned long)handle, (unsigned long)slot->tex.width, (unsigned long)th, (unsigned long)nstrips,
                        (unsigned long)r0);
                 RPHASE(7);
+                gpudump_note();
                 C3D_FrameEnd(0);
                 RPHASE(1);
                 C3D_FrameBegin(0);
@@ -1661,12 +1678,21 @@ static void fog_bind(const void* body) {
     C3D_FogLutBind(&lut);
 }
 
+static Record* s_render_rec; /* the record render_record replays (render thread), for gpudump_note */
+static void gpudump_note(void) {
+    Record* r = s_render_rec;
+    if (r != NULL) {
+        plat_gpudump_record(r->seq, r->frame, r->verts, r->nverts * (u32)sizeof(PlatGpuVertex), r->idx, r->nidx * 2u);
+    }
+}
+
 static u64 s_begin_wait_acc; /* render thread: ticks in C3D_FrameBegin over this frame's records */
 static u32 s_begin_records;
 
 static void render_record(Record* r) {
     u64 t0 = svcGetSystemTick();
     s_rseq = r->seq;
+    s_render_rec = r;
     vunif_reset();
     reap_targets();
     /* stereo (stereo.h): 0 mono, else the 2D tail's start; the 3D part is replayed once */
@@ -1679,6 +1705,13 @@ static void render_record(Record* r) {
      * wait for one more vblank each (gpusyncall=1: before every record, as before Step 1). */
     u64 tw = svcGetSystemTick();
     RPHASE(1);
+    if (plat_gpudump_test_hang(r->frame)) {
+        PLOG_W("gpuhangtest: the render thread stops before C3D_FrameBegin of record %lu (game frame %lu)",
+               (unsigned long)r->seq, (unsigned long)r->frame);
+        for (;;) {
+            svcSleepThread(1000000000LL);
+        }
+    }
     if (s_gpu_fence) {
         C3D_FrameBegin(0);
         gpu_done_publish(r->seq - 1);
@@ -1966,6 +1999,7 @@ eye_again:
 #undef STEREO_SPLIT
 #undef LEAVE_VSH
     RPHASE(7);
+    gpudump_note();
     C3D_FrameEnd(0);
     RPHASE(0);
     s_stats.render_us = (u32)((svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000000u));
@@ -2306,12 +2340,28 @@ static void gpu_selftest(void) {
 static void gpu_abort(void) {
     s_apt_off = 1; /* the hooks stay in libctru's list, inert */
     s_dead = 1;
-    C3D_Fini();
-    gfxExit();
+    /* No C3D_Fini and no gfxExit: C3D_Fini waits for the GX queue (C3Di_WaitAndClearQueue(-1)), which never
+     * ends on a hung GPU, so the crash screen never came up. The crash screen draws with the CPU into the
+     * libctru frame buffers instead. The queue is unbound so that a frame still in flight cannot swap the
+     * screens again after the crash screen is up. */
+    GX_BindQueue(NULL);
 }
 
 static void gpu_shutdown(void) {
     s_apt_discard = 1; /* a record parked by suspend or exit is dropped, not waited for */
+    /* A hung GPU (the fence is overdue, or the render thread is still busy after 3 s) never lets C3D_Fini's
+     * queue wait end: leave the GPU stack as it is and let the exit go on to the APT relaunch. */
+    u64 t0 = svcGetSystemTick();
+    while (__atomic_load_n(&s_busy, __ATOMIC_ACQUIRE) && svcGetSystemTick() - t0 < 3ull * SYSCLOCK_ARM11 &&
+           !__atomic_load_n(&s_fence_overdue, __ATOMIC_ACQUIRE)) {
+        LightEvent_WaitTimeout(&s_done, 50000000LL);
+    }
+    if (__atomic_load_n(&s_busy, __ATOMIC_ACQUIRE) || __atomic_load_n(&s_fence_overdue, __ATOMIC_ACQUIRE)) {
+        PLOG_W("gpu: shutdown with a hung GPU (busy %d, fence overdue %d): no C3D_Fini, no gfxExit", (int)s_busy,
+               (int)s_fence_overdue);
+        gpu_abort();
+        return;
+    }
     wait_idle();
     s_apt_off = 1;
     C3D_Fini();
@@ -2334,6 +2384,7 @@ void plat_gpu_init(void) {
     aptHook(&s_apt_first, apt_hook_first, NULL); /* after C3D_Init: runs before citro3d's on suspend, sleep, exit */
     plat_set_gpu_shutdown(gpu_shutdown);
     plat_set_gpu_abort(gpu_abort);
+    plat_gpudump_init();
     s_rot = plat_switch_int("rot", 0) & 3;
     s_merge = plat_switch_int("gxmerge", 1) != 0;
     s_copy_full = plat_switch_int("copyfull", 1) != 0;

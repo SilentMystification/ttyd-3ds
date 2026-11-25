@@ -134,6 +134,10 @@ void plat_crash_setup(void) {
     cfg.test_frame = plat_switch_int("crashframe", 60);
     cfg.test_addr = (uintptr_t)plat_switch_int("crashaddr", 4);
     cfg.boot_tick = plat_boot_tick();
+    static char s_dump[48];
+    if (plat_switch_value("crashshot", s_dump, sizeof(s_dump))) {
+        cfg.screen_dump = s_dump; /* test aid: crashshot=shots/crash writes shots/crash_top.ppm and _bottom.ppm */
+    }
     crash_setup(&cfg);
     crash_add_shutdown_hook(CRASH_STAGE_SCREEN, hook_console, NULL, 0);
     crash_add_shutdown_hook(CRASH_STAGE_SCREEN, hook_gpu, NULL, 10);

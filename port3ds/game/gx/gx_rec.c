@@ -1037,6 +1037,7 @@ void gx_rec_frame(void) {
         gx_tev_memo_log(f);
     }
     gx_bbox_stats_log(f);
+    gx_dirty_log(f);
     if (gx_rec_mode == 3) {
         u32 gm = 0;
         for (int i = 0; i < GXG_COUNT; i++) {

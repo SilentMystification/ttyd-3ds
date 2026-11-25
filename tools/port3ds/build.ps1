@@ -1,6 +1,10 @@
 # Build a 3DS CMake project inside the pinned build container (Windows).
 #
-#   powershell -NoProfile -File tools\port3ds\build.ps1 [-Project probe] [-CMakeArgs '-DFOO=1']
+#   powershell -NoProfile -File tools\port3ds\build.ps1 [-Project probe] [-NoCia] [-CMakeArgs '-DFOO=1']
+#
+# -NoCia (or $env:TTYD_NO_CIA=1) builds the 3dsx only and removes a stale ttyd.cia, like build.sh --no-cia.
+# Compile jobs go through ccache by default ($env:TTYD_CCACHE=0 turns it off); the cache lives in the
+# Docker volume ttyd3ds-ccache.
 #
 # Same result as tools/port3ds/build.sh on Linux. Needs Docker Desktop.
 #
@@ -12,7 +16,8 @@
 
 param(
     [string]$Project = '.',
-    [string[]]$CMakeArgs = @()
+    [string[]]$CMakeArgs = @(),
+    [switch]$NoCia
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,6 +31,30 @@ if (-not (Test-Path (Join-Path $repo "$src/CMakeLists.txt"))) {
 $name = if ($Project -eq '.') { 'game' } else { Split-Path -Leaf $Project }
 $outHost = Join-Path $repo "build\3ds\$name"
 New-Item -ItemType Directory -Force -Path $outHost | Out-Null
+
+# Same as build.sh: TTYD_CIA is a cached CMake variable, so pass it explicitly either way, and remove a
+# CIA from an earlier build so no tool runs it stale.
+if ($env:TTYD_NO_CIA -eq '1') { $NoCia = $true }
+if ($NoCia) {
+    $CMakeArgs = @('-DTTYD_CIA=OFF') + $CMakeArgs
+    $staleCia = Join-Path $outHost 'ttyd.cia'
+    if (Test-Path $staleCia) {
+        Remove-Item -Force $staleCia
+        Write-Host "build.ps1: -NoCia: removed stale build\3ds\$name\ttyd.cia"
+    }
+} else {
+    $CMakeArgs = @('-DTTYD_CIA=ON') + $CMakeArgs
+}
+
+# ccache (default on, $env:TTYD_CCACHE=0 turns it off). The launcher is a cached CMake variable, so it is
+# cleared explicitly when off.
+$ccArgs = @()
+if ($env:TTYD_CCACHE -ne '0') {
+    $ccArgs = @('-v', 'ttyd3ds-ccache:/ccache', '-e', 'CCACHE_DIR=/ccache', '-e', 'CCACHE_MAXSIZE=10G', '-e', 'CCACHE_NOHASHDIR=true')
+    $CMakeArgs = @('-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_ASM_COMPILER_LAUNCHER=ccache') + $CMakeArgs
+} else {
+    $CMakeArgs = @('-DCMAKE_C_COMPILER_LAUNCHER=', '-DCMAKE_ASM_COMPILER_LAUNCHER=') + $CMakeArgs
+}
 
 # Same tag rule as build.sh: first 12 hex digits of the Dockerfile's SHA-256.
 # Hash the LF form so Windows and Linux checkouts give the same tag.
@@ -60,6 +89,7 @@ docker run --rm `
     -v "${repo}:/host:ro" `
     -v 'ttyd3ds-work:/work' `
     -v "${outHost}:/out" `
+    @ccArgs `
     $tag sh -c $script sh $src $name @CMakeArgs
 if ($LASTEXITCODE -ne 0) { exit 1 }
 

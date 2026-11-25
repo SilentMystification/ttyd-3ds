@@ -412,6 +412,82 @@ void plat_gpu_set_state(const PlatGpuState* state) {
     }
 }
 
+/* The front end's switch gxdirty: the words outside `regions` are the ones of the last state it gave, so only the
+ * regions' words are compared. The record gets what plat_gpu_set_state would put there (the same delta, in the same
+ * word order, or the same full state). */
+void plat_gpu_set_state_dirty(const PlatGpuState* state, uint32_t regions) {
+    if (!s_last_state_valid || !s_state_delta) {
+        plat_gpu_set_state(state);
+        return;
+    }
+    enum { NW = sizeof(PlatGpuState) / 4 };
+    static const u16 k_range[4][2] = {
+        {0, offsetof(PlatGpuState, tex) / 4},
+        {offsetof(PlatGpuState, tex) / 4, offsetof(PlatGpuState, alpha_test_enable) / 4},
+        {offsetof(PlatGpuState, alpha_test_enable) / 4, offsetof(PlatGpuState, fog_lut_id) / 4},
+        {offsetof(PlatGpuState, scissor_x0) / 4, NW},
+    };
+    _Static_assert(offsetof(PlatGpuState, tex) % 4 == 0 && offsetof(PlatGpuState, alpha_test_enable) % 4 == 0 &&
+                       offsetof(PlatGpuState, fog_lut_id) % 4 == 0 && offsetof(PlatGpuState, scissor_x0) % 4 == 0,
+                   "state regions are word ranges");
+    if ((regions & PLAT_GPU_R_PIX) && state->fog_enable) {
+        u32 id = state->fog_lut_id;
+        u32 h = id != 0 ? 0 : fog_hash(state);
+        if (id != 0 ? id != s_last_fog_id : h != s_last_fog_hash) {
+            float* lut = rec_put(CMD_FOG, sizeof(state->fog_lut) + 8);
+            if (lut != NULL) {
+                memcpy(lut, state->fog_lut, sizeof(state->fog_lut));
+                s_last_fog_hash = h;
+                s_last_fog_id = id;
+            }
+        }
+    }
+    u32* a = (u32*)&s_last_state;
+    const u32* b = (const u32*)state;
+    u16 idx[NW];
+    u32 n = 0;
+    for (u32 r = 0; r < 4; r++) {
+        if (regions & (1u << r)) {
+            for (u32 i = k_range[r][0]; i < k_range[r][1]; i++) {
+                if (a[i] != b[i]) {
+                    idx[n++] = (u16)i;
+                }
+            }
+        }
+    }
+    if (regions & PLAT_GPU_R_PIX) {
+        /* the LUT words are not compared, but s_last_state carries them (end_segment gives it again) */
+        memcpy(&s_last_state.fog_lut_id, &state->fog_lut_id,
+               offsetof(PlatGpuState, scissor_x0) - offsetof(PlatGpuState, fog_lut_id));
+    }
+    if (n == 0) {
+        return;
+    }
+    if (n * 2 + 1 < NW / 2) {
+        u32* d = rec_put(CMD_STATE_DELTA, 4 + n * 8);
+        if (d == NULL) {
+            memset(&s_last_state, 0xFF, sizeof(s_last_state)); /* the record is full: the next state is whole */
+            s_last_state_valid = 0;
+            return;
+        }
+        d[0] = n;
+        for (u32 k = 0; k < n; k++) {
+            u32 i = idx[k];
+            d[1 + 2 * k] = i;
+            d[2 + 2 * k] = b[i];
+            a[i] = b[i];
+        }
+        s_stats_frame.state_changes++;
+        return;
+    }
+    PlatGpuState* dst = rec_put(CMD_STATE, sizeof(PlatGpuState));
+    if (dst != NULL) {
+        *dst = *state;
+        s_last_state = *state;
+        s_stats_frame.state_changes++;
+    }
+}
+
 void plat_gpu_draw(const PlatGpuVertex* vertices, uint32_t count) {
     Record* r = &s_rec[s_cur];
     if (s_merge && vertices != NULL && vertices == s_last_alloc &&

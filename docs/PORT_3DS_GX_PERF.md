@@ -663,6 +663,49 @@ So the plan's "a setter compares and stores" does not pay through the record's d
 
 **Not built:** per-class state rebuild, stage 3 (render thread writing PICA registers), stage 4 (immediate mode written in PICA form), stage 5 (one hop, `gx_rec.c` removed). **Not run:** `gw_diff.py` on the 1600-frame padscript, `vsh_accept.py` (the byte-identical `determ` shots are the stricter image test), the pipelined layout with the new switches, a PC-sample profile with the switches on. `gxcache=2` and `gxbatch` exclude each other; `gxbatch=2` is the batch's own check.
 
+## Core-2 round 2: gates and per-class state (2026-11-24, later)
+
+### Gates of `gxbatch=1 gxstatecache=1` (no code change)
+
+- **`gw_diff.py` on the 1600-frame padscript** (PORT_3DS_TEST_INFRA.md: `map=gor_01 story=30 determ gwdump=10` and the A2 padscript, to frame 1600), build `7dd7bbc5`, default switches against `gxbatch=1 gxstatecache=1`, two Azahar runs and `gw_diff.py --logs`: `gw_diff: A 160 records, B 160 records` / `gw_diff: 160 records equal (f 10..1600, fields compared: 23)`. A long run by necessity (two runs to frame 1600, about 3 minutes each).
+- **jin_00 and usu_00**, the two scenes the blank-shot heuristic flagged: the shots have scene content (jin_00: the steeple's interior with the stained-glass windows, 69% of pixels off the commonest colour, about 78 000 colours; usu_00: the town under the moon, 71%, about 10 500 colours; the black rows are the letterbox). Taken again with `tools/port3ds/determ_ab.py`, default against `gxbatch=1 gxstatecache=1`, frames 780 to 785: **jin_00 6 of 6, usu_00 6 of 6 byte-identical**. So the earlier 60 of 60 stands with no unconfirmed scene.
+
+Both defaults stay 0 (owner's decision).
+
+### Stage 2 rest, `gxdirty`: per-class dirty bits (built)
+
+Switch `gxdirty` (default 0; 2 is a verify mode). Files: `gx_state.c` (setters), `gx_draw.c` (`build_dirty`, `vsh_state_dirty`, the verify), `gx_tex.c` (`gx_tex_invalidate_all` marks textures), `plat/gpu.c` (`plat_gpu_set_state_dirty`).
+
+- **Setters.** Each setter that writes state compares its arguments with the fields it holds, inline (`SAME(...)` after the record step: no table, unlike `gxstatededup`), and returns before it changes anything when they are equal: no version change. A setter that changes something sets the dirty bit of its class: TEV (stages, order, registers, konst colours, swap tables, indirect), textures (maps, TLUTs; also a texture copy and a dropped conversion), pixel pipeline (alpha test, blend, depth, colour and alpha update, pixel format, fog, cull, ...), scissor and viewport, channels (channel control, colours, lights, texgens). Matrix loads set `GXD_CLIP` (position and normal) or `GXD_TEXROW` (texture); the projection and the current matrix compare first.
+- **`build_state` in parts.** `build_full` is the old build cut into its parts (units and TEV, texture units, transform flags, pixel pipeline, scissor and viewport); the switch-off path calls it as before. `build_dirty` runs only the parts of the dirty classes into the kept `PlatGpuState` (each part clears its own region first, so it equals a full build) and gives the back end the regions they fill. A frame start, `GXInit` and a texture copy mark the classes as before.
+- **Back end.** `plat_gpu_set_state_dirty(state, regions)` compares only the words of those regions with the last state (no two 700-byte compares, no full delta scan) and records what `plat_gpu_set_state` would: the same delta in the same word order, or the whole state. With no valid last state (a new record) it is `plat_gpu_set_state`.
+- **Uniform block.** In three parts: colour (TEV and channel classes; when lit, also the matrices), texture rows (TEV, channel and texture-matrix classes; position matrices only when a texgen reads one; whether the vertex has a normal), clip rows (matrices, projection, current matrix).
+- **`gxdirty=2`**: wherever the switch-off path would rebuild (a version change), the full build is made too and compared with the kept state, the units, the transform flags, and `vsh_prepare`'s block, reasons, unit attributes and light block (`gxdirty verify` warnings; the `gxdirty frame N:` line every `gxthreadstats` frames counts builds per class, checks and mismatches).
+
+Results (Azahar, build `7dd7bbc5` + this change, release build, `gxthread=0`, base `gxbatch=1 gxstatecache=1`):
+
+| Check | Result |
+|---|---|
+| `gxdirty=2`, gor_01 (story 30), frames 1 to 961 | 214 291 state checks and 214 291 uniform-block checks, **0 mismatches** (dev build) |
+| `gxdirty=2`, effects battle (`map=gon_02 story=30 battle=1 btlauto=perfect`), frames 1 to 961 | 104 330 + 104 330 checks, **0 mismatches** (dev build) |
+| `determ`, gor_01, shots 780 to 785, `gxdirty=0` against `1` | **6 of 6 byte-identical** |
+| `determ`, effects battle, shots 900 to 905 | **6 of 6 byte-identical** |
+
+Same-build A/B, `tools/port3ds/gx_perf_ab.py`, windows ending at frames 722 to 841, one run per cell:
+
+| Scene | frame A -> B (ms) | core-0 busy A -> B (ms) | render (ms) |
+|---|---|---|---|
+| gor_01 | 50.5 -> 50.3 | 45.5 -> **35.3** (-22%) | 15.4 -> 15.3 |
+| effects battle | 38.9 -> 28.9 | 27.3 -> **22.3** (-18%) | 7.1 -> 7.1 |
+| hei_01 | 33.4 -> 27.7 | 20.9 -> **17.2** (-18%) | 6.1 -> 6.1 |
+| aaa_00 | 33.4 -> 26.1 | 22.4 -> **16.5** (-26%) | 8.2 -> 8.2 |
+
+- Rebuilds per frame in gor_01 (verify run): about 441 partial builds (TEV 54, textures 341, pixel 227, scissor 8, channels 142) where the switch-off path rebuilds about 568 times in full; most are a texture change. The saving is the parts not rebuilt (TEV compile and texture lookups on a pixel-only change, the 700-byte compares) and the early returns.
+- No scene is slower. gor_01's frame stays at 50 ms (it waits for something else there); its busy time drops.
+- **Not run:** `vsh_accept.py`, `gw_diff.py` and the `gxcache=2` sweep with `gxdirty=1`; the other six scenes of the ten; the pipelined layout (`gxthread=2`) with `gxdirty`; `gxdirty` without `gxbatch`. **Default stays 0.**
+
+`tools/port3ds/determ_ab.py` (new): `determ` shots of two switch sets of one build, compared byte for byte, with a content line per shot (share of pixels off the commonest colour, number of colours), so a blank shot is visible.
+
 ## Risks of the cache
 
 - **Hash collisions.** A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.
@@ -686,6 +729,7 @@ Rows for the switch table:
 | `gxtrust=0/1` | 1 (default): a cache entry whose list and array spans lie in covered memory of the content-stable registry (`port3ds/plat/memstable.c`), unchanged since its last full check, is a hit without hashing; 0 hashes every hit (A/B). `gxcache=2` still hashes and decodes trusted hits and counts what trust skipped (`stale`, `mismatched`) |
 | `gxscribble=N` | Test of the verify mode, not for play: at game frame N, xors one byte of an array a cached (preferably trusted) list reads, with no flush and no report. With `gxcache=2` it must show as `mismatched` and `stale`; with trust on it keeps drawing the old vertices, and the `gxstats scribble` line counts those hits (the contract) |
 | `gxstatever=0/1` | 0 (default): every state version change rebuilds the PICA state. 1: matrix and projection loads do not bump the version, and a version change whose state (texgen to pixel engine without the lights, viewport) equals the last build skips `build_state` (`builds N (unchanged M)` in `gxstats`). Fewer rebuilds, but no time saved yet (see Results) |
+| `gxdirty=0/1/2` | 0 (default): every state version change rebuilds the whole PICA state. 1: setters return early when their values are in force, others mark their class dirty; only dirty classes are rebuilt and sent (`plat_gpu_set_state_dirty`), and the uniform block by parts. 2: as 1, plus a full rebuild compared at every switch-off rebuild (`gxdirty verify` warnings, `gxdirty frame N:` line with `gxthreadstats`) |
 | `gxfogcache=0/1` | 1 (default): the fog LUT is recomputed only when the fog parameters change and goes to the back end with an id instead of being hashed; 0 recomputes and hashes it on every rebuild (A/B) |
 | `gxunlit=0/1` | 1 (default): unlit colour channels skip `channel_color` and the eye-space normal; 0 the general path (A/B) |
 | `gxmerge=0/1` | 1 (default): consecutive draws with nothing recorded between them extend one draw command (`plat/gpu.c`); 0 one command per draw (A/B). `gxstats` shows `gpu draws N (of M calls)` |

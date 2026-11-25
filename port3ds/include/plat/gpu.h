@@ -133,6 +133,15 @@ void plat_gpu_frame_begin(void);
 PlatGpuVertex* plat_gpu_alloc_vertices(uint32_t count);
 /* State for the following draws (copied into the record). */
 void plat_gpu_set_state(const PlatGpuState* state);
+/* The same for a caller that knows which regions of `state` can differ from the last state it gave: only their
+ * words are compared (the front end's switch gxdirty). Regions in PlatGpuState order: */
+enum {
+    PLAT_GPU_R_TEV = 1u << 0, /* stages .. buffer_color */
+    PLAT_GPU_R_TEX = 1u << 1, /* tex[3] */
+    PLAT_GPU_R_PIX = 1u << 2, /* alpha_test_enable .. fog_lut */
+    PLAT_GPU_R_SCI = 1u << 3, /* scissor_x0 .. depth_far */
+};
+void plat_gpu_set_state_dirty(const PlatGpuState* state, uint32_t regions);
 /* Triangle list of `count` vertices from plat_gpu_alloc_vertices. */
 void plat_gpu_draw(const PlatGpuVertex* vertices, uint32_t count);
 /* Clears the EFB rectangle (GX copy with clear). */

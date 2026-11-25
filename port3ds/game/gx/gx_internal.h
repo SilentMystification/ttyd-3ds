@@ -179,6 +179,29 @@ typedef struct {
 extern GxState gx;
 extern u32 gx_vtx_version; /* gx_state.c: the vertex state same_state compares changed */
 
+/* Switch gxdirty (default 0; PORT_3DS_GX_PERF.md, "Core-2 round 2", stage 2):
+ *   1: a setter compares its arguments with the state it holds and returns at once when they are equal (no
+ *      version change); a setter that changes something sets the dirty bit of its class. build_state rebuilds
+ *      only the dirty classes into the kept PICA state and gives the back end the regions they fill
+ *      (plat_gpu_set_state_dirty); the uniform block rebuilds its clip rows only after a matrix or projection
+ *      change and its texture rows only after a texgen or texture matrix change;
+ *   2: as 1, and every rebuild the switch-off path would make is also made in full and compared (the kept PICA
+ *      state, the transform's flags, the uniform block): `gxdirty verify` lines. */
+extern int gx_opt_dirty;
+extern u32 gx_dirty;
+enum {
+    GXD_TEV = 1u << 0,    /* TEV stages, order, registers, konst colours, swap tables, indirect */
+    GXD_TEX = 1u << 1,    /* texture maps, TLUTs (and texture copies, conversions dropped) */
+    GXD_PIX = 1u << 2,    /* alpha test, blend, depth, colour and alpha update, pixel format, fog, cull, ... */
+    GXD_SCI = 1u << 3,    /* scissor, scissor offset, viewport */
+    GXD_CHAN = 1u << 4,   /* colour channels, material and ambient colours, lights, texgens */
+    GXD_STATE = 0x1Fu,    /* the classes build_state reads */
+    GXD_CLIP = 1u << 5,   /* position or normal matrix, projection: the uniform block's clip rows (and light) */
+    GXD_TEXROW = 1u << 6, /* texture matrix: the uniform block's texture rows */
+    GXD_ALL = 0x7Fu
+};
+void gx_dirty_log(u32 frames); /* the gxthreadstats gxdirty line */
+
 /* ---- GX calls by value ----
  * One id per state call. Display lists the game records hold them as port
  * opcodes (gx_state.c, LEB128 words); the translator thread's record

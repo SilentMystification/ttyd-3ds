@@ -1083,6 +1083,7 @@ void gx_tex_invalidate_all(void) {
             entry_free(&s_cache[i]);
         }
     }
+    gx_dirty |= GXD_TEX; /* gxdirty: the texture units are looked up again */
 }
 
 void gx_tex_frame_end(void) {

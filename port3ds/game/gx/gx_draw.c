@@ -49,7 +49,10 @@ static u32 s_snap[SNAP_WORDS]; /* word-aligned: the compare runs a word at a tim
 static f32 s_snap_vp[6];
 static int s_snap_valid;
 
-void gx_draw_state_lost(void) { s_snap_valid = 0; }
+void gx_draw_state_lost(void) {
+    s_snap_valid = 0;
+    gx_dirty |= GXD_TEX; /* gxdirty: the texture units are looked up again */
+}
 
 static int state_unchanged(void) {
     if (!s_snap_valid) {
@@ -100,7 +103,12 @@ void gx_opts_init(void) {
     gx_bbx_init();
     gx_opt_vshlit = plat_switch_int("gxvshlit", 1) != 0;
     gx_opt_vshtg = plat_switch_int("gxvshtg", 1) != 0;
-    PLOG_I("gx: statever %d fogcache %d unlit %d", gx_opt_statever, gx_opt_fogcache, gx_opt_unlit);
+    gx_opt_dirty = plat_switch_int("gxdirty", 0);
+    if (gx_opt_dirty < 0 || gx_opt_dirty > 2) {
+        gx_opt_dirty = 1;
+    }
+    PLOG_I("gx: statever %d fogcache %d unlit %d dirty %d", gx_opt_statever, gx_opt_fogcache, gx_opt_unlit,
+           gx_opt_dirty);
     gx_vsh_init();
 }
 
@@ -267,10 +275,8 @@ static void assign_units(void) {
     }
 }
 
-static void build_state(void) {
-    PlatGpuState* st = &s_state;
-    memset(st, 0, sizeof(*st));
-    assign_units();
+/* The parts of build_state, by the GX state they read (switch gxdirty rebuilds only the dirty ones). */
+static void build_tex_units(PlatGpuState* st) { /* the units (TEV order), the texture maps and TLUTs */
     for (int u = 0; u < 3; u++) {
         PlatGpuTexUnit* tu = &st->tex[u];
         if (u >= s_units) {
@@ -285,12 +291,17 @@ static void build_state(void) {
         tu->wrap_t = wrap[t->wrap_t % 3];
         gx_tex_unit_sampler(tu, t, map); /* min/mag filter, mip filter, LOD bias (the texfilter option) */
     }
+}
+
+static void build_tev(PlatGpuState* st) { /* TEV */
     if (gx_opt_statecache) {
         gx_tev_compile_memo(st);
     } else {
         gx_tev_compile(st);
     }
+}
 
+static void build_chan_flags(void) { /* the units (TEV order), texgens, channels */
     /* what the transform needs per vertex (gxunlit) */
     s_need_both = 0;
     for (int u = 0; u < s_units; u++) {
@@ -305,7 +316,9 @@ static void build_state(void) {
         s_mat_vtx_a[ch] = gx.chan[ch + 2].mat_src == GX_SRC_VTX;
     }
     s_need_nrm = !s_unlit[s_color_chan] || (s_need_both && !s_unlit[1 - s_color_chan]);
+}
 
+static void build_pix(PlatGpuState* st) { /* the pixel pipeline */
     /* alpha compare */
     u8 c0 = gx.alpha_comp0, c1 = gx.alpha_comp1, op = gx.alpha_op;
     st->alpha_test_enable = 1;
@@ -367,7 +380,9 @@ static void build_state(void) {
     st->color_write = (u8)((gx.color_update ? 0x7 : 0) | (alpha_writes ? 0x8 : 0));
     st->cull = 0; /* culled here */
     build_fog(st);
+}
 
+static void build_sci(PlatGpuState* st) { /* scissor and viewport */
     /* scissor (inclusive GX box -> exclusive) and viewport */
     s32 x0 = (s32)gx.scissor[0] - gx.scissor_off[0], y0 = (s32)gx.scissor[1] - gx.scissor_off[1];
     s32 x1 = x0 + (s32)gx.scissor[2], y1 = y0 + (s32)gx.scissor[3];
@@ -385,9 +400,119 @@ static void build_state(void) {
     st->viewport_h = gx.vp[3];
     st->depth_near = gx.vp[4];
     st->depth_far = gx.vp[5];
+}
 
-    plat_gpu_set_state(st);
+/* The whole PICA state for the GX state in force, into `st` (and the transform's flags). */
+static void build_full(PlatGpuState* st) {
+    memset(st, 0, sizeof(*st));
+    assign_units();
+    build_tex_units(st);
+    build_tev(st);
+    build_chan_flags();
+    build_pix(st);
+    build_sci(st);
+}
+
+static void build_state(void) {
+    build_full(&s_state);
+    plat_gpu_set_state(&s_state);
     s_built_version = gx.version;
+}
+
+/* ---- switch gxdirty: the dirty classes only, into the kept state ---- */
+int gx_opt_dirty;
+u32 gx_dirty = GXD_ALL;
+#define PIX_FROM offsetof(PlatGpuState, alpha_test_enable)
+#define PIX_TO offsetof(PlatGpuState, scissor_x0)
+static struct {
+    u32 builds, classes[5], checks, bad, vchecks, vbad, logged;
+} s_dv;
+
+static void build_dirty(u32 d) {
+    PlatGpuState* st = &s_state;
+    u32 regions = 0;
+    if (d & GXD_TEV) {
+        assign_units();
+        memset(st, 0, offsetof(PlatGpuState, tex));
+        build_tev(st);
+        regions |= PLAT_GPU_R_TEV;
+    }
+    if (d & (GXD_TEV | GXD_TEX)) {
+        memset(st->tex, 0, sizeof(st->tex));
+        build_tex_units(st);
+        regions |= PLAT_GPU_R_TEX;
+    }
+    if (d & (GXD_TEV | GXD_CHAN)) {
+        build_chan_flags();
+    }
+    if (d & GXD_PIX) {
+        memset((u8*)st + PIX_FROM, 0, PIX_TO - PIX_FROM);
+        build_pix(st);
+        regions |= PLAT_GPU_R_PIX;
+    }
+    if (d & GXD_SCI) {
+        build_sci(st);
+        regions |= PLAT_GPU_R_SCI;
+    }
+    if (regions != 0) {
+        plat_gpu_set_state_dirty(st, regions);
+    }
+    s_dv.builds++;
+    for (int k = 0; k < 5; k++) {
+        s_dv.classes[k] += d >> k & 1;
+    }
+}
+
+/* gxdirty=2: the full build of the same GX state must give the kept state and flags. */
+static void verify_dirty(u32 d) {
+    int units = s_units, cchan = s_color_chan, need_both = s_need_both, need_nrm = s_need_nrm;
+    int ucoord[3], umap[3], uom[GX_MAX_TEXMAP], uos[GX_MAX_TEV];
+    u8 unlit[2] = {s_unlit[0], s_unlit[1]}, mrgb[2] = {s_mat_vtx_rgb[0], s_mat_vtx_rgb[1]};
+    u8 ma[2] = {s_mat_vtx_a[0], s_mat_vtx_a[1]};
+    memcpy(ucoord, s_unit_coord, sizeof(ucoord));
+    memcpy(umap, s_unit_map, sizeof(umap));
+    memcpy(uom, gx_unit_of_map, sizeof(uom));
+    memcpy(uos, gx_unit_of_stage, sizeof(uos));
+    static PlatGpuState full;
+    build_full(&full);
+    u32 bad = 0;
+    static const u16 k_rg[5] = {0, offsetof(PlatGpuState, tex), PIX_FROM, PIX_TO, sizeof(PlatGpuState)};
+    for (int r = 0; r < 4; r++) {
+        if (memcmp((const u8*)&full + k_rg[r], (const u8*)&s_state + k_rg[r], k_rg[r + 1] - k_rg[r]) != 0) {
+            bad |= 1u << r;
+        }
+    }
+    if (units != s_units || cchan != s_color_chan || memcmp(ucoord, s_unit_coord, sizeof(ucoord)) != 0 ||
+        memcmp(umap, s_unit_map, sizeof(umap)) != 0 || memcmp(uom, gx_unit_of_map, sizeof(uom)) != 0 ||
+        memcmp(uos, gx_unit_of_stage, sizeof(uos)) != 0) {
+        bad |= 0x10; /* units */
+    }
+    if (need_both != s_need_both || need_nrm != s_need_nrm || memcmp(unlit, s_unlit, 2) != 0 ||
+        memcmp(mrgb, s_mat_vtx_rgb, 2) != 0 || memcmp(ma, s_mat_vtx_a, 2) != 0) {
+        bad |= 0x20; /* transform flags */
+    }
+    s_dv.checks++;
+    if (bad != 0) {
+        s_dv.bad++;
+        if (s_dv.logged < 20) {
+            s_dv.logged++;
+            PLOG_W("gxdirty verify: frame %lu state mismatch, parts 0x%02lx (1 TEV, 2 TEX, 4 PIX, 8 SCI, 10 units, "
+                   "20 flags), classes rebuilt 0x%02lx",
+                   (unsigned long)gx_perf_frame_no(), (unsigned long)bad, (unsigned long)d);
+        }
+    }
+    /* go on with the kept result (what gxdirty=1 draws) */
+    s_units = units;
+    s_color_chan = cchan;
+    s_need_both = need_both;
+    s_need_nrm = need_nrm;
+    memcpy(s_unit_coord, ucoord, sizeof(ucoord));
+    memcpy(s_unit_map, umap, sizeof(umap));
+    memcpy(gx_unit_of_map, uom, sizeof(uom));
+    memcpy(gx_unit_of_stage, uos, sizeof(uos));
+    memcpy(s_unlit, unlit, 2);
+    memcpy(s_mat_vtx_rgb, mrgb, 2);
+    memcpy(s_mat_vtx_a, ma, 2);
 }
 
 /* ---- Lighting ---- */
@@ -1357,7 +1482,35 @@ static void perf_draw(u8 prim, const GxVertex* v, u32 n) {
 }
 
 /* The PICA state for the GX state in force (rebuilt when the version changed). */
+static u32 s_vsh_dirty = GXD_ALL; /* gxdirty: the classes the uniform block has not seen yet */
+
 static void ensure_state(void) {
+    if (gx_opt_dirty) {
+        u32 d = gx_dirty & GXD_STATE;
+        if (gx_opt_dirty == 2 && (gx.version != s_built_version || d != 0)) {
+            /* where the switch-off path rebuilds: the kept state must be the full build's */
+            if (d != 0) {
+                build_dirty(d);
+            }
+            gx_dirty &= ~GXD_STATE;
+            s_vsh_dirty |= d;
+            s_built_version = gx.version;
+            verify_dirty(d);
+            return;
+        }
+        if (d == 0) {
+            return;
+        }
+        u64 t0 = GX_PERF_T();
+        build_dirty(d);
+        gx_dirty &= ~GXD_STATE;
+        s_vsh_dirty |= d;
+        if (gx_perf_on > 0) {
+            gx_perf.builds++;
+            gx_perf.t_state += plat_ticks() - t0;
+        }
+        return;
+    }
     if (gx.version == s_built_version) {
         return;
     }
@@ -1557,13 +1710,225 @@ static void vsh_prepare(void) {
     }
 }
 
+/* ---- switch gxdirty: the uniform block by parts ----
+ * colour part (clrmix, matclr, the light block, why LIT/TWOCHAN/CLR1): TEV and channel classes; when lit, also the
+ *   position and normal matrix (GXD_CLIP) and whether the vertex has a normal;
+ * texture part (tex, tgsrc, the unit attributes, why TGFUNC/TGSRC/TGPOST): TEV, channel (texgens) and texture
+ *   matrix classes, whether the vertex has a normal, and GXD_CLIP when a texgen reads a position matrix;
+ * clip part (clip, the ORTHO flag): GXD_CLIP (matrices, projection, current matrix). */
+static PlatGpuVshConst s_vw;        /* the block being kept */
+static u32 s_vw_why_c, s_vw_why_t;
+static int s_vw_has_nrm = -1, s_vw_tex_pos;
+
+static void vsh_part_color(PlatGpuVshConst* c, u32* why) {
+    *why = 0;
+    s_vsh_lit = 0;
+    memset(c->clrmix, 0, sizeof(c->clrmix));
+    memset(c->matclr, 0, sizeof(c->matclr));
+    if (s_need_both) {
+        *why |= GXV_R_TWOCHAN;
+    }
+    if (gx.num_chans != 0) {
+        int ch = s_color_chan;
+        if (!s_unlit[ch]) {
+            PlatGpuVshLight L;
+            if (vsh_light_block(ch, &L)) {
+                s_vsh_lit = 1;
+                if (s_vsh_light_id == 0 || !gx_mem_equal(&L, &s_vsh_light, sizeof(L))) {
+                    s_vsh_light = L;
+                    if (++s_vsh_light_id == 0) {
+                        s_vsh_light_id = 1;
+                    }
+                }
+            } else {
+                *why |= GXV_R_LIT;
+            }
+        }
+        if (ch == 1 && (s_mat_vtx_rgb[1] || s_mat_vtx_a[1])) {
+            *why |= GXV_R_CLR1;
+        }
+        const GXColor m = gx.mat[ch];
+        for (int i = 0; i < 3; i++) {
+            c->clrmix[i] = s_mat_vtx_rgb[ch] ? 1.0f : 0.0f;
+            c->matclr[i] = s_mat_vtx_rgb[ch] ? 0.0f : (f32)(&m.r)[i];
+        }
+        c->clrmix[3] = s_mat_vtx_a[ch] ? 1.0f : 0.0f;
+        c->matclr[3] = s_mat_vtx_a[ch] ? 0.0f : (f32)m.a;
+    }
+}
+
+static void vsh_part_tex(PlatGpuVshConst* c, u32* why, int has_nrm) {
+    *why = 0;
+    s_vw_tex_pos = 0;
+    memset(c->tex, 0, sizeof(c->tex));
+    memset(c->tgsrc, 0, sizeof(c->tgsrc));
+    for (int u = 0; u < 3; u++) {
+        s_vsh_unit_attr[u] = 0xFF;
+        c->tex[3 * u + 2][3] = 1.0f;
+        if (u >= s_units) {
+            continue;
+        }
+        const typeof(gx.texgen[0])* tg = &gx.texgen[s_unit_coord[u]];
+        int proj = tg->func == GX_TG_MTX3x4;
+        if (tg->func != GX_TG_MTX2x4 && !(proj && gx_opt_vshtg)) {
+            *why |= GXV_R_TGFUNC;
+        }
+        if (tg->src >= GX_TG_TEX0 && tg->src <= GX_TG_TEX7) {
+            s_vsh_unit_attr[u] = (u8)(tg->src - GX_TG_TEX0);
+            c->tgsrc[u][2] = 1.0f;
+        } else if (gx_opt_vshtg && tg->src == GX_TG_POS) {
+            c->tgsrc[u][0] = 1.0f;
+        } else if (gx_opt_vshtg && tg->src == GX_TG_NRM && has_nrm) {
+            c->tgsrc[u][1] = 1.0f;
+        } else {
+            *why |= GXV_R_TGSRC;
+        }
+        if (tg->pt_mtx != GX_PTIDENTITY && tg->pt_mtx >= GX_PTTEXMTX0) {
+            *why |= GXV_R_TGPOST;
+        }
+        s_vw_tex_pos |= tg->mtx < 30;
+        const f32* m = matrix_rows(tg->mtx);
+        memcpy(c->tex[3 * u], m, 16);
+        memcpy(c->tex[3 * u + 1], m + 4, 16);
+        if (proj) {
+            memcpy(c->tex[3 * u + 2], m + 8, 16);
+            c->tgsrc[u][3] = 1.0f;
+        }
+    }
+}
+
+static void vsh_part_clip(PlatGpuVshConst* c) {
+    const f32(*m)[4] = gx.pos_mtx[gx.cur_pnmtx % GX_POS_MTX_COUNT];
+    const f32* p = gx.proj;
+    for (int j = 0; j < 4; j++) {
+        if (p[0] == (f32)GX_PERSPECTIVE) {
+            c->clip[0][j] = p[1] * m[0][j] + p[2] * m[2][j];
+            c->clip[1][j] = p[3] * m[1][j] + p[4] * m[2][j];
+            c->clip[2][j] = p[5] * m[2][j] + (j == 3 ? p[6] : 0.0f);
+            c->clip[3][j] = -m[2][j];
+        } else {
+            c->clip[0][j] = p[1] * m[0][j] + (j == 3 ? p[2] : 0.0f);
+            c->clip[1][j] = p[3] * m[1][j] + (j == 3 ? p[4] : 0.0f);
+            c->clip[2][j] = p[5] * m[2][j] + (j == 3 ? p[6] : 0.0f);
+            c->clip[3][j] = j == 3 ? 1.0f : 0.0f;
+        }
+    }
+}
+
+static void vsh_verify(void);
+
+static void vsh_state_dirty(void) {
+    u32 d = s_vsh_dirty | (gx_dirty & (GXD_CLIP | GXD_TEXROW));
+    if (s_vsh_pn != gx.cur_pnmtx) {
+        d |= GXD_CLIP;
+    }
+    int has_nrm = gx.vtx_desc[GX_VA_NRM] != GX_NONE || gx.vtx_desc[GX_VA_NBT] != GX_NONE;
+    int nrm_changed = has_nrm != s_vw_has_nrm;
+    if (d == 0 && !nrm_changed) {
+        return;
+    }
+    s_vsh_dirty = 0;
+    gx_dirty &= ~(GXD_CLIP | GXD_TEXROW);
+    s_vsh_pn = gx.cur_pnmtx;
+    s_vw_has_nrm = has_nrm;
+    PlatGpuVshConst* c = &s_vw;
+    int part_c = (d & (GXD_TEV | GXD_CHAN)) || (s_vsh_lit && ((d & GXD_CLIP) || nrm_changed));
+    int part_t = (d & (GXD_TEV | GXD_CHAN | GXD_TEXROW)) || nrm_changed || (s_vw_tex_pos && (d & GXD_CLIP));
+    int part_p = (d & GXD_CLIP) != 0;
+    if (part_c) {
+        vsh_part_color(c, &s_vw_why_c);
+    }
+    if (part_t) {
+        vsh_part_tex(c, &s_vw_why_t, has_nrm);
+    }
+    if (part_p) {
+        vsh_part_clip(c);
+    }
+    if (part_c || part_p) {
+        c->flags = (gx.proj[0] == (f32)GX_PERSPECTIVE ? 0u : PLAT_VSH_ORTHO) | (s_vsh_lit ? PLAT_VSH_LIT : 0u);
+    }
+    s_vsh_reasons = s_vw_why_c | s_vw_why_t;
+    if (part_c || part_t || part_p) {
+        if (s_vsh_const_id == 0 || !gx_mem_equal(c, &s_vsh_const, sizeof(*c))) {
+            s_vsh_const = *c;
+            if (++s_vsh_const_id == 0) {
+                s_vsh_const_id = 1;
+            }
+        }
+    }
+}
+
 static void vsh_state(void) {
+    if (gx_opt_dirty) {
+        vsh_state_dirty();
+        if (gx_opt_dirty == 2 && (s_vsh_ver != gx.version || s_vsh_xfv != gx_xf_version)) {
+            s_vsh_ver = gx.version;
+            s_vsh_xfv = gx_xf_version;
+            vsh_verify();
+        }
+        return;
+    }
     if (s_vsh_ver != gx.version || s_vsh_xfv != gx_xf_version || s_vsh_pn != gx.cur_pnmtx) {
         vsh_prepare();
         s_vsh_ver = gx.version;
         s_vsh_xfv = gx_xf_version;
         s_vsh_pn = gx.cur_pnmtx;
     }
+}
+
+/* gxdirty=2: vsh_prepare's block, reasons, unit attributes and light flag must be the kept ones. */
+static void vsh_verify(void) {
+    u32 reasons = s_vsh_reasons, cid = s_vsh_const_id, lid = s_vsh_light_id;
+    int lit = s_vsh_lit;
+    u8 ua[3] = {s_vsh_unit_attr[0], s_vsh_unit_attr[1], s_vsh_unit_attr[2]};
+    PlatGpuVshConst kept = s_vsh_const;
+    PlatGpuVshLight kl = s_vsh_light;
+    vsh_prepare();
+    u32 bad = 0;
+    if (!gx_mem_equal(&kept, &s_vsh_const, sizeof(kept))) {
+        bad |= 1;
+    }
+    if (reasons != s_vsh_reasons) {
+        bad |= 2;
+    }
+    if (memcmp(ua, s_vsh_unit_attr, 3) != 0) {
+        bad |= 4;
+    }
+    if (lit != s_vsh_lit || (lit && !gx_mem_equal(&kl, &s_vsh_light, sizeof(kl)))) {
+        bad |= 8;
+    }
+    s_dv.vchecks++;
+    if (bad != 0) {
+        s_dv.vbad++;
+        if (s_dv.logged < 20) {
+            s_dv.logged++;
+            PLOG_W("gxdirty verify: frame %lu uniform block mismatch, parts 0x%lx (1 block, 2 reasons, 4 units, "
+                   "8 light)", (unsigned long)gx_perf_frame_no(), (unsigned long)bad);
+        }
+    }
+    /* go on with the kept result */
+    s_vsh_reasons = reasons;
+    s_vsh_lit = lit;
+    memcpy(s_vsh_unit_attr, ua, 3);
+    s_vsh_const = kept;
+    s_vsh_const_id = cid;
+    s_vsh_light = kl;
+    s_vsh_light_id = lid;
+}
+
+void gx_dirty_log(u32 frames) {
+    if (!gx_opt_dirty || frames == 0) {
+        return;
+    }
+    PLOG_I("gxdirty frame %lu: per frame %lu builds (TEV %lu TEX %lu PIX %lu SCI %lu CHAN %lu); verify %lu+%lu "
+           "checks, %lu+%lu mismatches (total)",
+           (unsigned long)gx_perf_frame_no(), (unsigned long)(s_dv.builds / frames),
+           (unsigned long)(s_dv.classes[0] / frames), (unsigned long)(s_dv.classes[1] / frames),
+           (unsigned long)(s_dv.classes[2] / frames), (unsigned long)(s_dv.classes[3] / frames),
+           (unsigned long)(s_dv.classes[4] / frames), (unsigned long)s_dv.checks, (unsigned long)s_dv.vchecks,
+           (unsigned long)s_dv.bad, (unsigned long)s_dv.vbad);
+    s_dv.builds = 0;
+    memset(s_dv.classes, 0, sizeof(s_dv.classes));
 }
 
 static u32 vsh_cull(void) { return gx.cull == GX_CULL_FRONT ? 1u : gx.cull == GX_CULL_BACK ? 2u : 0u; }
@@ -1908,6 +2273,8 @@ void gx_draw_frame_begin(void) {
     gx_stat_draws = gx_stat_vertices = gx_stat_copies = 0;
     s_built_version = 0xFFFFFFFFu; /* every frame starts with a full state */
     s_snap_valid = 0;
+    gx_dirty = GXD_ALL;
+    s_vsh_dirty = GXD_ALL;
 }
 
 /* ---- Compiled TEV setups, kept (switch gxstatecache) ----

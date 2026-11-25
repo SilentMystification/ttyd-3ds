@@ -1017,6 +1017,16 @@ uint32_t plat_gpu_tex_read(uint32_t handle, void* rgba8, uint32_t width, uint32_
 
 /* ---- Replay (render thread) ---- */
 
+static int s_scissor_empty;   /* the last apply_state set an empty scissor: draws are skipped */
+static int s_scissor_gx[4];   /* that scissor, x0 y0 x1 y1 */
+static void scissor_skip_log(void) {
+    static u32 s_logged;
+    if (s_logged++ == 0) {
+        PLOG_W("gpu: empty scissor (x0 %d y0 %d x1 %d y1 %d): draws skipped", s_scissor_gx[0], s_scissor_gx[1],
+               s_scissor_gx[2], s_scissor_gx[3]);
+    }
+}
+
 static void apply_state(const PlatGpuState* st) {
     for (int i = 0; i < 6; i++) {
         C3D_TexEnv* env = C3D_GetTexEnv(i);
@@ -1073,13 +1083,30 @@ static void apply_state(const PlatGpuState* st) {
     }
     float tx, ty, tw, th;
     efb_to_target_rect(st->viewport_x, st->viewport_y, st->viewport_w, st->viewport_h, &tx, &ty, &tw, &th);
+    if (tx < 0) tx = 0;
+    if (ty < 0) ty = 0;
     if (tw >= 1 && th >= 1) {
         C3D_SetViewport((u32)tx, (u32)ty, (u32)tw, (u32)th);
     }
     float sx, sy, sw, sh;
     efb_to_target_rect(st->scissor_x0, st->scissor_y0, (float)(st->scissor_x1 - st->scissor_x0),
                        (float)(st->scissor_y1 - st->scissor_y0), &sx, &sy, &sw, &sh);
-    C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)sx, (u32)sy, (u32)(sx + sw), (u32)(sy + sh));
+    /* clamp to the target region; start floors, end ceils */
+    float cx0 = sx < 0 ? 0 : sx > REGION_W ? REGION_W : sx;
+    float cy0 = sy < 0 ? 0 : sy > REGION_H ? REGION_H : sy;
+    float cx1 = sx + sw < 0 ? 0 : sx + sw > REGION_W ? REGION_W : sx + sw;
+    float cy1 = sy + sh < 0 ? 0 : sy + sh > REGION_H ? REGION_H : sy + sh;
+    int x0 = (int)cx0, y0 = (int)cy0, x1 = (int)cx1, y1 = (int)cy1;
+    x1 += (float)x1 < cx1;
+    y1 += (float)y1 < cy1;
+    s_scissor_gx[0] = x0;
+    s_scissor_gx[1] = y0;
+    s_scissor_gx[2] = x1;
+    s_scissor_gx[3] = y1;
+    s_scissor_empty = x1 <= x0 || y1 <= y0;
+    if (!s_scissor_empty) {
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)x0, (u32)y0, (u32)x1, (u32)y1);
+    }
 }
 
 static void draw_rect_quad(Record* r, u16 x, u16 y, u16 w, u16 h, u32 rgba, u32 depth24, int color, int depth) {
@@ -1789,6 +1816,10 @@ eye_again:
                     apply_state(cur_state);
                     restore = 0;
                 }
+                if (s_scissor_empty) {
+                    scissor_skip_log();
+                    break;
+                }
                 C3D_DrawArrays(GPU_TRIANGLES, (int)d[0], (int)(d[1] - d[1] % 3));
                 n_draw++;
                 after_last_draw = 0;
@@ -1838,6 +1869,10 @@ eye_again:
                 apply_state(cur_state); /* also sets cull none */
                 restore = 0;
                 v_cull = 0;
+            }
+            if (s_scissor_empty) {
+                scissor_skip_log();
+                break;
             }
             if (!vsh_mode) {
                 vsh_mode = 1;

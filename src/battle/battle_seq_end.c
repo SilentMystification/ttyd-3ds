@@ -2196,10 +2196,17 @@ static s32 _keta_get(s32 n) {
 #if VERSION >= VERSION_US
 // FAKE: same registers as (id, color, 0, x, y, z, sx, sy); listing the float arguments
 // first makes MWCC evaluate the texture-table load last, as in the US build.
+#ifdef TARGET_PORT
+#define LVOBJ_TEXPLANE(o, n, tbl)                                        \
+    btlDispTexPlane(                                                     \
+        tbl[gp->language], (o)->color, 0, (o)->pos.x - 16.0f, 20.0f + (o)->pos.y, \
+        2.0f + (o)->pos.z, (o)->scale.x, (o)->scale.y)
+#else
 #define LVOBJ_TEXPLANE(o, n, tbl)                                            \
     ((void (*)(f32, f32, f32, f32, f32, u32, GXColor, s32))btlDispTexPlane)( \
         (o)->pos.x - 16.0f, 20.0f + (o)->pos.y, 2.0f + (o)->pos.z,           \
         (o)->scale.x, (o)->scale.y, tbl[gp->language], (o)->color, 0)
+#endif
 #else
 #define LVOBJ_TEXPLANE(o, n, tbl)                                        \
     btlDispTexPlane(                                                     \

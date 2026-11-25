@@ -130,6 +130,7 @@ static u32 s_cap_epoch;         /* the registry's epoch when the decode began */
 /* counters (per frame, summed into the gxstats line) */
 static struct {
     u32 calls, hits, built, changed, variant, nocache, dynamic_calls, too_big, sparse, evicted, alloc_fail;
+    u32 relinks; /* lru_skip_batched: entries moved back to the front */
     u32 hit_verts;
     u32 verified, mismatched, full;
     u32 trusted, grants, stale, scribble_hits;
@@ -258,22 +259,32 @@ static int evictable(const DlcEntry* e) { return e != NULL && gx_perf_frame_no()
 /* gxbatch: a batch's draws do not move its members in the LRU list or stamp them, so the tail can be an entry
  * a batch still draws. Such entries go back to the front (they are in use); what is left at the tail is the
  * least recently used entry no batch needs. */
-static void lru_skip_batched(void) {
-    for (u32 n = 0; n < DLC_ENTRIES && s_lru_tail; n++) {
+#define LRU_SKIP_MAX 256
+static u32 s_skip_full_frame; /* the frame in which a scan found nothing but batched entries (+1) */
+static int lru_skip_batched(void) {
+    u32 frame = gx_perf_frame_no();
+    if (s_skip_full_frame == frame + 1) {
+        return 0; /* the tail was all batched earlier this frame: nothing new can have left it */
+    }
+    for (u32 n = 0; n < LRU_SKIP_MAX && s_lru_tail; n++) {
         DlcEntry* t = E(s_lru_tail);
         if (!t->bat || !gx_batch_recent(t->bat)) {
-            return;
+            return 1;
         }
-        t->last_frame = gx_perf_frame_no();
+        s_st.relinks++;
+        t->last_frame = frame;
         lru_unlink(t);
         lru_front(t);
     }
+    /* A tail of batched entries this long: all of them are in use. Allocation fails (cheaply) for the rest of
+     * the frame instead of walking the whole list again at every new entry. */
+    s_skip_full_frame = frame + 1;
+    return 0;
 }
 
 static DlcEntry* entry_new(const void* list, u32 nbytes) {
     if (!s_free_head) {
-        lru_skip_batched();
-        if (!evictable(E(s_lru_tail))) {
+        if (!lru_skip_batched() || !evictable(E(s_lru_tail))) {
             s_st.full++;
             return NULL;
         }
@@ -666,6 +677,7 @@ static u32 s_bat_hand;     /* eviction scan position */
 /* the index pool (linear memory): first fit over free runs, a bump pointer, frees held for the frames in flight */
 static u16* s_ix;
 static u32 s_ix_cap, s_ix_bump, s_ix_nruns, s_ix_npending;
+static u32 s_ix_lost, s_ix_lost_logged; /* indices given up (free runs or pending list full), and the log-once count */
 static struct {
     u32 start, len;
 } s_ix_runs[BAT_IX_RUNS];
@@ -719,6 +731,9 @@ static void bat_init(void) {
     u32 kb = (u32)plat_switch_int("gxbatchkb", 512);
     s_ix_cap = kb * 1024u / sizeof(u16);
     s_ix = plat_gpu_stream_alloc(s_ix_cap * sizeof(u16));
+    if (s_ix != NULL) {
+        plat_gpu_set_index_pool(s_ix, s_ix_cap * sizeof(u16));
+    }
     s_bat = gx_big_alloc("gxbatch slots", sizeof(Batch) * BAT_SLOTS);
     s_form.m = gx_big_alloc("gxbatch run", sizeof(BatMember) * BAT_MAX_MEMBERS);
     s_form.x = gx_big_alloc("gxbatch run draws", sizeof(FormX) * BAT_MAX_MEMBERS);
@@ -786,7 +801,25 @@ static void ix_release(u32 start, u32 len) {
         return;
     }
     if (s_ix_nruns == BAT_IX_RUNS) {
-        return; /* too fragmented: the range is lost until the pool empties (never seen) */
+        /* too fragmented: the smallest range (the new one or a held one) is given up until the pool empties */
+        u32 small = 0;
+        for (u32 k = 1; k < s_ix_nruns; k++) {
+            if (s_ix_runs[k].len < s_ix_runs[small].len) {
+                small = k;
+            }
+        }
+        s_ix_lost += s_ix_runs[small].len < len ? s_ix_runs[small].len : len;
+        if (s_ix_lost_logged++ == 0) {
+            PLOG_W("gxbatch: index pool free runs full: a range is given up until the pool empties");
+        }
+        if (len <= s_ix_runs[small].len) {
+            return;
+        }
+        memmove(&s_ix_runs[small], &s_ix_runs[small + 1], (s_ix_nruns - small - 1) * sizeof(s_ix_runs[0]));
+        s_ix_nruns--;
+        if (small < i) {
+            i--;
+        }
     }
     memmove(&s_ix_runs[i + 1], &s_ix_runs[i], (s_ix_nruns - i) * sizeof(s_ix_runs[0]));
     s_ix_runs[i].start = start;
@@ -845,13 +878,38 @@ static void bat_kill(Batch* b) {
     if (s_ix_npending == BAT_IX_PENDING) {
         ix_reap();
     }
-    if (s_ix_npending < BAT_IX_PENDING) {
+    u32 pstart = b->ix_first, plen = (b->ix_count + 3u) & ~3u, pframe = plat_gpu_present_count() + 3;
+    if (s_ix_npending == BAT_IX_PENDING) {
+        /* still full: fold the range into an adjacent pending free (held until the later of the two frames) */
+        for (u32 k = 0; k < s_ix_npending; k++) {
+            if (s_ix_pending[k].start + s_ix_pending[k].len == pstart) {
+                s_ix_pending[k].len += plen;
+                s_ix_pending[k].frame = pframe;
+                plen = 0;
+                break;
+            }
+            if (pstart + plen == s_ix_pending[k].start) {
+                s_ix_pending[k].start = pstart;
+                s_ix_pending[k].len += plen;
+                s_ix_pending[k].frame = pframe;
+                plen = 0;
+                break;
+            }
+        }
+    }
+    if (plen != 0 && s_ix_npending < BAT_IX_PENDING) {
         /* the record being written and the frames in flight may draw from it */
-        s_ix_pending[s_ix_npending].start = b->ix_first;
-        s_ix_pending[s_ix_npending].len = (b->ix_count + 3u) & ~3u;
-        s_ix_pending[s_ix_npending].frame = plat_gpu_present_count() + 3;
+        s_ix_pending[s_ix_npending].start = pstart;
+        s_ix_pending[s_ix_npending].len = plen;
+        s_ix_pending[s_ix_npending].frame = pframe;
         s_ix_npending++;
-    } /* else: the range is lost (never seen: more pending frees than batches) */
+    } else if (plen != 0) {
+        /* no adjacent entry either: the range is given up until the pool empties (counted, logged once) */
+        s_ix_lost += plen;
+        if (s_ix_lost_logged++ == 0) {
+            PLOG_W("gxbatch: index pool pending frees full: a range is given up until the pool empties");
+        }
+    }
     free(b->blob);
     if (s_bat_prev == b) {
         s_bat_prev = NULL;
@@ -985,9 +1043,32 @@ static int bat_open_chain(DlcEntry* e) {
     return 0;
 }
 
+/* gxbatch=2: the open batch's index range is live: below the bump pointer, in no free run, and no pending free
+ * waits longer than present+3 (the frames in flight). Logs the first failures. */
+static void bat_verify_life(const Batch* b) {
+    static u32 s_fail_logged;
+    u32 first = b->ix_first, end = first + ((b->ix_count + 3u) & ~3u), now = plat_gpu_present_count();
+    int bad = !b->live || end > s_ix_bump;
+    for (u32 i = 0; i < s_ix_nruns && !bad; i++) {
+        bad = first < s_ix_runs[i].start + s_ix_runs[i].len && s_ix_runs[i].start < end;
+    }
+    for (u32 i = 0; i < s_ix_npending && !bad; i++) {
+        bad = (s32)(s_ix_pending[i].frame - now) > 3;
+    }
+    if (bad && s_fail_logged++ < 8) {
+        PLOG_E("gxbatch verify: batch %lu index range %lu..%lu not live (bump %lu, %lu free runs, %lu pending, present %lu)",
+               (unsigned long)BIDX(b), (unsigned long)first, (unsigned long)end, (unsigned long)s_ix_bump,
+               (unsigned long)s_ix_nruns, (unsigned long)s_ix_npending, (unsigned long)now);
+        s_bst.bad++;
+    }
+}
+
 /* Records the draws of the open batch's members called so far. */
 static void bat_close(void) {
     Batch* b = s_act;
+    if (s_bat_on == 2) {
+        bat_verify_life(b);
+    }
     u32 p = s_act_pos;
     s_act = NULL;
     const BatMember* m = b_members(b);
@@ -1722,7 +1803,7 @@ void gx_dlcache_log(u32 frames) {
     const typeof(s_sum)* a = &s_sum;
     u32 pct = a->calls ? (u32)((u64)a->hits * 100u / a->calls) : 0;
     PLOG_I("gxstats   cache: calls %lu hits %lu (%lu%%, %lu verts) built %lu changed %lu variant %lu nocache %lu "
-           "dynamic %lu too-big %lu odd %lu evicted %lu full %lu alloc-fail %lu verified %lu mismatched %lu | "
+           "dynamic %lu too-big %lu odd %lu evicted %lu full %lu alloc-fail %lu verified %lu mismatched %lu relinks/frame %lu | "
            "%lu entries %lu KB of %lu KB",
            (unsigned long)(a->calls / f), (unsigned long)(a->hits / f), (unsigned long)pct,
            (unsigned long)(a->hit_verts / f), (unsigned long)(a->built / f), (unsigned long)(a->changed / f),
@@ -1730,6 +1811,7 @@ void gx_dlcache_log(u32 frames) {
            (unsigned long)(a->too_big / f), (unsigned long)(a->sparse / f), (unsigned long)a->evicted,
            (unsigned long)a->full,
            (unsigned long)a->alloc_fail, (unsigned long)a->verified, (unsigned long)a->mismatched,
+           (unsigned long)(a->relinks / f),
            (unsigned long)s_live, (unsigned long)(s_used_bytes / 1024),
            (unsigned long)(s_budget / 1024));
     PlatMemStableStats ms;

@@ -1215,8 +1215,13 @@ static u32 compareCamRoad(CamRoadState* a, CamRoadState* b, f32* outSpeed) {
 static inline f32 hokanRate(f32 t, f32 a, f32 b, f32 k, f32 o) {
     f32 c1, c0, c2, r;
     // FAKE: cos through a float-argument cast keeps the constant arguments as .sdata2 floats (FAKES.md)
+#ifdef TARGET_PORT
+    c0 = (f32)cos(a);
+    c1 = (f32)cos(b);
+#else
     c0 = (f32)((double (*)(f32))cos)(a);
     c1 = (f32)((double (*)(f32))cos)(b);
+#endif
     c2 = (f32)cos(3.141592f * t * k + o);
     r = (2.0f / (1.0f + c0)) * (0.5f * (1.0f - c1) + c2);
     r = 0.500001f * (2.0f - (1.0f + r));

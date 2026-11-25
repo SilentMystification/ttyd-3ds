@@ -254,7 +254,12 @@ void statusWinMain(void) {
 
 // iconDispGx's original prototype takes the scale first (f1 either way); calling it in that
 // order gives the target's argument evaluation order.
+#ifdef TARGET_PORT
+// ARM passes floats in the integer registers, so the GameCube cast with the scale first breaks the call
+#define iconDispGxScaleFirst(scale, pos, flags, id) iconDispGx((pos), (flags), (id), (scale))
+#else
 #define iconDispGxScaleFirst ((void (*)(f32, Vec*, s16, u16))iconDispGx)
+#endif
 
 /**
  * Draws the Star Power gauge at (x, y): one 32-pixel slot per crystal star obtained,

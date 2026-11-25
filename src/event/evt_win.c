@@ -1371,7 +1371,13 @@ static inline const char* party_name_table_rtn(s32 i) {
 }
 #endif
 #define ICONGX ((void (*)(Vec*, u16, u16, f32))iconDispGx)
+#ifdef TARGET_PORT
+static inline void ICONGX2(Vec* pos, u16 flags, f32 scale, u16 id) {
+    iconDispGx(pos, flags, id, scale);
+}
+#else
 #define ICONGX2 ((void (*)(Vec*, u16, f32, u16))iconDispGx)
+#endif
 /**
  * Draws the unit window each frame: the item name and description for the highlighted counter slot with prices,
  * the counter window that counts toward Mario's coins (or Star Pieces, or pouchGetSuperCoin with flag 0x4000),

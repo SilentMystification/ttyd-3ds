@@ -1325,7 +1325,11 @@ void winFontSetPitch(f32 pitch, Vec pos, Vec scale, GXColor color, const char* f
     FontDrawScaleVec(scale);
     // FAKE: called through a cast that passes the address of this function's own pos (the same registers as
     // fontmgr.h's by-value Vec): the plain call first copies pos to a temporary, which the target does not.
+#ifdef TARGET_PORT
+    FontDrawStringVecPitch(pos, pitch, (const s8*)buf);
+#else
     ((void (*)(Vec*, const char*, f32))FontDrawStringVecPitch)(&pos, buf, pitch);
+#endif
 }
 #endif
 

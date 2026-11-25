@@ -20,7 +20,7 @@
  *   window=ms     concurrency and contention window (default 250)
  *   chase=N       loads per latency point (default 262144)
  *   gpuprobe      run the PICA rules probe (ctrdk/gpuprobe.h) instead of the benchmark; it hangs the GPU on
- *                 purpose and resets it. Table: sdmc:/3ds/ctrdk/gpuprobe.txt. Sub-switches: probe=ids
+ *                 purpose and resets it. Table: sdmc:/3ds/qtmbench/gpuprobe.txt. Sub-switches: probe=ids
  *                 (case ids, groups, prefix*), probefresh (ignore the journal), probeselftest,
  *                 probesafe (skip the memory-fault cases), probetimeout=ms
  *   gpucore=N     core of the GPU feeder threads in contend (default 1)
@@ -259,7 +259,7 @@ int main(int argc, char** argv) {
         run = false;
         GpuProbeConfig pc;
         memset(&pc, 0, sizeof(pc));
-        pc.dir = "sdmc:/3ds/ctrdk";
+        pc.dir = QB_DIR; /* devupdate's read-only folder: files get @/gpuprobe.txt */
         pc.timeout_ms = (int)sw_int("probetimeout", 0);
         char only[128] = "";
         pc.only = sw_value("probe", only, sizeof(only)) ? only : NULL;

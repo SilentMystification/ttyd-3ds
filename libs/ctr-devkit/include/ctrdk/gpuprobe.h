@@ -27,7 +27,7 @@ extern "C" {
 #endif
 
 typedef struct {
-    const char* dir;        /* output folder, default "sdmc:/3ds/ctrdk" */
+    const char* dir;        /* output folder, default "sdmc:/3ds/qtmbench" */
     int timeout_ms;         /* wait per case; 0: 200 on hardware, 5000 on an emulator */
     const char* only;       /* comma list of case ids, or group names or id prefixes ending in '*'; NULL: all */
     bool fresh;             /* ignore and delete the journal: run every case again */

@@ -70,7 +70,7 @@ typedef struct {
 
 /* ---- the cases ---- */
 
-#define SC_NORMAL 1
+#define SC_NORMAL 3 /* GPU_SCISSOR_NORMAL: draw inside the rectangle */
 #define DRAW_ARR 0
 #define DRAW_E16 1
 #define DRAW_E8 2
@@ -273,18 +273,6 @@ static void res_set(Res* r, ResCode c, const char* fmt, ...) {
 
 static bool ev_wait(GSPGPU_Event e, int ms) { return LightEvent_WaitTimeout(&g.ev[e], (s64)ms * 1000000LL) == 0; }
 
-static bool gx_fill(void* dst, u32 n, u32 value) {
-    LightEvent_Clear(&g.ev[GSPGPU_EVENT_PSC0]);
-    Result rc = GX_MemoryFill((u32*)dst, value, (u32*)((u8*)dst + n), GX_FILL_TRIGGER | GX_FILL_32BIT_DEPTH, NULL, 0, NULL, 0);
-    return R_SUCCEEDED(rc) && ev_wait(GSPGPU_EVENT_PSC0, g.timeout_ms);
-}
-
-static bool gx_copy(void* dst, const void* src, u32 n) {
-    LightEvent_Clear(&g.ev[GSPGPU_EVENT_PPF]);
-    Result rc = GX_TextureCopy((u32*)src, 0, (u32*)dst, 0, n, GX_TRANSFER_RAW_COPY(1));
-    return R_SUCCEEDED(rc) && ev_wait(GSPGPU_EVENT_PPF, g.timeout_ms);
-}
-
 /* ---- init, reset ---- */
 
 static void events_up(void) {
@@ -337,6 +325,11 @@ static bool gpu_setup(void) {
     g.vb = linearMemAlign(64 * 1024, 256);
     g.ib = linearMemAlign(4096, 256);
     g.tex = linearMemAlign(TEX_SMALL, 256);
+    plog("gpuprobe: memory (virt/phys): cmd %p/%08lX vram %p/%08lX lin-target %p/%08lX vb %p/%08lX ib %p/%08lX tex %p/%08lX",
+         (void*)g.cmd, (unsigned long)osConvertVirtToPhys(g.cmd), (void*)g.blk_v,
+         (unsigned long)osConvertVirtToPhys(g.blk_v), (void*)g.blk_l, (unsigned long)osConvertVirtToPhys(g.blk_l),
+         (void*)g.vb, (unsigned long)osConvertVirtToPhys(g.vb), (void*)g.ib, (unsigned long)osConvertVirtToPhys(g.ib),
+         (void*)g.tex, (unsigned long)osConvertVirtToPhys(g.tex));
     return g.cmd && g.blk_v && g.blk_l && g.stage && g.vb && g.ib && g.tex;
 }
 
@@ -437,12 +430,12 @@ static void make_vertices(Vtx* v) {
         Vtx t = {0.0f, 0.0f, 0.0f, {255, 0, 0, 255}, 0.0f, 0.0f};
         switch (i % 3) {
         case 1:
-            t.x = 160.0f;
-            t.u = 2.5f;
+            t.x = 128.0f;
+            t.u = 2.0f;
             break;
         case 2:
-            t.y = 160.0f;
-            t.v = 2.5f;
+            t.y = 128.0f;
+            t.v = 2.0f;
             break;
         }
         v[i] = t;
@@ -487,6 +480,13 @@ static void kill_vsh_writes(u32* w, u32 n) {
 
 static void dump_list(const char* id, const u32* w, u32 bytes) {
     char path[220];
+    static bool ctl_done;
+    if (strcmp(id, "ctl_recover") == 0) {
+        if (ctl_done) {
+            return; /* the first control list (it carries the shader upload) is enough */
+        }
+        ctl_done = true;
+    }
     snprintf(path, sizeof(path), "%s/gpuprobe/%s.bin", g.dir, id);
     FILE* f = fopen(path, "wb");
     if (f != NULL) {
@@ -506,11 +506,9 @@ static Res classify(const Scene* s, bool timed_out, Result rc) {
         return r;
     }
     u8* blk = s->rt_linear ? g.blk_l : g.blk_v;
-    if (!gx_copy(g.stage, blk, BLK_BYTES)) {
-        res_set(&r, R_HANG, "readback copy timed out");
-        return r;
-    }
-    inval_dc(g.stage, BLK_BYTES);
+    /* CPU read of the block (VRAM is readable): the emulator's render cache is flushed by a CPU read, not by a GX copy. */
+    inval_dc(blk, BLK_BYTES);
+    memcpy(g.stage, blk, BLK_BYTES);
     const u32* w = (const u32*)g.stage;
     u32 guard_bad = 0, first_bad = 0;
     for (u32 i = 0; i < BLK_BYTES / 4; i++) {
@@ -545,9 +543,14 @@ static Res classify(const Scene* s, bool timed_out, Result rc) {
         }
     }
     if (guard_bad || bad) {
-        char a[60] = "", b[48] = "";
+        char a[80] = "", b[48] = "";
         if (bad) {
-            snprintf(a, sizeof(a), "%d/8 px wrong, first %08lX want %08lX", bad, (unsigned long)got0, (unsigned long)want0);
+            u32 changed = 0;
+            for (u32 i = RT_OFF / 4; i < (RT_OFF + RT_BYTES) / 4; i++) {
+                changed += w[i] != SENT;
+            }
+            snprintf(a, sizeof(a), "%d/8 px wrong, first %08lX want %08lX, %lu/%d words drawn", bad,
+                     (unsigned long)got0, (unsigned long)want0, (unsigned long)changed, RT_BYTES / 4);
         }
         if (guard_bad) {
             snprintf(b, sizeof(b), "%s%lu guard words changed from +0x%lX", bad ? "; " : "", (unsigned long)guard_bad,
@@ -562,9 +565,13 @@ static Res classify(const Scene* s, bool timed_out, Result rc) {
 static Res run_scene(Scene* s) {
     Res r = {R_OK, ""};
     u8* blk = s->rt_linear ? g.blk_l : g.blk_v;
-    if (!gx_fill(blk, BLK_BYTES, SENT)) {
-        res_set(&r, R_HANG, "clearing the target timed out");
-        return r;
+    /* CPU fill: a GX fill of the whole block overlaps the render target surface in an emulator's cache. */
+    {
+        u32* p = (u32*)blk;
+        for (u32 i = 0; i < BLK_BYTES / 4; i++) {
+            p[i] = SENT;
+        }
+        flush_dc(blk, BLK_BYTES);
     }
 
     memset(g.vb, 0, 64 * 1024);
@@ -612,10 +619,14 @@ static Res run_scene(Scene* s) {
     if (s->vb_mode == 2) {
         BufInfo_Add(bi, heapv, sizeof(Vtx), 3, 0x210);
     } else if (s->vb_mode == 1) {
+        /* citro3d's base is the constant 0x18000000 and each buffer carries its offset from it; here the base
+         * register (ATTRIBBUFFERS_LOC) is moved to the data address and the buffer offset is 0 */
         BufInfo_Add(bi, g.vb + s->vb_k, sizeof(Vtx), 3, 0x210);
+        bi->base_paddr += bi->buffers[0].offset;
+        bi->buffers[0].offset = 0;
     } else {
         BufInfo_Add(bi, g.vb, sizeof(Vtx), 3, 0x210);
-        bi->buffers[0].offset = (u32)s->vb_k;
+        bi->buffers[0].offset += (u32)s->vb_k;
     }
 
     C3D_FrameBuf fb;
@@ -643,7 +654,7 @@ static Res run_scene(Scene* s) {
     }
     set_proj(s->shader);
     if (s->boolreg >= 0) {
-        C3D_BoolUnifSet(GPU_VERTEX_SHADER, s->boolreg, true);
+        C3D_BoolUnifSet(GPU_VERTEX_SHADER, 0x68 + s->boolreg, true); /* shader bool ids start at 0x68 */
     }
     C3D_Tex tex;
     if (s->textured) {

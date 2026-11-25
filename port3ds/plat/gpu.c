@@ -485,6 +485,9 @@ void plat_gpu_set_state_dirty(const PlatGpuState* state, uint32_t regions) {
         *dst = *state;
         s_last_state = *state;
         s_stats_frame.state_changes++;
+    } else {
+        memset(&s_last_state, 0xFF, sizeof(s_last_state)); /* the record is full: the next state is whole */
+        s_last_state_valid = 0;
     }
 }
 

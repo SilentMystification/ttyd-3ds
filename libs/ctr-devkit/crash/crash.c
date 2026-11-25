@@ -9,7 +9,8 @@
  *   - One report path (crash_report) serves exceptions, crash_fatal, the
  *     watchdog and svcBreak. It writes the [CRASH] lines, then shows a crash
  *     screen on both screens (what happened on top, the call chain on the
- *     bottom) until START or the timeout, runs the shutdown hooks and ends
+ *     bottom; drawn by the CPU into the frame buffers, never through the GPU)
+ *     until START or the timeout, runs the shutdown hooks and ends
  *     the process with svcExitProcess (svcBreak leaves a console frozen).
  *   - The watchdog thread ends the process if a report takes over 5 s
  *     before the screen is up (or the exit takes over 4.5 s). A second fault
@@ -41,6 +42,8 @@ static CrashConfig s_cfg;
 static u64 s_boot_tick;
 static volatile u32 s_crash_ms; /* uptime in ms when a handler started, 0 if none */
 static volatile u32 s_wd_hold;
+static volatile u32 s_deadline_ms; /* uptime at which the watchdog ends the process, 0 = none (tentative: defined again below) */
+static volatile int s_in_crash;
 static Thread s_wd_thread;
 static volatile int s_wd_quit; /* set by crash_wd_quiesce: the monitor returns */
 static volatile u32 s_wd_counter;
@@ -215,19 +218,26 @@ static void crash_printf(const char* fmt, ...) {
     emit_line(buf, n);
 }
 
-/* Crash and watchdog exits only. svcExitProcess skips exit(), so the
- * atexit handlers never run; the EXIT hooks do what must not be skipped. */
+/* Crash, watchdog and recovery exits. svcExitProcess skips exit(), so the atexit handlers never run; the
+ * EXIT hooks do what must not be skipped. Nothing here waits for the GPU or another thread without a bound:
+ * the chainload (aptExit) gets 4.5 s, then the watchdog thread (or a second caller) ends the process
+ * without it. */
 void crash_exit_process(void) {
-    for (int i = 0; i < 100 && s_wd_hold; i++) {
-        svcSleepThread(10000000LL); /* a running save gets up to 1 s */
-    }
-    run_hooks(CRASH_STAGE_EXIT);
-    if (s_report_fd >= 0) {
-        close(s_report_fd);
-        s_report_fd = -1;
-    }
-    if (s_recovery_exit == 2) {
-        aptExit(); /* runs the chainloader set by the recovery service */
+    static volatile int s_exit_started;
+    if (!__atomic_exchange_n(&s_exit_started, 1, __ATOMIC_ACQ_REL)) {
+        for (int i = 0; i < 100 && s_wd_hold; i++) {
+            svcSleepThread(10000000LL); /* a running save gets up to 1 s */
+        }
+        run_hooks(CRASH_STAGE_EXIT);
+        if (s_report_fd >= 0) {
+            close(s_report_fd);
+            s_report_fd = -1;
+        }
+        if (s_recovery_exit == 2) {
+            s_crash_ms = uptime_ms() | 1u; /* the watchdog times this: it ends the process if aptExit hangs */
+            s_deadline_ms = (s_crash_ms + 4500u) | 1u;
+            aptExit(); /* runs the chainloader set by the recovery service */
+        }
     }
     svcExitProcess();
     for (;;) {
@@ -243,7 +253,15 @@ void crash_wd_quiesce(void) {
     s_wd_quit = 1;
 }
 
-void crash_recovery_exit(bool chainload) { s_recovery_exit = chainload ? 2 : 1; }
+/* Ends the crash screen's wait. With no crash in progress (the updater's relaunch deadline: the app's own exit
+ * path did not end the process, e.g. its game thread is stuck behind a hung GPU) there is no wait to end, so
+ * this ends the process itself. */
+void crash_recovery_exit(bool chainload) {
+    s_recovery_exit = chainload ? 2 : 1;
+    if (!s_in_crash) {
+        crash_exit_process();
+    }
+}
 
 static CrashAppInfo s_info;
 
@@ -403,14 +421,16 @@ static const char* base_name(const char* path) {
     return b;
 }
 
-/* Both screens: what happened on top, the call chain at the bottom. */
+/* Both screens: what happened on top, the call chain at the bottom. Drawn by the CPU straight into the
+ * libctru frame buffers (libctru consoles), then flushed and swapped: nothing goes through citro3d or the
+ * GX queue, so a hung GPU cannot stop it. gfxInitDefault is a no-op while the app's gfx is up (the app's
+ * GPU stack is left as it is: C3D_Fini and gfxExit wait for the GX queue and would hang on a hung GPU). */
 static void crash_screen_draw(const CrashInfo* ci, bool recovery) {
     run_hooks(CRASH_STAGE_SCREEN);
     gfxInitDefault();
     gfxSet3D(false);
     consoleInit(GFX_TOP, &s_top_con);
     consoleInit(GFX_BOTTOM, &s_bot_con);
-    s_deadline_ms = 0; /* the screen is up: the watchdog stops timing the report */
 
     consoleSelect(&s_top_con);
     printf("%s crashed\nbuild %s\n\n", s_cfg.app_name != NULL ? s_cfg.app_name : "app",
@@ -445,13 +465,21 @@ static void crash_screen_draw(const CrashInfo* ci, bool recovery) {
     if (s_nchain == 0) {
         printf("(none)\n");
     }
+    fflush(stdout);
+    gfxFlushBuffers();
+    gfxSwapBuffers(); /* no vblank wait: the system applies the swap at the next vblank */
 }
 
-/* Until START, the timeout (none in recovery) or crash_recovery_exit(). */
-static void crash_screen_wait(bool recovery) {
+/* Until START, the timeout (none in recovery) or crash_recovery_exit(). A fixed 16 ms sleep, not
+ * gspWaitForVBlank (one waiter per vblank event, shared with the app) and, after a hang, not aptMainLoop
+ * (citro3d's suspend hook would wait for the GX queue: HOME is ignored then). */
+static void crash_screen_wait(bool recovery, bool apt) {
     int wait_s = s_cfg.screen_wait_seconds == 0 ? 300 : s_cfg.screen_wait_seconds;
     u64 start = svcGetSystemTick();
-    while (aptMainLoop()) {
+    for (;;) {
+        if (apt && !aptMainLoop()) {
+            break;
+        }
         hidScanInput();
         if (hidKeysDown() & KEY_START) {
             break;
@@ -459,12 +487,31 @@ static void crash_screen_wait(bool recovery) {
         if (recovery ? s_recovery_exit != 0 : svcGetSystemTick() - start > (u64)wait_s * SYSCLOCK_ARM11) {
             break;
         }
-        gfxFlushBuffers();
-        gfxSwapBuffers();
-        gspWaitForVBlank();
+        svcSleepThread(16666667LL);
     }
-    s_deadline_ms = (uptime_ms() + 4500u) | 1u; /* the release below must not hang the console */
-    gfxExit();
+    s_deadline_ms = (uptime_ms() + 4500u) | 1u; /* the exit below must not hang the console */
+}
+
+/* Test aid (CrashConfig.screen_dump): what is in the frame buffers, as PPM files. */
+static void dump_screen(const char* prefix, gfxScreen_t scr, const char* name) {
+    u16 w, h;
+    const u16* fb = (const u16*)gfxGetFramebuffer(scr, GFX_LEFT, &w, &h); /* w = 240 (screen height), h = screen width */
+    char path[160];
+    snprintf(path, sizeof(path), "%s_%s.ppm", prefix, name);
+    FILE* f = fb != NULL ? fopen(path, "wb") : NULL;
+    if (f == NULL) {
+        return;
+    }
+    fprintf(f, "P6\n%u %u\n255\n", (unsigned)h, (unsigned)w);
+    for (unsigned y = 0; y < w; y++) {
+        for (unsigned x = 0; x < h; x++) {
+            u16 px = fb[(size_t)x * w + (w - 1 - y)];
+            fputc((px >> 11) << 3, f);
+            fputc(((px >> 5) & 63) << 2, f);
+            fputc((px & 31) << 3, f);
+        }
+    }
+    fclose(f);
 }
 
 static void crash_report(CrashInfo* ci, int thread_dump_stuck) {
@@ -523,23 +570,26 @@ static void crash_report(CrashInfo* ci, int thread_dump_stuck) {
             stack_scan(stack_of(ci->sp), ci->sp);
         }
     }
+    /* "drawn" is logged only after the draw and the swap returned; the 5 s deadline stays armed until then. */
+    bool apt = !thread_dump_stuck;
+    crash_printf("[CRASH] drawing the crash screen (CPU, frame buffers)");
+    crash_screen_draw(ci, s_cfg.on_recovery != NULL);
+    s_deadline_ms = 0; /* the screen is up: the watchdog stops timing the report */
+    crash_printf("[CRASH] crash screen drawn");
+    if (s_cfg.screen_dump != NULL) {
+        dump_screen(s_cfg.screen_dump, GFX_TOP, "top");
+        dump_screen(s_cfg.screen_dump, GFX_BOTTOM, "bottom");
+    }
     bool recovery = false;
     if (s_cfg.on_recovery != NULL) {
-        crash_printf("[CRASH] showing the crash screen, then recovery");
-        crash_screen_draw(ci, true);
-        gfxFlushBuffers();
-        gfxSwapBuffers();
         run_hooks(CRASH_STAGE_REPORT_END);
+        crash_printf("[CRASH] recovery mode: the updater server stays up until a restart, push or launch");
         recovery = s_cfg.on_recovery(s_report_copy, s_cfg.user);
         if (!recovery) {
             crash_printf("[CRASH] recovery refused");
         }
-        crash_screen_wait(recovery);
-    } else {
-        crash_printf("[CRASH] showing the crash screen");
-        crash_screen_draw(ci, false);
-        crash_screen_wait(false);
     }
+    crash_screen_wait(recovery, apt);
     crash_printf("[CRASH] exiting the process");
     run_hooks(CRASH_STAGE_REPORT_END);
     crash_exit_process();

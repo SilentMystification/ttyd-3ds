@@ -73,6 +73,9 @@ typedef struct {
      * set (the generic bootstrap sets it). */
     bool allow_3dsx_install;
     const char* log_path;    /* the app's log, whose tail "report" sends; NULL = none */
+    const char* report_path; /* the app's crash report file (ctrdk crash: report_path): "report" sends its tail when no
+                                crash of this run left an in-memory report (a crash that never reached recovery, or the
+                                launch after one); NULL = none */
     int recovery_net_seconds;    /* recovery ends the process if the network is not up in time; 0 = 30 */
     uint32_t soc_buffer_size;    /* 0 = 0x80000; reserved at start if the app has not set up sockets */
 

@@ -62,7 +62,8 @@ void plat_qtm_usage(uint32_t* used, uint32_t* total); /* memplace.c: QTM RAM pla
 uint32_t plat_gpu_vram_largest_kb(void);              /* gpu.c: the largest block vramAlloc can still give (probes; not every frame) */
 void plat_pause_grey(void);          /* pause look: the top screen's last frame, greyed and darker (both eyes); the game's next frame replaces it */
 void plat_pause_release(void);
-void plat_pause_begin(void);         /* a menu pauses the game thread: hold the watchdog, mute, grey the top screen */
+void plat_pause_begin_updater(int idle); /* the updater's pause, from its server thread: no GPU sync; greys the top screen only when idle (game thread parked) */
+void plat_pause_begin(void);        /* a menu pauses the game thread: hold the watchdog, mute, grey the top screen */
 void plat_pause_end(void);           /* ...and undo it, counting the time for plat_paused_ticks */
 void plat_pause_add_ticks(uint64_t ticks);
 void plat_pause_dump(int tick);      /* test aid: the frozen top screen as shots/pNNNNN.ppm */

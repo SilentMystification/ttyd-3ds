@@ -810,13 +810,27 @@ static void handle_client(int fd, bool recovery) {
     switch (h.cmd) {
     case CMD_PING: do_ping(fd); break;
     case CMD_REPORT:
-        if (s_report != NULL) {
+        if (s_report != NULL && s_report[0] != '\0') {
             size_t n = strlen(s_report);
             send_line(fd, "report %u", (unsigned)n);
             send_all(fd, s_report, n);
             send_line(fd, "%s", "");
         } else {
-            send_line(fd, "report 0");
+            /* no in-memory report (no crash in this run, or it never reached recovery): the report file's tail */
+            int rf = s_cfg.report_path != NULL ? open(s_cfg.report_path, O_RDONLY) : -1;
+            int n = 0;
+            if (rf >= 0) {
+                off_t end = lseek(rf, 0, SEEK_END);
+                lseek(rf, end > LOG_TAIL ? end - LOG_TAIL : 0, SEEK_SET);
+                n = read(rf, s_buf, LOG_TAIL);
+                close(rf);
+                if (n < 0) {
+                    n = 0;
+                }
+            }
+            send_line(fd, "report %d", n);
+            send_all(fd, (const char*)s_buf, (size_t)n);
+            send_line(fd, "%s", "");
         }
         send_file_tail(fd, s_cfg.log_path);
         send_line(fd, "done");

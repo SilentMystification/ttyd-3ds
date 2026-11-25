@@ -68,6 +68,19 @@ static PrintConsole s_console;
 #define HUD_ROWS 5
 #define FOOT_FIRST 27
 
+/* The console writes the bottom frame buffer with the CPU (write-back cache). Normally the game's frames flush
+ * it (C3D_FrameEnd flushes the whole linear heap), but while the game thread is paused (updater, menus) no frame
+ * runs, so a draw stays in the cache and the screen shows the old picture. Flushes the bottom buffer only. */
+static void present_bottom(void) {
+    u16 w, h;
+    u8* fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &w, &h);
+    GSPGPU_FramebufferFormat fmt = gfxGetScreenFormat(GFX_BOTTOM);
+    u32 bpp = fmt == GSP_RGBA8_OES ? 4 : fmt == GSP_BGR8_OES ? 3 : 2;
+    if (fb != NULL) {
+        GSPGPU_FlushDataCache(fb, (u32)w * h * bpp);
+    }
+}
+
 static int s_menu_mode;
 static int s_upd, s_upd_draw, s_upd_prev_menu; /* the updater screen is up; it is drawing; a menu was open under it */
 static void draw_menu(void);
@@ -176,6 +189,9 @@ void plat_console_log(const char* s, size_t n) {
         for (int r = LOG_FIRST - 1; r < LOG_LAST; r++) {
             s_shadow[r][0] = 1; /* the console scrolled: the screen text is no longer known */
         }
+        if (s_upd) {
+            present_bottom(); /* no game frame flushes it while the updater has the game paused */
+        }
     }
 }
 
@@ -235,6 +251,7 @@ void plat_updater_screen(int on) {
             }
         }
     }
+    present_bottom();
     plat_console_unlock();
     if (!on && s_menu_mode) {
         plat_options_menu_redraw();
@@ -266,6 +283,7 @@ void plat_updater_draw(const char* title, const char* build, const char* line, i
     at(4, line);
     at(6, bar);
     s_upd_draw = 0;
+    present_bottom();
     plat_console_unlock();
     plat_menu_shot_tick(); /* test aid: shotbottom=N also counts the updater's redraws */
 }

@@ -93,6 +93,8 @@ typedef struct {
     int test_frame;          /* 0 = 60 */
     uintptr_t test_addr;     /* address the "null" test writes */
     uint64_t boot_tick;      /* svcGetSystemTick at process start, for "uptime"; 0 = at crash_setup */
+    const char* screen_dump; /* test aid: path prefix; once the crash screen is drawn both screens are written as
+                                <prefix>_top.ppm and <prefix>_bottom.ppm; NULL = off */
 } CrashConfig;
 
 /* crash_setup + crash_start. */

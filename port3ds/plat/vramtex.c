@@ -138,14 +138,28 @@ static void vt_init(void) {
         PLOG_I("vramtex: on, reserve %lu KB, textures up to %lu KB, %lu KB copied per frame at most",
                (unsigned long)(s_reserve >> 10), (unsigned long)(s_cap >> 10), (unsigned long)(s_rate >> 10));
     }
-    s_mode = mode;
+    __atomic_store_n(&s_mode, mode, __ATOMIC_RELEASE); /* publishes the table and the lock */
+}
+
+/* The game thread and the render thread both reach this first: exactly one runs vt_init, the other waits for it. */
+static int vt_on_slow(void) {
+    static int s_claimed;
+    if (!__atomic_exchange_n(&s_claimed, 1, __ATOMIC_ACQ_REL)) {
+        vt_init();
+    }
+    int m;
+    while ((m = __atomic_load_n(&s_mode, __ATOMIC_ACQUIRE)) < 0) {
+        svcSleepThread(1000);
+    }
+    return m;
 }
 
 static inline int vt_on(void) {
-    if (__builtin_expect(s_mode < 0, 0)) {
-        vt_init();
+    int m = s_mode;
+    if (__builtin_expect(m < 0, 0)) {
+        return vt_on_slow();
     }
-    return s_mode;
+    return m;
 }
 
 static inline u32 vt_hash(const C3D_Tex* tex) { return (u32)(((uintptr_t)tex >> 3) * 2654435761u) >> 21; }

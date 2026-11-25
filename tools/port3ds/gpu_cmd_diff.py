@@ -17,6 +17,15 @@ Usage:
   gpu_cmd_diff.py a.bin b.bin [-n 20]         compare two lists (e.g. console hang vs Azahar frame)
   options: --full (print every command), --addr (compare address registers too; by default their values
   are masked because the console and the emulator allocate different addresses), -n N (differences shown)
+  gpu_cmd_diff.py --self-test                 test every rule on built lists
+  gpu_cmd_diff.py --probe-dir DIR             check the lists the gpuprobe saved (one line per case)
+
+Rules at each draw trigger (see rule_checks), tagged in the output:
+  [documented]  empty scissor or viewport registers, a draw with NUMVERTICES 0, a texture base not aligned for its
+                format (RGB565), a vertex shader output written in part (not .xyzw) or never written. From the
+                project docs; Azahar accepts all of them.
+  [probe]       rules confirmed on the New 3DS by the gpuprobe (docs/PORT_3DS_GPU_RULES.md). None yet: see
+                PROBE_RULES and TEX_ALIGN_PROBE.
 
 Findings flagged as invalid: unknown register, register span past the register file, byte mask 0, nonzero
 padding word, list ends inside a command, an address outside linear memory (0x20000000-0x30000000 physical)
@@ -272,13 +281,201 @@ def in_range(a, rng):
     return rng[0] <= a < rng[1]
 
 
-def check(cmds):
+#
+# Hardware rules, by where they come from. Every finding of these rules starts with its tag:
+#   [documented]  from the project docs (PORT_3DS_PLAN.md, STAR3D_NOTES.md, PORT_3DS_TESTING.md)
+#   [probe]       confirmed on the New 3DS by the gpuprobe (docs/PORT_3DS_GPU_RULES.md); none yet
+# The rules read the register state at each draw trigger (DRAWARRAYS / DRAWELEMENTS).
+#
+REG = {v: k for k, v in REG_NAMES.items() if not v[0].isdigit()}
+R_DRAWARRAYS, R_DRAWELEMENTS = REG["DRAWARRAYS"], REG["DRAWELEMENTS"]
+R_NUMVERTICES = REG["NUMVERTICES"]
+R_VP_W, R_VP_INVW, R_VP_H, R_VP_INVH = (REG["VIEWPORT_WIDTH"], REG["VIEWPORT_INVW"], REG["VIEWPORT_HEIGHT"],
+                                        REG["VIEWPORT_INVH"])
+R_SC_MODE, R_SC_POS, R_SC_DIM = REG["SCISSORTEST_MODE"], REG["SCISSORTEST_POS"], REG["SCISSORTEST_DIM"]
+R_TEX_CONFIG = REG["TEXUNIT_CONFIG"]
+R_OUTMAP_O = [REG["SH_OUTMAP_O%d" % i] for i in range(7)]
+R_VSH_CODE_CFG, R_VSH_CODE_DATA = REG["VSH_CODETRANSFER_CONFIG"], REG["VSH_CODETRANSFER_DATA"]
+R_VSH_OPD_CFG, R_VSH_OPD_DATA = REG["VSH_OPDESCS_CONFIG"], REG["VSH_OPDESCS_DATA"]
+R_VSH_ENTRY = REG["VSH_ENTRYPOINT"]
+
+# texture unit: (address register, type register); the type register's low 4 bits are the format
+TEX_UNITS = [(REG["TEXUNIT0_ADDR1"], REG["TEXUNIT0_TYPE"]), (REG["TEXUNIT1_ADDR"], REG["TEXUNIT1_TYPE"]),
+             (REG["TEXUNIT2_ADDR"], REG["TEXUNIT2_TYPE"])]
+TEX_FORMATS = {0: "RGBA8", 1: "RGB8", 2: "RGB5A1", 3: "RGB565", 4: "RGBA4", 5: "LA8", 6: "HILO8", 7: "L8", 8: "A8",
+               9: "LA4", 10: "L4", 11: "A4", 12: "ETC1", 13: "ETC1A4"}
+# Base address alignment in bytes per texture format. The register holds address >> 3, so 8 always holds.
+#   documented: STAR3D_NOTES.md: "unaligned RGB565 texture bases fail on hardware" (the alignment is not stated: 128
+#   is assumed, the largest the probe tests, until the probe gives the real one)
+TEX_ALIGN_DOCUMENTED = {"RGB565": 128}
+#   probe: filled from docs/PORT_3DS_GPU_RULES.md after the console run, e.g. {"RGB565": 64, "ETC1": 16}
+TEX_ALIGN_PROBE = {}
+
+
+def f24(v):
+    """A PICA float24 (sign, 7 exponent bits, 16 mantissa bits) as a Python float; 0 for a zero exponent."""
+    v &= 0xFFFFFF
+    e = (v >> 16) & 0x7F
+    if e == 0:
+        return 0.0
+    m = 1.0 + (v & 0xFFFF) / 65536.0
+    x = m * 2.0 ** (e - 63)
+    return -x if v >> 23 else x
+
+
+def f31_nonfinite(v):
+    """A PICA float31 (sign, 7 exponent bits, 23 mantissa bits) with the largest exponent: what 1/0 becomes."""
+    return ((v >> 23) & 0x7F) == 0x7F
+
+
+# Vertex shader instructions that write a destination register, and where the destination and operand descriptor sit
+# (3dbrew "Shader Instruction Set"): arithmetic formats have dest in bits 21-25 and the descriptor in bits 0-6;
+# MAD has dest in bits 24-28 and the descriptor in bits 0-4. Destination 0x00-0x0F is an output register.
+DEST_21 = set(range(0x00, 0x10)) | {0x13, 0x18, 0x19, 0x1A, 0x1B}
+DEST_24 = set(range(0x38, 0x40))
+
+
+OP_END = 0x22
+
+
+def shader_output_writes(code, opdescs, entry=0):
+    """{output register: mask of components written (bit 0 = x ... bit 3 = w)} over the instructions from the entry
+    point to the first END (a straight scan: both arms of an if are counted).
+    The operand descriptor's destination mask is bits 0-3 with bit 3 = x."""
+    out = {}
+    for w in code[entry:]:
+        op = w >> 26
+        if op == OP_END:
+            break
+        if op in DEST_21:
+            dest, desc = (w >> 21) & 0x1F, w & 0x7F
+        elif op in DEST_24:
+            dest, desc = (w >> 24) & 0x1F, w & 0x1F
+        else:
+            continue
+        if dest >= 0x10 or desc >= len(opdescs):
+            continue
+        dm = opdescs[desc] & 0xF
+        out[dest] = out.get(dest, 0) | (((dm >> 3) & 1) | ((dm >> 2) & 1) << 1 | ((dm >> 1) & 1) << 2 | (dm & 1) << 3)
+    return out
+
+
+def comp_str(m):
+    return "".join(c for i, c in enumerate("xyzw") if m >> i & 1) or "none"
+
+
+def rule_checks(state, shader, pos, tag_prefix=""):
+    """Checks at a draw trigger. state: register id -> last value written. shader: dict with the vertex shader's
+    uploaded code and operand descriptors. Returns [(pos, message)]."""
+    out = []
+    # documented: empty scissor (PORT_3DS_PLAN.md "Hardware hangs that Azahar does not show")
+    mode = state.get(R_SC_MODE, 0) & 3
+    if mode and R_SC_POS in state and R_SC_DIM in state:
+        p, d = state[R_SC_POS], state[R_SC_DIM]
+        x0, y0, x1, y1 = p & 0xFFFF, p >> 16 & 0xFFFF, d & 0xFFFF, d >> 16 & 0xFFFF
+        if x1 < x0 or y1 < y0:
+            out.append((pos, "[documented] empty scissor at the draw: x %d..%d, y %d..%d (mode %d)" % (x0, x1, y0, y1, mode)))
+        elif x1 >= 0x8000 or y1 >= 0x8000:
+            out.append((pos, "[documented] scissor right/bottom wrapped below 0 (an empty scissor given as right=0 or bottom=0): x %d..%d, y %d..%d" % (x0, x1, y0, y1)))
+    # documented: empty viewport
+    for name, rw, ri in (("width", R_VP_W, R_VP_INVW), ("height", R_VP_H, R_VP_INVH)):
+        if rw in state:
+            v = f24(state[rw])
+            if v <= 0.0:
+                out.append((pos, "[documented] empty viewport at the draw: %s/2 = %g (%s = 0x%06X)" % (name, v, REG_NAMES[rw], state[rw] & 0xFFFFFF)))
+            elif ri in state and f31_nonfinite(state[ri]):
+                out.append((pos, "[documented] viewport %s inverse is not finite (0x%08X)" % (name, state[ri])))
+    # documented: zero-vertex draw
+    if R_NUMVERTICES in state and state[R_NUMVERTICES] == 0:
+        out.append((pos, "[documented] draw with NUMVERTICES = 0"))
+    # documented: texture base alignment per format
+    cfg = state.get(R_TEX_CONFIG, 0)
+    for unit, (ra, rt) in enumerate(TEX_UNITS):
+        if not cfg >> unit & 1 or ra not in state or rt not in state or state[ra] == 0:
+            continue
+        fmt = TEX_FORMATS.get(state[rt] & 0xF, "format %d" % (state[rt] & 0xF))
+        base = (state[ra] << 3) & 0xFFFFFFFF
+        if fmt in TEX_ALIGN_PROBE:
+            al, tag = TEX_ALIGN_PROBE[fmt], "[probe]"
+        elif fmt in TEX_ALIGN_DOCUMENTED:
+            al, tag = TEX_ALIGN_DOCUMENTED[fmt], "[documented]"
+        else:
+            continue
+        if base % al:
+            out.append((pos, "%s texture unit %d (%s) base %08X is not %d-byte aligned" % (tag, unit, fmt, base, al)))
+    # documented: vertex shader outputs must be written in full (PORT_3DS_PLAN.md, STAR3D_NOTES.md)
+    if shader.get("code"):
+        writes = shader_output_writes(shader["code"], shader["opdescs"], state.get(R_VSH_ENTRY, 0) & 0xFFFF)
+        for reg, mask in sorted(writes.items()):
+            if mask != 0xF:
+                out.append((pos, "[documented] vertex shader writes output o%d as .%s only (every output must be written in full, .xyzw)" % (reg, comp_str(mask))))
+        used = state.get(REG["SH_OUTMAP_TOTAL"], 0) & 0xF
+        for i in range(min(used, len(R_OUTMAP_O))):
+            if i in writes:
+                continue
+            if state.get(R_OUTMAP_O[i], 0x1F1F1F1F) != 0x1F1F1F1F:
+                out.append((pos, "[documented] output map o%d is used but the vertex shader never writes it" % i))
+    out.extend(probe_rules(state, shader, pos))
+    return out
+
+
+# Rules the probe confirmed on the New 3DS go here, each as a function (state, shader, pos) -> [(pos, "[probe] ...")].
+# docs/PORT_3DS_GPU_RULES.md lists the cases to turn into rules. None are confirmed yet.
+PROBE_RULES = []
+
+
+def probe_rules(state, shader, pos):
+    out = []
+    for rule in PROBE_RULES:
+        out.extend(rule(state, shader, pos))
+    return out
+
+
+def collect_shader(cmds):
+    """The vertex shader code and operand descriptors a list uploads (citro3d uploads a shader binary once, so most
+    lists of a run carry no code: take it from the list that does)."""
+    shader = {"code": [], "opdescs": []}
+    check(cmds, shader, collect_only=True)
+    return shader
+
+
+def check(cmds, shader=None, collect_only=False):
     findings = []
     attr_base = None  # ATTRIBBUFFERS_LOC as a physical address
+    state = {}
+    if shader is None:
+        shader = {"code": [], "opdescs": []}
+    code_idx = opd_idx = 0
     for c in cmds:
         if c.reg < 0:
             findings.extend((c.pos, b) for b in c.bad)
             continue
+        # register state and shader uploads, for the draw-time rules
+        for k, v in enumerate(c.params):
+            r = c.reg + (k if c.consec else 0)
+            if c.mask == 0:
+                continue
+            if r == R_VSH_CODE_CFG:
+                code_idx = v & 0xFFF
+            elif r == R_VSH_OPD_CFG:
+                opd_idx = v & 0xFF
+            elif R_VSH_CODE_DATA <= r < R_VSH_CODE_DATA + 8:
+                while len(shader["code"]) <= code_idx:
+                    shader["code"].append(0)
+                shader["code"][code_idx] = v
+                code_idx += 1
+            elif R_VSH_OPD_DATA <= r < R_VSH_OPD_DATA + 8:
+                while len(shader["opdescs"]) <= opd_idx:
+                    shader["opdescs"].append(0)
+                shader["opdescs"][opd_idx] = v
+                opd_idx += 1
+            else:
+                keep = sum(0xFF << (8 * b) for b in range(4) if not c.mask >> b & 1)  # byte mask: unwritten bytes stay
+                state[r] = (state.get(r, 0) & keep) | (v & ~keep & 0xFFFFFFFF)
+        if collect_only:
+            continue
+        if c.reg in (R_DRAWARRAYS, R_DRAWELEMENTS):
+            findings.extend(rule_checks(state, shader, c.pos))
         for b in c.bad:
             findings.append((c.pos, b))
         if c.mask == 0:
@@ -339,22 +536,106 @@ def key(c, with_addr):
     return (c.reg, c.mask, c.consec, tuple(params))
 
 
+def enc(reg, params, mask=0xF, consec=False):
+    """Encodes one command (first parameter, header, extra parameters, padding)."""
+    extra = len(params) - 1
+    w = [params[0], (int(consec) << 31) | (mask << 16) | (extra << 20) | reg] + list(params[1:])
+    if extra & 1:
+        w.append(0)
+    return w
+
+
+def self_test():
+    """Builds small lists and checks that each rule fires on the bad one and stays quiet on the good one."""
+    N = REG
+    draw = enc(N["DRAWARRAYS"], [1])
+    nv = lambda n: enc(N["NUMVERTICES"], [n])
+    f = lambda words: [m for _, m in check(decode(words))]
+    n_fail = 0
+
+    def expect(name, words, needle):
+        nonlocal n_fail
+        msgs = f(words)
+        hit = [m for m in msgs if needle in m]
+        ok = bool(hit) if needle else not any(m.startswith("[") for m in msgs)
+        print("  %-34s %s%s" % (name, "ok" if ok else "FAIL", "" if ok else "  got %r" % msgs))
+        n_fail += not ok
+
+    sc = lambda x0, y0, x1, y1: enc(N["SCISSORTEST_MODE"], [3, y0 << 16 | x0, y1 << 16 | x1], consec=True)
+    expect("scissor 0..63 (good)", sc(0, 0, 63, 63) + nv(3) + draw, "")
+    expect("scissor width 0", sc(32, 0, 31, 63) + nv(3) + draw, "[documented] empty scissor")
+    expect("scissor height 0", sc(0, 32, 63, 31) + nv(3) + draw, "[documented] empty scissor")
+    expect("scissor right = 0 wrapped", sc(0, 0, 0xFFFF, 63) + nv(3) + draw, "[documented] scissor right/bottom wrapped")
+    vp = lambda w: enc(N["VIEWPORT_WIDTH"], [w, 0x3A000000, 0x440000, 0x3A000000], consec=True)
+    expect("viewport 32 x 32 (good)", vp(0x440000) + nv(3) + draw, "")
+    expect("viewport width 0", vp(0) + nv(3) + draw, "[documented] empty viewport")
+    expect("zero-vertex draw", nv(0) + draw, "[documented] draw with NUMVERTICES = 0")
+    expect("one-vertex draw (no rule yet)", nv(1) + draw, "")
+    tex = lambda fmt, addr: (enc(N["TEXUNIT_CONFIG"], [1]) + enc(N["TEXUNIT0_ADDR1"], [addr >> 3]) +
+                             enc(N["TEXUNIT0_TYPE"], [fmt]))
+    expect("RGB565 base 128-aligned (good)", tex(3, 0x20000080) + nv(3) + draw, "")
+    expect("RGB565 base 16-aligned", tex(3, 0x20000010) + nv(3) + draw, "[documented] texture unit 0 (RGB565)")
+    expect("RGBA8 base 8-aligned (good)", tex(0, 0x20000008) + nv(3) + draw, "")
+    # shader: MOV o1, r0 with destination mask xyz / xyzw (operand descriptor 0)
+    def shader(mask):
+        mov = 0x13 << 26 | 1 << 21
+        return (enc(N["VSH_CODETRANSFER_CONFIG"], [0]) + enc(N["VSH_CODETRANSFER_DATA"], [mov, 0x21 << 26]) +
+                enc(N["VSH_OPDESCS_CONFIG"], [0]) + enc(N["VSH_OPDESCS_DATA"], [mask]))
+    expect("output written .xyzw (good)", shader(0xF) + nv(3) + draw, "")
+    expect("output written .xyz only", shader(0xE) + nv(3) + draw, "[documented] vertex shader writes output o1 as .xyz only")
+    expect("output written .xy only", shader(0xC) + nv(3) + draw, "as .xy only")
+    print("gpu_cmd_diff self-test: %s" % ("FAILED (%d)" % n_fail if n_fail else "ok"))
+    return 1 if n_fail else 0
+
+
+def copy_shader(s):
+    return None if s is None else {"code": list(s["code"]), "opdescs": list(s["opdescs"])}
+
+
+def probe_dir(path):
+    """Checks every list the gpuprobe saved (sdmc:/3ds/ctrdk/gpuprobe/<case>.bin): one line per case."""
+    import os
+    rc = 0
+    src = os.path.join(path, "ctl_recover.bin")  # the probe's first list: it carries the shader upload
+    base = collect_shader(decode(load(src))) if os.path.exists(src) else None
+    for name in sorted(os.listdir(path)):
+        if not name.endswith(".bin"):
+            continue
+        fs = check(decode(load(os.path.join(path, name))), copy_shader(base))
+        tagged = [m for _, m in fs if m.startswith("[")]
+        other = [m for _, m in fs if not m.startswith("[")]
+        first = (tagged or other or ["-"])[0]
+        print("%-16s %2d tagged, %2d other  %s" % (name[:-4], len(tagged), len(other), first[:110]))
+    return rc
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("a")
+    ap.add_argument("a", nargs="?")
     ap.add_argument("b", nargs="?")
+    ap.add_argument("--self-test", action="store_true", help="test the rules on built lists")
+    ap.add_argument("--probe-dir", help="check every list saved by the gpuprobe in this folder")
+    ap.add_argument("--shader", help="a list that uploads the vertex shader (citro3d uploads it once, so a hang dump "
+                                     "has no code); the shader output rule reads the code from it")
     ap.add_argument("-n", type=int, default=20, help="differences to print")
     ap.add_argument("--full", action="store_true")
     ap.add_argument("--addr", action="store_true", help="compare address registers too")
     args = ap.parse_args()
+    if args.self_test:
+        return self_test()
+    if args.probe_dir:
+        return probe_dir(args.probe_dir)
+    if not args.a:
+        ap.error("a dump file, --self-test or --probe-dir is needed")
     rc = 0
+    shader_src = collect_shader(decode(load(args.shader))) if args.shader else None
     lists = []
     for path in [p for p in (args.a, args.b) if p]:
         words = load(path)
         cmds = decode(words)
         lists.append((path, cmds))
         print("== %s: %d words, %s" % (path, len(words), summary(cmds)))
-        fs = check(cmds)
+        fs = check(cmds, copy_shader(shader_src))
         if fs:
             rc = 1
             print("   %d suspicious writes:" % len(fs))

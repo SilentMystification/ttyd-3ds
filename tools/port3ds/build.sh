@@ -4,6 +4,7 @@
 #   tools/port3ds/build.sh [--dev] [project] [cmake -D options...]
 #   tools/port3ds/build.sh . -DREGION=PAL     (the game for one region; US by default)
 #   tools/port3ds/build.sh --dev              (fast dev build: LTO and GX -O3 off)
+#   tools/port3ds/build.sh --no-cia           (3dsx only: skips makerom, 70-100 s; TTYD_NO_CIA=1 does the same)
 #
 # project is a directory under port3ds/ ("probe" builds port3ds/probe; the
 # default "." builds the game in port3ds/), or a path from the repository
@@ -15,7 +16,8 @@
 # Explicit -D options after it still win. Dev builds do not archive the ELF.
 #
 # TTYD_CCACHE=1 sends compile jobs through ccache (cache shared in ${XDG_CACHE_HOME:-~/.cache}/ttyd3ds/ccache).
-# Off by default: a warm-cache build was NOT byte-identical to a no-ccache build of the same commit (see docs).
+# The ELF of a ccache build is byte-identical to a no-ccache build of the same commit (checked: cold, warm).
+# (CCACHE_BASEDIR used to break that: it made the debug paths and LTO names relative.) Still opt-in.
 # BUILD_JOBS unset: all host threads when no other build holds a build slot, else 8.
 #
 # The image is built from tools/port3ds/docker/Dockerfile on first use and
@@ -36,7 +38,12 @@ repo=$(cd "$(dirname "$0")/../.." && pwd)
 
 dev=0
 if [ "${TTYD_DEV:-0}" = 1 ]; then dev=1; fi
-if [ "${1:-}" = --dev ]; then dev=1; shift; fi
+nocia=0
+if [ "${TTYD_NO_CIA:-0}" = 1 ]; then nocia=1; fi
+while [ "${1:-}" = --dev ] || [ "${1:-}" = --no-cia ]; do
+    if [ "$1" = --dev ]; then dev=1; else nocia=1; fi
+    shift
+done
 project=${1:-.}
 [ $# -gt 0 ] && shift
 
@@ -64,6 +71,11 @@ if [ "$dev" = 1 ]; then
     # Dev defaults come first, so explicit -D options after them override.
     set -- -DTTYD_LTO=OFF -DTTYD_GX_O3=OFF "$@"
 fi
+
+# --no-cia (or TTYD_NO_CIA=1): build the 3dsx only. makerom compresses the code and takes 70-100 s, about
+# a quarter of a full build; azahar runs and 3dsx tests do not need the CIA. The option is a cached CMake
+# variable, so the default passes ON explicitly. A CIA from an earlier build stays in the directory, stale.
+if [ "$nocia" = 1 ]; then set -- -DTTYD_CIA=OFF "$@"; else set -- -DTTYD_CIA=ON "$@"; fi
 
 [ -f "$repo/$src/CMakeLists.txt" ] || { echo "build.sh: no CMakeLists.txt in $src" >&2; exit 2; }
 
@@ -146,9 +158,11 @@ if [ "${TTYD_CCACHE:-0}" = 1 ]; then
     # One cache for every checkout: sources are always at /work inside the container, so worktrees share hits.
     ccdir="${XDG_CACHE_HOME:-$HOME/.cache}/ttyd3ds/ccache"
     mkdir -p "$ccdir"
-    # Sources are always /work inside the container, so paths match across checkouts: BASEDIR and
-    # NOHASHDIR only make that explicit (the directory is not part of the hash).
-    ccmount="-v $ccdir:/ccache -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=10G -e CCACHE_BASEDIR=/work -e CCACHE_NOHASHDIR=true"
+    # Sources are always /work inside the container, so absolute paths match across checkouts and
+    # NOHASHDIR keeps the (constant) working directory out of the hash. No CCACHE_BASEDIR: it rewrote the
+    # absolute source paths on the compile line to relative ones (../../../src/x.c), so the debug info and
+    # the LTO section names/symbol suffixes (derived from the paths) differed from a no-ccache build.
+    ccmount="-v $ccdir:/ccache -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=10G -e CCACHE_NOHASHDIR=true"
     set -- -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_ASM_COMPILER_LAUNCHER=ccache "$@"
 else
     # The launcher is a cached CMake variable: clear it, or an earlier ccache build keeps using it.

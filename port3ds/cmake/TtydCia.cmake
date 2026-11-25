@@ -12,6 +12,7 @@
 # (tools/port3ds/make_placeholder_art.py); no game data is involved.
 # The CIA uses port3ds/rsf/ttyd.rsf.
 
+option(TTYD_CIA "Build the CIA (makerom compresses the code: ~70-100 s); OFF builds the 3dsx only" ON)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_program(MAKEROM makerom)
 find_program(BANNERTOOL bannertool)
@@ -77,7 +78,7 @@ function(ttyd_add_cia target)
         VERBATIM
         COMMENT "Building ${target}.3dsx")
 
-    if(NOT MAKEROM OR NOT BANNERTOOL)
+    if(NOT TTYD_CIA OR NOT MAKEROM OR NOT BANNERTOOL)
         add_custom_target(${target}_package ALL DEPENDS "${out_dir}/${target}.3dsx")
         return()
     endif()

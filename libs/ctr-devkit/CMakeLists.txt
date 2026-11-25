@@ -9,7 +9,7 @@
 # it also builds the example apps.
 
 cmake_minimum_required(VERSION 3.20)
-project(ctr_devkit C)
+project(ctr_devkit C ASM)
 
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/CtrDevkitApp.cmake")
 
@@ -31,6 +31,9 @@ target_compile_options(ctrdk_devupdate PRIVATE ${CTRDK_FLAGS})
 add_library(ctrdk_perf STATIC "${CMAKE_CURRENT_LIST_DIR}/perf/perf.c")
 target_include_directories(ctrdk_perf PUBLIC "${CMAKE_CURRENT_LIST_DIR}/include")
 target_compile_options(ctrdk_perf PRIVATE ${CTRDK_FLAGS})
+
+# PICA200 rules probe (own shaders, citro3d).
+add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/gpuprobe" gpuprobe)
 
 # svcBreak (libctru and citro3d panics) goes to the crash handler.
 function(ctrdk_wrap_svcbreak target)

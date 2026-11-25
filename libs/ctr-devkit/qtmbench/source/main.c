@@ -19,6 +19,10 @@
  *   trials=N      trials per bandwidth point (default 3)
  *   window=ms     concurrency and contention window (default 250)
  *   chase=N       loads per latency point (default 262144)
+ *   gpuprobe      run the PICA rules probe (ctrdk/gpuprobe.h) instead of the benchmark; it hangs the GPU on
+ *                 purpose and resets it. Table: sdmc:/3ds/ctrdk/gpuprobe.txt. Sub-switches: probe=ids
+ *                 (case ids, groups, prefix*), probefresh (ignore the journal), probeselftest,
+ *                 probesafe (skip the memory-fault cases), probetimeout=ms
  *   gpucore=N     core of the GPU feeder threads in contend (default 1)
  *   devupdateport=N  the devupdate server port (default 5050)
  *   nocore1 nocore2 nopte norun autoexit
@@ -35,6 +39,7 @@
 #include "build_stamp.h"
 #include "ctrdk/crash.h"
 #include "ctrdk/devupdate.h"
+#include "ctrdk/gpuprobe.h"
 
 extern u32 __stacksize__;
 
@@ -126,6 +131,8 @@ void ui_poll(void) {
         relaunch_now();
     }
 }
+
+static void probe_log(const char* line, void* user) { logf_("%s", line); }
 
 /* ---- system facts ---- */
 
@@ -247,6 +254,26 @@ int main(int argc, char** argv) {
     }
 
     bool run = !sw_has("norun");
+    if (sw_has("gpuprobe")) {
+        /* the PICA rules probe replaces the benchmark; it can hang the GPU on purpose */
+        run = false;
+        GpuProbeConfig pc;
+        memset(&pc, 0, sizeof(pc));
+        pc.dir = "sdmc:/3ds/ctrdk";
+        pc.timeout_ms = (int)sw_int("probetimeout", 0);
+        char only[128] = "";
+        pc.only = sw_value("probe", only, sizeof(only)) ? only : NULL;
+        pc.fresh = sw_has("probefresh");
+        pc.selftest = sw_has("probeselftest");
+        pc.no_dangerous = sw_has("probesafe");
+        pc.emulator = g_opt.emulator;
+        pc.log = probe_log;
+        GpuProbeSummary ps;
+        int bad = gpuprobe_run(&pc, &ps);
+        status("GPUPROBE DONE: %d OK, %d not OK", ps.ok, bad);
+        info("gpuprobe", "%d OK, %d WRONG, %d HANG, %d FAULT, %d ERR, %d SKIP", ps.ok, ps.wrong, ps.hang, ps.fault,
+             ps.err, ps.skip);
+    }
     if (run && !mem_setup()) {
         status("allocation failed");
         run = false;

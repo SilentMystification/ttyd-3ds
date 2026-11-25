@@ -74,8 +74,12 @@ fi
 
 # --no-cia (or TTYD_NO_CIA=1): build the 3dsx only. makerom compresses the code and takes 70-100 s, about
 # a quarter of a full build; azahar runs and 3dsx tests do not need the CIA. The option is a cached CMake
-# variable, so the default passes ON explicitly. A CIA from an earlier build stays in the directory, stale.
+# variable, so the default passes ON explicitly. A CIA from an earlier build is removed so no tool runs it stale.
 if [ "$nocia" = 1 ]; then set -- -DTTYD_CIA=OFF "$@"; else set -- -DTTYD_CIA=ON "$@"; fi
+if [ "$nocia" = 1 ] && [ -f "$repo/$out/ttyd.cia" ]; then
+    rm -f "$repo/$out/ttyd.cia"
+    echo "build.sh: --no-cia: removed stale $out/ttyd.cia"
+fi
 
 [ -f "$repo/$src/CMakeLists.txt" ] || { echo "build.sh: no CMakeLists.txt in $src" >&2; exit 2; }
 

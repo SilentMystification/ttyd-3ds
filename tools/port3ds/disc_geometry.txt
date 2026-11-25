@@ -668,3 +668,7 @@ geo_shadowdrv_cylinder_dl_top_outside cylinder_dl_top_outside 0 raw 64
 geo_shadowdrv_vertex_tbl vertex_tbl 0 swap32 720
 geo_mri_puni_shadow_vtx shadow_vtx 1 swap32 64 mri
 geo_punidrv_shadow_vtx shadow_vtx 0 swap32 224 mri
+geo_eff_water_damage_n64_water_damage_tex water_damage_tex 0 swap32 128
+geo_punidrv_shadow_dl shadow_dl 0 raw 32 mri
+geo_mri_puni_shadow_dl shadow_dl 1 raw 32 mri
+geo_mri_puni_shadow_coord shadow_coord 0 swap32 32 mri

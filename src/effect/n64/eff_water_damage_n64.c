@@ -69,12 +69,17 @@ effN64Vtx size8x8_tex16x16_2_vtx[] = {
 #endif
 
 #if VERSION >= VERSION_JP
+#ifdef TARGET_PORT
+u32 water_damage_tex[32] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(water_damage_tex, geo_eff_water_damage_n64_water_damage_tex)
+#else
 u32 water_damage_tex[32] __attribute__((aligned(32))) = {
     0x78A31427, 0x572B0B52, 0x5167133A, 0x7FDF7F2F, 0x653E32A7, 0xF5FFFF8B, 0x32670486, 0x8BFFD55E,
     0x60830B26, 0xF8E8FA55, 0x602011C5, 0x2E020278, 0x59A40486, 0xF7155555, 0x90200486, 0xBC555555,
     0xE77F1BFF, 0x6258577A, 0xAE9A0C4F, 0xF5B5D522, 0xF7BF241F, 0x78002AFF, 0xF7DF1BFF, 0x022AFFDD,
     0x8D7A0A92, 0xF5F5F5EC, 0xADFA098B, 0xF555FD25, 0xE77E135A, 0xA0035555, 0xADFA09CE, 0x25D5F5F5
 };
+#endif
 #endif
 
 static void effWaterDamageMain(EffectEntry* effect);

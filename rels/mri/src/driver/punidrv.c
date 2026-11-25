@@ -470,9 +470,14 @@ void puniLoadTextureExit(void) {
     GXTexModeSync();
 }
 
+#ifdef TARGET_PORT
+static u8 shadow_dl[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(shadow_dl, geo_punidrv_shadow_dl)
+#else
 static u8 shadow_dl[32] ATTRIBUTE_ALIGN(32) = {
     0xA0, 0x00, 0x12, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x01,
 };
+#endif
 
 #ifdef TARGET_PORT
 static f32 shadow_vtx[56] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)

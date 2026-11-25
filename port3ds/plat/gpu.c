@@ -2184,17 +2184,20 @@ static void direct_log(void) {
     }
     u32 n = s_dlog_n;
     s_dlog_n = 0;
-    PLOG_I("gxdirect frame %lu: per frame %lu draws, kept blocks tev %lu tex %lu pix %lu lay %lu, captured %lu %lu %lu "
-           "%lu, citro3d flushes %lu, uniform runs %lu | in %lu frames: uncached %lu, degenerate viewport %lu, largest "
-           "%lu %lu %lu %lu words, verify checks %lu mismatches %lu",
+    /* two lines: the log holds about 250 characters per line */
+    PLOG_I("gxdirect frame %lu: per frame %lu draws, kept tev %lu tex %lu pix %lu lay %lu, captured %lu %lu %lu %lu, "
+           "c3d flushes %lu, unif runs %lu",
            (unsigned long)s_frame_counter, (unsigned long)(s_dst.draws / n), (unsigned long)(s_dst.copied[0] / n),
            (unsigned long)(s_dst.copied[1] / n), (unsigned long)(s_dst.copied[2] / n),
            (unsigned long)(s_dst.copied[3] / n), (unsigned long)(s_dst.captured[0] / n),
            (unsigned long)(s_dst.captured[1] / n), (unsigned long)(s_dst.captured[2] / n),
-           (unsigned long)(s_dst.captured[3] / n), (unsigned long)(s_dst.flushes / n), (unsigned long)(s_dst.runs / n),
-           (unsigned long)n, (unsigned long)s_dst.uncached, (unsigned long)s_dst.degenerate,
+           (unsigned long)(s_dst.captured[3] / n), (unsigned long)(s_dst.flushes / n), (unsigned long)(s_dst.runs / n));
+    PLOG_I("gxdirect frame %lu, in %lu frames: verify checks %lu mismatches %lu, uncached %lu, degenerate viewport %lu, "
+           "largest %lu %lu %lu %lu words",
+           (unsigned long)s_frame_counter, (unsigned long)n, (unsigned long)s_dst.checks,
+           (unsigned long)s_dst.mismatches, (unsigned long)s_dst.uncached, (unsigned long)s_dst.degenerate,
            (unsigned long)s_dst.maxw[0], (unsigned long)s_dst.maxw[1], (unsigned long)s_dst.maxw[2],
-           (unsigned long)s_dst.maxw[3], (unsigned long)s_dst.checks, (unsigned long)s_dst.mismatches);
+           (unsigned long)s_dst.maxw[3]);
     memset(&s_dst, 0, sizeof(s_dst));
 }
 

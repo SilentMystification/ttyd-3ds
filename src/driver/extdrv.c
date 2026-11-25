@@ -1,5 +1,6 @@
 // Ext driver: draws many copies of one paper animation as flat textured quads with shadows; the
 // animation frame is rendered to a texture first.
+#include "port_disc_data.h"
 #include "driver/extdrv.h"
 #include "system.h"
 #include "driver/dispdrv.h"
@@ -471,11 +472,20 @@ void extLoadTev(void) {
     GXSetNumTevStages(1);
 }
 
+#ifdef TARGET_PORT
+static u8 shadow_dl[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(shadow_dl, geo_extdrv_shadow_dl)
+#else
 static u8 shadow_dl[32] ATTRIBUTE_ALIGN(32) = {
     0x80, 0x00, 0x04, 0x00, 0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0x03,
 };
+#endif
 
 // The retail builds place shadow_vtx in small data; the demo keeps it in .data
+#ifdef TARGET_PORT
+static f32 shadow_vtx[16]; // filled from the disc (port_disc_data.h): the first 12 floats
+PORT_DISC_DATA(shadow_vtx, geo_extdrv_shadow_vtx)
+#else
 #if VERSION <= VERSION_DEMO_JP
 /** Corners of the shared shadow quad, 2.4 units square and flat on the ground, drawn under every copy. */
 static f32 shadow_vtx[16] = {
@@ -488,11 +498,17 @@ __declspec(section ".sdata") static f32 shadow_vtx[16] = {
     1.2f, 0.0f, 1.2f,
     1.2f, 0.0f, -1.2f,
 };
+#endif
 
 /** Texture coordinates of the shadow quad's four corners. */
+#ifdef TARGET_PORT
+static f32 shadow_coord[8]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(shadow_coord, geo_extdrv_shadow_coord)
+#else
 static f32 shadow_coord[8] = {
     0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f,
 };
+#endif
 
 /** Points the GX vertex arrays at the shared shadow quad (2.4 units square, flat on the ground). */
 void extLoadShadowVertex(void) {

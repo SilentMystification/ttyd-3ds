@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: akari (light) flash, a yellow flare of the given size that fades over its lifetime.
+#include "port_disc_data.h"
 #include "eff/n64/eff_akari_sflush_n64.h"
 #include "driver/effdrv.h"
 #include "eff/eff_n64.h"
@@ -24,6 +25,10 @@ typedef struct EffAkariSflushN64Work {
 } EffAkariSflushN64Work;
 
 /** One pointed flare of the flash, a long thin diamond; the ring of five flares is drawn from it. */
+#ifdef TARGET_PORT
+static effN64Vtx size16x16_tex32x32_vtx[6]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex32x32_vtx, geo_eff_akari_sflush_n64_size16x16_tex32x32_vtx)
+#else
 static effN64Vtx size16x16_tex32x32_vtx[] = {
     {16, 0, 0, 0, 0, 0, 0, 0, 255},
     {3, 4, 0, 0, 0, 0, 0, 0, 255},
@@ -32,6 +37,7 @@ static effN64Vtx size16x16_tex32x32_vtx[] = {
     {-3, -4, 0, 0, 0, 200, 200, 200, 255},
     {-16, 0, 0, 0, 0, 255, 255, 255, 255},
 };
+#endif
 
 /** White, used as the flash's second colour when drawing the flares. */
 static const GXColor kWhite = {255, 255, 255, 0};

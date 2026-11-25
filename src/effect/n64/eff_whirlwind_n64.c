@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: four spinning wind bands around a Mario target, used in battle; `life` sets the duration.
+#include "port_disc_data.h"
 #include "mario/mario.h"
 #include "eff/eff_n64.h"
 #include "eff/n64/eff_whirlwind_n64.h"
@@ -19,6 +20,10 @@ u8 col_g[3] = {0xFF, 0x40, 0x40};
 u8 col_b[3] = {0xFF, 0x40, 0xFF};
 
 /** The wind band mesh: a thin curved strip that wraps around the centre, drawn once for each band. */
+#ifdef TARGET_PORT
+effN64Vtx eff_whirlwind_v[26]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(eff_whirlwind_v, geo_eff_whirlwind_n64_eff_whirlwind_v)
+#else
 effN64Vtx eff_whirlwind_v[] = {
     {-5, -2, 9, 939, 0, 0xFF, 0xFF, 0xFF, 0xFF},
     {-5, 2, 9, 939, 512, 0xFF, 0xFF, 0xFF, 0xFF},
@@ -47,6 +52,7 @@ effN64Vtx eff_whirlwind_v[] = {
     {-5, -2, -9, 597, 0, 0xFF, 0xFF, 0xFF, 0xFF},
     {-5, 2, -9, 597, 512, 0xFF, 0xFF, 0xFF, 0xFF},
 };
+#endif
 
 static void effWhirlwindMain(EffectEntry* effect);
 static void effWhirlwindDisp(CameraId cameraId, EffectEntry* effect);

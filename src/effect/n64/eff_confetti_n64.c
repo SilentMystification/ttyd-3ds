@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: confetti burst; type % 10 picks the piece count and motion.
+#include "port_disc_data.h"
 #include "eff/eff_n64.h"
 #include "eff/n64/eff_confetti_n64.h"
 #include "driver/camdrv.h"
@@ -34,14 +35,23 @@ u8 color_table[] = {
 };
 
 /** Single 6x6 confetti piece quad, used by every type except the type 3 shower. */
+#ifdef TARGET_PORT
+effN64Vtx size6x6_tex16x16_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size6x6_tex16x16_vtx, geo_eff_confetti_n64_size6x6_tex16x16_vtx)
+#else
 effN64Vtx size6x6_tex16x16_vtx[] = {
     {-3, -3, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF},
     {3, -3, 0, 0x200, 0, 0xFF, 0xFF, 0xFF, 0xFF},
     {3, 3, 0, 0x200, 0x200, 0xFF, 0xFF, 0xFF, 0xFF},
     {-3, 3, 0, 0, 0x200, 0xFF, 0xFF, 0xFF, 0xFF},
 };
+#endif
 
 /** Four small 6x6 quads per confetti piece, used by the type 3 falling shower. */
+#ifdef TARGET_PORT
+effN64Vtx size6x6_tex16x16_2_vtx[16]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size6x6_tex16x16_2_vtx, geo_eff_confetti_n64_size6x6_tex16x16_2_vtx)
+#else
 effN64Vtx size6x6_tex16x16_2_vtx[] = {
     {-3, -3, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF},
     {3, -3, 0, 0x200, 0, 0xFF, 0xFF, 0xFF, 0xFF},
@@ -60,6 +70,7 @@ effN64Vtx size6x6_tex16x16_2_vtx[] = {
     {-8, 12, -50, 0x200, 0x1A00, 0xFF, 0xFF, 0xFF, 0xFF},
     {-14, 12, -50, 0, 0x1A00, 0xFF, 0xFF, 0xFF, 0xFF},
 };
+#endif
 
 /** Flutter cycle of a confetti piece: the texture frame on each of six steps, forward and back. */
 u8 anm_seq[] = {0, 1, 2, 3, 2, 1};

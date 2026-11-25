@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: pokopi charge (pcharge) at a point with a scale and lifetime; types 0-9.
+#include "port_disc_data.h"
 #include "eff/n64/eff_pokopi_pcharge_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -18,6 +19,10 @@ u8 n_data[13] = {11, 11, 11, 11, 17, 11, 11, 21, 21, 21, 21, 21, 21};
 static u8 vx_data[13] = {20, 5, 20, 20, 10, 20, 20, 8, 8, 8, 1, 1, 1};
 
 /** Short streak quads for types 0-2, each type showing its own band of the streak texture. */
+#ifdef TARGET_PORT
+static effN64Vtx size10x10_tex32x32_vtx[16]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size10x10_tex32x32_vtx, geo_eff_pokopi_pcharge_n64_size10x10_tex32x32_vtx)
+#else
 static effN64Vtx size10x10_tex32x32_vtx[] = {
     {0, -5, 0, 0, 0, 0, 0, 0, 255},
     {10, -5, 0, 1024, 0, 0, 0, 0, 255},
@@ -36,11 +41,16 @@ static effN64Vtx size10x10_tex32x32_vtx[] = {
     {10, 5, 0, 1024, 4096, 0, 0, 0, 255},
     {0, 5, 0, 0, 4096, 0, 0, 0, 255},
 };
+#endif
 
 /**
  * The same short streak quads flipped horizontally for types 3-5;
  * the third band is also used by types 9 and 12.
  */
+#ifdef TARGET_PORT
+static effN64Vtx size10x10_tex32x32_2_vtx[16]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size10x10_tex32x32_2_vtx, geo_eff_pokopi_pcharge_n64_size10x10_tex32x32_2_vtx)
+#else
 static effN64Vtx size10x10_tex32x32_2_vtx[] = {
     {0, -5, 0, 1024, 0, 0, 0, 0, 255},
     {10, -5, 0, 0, 0, 0, 0, 0, 255},
@@ -59,8 +69,13 @@ static effN64Vtx size10x10_tex32x32_2_vtx[] = {
     {10, 5, 0, 0, 4096, 0, 0, 0, 255},
     {0, 5, 0, 1024, 4096, 0, 0, 0, 255},
 };
+#endif
 
 /** Long 128-unit streak quad for types 6-8 and 11. */
+#ifdef TARGET_PORT
+static effN64Vtx size128x10_tex32x32_vtx[16]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size128x10_tex32x32_vtx, geo_eff_pokopi_pcharge_n64_size128x10_tex32x32_vtx)
+#else
 static effN64Vtx size128x10_tex32x32_vtx[] = {
     {0, -5, 0, 0, 0, 0, 0, 0, 255},
     {128, -5, 0, 1024, 0, 0, 0, 0, 255},
@@ -79,8 +94,13 @@ static effN64Vtx size128x10_tex32x32_vtx[] = {
     {128, 5, 0, 1024, 4096, 0, 0, 0, 255},
     {0, 5, 0, 0, 4096, 0, 0, 0, 255},
 };
+#endif
 
 /** The long streak quad flipped horizontally, drawn for type 10. */
+#ifdef TARGET_PORT
+static effN64Vtx size128x10_tex32x32_2_vtx[16]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size128x10_tex32x32_2_vtx, geo_eff_pokopi_pcharge_n64_size128x10_tex32x32_2_vtx)
+#else
 static effN64Vtx size128x10_tex32x32_2_vtx[] = {
     {0, -5, 0, 1024, 0, 0, 0, 0, 255},
     {128, -5, 0, 0, 0, 0, 0, 0, 255},
@@ -99,6 +119,7 @@ static effN64Vtx size128x10_tex32x32_2_vtx[] = {
     {128, 5, 0, 0, 4096, 0, 0, 0, 255},
     {0, 5, 0, 1024, 4096, 0, 0, 0, 255},
 };
+#endif
 static void effPokopiPchargeMain(EffectEntry* effect);
 static void effPokopiPchargeDisp(CameraId cameraId, EffectEntry* effect);
 

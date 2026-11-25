@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: stamp: seven sprites spread out from a point over 30 frames, tinted by type.
+#include "port_disc_data.h"
 #include "eff/n64/eff_stamp_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -9,12 +10,17 @@
 #include "libc_decls.h"
 
 /** Tapered quad for each stamp piece, clear at its base by the centre and solid at its outer end. */
+#ifdef TARGET_PORT
+static effN64Vtx size16x16_tex64x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex64x32_vtx, geo_eff_stamp_n64_size16x16_tex64x32_vtx)
+#else
 static effN64Vtx size16x16_tex64x32_vtx[] = {
     {-8, 0, 0, 0, 0, 0, 0, 0, 0},
     {8, 0, 0, 2048, 0, 0, 0, 0, 0},
     {10, 16, 0, 2048, 1024, 0, 0, 0, 255},
     {-10, 16, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 static void effStampMain(EffectEntry* effect);
 static void effStampDisp(CameraId cameraId, EffectEntry* effect);

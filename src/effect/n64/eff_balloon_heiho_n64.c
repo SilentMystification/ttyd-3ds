@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: balloon with a Shy Guy (heiho); types 0-2 pick one of three textures, moved by speed and accel.
+#include "port_disc_data.h"
 #include "eff/n64/eff_balloon_heiho_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -19,6 +20,10 @@ typedef struct EffBalloonHeihoN64Work {
 } EffBalloonHeihoN64Work;
 
 /** Camera-facing 32x64 balloon Shy Guy sprite, split into four horizontal strips. */
+#ifdef TARGET_PORT
+static effN64Vtx size32x64_tex32x64_vtx[8]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size32x64_tex32x64_vtx, geo_eff_balloon_heiho_n64_size32x64_tex32x64_vtx)
+#else
 static effN64Vtx size32x64_tex32x64_vtx[] = {
     {-16, 64, 0, 0, 2048, 0, 0, 0, 255},
     {16, 64, 0, 1024, 2048, 0, 0, 0, 255},
@@ -29,6 +34,7 @@ static effN64Vtx size32x64_tex32x64_vtx[] = {
     {-16, 0, 0, 0, 0, 0, 0, 0, 255},
     {16, 0, 0, 1024, 0, 0, 0, 0, 255},
 };
+#endif
 
 static void effBalloonHeihoMain(EffectEntry* effect);
 static void effBalloonHeihoDisp(CameraId cameraId, EffectEntry* effect);

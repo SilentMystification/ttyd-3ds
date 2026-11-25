@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: bush, four leaves at random offsets that spin and fall; types 0-1.
+#include "port_disc_data.h"
 #include "eff/n64/eff_bush_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -25,6 +26,10 @@ typedef struct EffBushN64Work {
 } EffBushN64Work;
 
 /** Two-sided 12x12 green leaf quad for the bush leaves. */
+#ifdef TARGET_PORT
+static effN64Vtx size12x12_tex64x64_vtx[8]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size12x12_tex64x64_vtx, geo_eff_bush_n64_size12x12_tex64x64_vtx)
+#else
 static effN64Vtx size12x12_tex64x64_vtx[] = {
     {-6, -6, 0, 0, 0, 0x19, 0x55, 0x11, 0xFF},
     {6, -6, 0, 2048, 0, 0x19, 0x55, 0x11, 0xFF},
@@ -35,6 +40,7 @@ static effN64Vtx size12x12_tex64x64_vtx[] = {
     {6, 6, 0, 2048, 4096, 0x30, 0x6C, 0x25, 0xFF},
     {-6, 6, 0, 0, 4096, 0x30, 0x6C, 0x25, 0xFF},
 };
+#endif
 
 static void effBushMain(EffectEntry* effect);
 static void effBushDisp(CameraId cameraId, EffectEntry* effect);

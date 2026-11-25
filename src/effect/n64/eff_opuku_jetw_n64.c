@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: water jet (jetw) from a point with a scale and lifetime.
+#include "port_disc_data.h"
 #include "eff/n64/eff_opuku_jetw_n64.h"
 #include "driver/camdrv.h"
 #include "driver/dispdrv.h"
@@ -128,20 +129,30 @@ static struct {
 static s32 dat_ry[] = {0, 40, 55, 190, 20, 130, 270, 300};
 
 /** 16x16 quad drawn for the central blob and for every blob in the spray streams. */
+#ifdef TARGET_PORT
+static effN64Vtx size16x16_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex32x32_vtx, geo_eff_opuku_jetw_n64_size16x16_tex32x32_vtx)
+#else
 static effN64Vtx size16x16_tex32x32_vtx[] = {
     {-8, -8, 0, 0, 0, 255, 255, 255, 255},
     {8, -8, 0, 1024, 0, 255, 255, 255, 255},
     {8, 8, 0, 1024, 1024, 255, 255, 255, 255},
     {-8, 8, 0, 0, 1024, 255, 255, 255, 255},
 };
+#endif
 
 /** A tall 6x22 quad standing on its origin; nothing in this effect draws it. */
+#ifdef TARGET_PORT
+effN64Vtx size6x22_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size6x22_tex32x32_vtx, geo_eff_opuku_jetw_n64_size6x22_tex32x32_vtx)
+#else
 effN64Vtx size6x22_tex32x32_vtx[] = {
     {-3, 0, 0, 0, 0, 255, 255, 255, 255},
     {3, 0, 0, 1024, 0, 255, 255, 255, 255},
     {3, 22, 0, 1024, 1024, 255, 255, 255, 255},
     {-3, 22, 0, 0, 1024, 255, 255, 255, 255},
 };
+#endif
 
 static void effOpukuJetwMain(EffectEntry* effect);
 static void effOpukuJetwDisp(CameraId cameraId, EffectEntry* effect);

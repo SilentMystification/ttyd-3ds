@@ -1,5 +1,6 @@
 // Ultra Hammer effect: three stacked ring models (wakka: ring) with a scrolling texture that scroll in turn;
 // it ends after `counter` frames (0 or less: until removed).
+#include "port_disc_data.h"
 #include "eff/eff_ultra_hammer.h"
 #include "driver/dispdrv.h"
 #include "memory.h"
@@ -63,6 +64,10 @@ s16 wakka_vertex_tbl[] ATTRIBUTE_ALIGN(32) = {
     0, 6862, -25610,
 };
 #else
+#ifdef TARGET_PORT
+s16 wakka_vertex_tbl[126] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_vertex_tbl, geo_eff_ultra_hammer_wakka_vertex_tbl)
+#else
 s16 wakka_vertex_tbl[] ATTRIBUTE_ALIGN(32) = {
     24347, 0, -8825, // 0
     20710, 0, -15961, // 1
@@ -107,6 +112,7 @@ s16 wakka_vertex_tbl[] ATTRIBUTE_ALIGN(32) = {
     0, 0, -13714, // 40
     0, 0, -26514, // 41
 };
+#endif
 #endif
 
 #if VERSION <= VERSION_DEMO_JP
@@ -161,6 +167,10 @@ s16 wakka_texcoord0_tbl[] ATTRIBUTE_ALIGN(32) = {
     0, 0,
 };
 #else
+#ifdef TARGET_PORT
+s16 wakka_texcoord0_tbl[84] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_texcoord0_tbl, geo_eff_ultra_hammer_wakka_texcoord0_tbl)
+#else
 s16 wakka_texcoord0_tbl[] ATTRIBUTE_ALIGN(32) = {
     24576, 0, // 0
     25600, 0, // 1
@@ -206,22 +216,37 @@ s16 wakka_texcoord0_tbl[] ATTRIBUTE_ALIGN(32) = {
     28672, 8192, // 41
 };
 #endif
+#endif
 
 #if VERSION <= VERSION_DEMO_JP
 s8 wakka_normal_tbl[] ATTRIBUTE_ALIGN(32) = {
     0, 61, 16,
 };
 #else
+#ifdef TARGET_PORT
+s8 wakka_normal_tbl[3] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_normal_tbl, geo_eff_ultra_hammer_wakka_normal_tbl)
+#else
 s8 wakka_normal_tbl[] ATTRIBUTE_ALIGN(32) = {
     0, 64, 0, // 0
 };
 #endif
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_color0_tbl[8] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_color0_tbl, geo_eff_ultra_hammer_wakka_color0_tbl)
+#else
 u8 wakka_color0_tbl[] ATTRIBUTE_ALIGN(32) = {
     0xFF, 0xFF, 0xFF, 0x7F, // 0
     0xFF, 0xFF, 0xFF, 0x00  // 1
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_0[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_0, geo_eff_ultra_hammer_wakka_dl_0_0)
+#else
 u8 wakka_dl_0_0[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -232,7 +257,12 @@ u8 wakka_dl_0_0[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_1[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_1, geo_eff_ultra_hammer_wakka_dl_0_1)
+#else
 u8 wakka_dl_0_1[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -243,7 +273,12 @@ u8 wakka_dl_0_1[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_2[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_2, geo_eff_ultra_hammer_wakka_dl_0_2)
+#else
 u8 wakka_dl_0_2[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -254,7 +289,12 @@ u8 wakka_dl_0_2[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_3[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_3, geo_eff_ultra_hammer_wakka_dl_0_3)
+#else
 u8 wakka_dl_0_3[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -265,7 +305,12 @@ u8 wakka_dl_0_3[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_4[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_4, geo_eff_ultra_hammer_wakka_dl_0_4)
+#else
 u8 wakka_dl_0_4[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -276,7 +321,12 @@ u8 wakka_dl_0_4[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_5[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_5, geo_eff_ultra_hammer_wakka_dl_0_5)
+#else
 u8 wakka_dl_0_5[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -287,7 +337,12 @@ u8 wakka_dl_0_5[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_6[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_6, geo_eff_ultra_hammer_wakka_dl_0_6)
+#else
 u8 wakka_dl_0_6[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -298,7 +353,12 @@ u8 wakka_dl_0_6[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_7[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_7, geo_eff_ultra_hammer_wakka_dl_0_7)
+#else
 u8 wakka_dl_0_7[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -309,7 +369,12 @@ u8 wakka_dl_0_7[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_8[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_8, geo_eff_ultra_hammer_wakka_dl_0_8)
+#else
 u8 wakka_dl_0_8[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -320,7 +385,12 @@ u8 wakka_dl_0_8[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_9[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_9, geo_eff_ultra_hammer_wakka_dl_0_9)
+#else
 u8 wakka_dl_0_9[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -331,7 +401,12 @@ u8 wakka_dl_0_9[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_10[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_10, geo_eff_ultra_hammer_wakka_dl_0_10)
+#else
 u8 wakka_dl_0_10[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -342,7 +417,12 @@ u8 wakka_dl_0_10[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_11[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_11, geo_eff_ultra_hammer_wakka_dl_0_11)
+#else
 u8 wakka_dl_0_11[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -353,7 +433,12 @@ u8 wakka_dl_0_11[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_12[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_12, geo_eff_ultra_hammer_wakka_dl_0_12)
+#else
 u8 wakka_dl_0_12[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -364,7 +449,12 @@ u8 wakka_dl_0_12[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_13[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_13, geo_eff_ultra_hammer_wakka_dl_0_13)
+#else
 u8 wakka_dl_0_13[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -375,7 +465,12 @@ u8 wakka_dl_0_13[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_14[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_14, geo_eff_ultra_hammer_wakka_dl_0_14)
+#else
 u8 wakka_dl_0_14[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -386,7 +481,12 @@ u8 wakka_dl_0_14[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_15[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_15, geo_eff_ultra_hammer_wakka_dl_0_15)
+#else
 u8 wakka_dl_0_15[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -397,7 +497,12 @@ u8 wakka_dl_0_15[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_16[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_16, geo_eff_ultra_hammer_wakka_dl_0_16)
+#else
 u8 wakka_dl_0_16[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -408,7 +513,12 @@ u8 wakka_dl_0_16[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_17[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_17, geo_eff_ultra_hammer_wakka_dl_0_17)
+#else
 u8 wakka_dl_0_17[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -419,7 +529,12 @@ u8 wakka_dl_0_17[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_18[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_18, geo_eff_ultra_hammer_wakka_dl_0_18)
+#else
 u8 wakka_dl_0_18[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -430,7 +545,12 @@ u8 wakka_dl_0_18[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
+#ifdef TARGET_PORT
+u8 wakka_dl_0_19[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_19, geo_eff_ultra_hammer_wakka_dl_0_19)
+#else
 u8 wakka_dl_0_19[] ATTRIBUTE_ALIGN(32) = {
     (GX_DRAW_TRIANGLE_STRIP | GX_VTXFMT0), // command
     0, 4, //number of verts
@@ -441,6 +561,7 @@ u8 wakka_dl_0_19[] ATTRIBUTE_ALIGN(32) = {
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
     GX_NOP, GX_NOP, GX_NOP, GX_NOP, GX_NOP,
 };
+#endif
 
 /** The ring model's 20 display lists, drawn with wakka_dl_0_size_tbl. */
 void* wakka_dl_0_tbl[] = {
@@ -467,6 +588,10 @@ void* wakka_dl_0_tbl[] = {
 };
 
 /** Display-list sizes (32-byte units) of the ring model's lists. */
+#ifdef TARGET_PORT
+u8 wakka_dl_0_size_tbl[20]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(wakka_dl_0_size_tbl, geo_eff_ultra_hammer_wakka_dl_0_size_tbl)
+#else
 u8 wakka_dl_0_size_tbl[] = {
     1, // 0
     1, // 1
@@ -489,6 +614,7 @@ u8 wakka_dl_0_size_tbl[] = {
     1, // 18
     1, // 19
 };
+#endif
 
 #if VERSION <= VERSION_DEMO_JP
 // The demo grows the ring while it scrolls; retail keeps it at 3.5.

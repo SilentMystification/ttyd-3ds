@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: falling leaves, four leaves drifting down for the given lifetime; types 0-4.
+#include "port_disc_data.h"
 #include "eff/n64/eff_fall_leaf_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -28,6 +29,10 @@ typedef struct EffFallLeafN64Work {
 } EffFallLeafN64Work;
 
 /** 12x12 leaf quad for the falling leaves. */
+#ifdef TARGET_PORT
+static effN64Vtx size12x12_tex64x64_vtx[8]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size12x12_tex64x64_vtx, geo_eff_fall_leaf_n64_size12x12_tex64x64_vtx)
+#else
 static effN64Vtx size12x12_tex64x64_vtx[] = {
     {-6, -6, 0, 0, 0, 0x19, 0x55, 0x11, 0xFF},
     {6, -6, 0, 2048, 0, 0x19, 0x55, 0x11, 0xFF},
@@ -38,6 +43,7 @@ static effN64Vtx size12x12_tex64x64_vtx[] = {
     {6, 6, 0, 2048, 4096, 0x30, 0x6C, 0x25, 0xFF},
     {-6, 6, 0, 0, 4096, 0x30, 0x6C, 0x25, 0xFF},
 };
+#endif
 
 static void effFallLeafMain(EffectEntry* effect);
 static void effFallLeafDisp(CameraId cameraId, EffectEntry* effect);

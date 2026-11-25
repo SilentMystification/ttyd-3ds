@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: a yellow electric shock flash that expands and fades; also spawned by the thunder effect.
+#include "port_disc_data.h"
 #include "eff/n64/eff_shock_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -16,6 +17,10 @@ GXColor shock_zero_color1;
  * The jagged shock-flash mesh: white-edged spikes around a dark inner rim,
  * drawn textured and then plain for types 1-3.
  */
+#ifdef TARGET_PORT
+effN64Vtx testsrc_shock_v[96]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(testsrc_shock_v, geo_eff_shock_n64_testsrc_shock_v)
+#else
 effN64Vtx testsrc_shock_v[] = {
     {242, -140, 0, 1800, 576, 0xFF, 0xFF, 0xFF, 0xFF},
     {189, -51, 0, 1630, 862, 0x00, 0x00, 0x00, 0xFF},
@@ -114,6 +119,7 @@ effN64Vtx testsrc_shock_v[] = {
     {-102, -102, 0, 698, -326, 0x00, 0x00, 0x00, 0xFF},
     {-178, -103, 0, 453, -330, 0xFF, 0xFF, 0xFF, 0xFF},
 };
+#endif
 
 static void effShockMain(EffectEntry* effect);
 static void effShockDisp(CameraId cameraId, EffectEntry* effect);

@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: `count` colored sparkle stars scatter from a point with the given velocity (stardust).
+#include "port_disc_data.h"
 #include "eff/n64/eff_stardust2_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -41,6 +42,10 @@ static u8 scale_data[] = {0x1E, 0x3C, 0x5A, 0x64, 0x68, 0x6A, 0x6C, 0x6E, 0x70, 
 /**
  * Eight 16x16 quads, one per 22x22 cell of the sparkle strip, that each sparkle steps through as it twinkles.
  */
+#ifdef TARGET_PORT
+static effN64Vtx size8x8_tex22x22_vtx[32]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size8x8_tex22x22_vtx, geo_eff_stardust2_n64_size8x8_tex22x22_vtx)
+#else
 static effN64Vtx size8x8_tex22x22_vtx[] = {
     {-8, -8, 0, 0, 0, 0, 0, 0, 0xFF},
     {8, -8, 0, 704, 0, 0, 0, 0, 0xFF},
@@ -76,6 +81,7 @@ static effN64Vtx size8x8_tex22x22_vtx[] = {
     {-8, 8, 0, 4928, 704, 0, 0, 0, 0xFF},
 
 };
+#endif
 
 /**
  * Spawns `count` sparkle stars at (x, y, z) with velocity scale (vx, vy), drawn on `camera`.

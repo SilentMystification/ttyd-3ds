@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: broken barrier, 60 pieces of a shattering barrier that scatter and fade.
+#include "port_disc_data.h"
 #include "eff/n64/eff_broken_barrier_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -45,6 +46,10 @@ static f32 scale_data[] = {0.2f, 0.4f, 0.8f, 1.3f, 1.5f, 1.3f, 0.9f, 0.6f, 0.4f,
                            0.2f, 0.4f, 0.8f, 1.3f, 1.5f, 1.3f, 0.9f, 0.6f, 0.4f, 0.3f};
 
 /** Barrier shard quads: eight cells of the shard texture strip, one picked per shard. */
+#ifdef TARGET_PORT
+static effN64Vtx size8x8_tex22x22_vtx[32]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size8x8_tex22x22_vtx, geo_eff_broken_barrier_n64_size8x8_tex22x22_vtx)
+#else
 static effN64Vtx size8x8_tex22x22_vtx[] = {
     {-8, -8, 0, 0, 0, 0, 0, 0, 255},
     {8, -8, 0, 704, 0, 0, 0, 0, 255},
@@ -79,6 +84,7 @@ static effN64Vtx size8x8_tex22x22_vtx[] = {
     {8, 8, 0, 5632, 704, 0, 0, 0, 255},
     {-8, 8, 0, 4928, 704, 0, 0, 0, 255},
 };
+#endif
 
 /**
  * Spawns 60 barrier shards around (x, y, z) for `life` frames (0 or less: until soft deleted).

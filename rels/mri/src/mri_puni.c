@@ -1,6 +1,7 @@
 // mri_puni (巨木の中, The Great Tree): the Puni crowd system: every puni and Jabbi follows Mario or its group leader,
 // walks the maze maps (puniMapdata), falls, fights and is saved/restored through the LSW bytes; driven by the
 // evt_puni_* calls.
+#include "port_disc_data.h"
 #include "eff/eff_fukidashi.h"
 #include "eff/eff_puniballoon.h"
 #include "version.h"
@@ -4640,9 +4641,14 @@ static u8 shadow_dl[32] ATTRIBUTE_ALIGN(32) = {
     0x03,
 };
 /** The four corners of the square shadow drawn under each Puni (2.4 units wide, on the ground). */
+#ifdef TARGET_PORT
+static f32 shadow_vtx[16]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(shadow_vtx, geo_mri_puni_shadow_vtx)
+#else
 static f32 shadow_vtx[16] = {
     -1.2f, 0.0f, -1.2f, -1.2f, 0.0f, 1.2f, 1.2f, 0.0f, 1.2f, 1.2f, 0.0f, -1.2f,
 };
+#endif
 /** Texture coordinates of the shadow square, one pair per corner. */
 static f32 shadow_coord[8] = {0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f};
 

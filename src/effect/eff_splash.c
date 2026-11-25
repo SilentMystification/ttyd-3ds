@@ -1,5 +1,6 @@
 // Water splash: columns and droplets rising and falling around a point; types 0-4 vary the shape and size,
 // type 3 also adds a water-damage effect.
+#include "port_disc_data.h"
 #include "eff/eff_splash.h"
 #include "driver/camdrv.h"
 #include "driver/dispdrv.h"
@@ -40,15 +41,60 @@ typedef struct EffSplashWork {
 // Model data in the exporter's layout: indexed vertex arrays (positions, normals, colours, texture coordinates),
 // display lists of GX commands (each padded to 32 bytes with GX_NOP) and, per list table, the list sizes in
 // 32-byte units for GXCallDisplayList.
+#ifdef TARGET_PORT
+static s16 geso_shibuki_vertex_tbl[54] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(geso_shibuki_vertex_tbl, geo_eff_splash_geso_shibuki_vertex_tbl)
+#else
 static s16 geso_shibuki_vertex_tbl[] __attribute__((aligned(32))) = {-27648, 0, 0, -21503, 0, 0, -15871, 0, 0, -10751, 0, 0, -5631, 0, 0, 0, 0, 0, -28426, 333, 0, -23324, 3291, 0, -18243, 5029, 0, -13562, 6464, 0, -8405, 6754, 0, -1797, 4829, 0, -28349, 2048, 0, -23897, 4665, 0, -19006, 6861, 0, -14421, 8524, 0, -9359, 9043, 0, -3897, 6702, 0};
+#endif
+#ifdef TARGET_PORT
+static s16 geso_shibuki_texcoord0_tbl[36] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(geso_shibuki_texcoord0_tbl, geo_eff_splash_geso_shibuki_texcoord0_tbl)
+#else
 static s16 geso_shibuki_texcoord0_tbl[] __attribute__((aligned(32))) = {-11004, 6276, -3325, 6276, -3325, 18299, -11004, 18299, 4352, 6276, 4352, 18299, 12031, 6276, 12031, 18299, 19709, 6276, 19709, 18299, 27388, 6276, 27388, 18299, -11004, 512, -3325, 512, 4352, 512, 12031, 512, 19709, 512, 27388, 0};
+#endif
+#ifdef TARGET_PORT
+static s8 geso_shibuki_normal_tbl[3] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(geso_shibuki_normal_tbl, geo_eff_splash_geso_shibuki_normal_tbl)
+#else
 static s8 geso_shibuki_normal_tbl[] __attribute__((aligned(32))) = {0, 0, 64};
+#endif
+#ifdef TARGET_PORT
+static u8 geso_shibuki_color0_tbl[8] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(geso_shibuki_color0_tbl, geo_eff_splash_geso_shibuki_color0_tbl)
+#else
 static u8 geso_shibuki_color0_tbl[] __attribute__((aligned(32))) = {0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+#endif
+#ifdef TARGET_PORT
+static u8 geso_shibuki_dl_0_0[32] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(geso_shibuki_dl_0_0, geo_eff_splash_geso_shibuki_dl_0_0)
+#else
 static u8 geso_shibuki_dl_0_0[] __attribute__((aligned(32))) = {0x98, 0x00, 0x06, 0x0C, 0x00, 0x01, 0x0C, 0x0D, 0x00, 0x01, 0x0D, 0x06, 0x00, 0x00, 0x00, 0x07, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+#endif
+#ifdef TARGET_PORT
+static u8 geso_shibuki_dl_0_1[32] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(geso_shibuki_dl_0_1, geo_eff_splash_geso_shibuki_dl_0_1)
+#else
 static u8 geso_shibuki_dl_0_1[] __attribute__((aligned(32))) = {0x98, 0x00, 0x06, 0x0D, 0x00, 0x01, 0x0D, 0x0E, 0x00, 0x01, 0x0E, 0x07, 0x00, 0x01, 0x01, 0x08, 0x00, 0x01, 0x04, 0x01, 0x00, 0x00, 0x02, 0x02, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00};
+#endif
+#ifdef TARGET_PORT
+static u8 geso_shibuki_dl_0_2[32] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(geso_shibuki_dl_0_2, geo_eff_splash_geso_shibuki_dl_0_2)
+#else
 static u8 geso_shibuki_dl_0_2[] __attribute__((aligned(32))) = {0x98, 0x00, 0x06, 0x0E, 0x00, 0x01, 0x0E, 0x0F, 0x00, 0x01, 0x0F, 0x08, 0x00, 0x01, 0x04, 0x09, 0x00, 0x01, 0x06, 0x02, 0x00, 0x00, 0x05, 0x03, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00};
+#endif
+#ifdef TARGET_PORT
+static u8 geso_shibuki_dl_0_3[32] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(geso_shibuki_dl_0_3, geo_eff_splash_geso_shibuki_dl_0_3)
+#else
 static u8 geso_shibuki_dl_0_3[] __attribute__((aligned(32))) = {0x98, 0x00, 0x06, 0x0F, 0x00, 0x01, 0x0F, 0x10, 0x00, 0x01, 0x10, 0x09, 0x00, 0x01, 0x06, 0x0A, 0x00, 0x01, 0x08, 0x03, 0x00, 0x00, 0x07, 0x04, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00};
+#endif
+#ifdef TARGET_PORT
+static u8 geso_shibuki_dl_0_4[32] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(geso_shibuki_dl_0_4, geo_eff_splash_geso_shibuki_dl_0_4)
+#else
 static u8 geso_shibuki_dl_0_4[] __attribute__((aligned(32))) = {0x98, 0x00, 0x06, 0x10, 0x00, 0x01, 0x10, 0x11, 0x00, 0x01, 0x11, 0x0A, 0x00, 0x01, 0x08, 0x0B, 0x00, 0x01, 0x0A, 0x04, 0x00, 0x00, 0x09, 0x05, 0x00, 0x00, 0x0B, 0x00, 0x00, 0x00, 0x00, 0x00};
+#endif
 /** The five display lists of the Blooper spray (shibuki) model. */
 static u8* geso_shibuki_dl_0_tbl[] = {geso_shibuki_dl_0_0, geso_shibuki_dl_0_1, geso_shibuki_dl_0_2, geso_shibuki_dl_0_3, geso_shibuki_dl_0_4};
 /**
@@ -59,7 +105,12 @@ static u8 geso_scale_dt[] = {0x60, 0x60, 0x72, 0x88, 0x9F, 0xB6, 0xCC, 0xDF, 0xE
 /** Path of the Blooper splash spray columns: an x, y offset pair per frame for 71 frames. */
 static s8 geso_trans_dt[] = {-40, -12, -40, -12, -39, -9, -39, -6, -39, -3, -39, 0, -38, 3, -38, 5, -38, 8, -39, 10, -40, 12, -41, 13, -42, 13, -43, 13, -45, 13, -47, 13, -49, 13, -51, 12, -52, 12, -54, 12, -56, 12, -57, 12, -58, 12, -59, 12, -61, 12, -62, 12, -63, 12, -65, 12, -66, 12, -67, 12, -69, 12, -70, 12, -71, 12, -73, 12, -74, 12, -75, 12, -76, 12, -78, 12, -79, 12, -80, 12, -81, 12, -83, 12, -84, 12, -85, 12, -87, 12, -88, 12, -89, 12, -90, 12, -92, 12, -93, 12, -94, 12, -95, 12, -97, 12, -98, 12, -99, 12, -100, 12, -102, 12, -103, 12, -104, 12, -106, 12, -107, 12, -108, 12, -109, 12, -111, 12, -112, 12, -113, 12, -114, 12, -116, 12, -117, 12, -118, 12, -120, 12};
 /** Display-list sizes (32-byte units) of the Blooper spray (shibuki) model's five lists. */
+#ifdef TARGET_PORT
+static u8 geso_shibuki_dl_0_size_tbl[5]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(geso_shibuki_dl_0_size_tbl, geo_eff_splash_geso_shibuki_dl_0_size_tbl)
+#else
 static u8 geso_shibuki_dl_0_size_tbl[] = {1, 1, 1, 1, 1};
+#endif
 
 /**
  * Spawns the splash at (x, y, z) with `size`.

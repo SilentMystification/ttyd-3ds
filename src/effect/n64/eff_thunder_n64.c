@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: lightning strike with a charge light or flare and a shock flash; type picks variant.
+#include "port_disc_data.h"
 #include "eff/n64/eff_thunder_n64.h"
 #include "eff/eff_n64.h"
 #include "eff/n64/eff_akari_charge_n64.h"
@@ -39,6 +40,10 @@ static void effThunderDisp(CameraId cameraId, EffectEntry* effect);
  * The lightning bolt mesh (inazuma, "lightning"): several jagged bolt shapes,
  * of which each type draws its own set of triangles.
  */
+#ifdef TARGET_PORT
+effN64Vtx Ncube_inazuma_v[552]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(Ncube_inazuma_v, geo_eff_thunder_n64_Ncube_inazuma_v)
+#else
 effN64Vtx Ncube_inazuma_v[] = {
     {-85, -102, 0, 3887, 2048, 255, 255, 255, 255},
     {-135, -138, 0, 4053, 1024, 255, 255, 255, 255},
@@ -593,6 +598,7 @@ effN64Vtx Ncube_inazuma_v[] = {
     {-87, -85, 0, 9535, 1024, 255, 255, 255, 255},
     {-13, -115, 0, 9463, 2048, 255, 255, 255, 255},
 };
+#endif
 
 /** Spawns a lightning strike at (x, y, z); type picks the variant. Spawned by event scripts through evt_eff. */
 EffectEntry* effThunderN64Entry(s32 type, f32 x, f32 y, f32 z, f32 a, f32 b) {

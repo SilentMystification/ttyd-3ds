@@ -1,4 +1,5 @@
 // Paper Mario 64 smoke effect 4 (kemuri: smoke) at a point with an angle and a flip option.
+#include "port_disc_data.h"
 #include "eff/n64/eff_kemuri4_n64.h"
 #include "driver/camdrv.h"
 #include "driver/dispdrv.h"
@@ -36,6 +37,10 @@ typedef struct EffKemuri4N64Work {
 } EffKemuri4N64Work;
 
 /** Dash puff mesh: the textured quad at 25 and the vertex-coloured flower shape at 35. */
+#ifdef TARGET_PORT
+effN64Vtx flowers_v[41]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(flowers_v, geo_eff_kemuri4_n64_flowers_v)
+#else
 effN64Vtx flowers_v[41] = {
     {-9, 8, -7, 0, 512, 255, 255, 255, 255},
     {-9, 4, 2, 512, 512, 255, 255, 255, 255},
@@ -79,6 +84,7 @@ effN64Vtx flowers_v[41] = {
     {-4, -7, 0, 0, 0, 100, 160, 60, 255},
     {-11, -5, 0, 0, 0, 100, 160, 60, 255},
 };
+#endif
 
 static void effKemuri4Main(EffectEntry* effect);
 static void effKemuri4Disp(CameraId cameraId, EffectEntry* effect);

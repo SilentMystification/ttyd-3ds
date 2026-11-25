@@ -31,16 +31,17 @@ typedef struct {
     int section;
     u32 offset; /* main.dol: address */
     u32 size;
+    int fmt; /* how the disc's big-endian bytes become memory: see port_disc_data.h */
 } Entry;
 
-static Entry s_entries[16];
+static Entry s_entries[1024];
 static int s_count;
 
-void port_disc_data_register(void* dst, const char* rel, int section, unsigned int offset, unsigned int size) {
+void port_disc_data_register(void* dst, const char* rel, int section, unsigned int offset, unsigned int size, int fmt) {
     if (s_count >= (int)(sizeof(s_entries) / sizeof(s_entries[0]))) {
         plat_fatal("disc data: too many entries");
     }
-    s_entries[s_count++] = (Entry){dst, rel, section, offset, size};
+    s_entries[s_count++] = (Entry){dst, rel, section, offset, size, fmt};
 }
 
 static void (*s_fixups[8])(void);
@@ -56,10 +57,14 @@ void port_disc_data_add_fixup(void (*fn)(void)) {
 static u32 be32(const u8* p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }
 
 static u32 dol_file_offset(u32 addr, u32 size) {
-    u8 h[0x100];
-    u32 dol = port_dvd_dol_offset();
-    if (port_dvd_read_raw(dol, h, sizeof(h)) != (s32)sizeof(h)) {
-        return 0;
+    static u8 h[0x100];
+    static u32 dol;
+    if (dol == 0) { /* the header is read once */
+        dol = port_dvd_dol_offset();
+        if (port_dvd_read_raw(dol, h, sizeof(h)) != (s32)sizeof(h)) {
+            dol = 0;
+            return 0;
+        }
     }
     for (int i = 0; i < 18; i++) { /* 7 text, 11 data sections */
         u32 off = be32(h + i * 4), a = be32(h + 0x48 + i * 4), sz = be32(h + 0x90 + i * 4);
@@ -97,15 +102,103 @@ static u32 rel_file_offset(const char* rel, int section, u32 offset, u32 size) {
     return base + soff + offset;
 }
 
-void port_disc_data_fill(void) {
-    for (int i = 0; i < s_count; i++) {
-        const Entry* e = &s_entries[i];
-        u32 at = e->rel[0] ? rel_file_offset(e->rel, e->section, e->offset, e->size) : dol_file_offset(e->offset, e->size);
-        if (at == 0 || port_dvd_read_raw(at, e->dst, e->size) != (s32)e->size) {
-            plat_fatal("disc data: %s %08lx (%lu bytes) not found in the image", e->rel[0] ? e->rel : "main.dol",
-                       (unsigned long)e->offset, (unsigned long)e->size);
+/* The formats of port_disc_data.h; keep in step with tools/port3ds/disc_geo.py (swap). */
+static void swap_bytes(u8* p, u32 size, u32 step) {
+    for (u32 i = 0; i + step <= size; i += step) {
+        for (u32 a = i, b = i + step - 1; a < b; a++, b--) {
+            u8 t = p[a];
+            p[a] = p[b];
+            p[b] = t;
         }
     }
+}
+
+static void swap_entry(u8* p, u32 size, int fmt) {
+    switch (fmt) {
+        case 1: /* s16 */
+            swap_bytes(p, size, 2);
+            break;
+        case 2: /* f32, u32, Vec */
+            swap_bytes(p, size, 4);
+            break;
+        case 3: /* effN64Vtx: five s16, then r g b a */
+            for (u32 v = 0; v + 14 <= size; v += 14) {
+                swap_bytes(p + v, 10, 2);
+            }
+            break;
+        default: /* raw bytes, and u32 display lists in GX byte order */
+            break;
+    }
+}
+
+/* The main.dol arrays sit close together in the image, so they are read in windows: entries sorted by file
+ * offset, neighbours (gap under 256 bytes) share one read of at most WINDOW bytes. */
+#define WINDOW 0x8000
+static u8 s_window[WINDOW];
+static u32 s_at[1024];    /* an entry's file offset */
+static u32 s_order[1024]; /* the DOL entries by file offset */
+
+static void fill_dol_entries(int n) {
+    int i = 0;
+    while (i < n) {
+        const Entry* first = &s_entries[s_order[i]];
+        u32 start = s_at[s_order[i]];
+        u32 end = start + first->size;
+        int j = i + 1;
+        while (j < n && s_at[s_order[j]] <= end + 256 &&
+               s_at[s_order[j]] + s_entries[s_order[j]].size - start <= WINDOW && end - start <= WINDOW) {
+            u32 e2 = s_at[s_order[j]] + s_entries[s_order[j]].size;
+            if (e2 > end) {
+                end = e2;
+            }
+            j++;
+        }
+        if (end - start > WINDOW) { /* a single entry larger than a window: read it straight */
+            if (port_dvd_read_raw(start, first->dst, first->size) != (s32)first->size) {
+                plat_fatal("disc data: main.dol %08lx not read", (unsigned long)first->offset);
+            }
+            swap_entry(first->dst, first->size, first->fmt);
+            i++;
+            continue;
+        }
+        if (port_dvd_read_raw(start, s_window, end - start) != (s32)(end - start)) {
+            plat_fatal("disc data: main.dol window at %08lx not read", (unsigned long)first->offset);
+        }
+        for (int k = i; k < j; k++) {
+            const Entry* e = &s_entries[s_order[k]];
+            memcpy(e->dst, s_window + (s_at[s_order[k]] - start), e->size);
+            swap_entry(e->dst, e->size, e->fmt);
+        }
+        i = j;
+    }
+}
+
+void port_disc_data_fill(void) {
+    int n = 0;
+    for (int i = 0; i < s_count; i++) {
+        const Entry* e = &s_entries[i];
+        if (e->rel[0]) {
+            u32 where = rel_file_offset(e->rel, e->section, e->offset, e->size);
+            if (where == 0 || port_dvd_read_raw(where, e->dst, e->size) != (s32)e->size) {
+                plat_fatal("disc data: %s %08lx (%lu bytes) not found in the image", e->rel, (unsigned long)e->offset,
+                           (unsigned long)e->size);
+            }
+            swap_entry(e->dst, e->size, e->fmt);
+            continue;
+        }
+        s_at[i] = dol_file_offset(e->offset, e->size);
+        if (s_at[i] == 0) {
+            plat_fatal("disc data: main.dol %08lx (%lu bytes) not found in the image", (unsigned long)e->offset,
+                       (unsigned long)e->size);
+        }
+        int k = n++; /* insertion sort by file offset */
+        while (k > 0 && s_at[s_order[k - 1]] > s_at[i]) {
+            s_order[k] = s_order[k - 1];
+            k--;
+        }
+        s_order[k] = (u32)i;
+    }
+    fill_dol_entries(n);
     for (int i = 0; i < s_nfixups; i++) {
         s_fixups[i]();
     }

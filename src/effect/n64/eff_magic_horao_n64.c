@@ -1,4 +1,5 @@
 // Paper Mario 64 magic effect (horao); types 0-5, some types spawn dust (hokori) puffs.
+#include "port_disc_data.h"
 #include "eff/n64/eff_magic_horao_n64.h"
 #include "driver/camdrv.h"
 #include "driver/dispdrv.h"
@@ -31,12 +32,17 @@ typedef struct EffMagicHoraoN64Work {
 } EffMagicHoraoN64Work;
 
 /** Large flat quad (6400 units wide) the horao magic draws its textures on. */
+#ifdef TARGET_PORT
+static effN64Vtx size64x64_tex64x64_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size64x64_tex64x64_vtx, geo_eff_magic_horao_n64_size64x64_tex64x64_vtx)
+#else
 static effN64Vtx size64x64_tex64x64_vtx[] = {
     {-3200, 0, 0, 0, 0, 0, 0, 0, 0xFF},
     {3200, 0, 0, 2048, 0, 0, 0, 0, 0xFF},
     {3200, 6400, 0, 2048, 2048, 0, 0, 0, 0xFF},
     {-3200, 6400, 0, 0, 2048, 0, 0, 0, 0xFF},
 };
+#endif
 
 static void effMagicHoraoMain(EffectEntry* effect);
 static void effMagicHoraoDisp(CameraId cameraId, EffectEntry* effect);

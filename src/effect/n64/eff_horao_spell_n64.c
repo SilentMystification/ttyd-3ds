@@ -1,5 +1,6 @@
 // Paper Mario 64 effect: horao spell, two wavy 16-segment glow ribbons at fixed angles that sway, scroll their texture
 // and cycle through a 17-step green colour table; fades in over 16 frames and out over the last 16.
+#include "port_disc_data.h"
 #include "eff/n64/eff_horao_spell_n64.h"
 #include "driver/camdrv.h"
 #include "driver/dispdrv.h"
@@ -36,6 +37,10 @@ static u8 colg[17] = {0xAA, 0xA0, 0x96, 0x8C, 0x82, 0x78, 0x82, 0x8C, 0x96, 0xA0
 static u8 colb[17] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 /** Template points of a glow ribbon: top and bottom vertex pairs that are copied and swayed each frame. */
+#ifdef TARGET_PORT
+effN64Vtx horao_spell_vtx[32]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(horao_spell_vtx, geo_eff_horao_spell_n64_horao_spell_vtx)
+#else
 effN64Vtx horao_spell_vtx[] = {
     {0, -8, 0, 0, 0, 0, 0, 0, 0},
     {0, 8, 0, 0, 1024, 0, 0, 0, 0},
@@ -70,6 +75,7 @@ effN64Vtx horao_spell_vtx[] = {
     {0, -8, 0, 7680, 0, 0, 0, 0, 0},
     {0, 8, 0, 7680, 1024, 0, 0, 0, 0},
 };
+#endif
 
 static void effHoraoSpellMain(EffectEntry* effect);
 static void effHoraoSpellDisp(CameraId cameraId, EffectEntry* effect);

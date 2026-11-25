@@ -1,5 +1,6 @@
 // Paper Mario 64 effect: a green blob lobbed from a start point to an end point along an arc,
 // squashing and stretching as it moves; lasts `duration` frames plus a fade-out.
+#include "port_disc_data.h"
 #include "eff/n64/eff_pokopi_pipo_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -35,12 +36,17 @@ typedef struct EffPokopiPipoN64Work {
 } EffPokopiPipoN64Work;
 
 /** 32x32 camera-facing quad drawn for the lobbed blob. */
+#ifdef TARGET_PORT
+static effN64Vtx size32x32_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size32x32_tex32x32_vtx, geo_eff_pokopi_pipo_n64_size32x32_tex32x32_vtx)
+#else
 static effN64Vtx size32x32_tex32x32_vtx[] = {
     {-16, -16, 0, 0, 0, 0, 0, 0, 255},
     {16, -16, 0, 1024, 0, 0, 0, 0, 255},
     {16, 16, 0, 1024, 1024, 0, 0, 0, 255},
     {-16, 16, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 /** Width and height in percent over the squash-and-stretch the blob plays when it lands. */
 static u8 w_scale_data[7] = {110, 150, 130, 110, 100, 95, 100};

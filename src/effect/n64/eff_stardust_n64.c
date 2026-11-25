@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: a burst of colored sparkle stars from a point; setters change color, scale and camera.
+#include "port_disc_data.h"
 #include "eff/n64/eff_stardust_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -43,6 +44,10 @@ static u8 scale_data[] = "<Zdhjlm";
 /**
  * Eight 16x16 quads, one per 22x22 cell of the sparkle strip, that each sparkle steps through as it twinkles.
  */
+#ifdef TARGET_PORT
+static effN64Vtx size8x8_tex22x22_vtx[32]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size8x8_tex22x22_vtx, geo_eff_stardust_n64_size8x8_tex22x22_vtx)
+#else
 static effN64Vtx size8x8_tex22x22_vtx[] = {
     {-8, -8, 0, 0, 0, 0, 0, 0, 255},
     {8, -8, 0, 704, 0, 0, 0, 0, 255},
@@ -77,6 +82,7 @@ static effN64Vtx size8x8_tex22x22_vtx[] = {
     {8, 8, 0, 5632, 704, 0, 0, 0, 255},
     {-8, 8, 0, 4928, 704, 0, 0, 0, 255},
 };
+#endif
 
 static void effStardustMain(EffectEntry* effect);
 static void effStardustDisp(CameraId cameraId, EffectEntry* effect);

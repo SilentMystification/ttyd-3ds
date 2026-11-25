@@ -1,4 +1,5 @@
 // Paper Mario 64 magic effect 3 at a point for a given life.
+#include "port_disc_data.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
 #include "driver/dispdrv.h"
@@ -210,9 +211,14 @@ static void effMagic3Disp(CameraId cameraId, EffectEntry* effect) {
 }
 
 /** Camera-facing 32x16 streak each magic spark is drawn with. */
+#ifdef TARGET_PORT
+effN64Vtx size32x16_tex64x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size32x16_tex64x32_vtx, geo_eff_magic3_n64_size32x16_tex64x32_vtx)
+#else
 effN64Vtx size32x16_tex64x32_vtx[] = {
     {-16, -8, 0, 0, 0, 0, 0, 0, 255},
     {16, -8, 0, 2048, 0, 0, 0, 0, 255},
     {16, 8, 0, 2048, 1024, 0, 0, 0, 255},
     {-16, 8, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif

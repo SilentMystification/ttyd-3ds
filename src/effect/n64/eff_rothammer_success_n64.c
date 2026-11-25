@@ -1,5 +1,6 @@
 // Paper Mario 64 effect: a ring of `count` yellow star sprites flying outward from a point and spinning;
 // the success counterpart of eff_rothammer_fail_n64.c.
+#include "port_disc_data.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
 #include "driver/dispdrv.h"
@@ -23,12 +24,17 @@ typedef struct EffRotHammerSuccessWork {
 } EffRotHammerSuccessWork;
 
 /** 16x16 camera-facing quad drawn for each spinning yellow star. */
+#ifdef TARGET_PORT
+static effN64Vtx size16x16_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex32x32_vtx, geo_eff_rothammer_success_n64_size16x16_tex32x32_vtx)
+#else
 static effN64Vtx size16x16_tex32x32_vtx[] = {
     {-8, -8, 0, 0, 0, 0, 0, 0, 255},
     {8, -8, 0, 64, 0, 0, 0, 0, 255},
     {8, 8, 0, 64, 32, 0, 0, 0, 255},
     {-8, 8, 0, 0, 32, 0, 0, 0, 255},
 };
+#endif
 
 static void effRotHammerSuccessMain(EffectEntry* effect);
 static void effRotHammerSuccessDisp(CameraId cameraId, EffectEntry* effect);

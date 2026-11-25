@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: thunder flare: a glowing flare sprite with a color pair, used by the thunder effect.
+#include "port_disc_data.h"
 #include "eff/n64/eff_thunderflare_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -13,6 +14,10 @@
  * 16x16 quad drawn for each spark, white at the top shading to red at the bottom,
  * followed by an unused larger copy turned 45 degrees.
  */
+#ifdef TARGET_PORT
+static effN64Vtx size16x16_tex32x32_vtx[8]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex32x32_vtx, geo_eff_thunderflare_n64_size16x16_tex32x32_vtx)
+#else
 static effN64Vtx size16x16_tex32x32_vtx[] = {
     {-8, -8, 0, 0, 0, 250, 250, 250, 255},
     {8, -8, 0, 1024, 0, 250, 250, 250, 255},
@@ -23,6 +28,7 @@ static effN64Vtx size16x16_tex32x32_vtx[] = {
     {12, 12, 0, 1536, 512, 250, 0, 0, 255},
     {-12, 12, 0, 512, 1536, 250, 0, 0, 255},
 };
+#endif
 
 static void effThunderflareMain(EffectEntry* effect);
 static void effThunderflareDisp(CameraId cameraId, EffectEntry* effect);

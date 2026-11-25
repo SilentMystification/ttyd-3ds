@@ -1,5 +1,6 @@
 // Paper Mario 64 effect: a single flat sprite that stretches over `time` frames (progress 0-7);
 // the failure counterpart of eff_rothammer_success_n64.c.
+#include "port_disc_data.h"
 #include "eff/n64/eff_rothammer_fail_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -26,12 +27,17 @@ typedef struct EffRotHammerFailN64Work {
 } EffRotHammerFailN64Work;
 
 /** 24x24 camera-facing quad, texture mirrored horizontally, drawn for the smoke puff. */
+#ifdef TARGET_PORT
+static effN64Vtx size24x24_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size24x24_tex32x32_vtx, geo_eff_rothammer_fail_n64_size24x24_tex32x32_vtx)
+#else
 static effN64Vtx size24x24_tex32x32_vtx[] = {
     {-12, -12, 0, 0, 0, 0, 0, 0, 255},
     {12, -12, 0, -1024, 0, 0, 0, 0, 255},
     {12, 12, 0, -1024, 1024, 0, 0, 0, 255},
     {-12, 12, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 static void effRotHammerFailMain(EffectEntry* effect);
 static void effRotHammerFailDisp(CameraId cameraId, EffectEntry* effect);

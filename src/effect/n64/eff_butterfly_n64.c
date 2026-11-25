@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: butterfly that flutters around a home point.
+#include "port_disc_data.h"
 #include "eff/n64/eff_butterfly_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -34,6 +35,10 @@ static void effButterflyMain(EffectEntry* effect);
 static void effButterflyDisp(CameraId cameraId, EffectEntry* effect);
 
 /** Butterfly wing poses: one six-vertex set per bob step, with the wing tips rising set by set so the wings flap. */
+#ifdef TARGET_PORT
+effN64Vtx but_02_v[180]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(but_02_v, geo_eff_butterfly_n64_but_02_v)
+#else
 effN64Vtx but_02_v[] = {
     {0, 0, 250, 0, 2048, 255, 255, 255, 255},
     {318, 31, 250, 1024, 2048, 255, 255, 255, 255},
@@ -215,6 +220,7 @@ effN64Vtx but_02_v[] = {
     {0, 0, -254, 0, 0, 255, 255, 255, 255},
     {-318, 27, 250, 1024, 2048, 255, 255, 255, 255},
     {-318, 27, -254, 1024, 0, 255, 255, 255, 255},};
+#endif
 
 /**
  * Spawns a butterfly that wanders within 50 units horizontally and 30 vertically of (x, y, z);

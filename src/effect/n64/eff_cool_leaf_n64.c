@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: cool leaf, four leaves tumbling and spinning; types 0-2 pick the spin.
+#include "port_disc_data.h"
 #include "eff/n64/eff_cool_leaf_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -28,6 +29,10 @@ typedef struct EffCoolLeafN64Work {
 } EffCoolLeafN64Work;
 
 /** Two-sided 12x12 brown leaf quad, used by type 0. */
+#ifdef TARGET_PORT
+static effN64Vtx size12x12_tex64x64_brown_vtx[8]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size12x12_tex64x64_brown_vtx, geo_eff_cool_leaf_n64_size12x12_tex64x64_brown_vtx)
+#else
 static effN64Vtx size12x12_tex64x64_brown_vtx[] = {
     {-6, -6, 0, 0, 0, 0x19, 0x2A, 0x11, 0xFF},
     {6, -6, 0, 2048, 0, 0x19, 0x2A, 0x11, 0xFF},
@@ -38,8 +43,13 @@ static effN64Vtx size12x12_tex64x64_brown_vtx[] = {
     {6, 6, 0, 2048, 4096, 0x30, 0x36, 0x25, 0xFF},
     {-6, 6, 0, 0, 4096, 0x30, 0x36, 0x25, 0xFF},
 };
+#endif
 
 /** Two-sided 12x12 red leaf quad, used by type 1. */
+#ifdef TARGET_PORT
+static effN64Vtx size12x12_tex64x64_red_vtx[8]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size12x12_tex64x64_red_vtx, geo_eff_cool_leaf_n64_size12x12_tex64x64_red_vtx)
+#else
 static effN64Vtx size12x12_tex64x64_red_vtx[] = {
     {-6, -6, 0, 0, 0, 0x32, 0x15, 0x11, 0xFF},
     {6, -6, 0, 2048, 0, 0x32, 0x15, 0x11, 0xFF},
@@ -50,6 +60,7 @@ static effN64Vtx size12x12_tex64x64_red_vtx[] = {
     {6, 6, 0, 2048, 4096, 0x60, 0x1B, 0x25, 0xFF},
     {-6, 6, 0, 0, 4096, 0x60, 0x1B, 0x25, 0xFF},
 };
+#endif
 
 static void effCoolLeafMain(EffectEntry* effect);
 static void effCoolLeafDisp(CameraId cameraId, EffectEntry* effect);

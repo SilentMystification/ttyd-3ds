@@ -69,6 +69,12 @@ def arena_hi(version):
 
 SYM = re.compile(r"^(\S+) = (\.[a-z0-9]+):0x([0-9A-Fa-f]+); // .*?size:0x([0-9A-Fa-f]+)")
 
+# Geometry: one line per array in disc_geometry.txt (key symbol occurrence format bytes). The format says how the
+# disc's big-endian bytes become the port's memory (tools/port3ds/disc_geo.py); the loader in
+# port3ds/game/disc_data.c takes the number.
+GEOMETRY_FILE = REPO / "tools" / "port3ds" / "disc_geometry.txt"
+FORMATS = ("raw", "s16", "swap32", "n64vtx", "dl32")  # the order of disc_geo.FORMATS and of port_disc_data.h
+
 
 def symbols(path):
     out = {}
@@ -76,6 +82,30 @@ def symbols(path):
         m = SYM.match(line)
         if m:
             out.setdefault(m.group(1), (m.group(2), int(m.group(3), 16), int(m.group(4), 16)))
+    return out
+
+
+def symbols_all(path):
+    """name -> [(section, address, size), ...] in file order (statics repeat across files)."""
+    out = {}
+    for line in path.read_text().splitlines():
+        m = SYM.match(line)
+        if m:
+            out.setdefault(m.group(1), []).append((m.group(2), int(m.group(3), 16), int(m.group(4), 16)))
+    return out
+
+
+def geometry_entries(path=GEOMETRY_FILE):
+    """[(key, symbol, occurrence, format, bytes, rel)] from disc_geometry.txt (rel "" = main.dol)."""
+    out = []
+    for n, line in enumerate(path.read_text().splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        f = line.split()
+        if len(f) not in (5, 6) or f[3] not in FORMATS:
+            sys.exit(f"gen_disc_data: {path}:{n}: expected 'key symbol occurrence format bytes [rel]'")
+        out.append((f[0], f[1], int(f[2]), f[3], int(f[4]), f[5] if len(f) == 6 else ""))
     return out
 
 
@@ -160,10 +190,25 @@ def main():
         if size < want:
             sys.exit(f"gen_disc_data: {sym} is 0x{size:X} bytes in {path}, the port's array 0x{want:X}")
         if where == "dol":
-            lines.append(f'#define PORT_DISC_{key} "", 0, 0x{addr:08X}u, 0x{want:X}u')
+            lines.append(f'#define PORT_DISC_{key} "", 0, 0x{addr:08X}u, 0x{want:X}u, 0')
         else:
             index = rel_sections(cfg / where / "splits.txt")[section]
-            lines.append(f'#define PORT_DISC_{key} "{where}", {index}, 0x{addr:08X}u, 0x{want:X}u')
+            lines.append(f'#define PORT_DISC_{key} "{where}", {index}, 0x{addr:08X}u, 0x{want:X}u, 0')
+
+    all_syms = symbols_all(cfg / "symbols.txt")
+    for key, sym, occ, fmt, size, rel in geometry_entries():
+        table = symbols_all(cfg / rel / "symbols.txt") if rel else all_syms
+        found = table.get(sym, [])
+        if occ >= len(found):
+            sys.exit(f"gen_disc_data: {sym} occurrence {occ} not in the symbols of {rel or 'main.dol'} ({len(found)} found)")
+        section, addr, sym_size = found[occ]
+        if sym_size < size:
+            sys.exit(f"gen_disc_data: {sym} is 0x{sym_size:X} bytes in symbols.txt, the port reads 0x{size:X}")
+        if rel:
+            index = rel_sections(cfg / rel / "splits.txt")[section]
+            lines.append(f'#define PORT_DISC_{key} "{rel}", {index}, 0x{addr:08X}u, 0x{size:X}u, {FORMATS.index(fmt)}')
+        else:
+            lines.append(f'#define PORT_DISC_{key} "", 0, 0x{addr:08X}u, 0x{size:X}u, {FORMATS.index(fmt)}')
 
     lo = ((dol_end(cfg / "symbols.txt") + 31) & ~31) + STACK_SIZE
     hi, known = arena_hi(args.version)

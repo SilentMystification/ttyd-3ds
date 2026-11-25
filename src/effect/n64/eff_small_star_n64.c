@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: `count` small star sprites scatter from a point with the given velocity.
+#include "port_disc_data.h"
 #include "eff/n64/eff_small_star_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -291,12 +292,17 @@ static u8 color_rotation_data[] = {
     0xB4, 0xFE, 0xB4, 0xD5, 0xFE, 0xB4, 0xFE, 0xFE, 0xB4, 0xFE, 0xD5, 0xAC,
 };
 /** 16x16 camera-facing quad drawn for each small star. */
+#ifdef TARGET_PORT
+static effN64Vtx size16x16_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex32x32_vtx, geo_eff_small_star_n64_size16x16_tex32x32_vtx)
+#else
 static effN64Vtx size16x16_tex32x32_vtx[] = {
     {-8, -8, 0, 0, 0, 0, 0, 0, 0xFF},
     {8, -8, 0, 64, 0, 0, 0, 0, 0xFF},
     {8, 8, 0, 64, 32, 0, 0, 0, 0xFF},
     {-8, 8, 0, 0, 32, 0, 0, 0, 0xFF},
 };
+#endif
 
 /** Reads one byte of the shared color rotation table, wrapping at 36 entries. */
 static inline u8 color_rot_get(s32 idx) {

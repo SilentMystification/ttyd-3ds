@@ -1,5 +1,6 @@
 // Paper Mario 64 effect: rappa (trumpet): star-like sparks fired from a point in the direction set by pitch and yaw,
 // slowing down and fading over 30 frames.
+#include "port_disc_data.h"
 #include "eff/n64/eff_rappa_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -30,12 +31,17 @@ static u8 color_rotation_data[] = {
     0xB4, 0xFE, 0xB4, 0xD5, 0xFE, 0xB4, 0xFE, 0xFE, 0xB4, 0xFE, 0xD5, 0xAC,
 };
 /** 16x16 camera-facing quad drawn for each trumpet spark. */
+#ifdef TARGET_PORT
+static effN64Vtx size16x16_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex32x32_vtx, geo_eff_rappa_n64_size16x16_tex32x32_vtx)
+#else
 static effN64Vtx size16x16_tex32x32_vtx[] = {
     {-8, -8, 0, 0, 0, 0, 0, 0, 255},
     {8, -8, 0, 1024, 0, 0, 0, 0, 255},
     {8, 8, 0, 1024, 1024, 0, 0, 0, 255},
     {-8, 8, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 static void effRappaMain(EffectEntry* effect);
 static void effRappaDisp(CameraId cameraId, EffectEntry* effect);

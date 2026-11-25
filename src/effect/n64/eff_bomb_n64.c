@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: bomb blast, a flash and burst that spawns smoke and confetti; types 0-2 pick the size.
+#include "port_disc_data.h"
 #include "eff/n64/eff_bomb_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -37,12 +38,17 @@ typedef struct EffBombN64Work {
 } EffBombN64Work;
 
 /** Small 8x8 quad the bomb's flash and burst sprite are scaled up from. */
+#ifdef TARGET_PORT
+static effN64Vtx size8x8_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size8x8_tex32x32_vtx, geo_eff_bomb_n64_size8x8_tex32x32_vtx)
+#else
 static effN64Vtx size8x8_tex32x32_vtx[] = {
     {-4, -4, 0, 0, 0, 255, 255, 255, 255},
     {4, -4, 0, 1024, 0, 255, 255, 255, 255},
     {4, 4, 0, 1024, 1024, 255, 255, 255, 255},
     {-4, 4, 0, 0, 1024, 255, 255, 255, 255},
 };
+#endif
 
 static void effBombMain(EffectEntry* effect);
 static void effBombDisp(CameraId cameraId, EffectEntry* effect);

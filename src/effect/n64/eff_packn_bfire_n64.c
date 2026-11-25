@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: Piranha Plant (packn) fire breath (bfire) from a point toward a target; types 0-2.
+#include "port_disc_data.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
 #include "driver/dispdrv.h"
@@ -36,12 +37,17 @@ static void effPacknBfireMain(EffectEntry* effect);
 static void effPacknBfireDisp(CameraId cameraId, EffectEntry* effect);
 
 /** 64x64 camera-facing quad drawn for each fire puff and spark of the Piranha Plant's fire breath. */
+#ifdef TARGET_PORT
+static effN64Vtx size64x64_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size64x64_tex32x32_vtx, geo_eff_packn_bfire_n64_size64x64_tex32x32_vtx)
+#else
 static effN64Vtx size64x64_tex32x32_vtx[] = {
     {-32, -32, 0, 0, 0, 0, 0, 0, 255},
     {32, -32, 0, 1024, 0, 0, 0, 0, 255},
     {32, 32, 0, 1024, 1024, 0, 0, 0, 255},
     {-32, 32, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 /**
  * Spawns piranha-plant fire breath from (x, y, z) toward (tx, ty, tz).

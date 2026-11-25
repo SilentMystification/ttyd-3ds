@@ -1,6 +1,7 @@
 // Paper Mario 64 effect: pale-yellow rays from a point: types 0-1 eight rays that rise and fade, other
 // types 16 spinning rays with scrolling textures; type + 10 draws in another display layer with plain alpha blending
 // and no depth test.
+#include "port_disc_data.h"
 #include "eff/eff_n64.h"
 #include "eff/n64/eff_radiation_n64.h"
 #include "driver/camdrv.h"
@@ -14,22 +15,32 @@ static void effRadiationMain(EffectEntry* effect);
 static void effRadiationDisp(CameraId cameraId, EffectEntry* effect);
 
 /** 150x20 quad, starting at the centre and reaching outward, drawn for each ray of types 0-1. */
+#ifdef TARGET_PORT
+effN64Vtx size150x20_tex32x32[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size150x20_tex32x32, geo_eff_radiation_n64_size150x20_tex32x32)
+#else
 effN64Vtx size150x20_tex32x32[] = {
     {0, 10, 0, 0, 0, 255, 255, 255, 255},
     {0, -10, 0, 1024, 0, 255, 255, 255, 255},
     {150, -10, 0, 1024, 1024, 255, 255, 255, 255},
     {150, 10, 0, 0, 1024, 255, 255, 255, 255},
 };
+#endif
 
 /**
  * The 300x40 triangle, its tip at the centre, drawn for each ray of the spinning types;
  * kept as raw halfwords because its 0x2C bytes are not a whole number of 14-byte effN64Vtx records.
  */
+#ifdef TARGET_PORT
+s16 size300x40_tex32x32[21]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size300x40_tex32x32, geo_eff_radiation_n64_size300x40_tex32x32)
+#else
 s16 size300x40_tex32x32[] = {
     0, 0, 0, 16, 0, -1, -1,
     300, 20, 0, 0, 1024, -5121, -2816,
     300, -20, 0, 1024, 1024, -5121, -2816,
 };
+#endif
 /**
  * Fixed pose of each of the 16 spinning rays, five numbers per ray: X, Y and Z tilt in degrees,
  * an unused value and the Z spin speed in tenths of a degree per frame.

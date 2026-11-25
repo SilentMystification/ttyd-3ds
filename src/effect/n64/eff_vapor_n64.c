@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: a soft puff of steam (vapor) that grows and fades; its two colors are set in the work data.
+#include "port_disc_data.h"
 #include "eff/n64/eff_vapor_n64.h"
 #include "driver/camdrv.h"
 #include "driver/dispdrv.h"
@@ -40,6 +41,10 @@ static u8 rz_data[3][30] = {
 };
 
 /** The steam puff quads standing on their base point, one per frame of the smoke strip. */
+#ifdef TARGET_PORT
+static effN64Vtx size64x64_tex32x32_vtx[20]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size64x64_tex32x32_vtx, geo_eff_vapor_n64_size64x64_tex32x32_vtx)
+#else
 static effN64Vtx size64x64_tex32x32_vtx[] = {
     {-32, 0, 2, 0, 1024, 120, 120, 0, 255},
     {32, 0, 2, 1024, 1024, 120, 120, 0, 255},
@@ -62,6 +67,7 @@ static effN64Vtx size64x64_tex32x32_vtx[] = {
     {32, 64, 2, 1024, 4096, 120, 120, 0, 255},
     {-32, 64, 2, 0, 4096, 120, 120, 0, 255},
 };
+#endif
 
 static const GXColor kColor1;
 static const GXColor kColor2;

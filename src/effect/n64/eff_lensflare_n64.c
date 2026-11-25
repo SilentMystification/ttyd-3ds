@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: lens flare made of a bright head and five rings along a flare axis.
+#include "port_disc_data.h"
 #include "eff/n64/eff_lensflare_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -26,14 +27,23 @@ typedef struct EffLensflareN64Elem {
 } EffLensflareN64Elem;
 
 /** Spinning 48x48 glow at the head of the lens flare. */
+#ifdef TARGET_PORT
+static effN64Vtx size48x48_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size48x48_tex32x32_vtx, geo_eff_lensflare_n64_size48x48_tex32x32_vtx)
+#else
 static effN64Vtx size48x48_tex32x32_vtx[] = {
     {-24, -24, 0, 0, 0, 0, 0, 0, 255},
     {24, -24, 0, 1024, 0, 0, 0, 0, 255},
     {24, 24, 0, 1024, 1024, 0, 0, 0, 255},
     {-24, 24, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 /** 10x10 shape of the lens flare's streak elements, drawn four times per element. */
+#ifdef TARGET_PORT
+static effN64Vtx size10x10_tex32x32_vtx[16]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size10x10_tex32x32_vtx, geo_eff_lensflare_n64_size10x10_tex32x32_vtx)
+#else
 static effN64Vtx size10x10_tex32x32_vtx[] = {
     {0, -5, 0, 0, 0, 0, 0, 0, 255},
     {10, -5, 0, 1024, 0, 0, 0, 0, 255},
@@ -52,6 +62,7 @@ static effN64Vtx size10x10_tex32x32_vtx[] = {
     {5, 5, 0, 1024, 4096, 0, 0, 0, 255},
     {-5, 5, 0, 0, 4096, 0, 0, 0, 255},
 };
+#endif
 
 static void effLensflareMain(EffectEntry* effect);
 static void effLensflareDisp(CameraId cameraId, EffectEntry* effect);

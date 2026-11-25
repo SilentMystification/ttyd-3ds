@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: dogabon attack, 25 pieces placed on a spiral that spin, with stone smoke puffs.
+#include "port_disc_data.h"
 #include "eff/n64/eff_dogabon_attack_n64.h"
 #include "eff/eff_n64.h"
 #include "eff/n64/eff_stone_smoke_n64.h"
@@ -65,12 +66,17 @@ u8 move_data_2[70] = {
 static s8 y_data[] = {-5, -5, -5, -4, -4, -4, -3, -3, -2, -2, -1, -1, 0, 0, 1, 2, 2, 3, 3, 4, 4, 4, 5, 5, 5};
 
 /** 12x12 quad each of the 25 pieces is drawn with. */
+#ifdef TARGET_PORT
+effN64Vtx size12x12_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size12x12_tex32x32_vtx, geo_eff_dogabon_attack_n64_size12x12_tex32x32_vtx)
+#else
 effN64Vtx size12x12_tex32x32_vtx[] = {
     {-6, -6, 0, 0, 0, 0, 0, 0, 255},
     {6, -6, 0, 1024, 0, 0, 0, 0, 255},
     {6, 6, 0, 1024, 1024, 0, 0, 0, 255},
     {-6, 6, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 /**
  * Spawns the dogabon attack at (x, y, z): 25 pieces laid out on a spiral of radius 120,

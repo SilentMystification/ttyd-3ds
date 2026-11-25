@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: recovery heart: a heart sprite rises and fades, with the recovered count drawn as digits.
+#include "port_disc_data.h"
 #include "eff/n64/eff_recover_heart_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -36,68 +37,108 @@ f32 scale_w_dat[] = {0.25f, 0.5f, 0.75f, 1.0f, 0.9f, 1.1f, 1.0f};
 f32 scale_h_dat[] = {0.25f, 0.5f, 0.75f, 1.0f, 1.2f, 0.9f, 1.0f};
 
 /** 32x32 quad for the large first heart or flower that carries the recovered amount. */
+#ifdef TARGET_PORT
+effN64Vtx size32x32_tex32x32_heart_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size32x32_tex32x32_heart_vtx, geo_eff_recover_heart_n64_size32x32_tex32x32_heart_vtx)
+#else
 effN64Vtx size32x32_tex32x32_heart_vtx[] = {
     {-16, -16, 0, 0, 0, 255, 255, 255, 255},
     {16, -16, 0, 1024, 0, 255, 255, 255, 255},
     {16, 16, 0, 1024, 1024, 255, 255, 255, 255},
     {-16, 16, 0, 0, 1024, 255, 255, 255, 255},
 };
+#endif
 
 /** 16x16 quad for the smaller hearts or flowers that float up beside the large one. */
+#ifdef TARGET_PORT
+effN64Vtx size16x16_tex32x32_heart_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex32x32_heart_vtx, geo_eff_recover_heart_n64_size16x16_tex32x32_heart_vtx)
+#else
 effN64Vtx size16x16_tex32x32_heart_vtx[] = {
     {-8, -8, 0, 0, 0, 255, 255, 255, 255},
     {8, -8, 0, 1024, 0, 255, 255, 255, 255},
     {8, 8, 0, 1024, 1024, 255, 255, 255, 255},
     {-8, 8, 0, 0, 1024, 255, 255, 255, 255},
 };
+#endif
 
 /** Near-white quad for a single-digit amount drawn on the heart. */
+#ifdef TARGET_PORT
+effN64Vtx size24x24_tex32x32_heart_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size24x24_tex32x32_heart_vtx, geo_eff_recover_heart_n64_size24x24_tex32x32_heart_vtx)
+#else
 effN64Vtx size24x24_tex32x32_heart_vtx[] = {
     {-12, -15, 0, 0, 0, 250, 250, 250, 255},
     {12, -15, 0, 1024, 0, 250, 250, 250, 255},
     {12, 9, 0, 1024, 1024, 250, 250, 250, 255},
     {-12, 9, 0, 0, 1024, 250, 250, 250, 255},
 };
+#endif
 
 /** Near-white quad for the left-hand digit of a two-digit amount on the heart. */
+#ifdef TARGET_PORT
+effN64Vtx size16x24_tex32x32_l_heart_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x24_tex32x32_l_heart_vtx, geo_eff_recover_heart_n64_size16x24_tex32x32_l_heart_vtx)
+#else
 effN64Vtx size16x24_tex32x32_l_heart_vtx[] = {
     {-16, -15, 0, 0, 0, 250, 250, 250, 255},
     {4, -15, 0, 1024, 0, 250, 250, 250, 255},
     {4, 9, 0, 1024, 1024, 250, 250, 250, 255},
     {-16, 9, 0, 0, 1024, 250, 250, 250, 255},
 };
+#endif
 
 /** Near-white quad for the right-hand digit of a two-digit amount on the heart. */
+#ifdef TARGET_PORT
+effN64Vtx size16x24_tex32x32_r_heart_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x24_tex32x32_r_heart_vtx, geo_eff_recover_heart_n64_size16x24_tex32x32_r_heart_vtx)
+#else
 effN64Vtx size16x24_tex32x32_r_heart_vtx[] = {
     {-4, -15, 0, 0, 0, 250, 250, 250, 255},
     {16, -15, 0, 1024, 0, 250, 250, 250, 255},
     {16, 9, 0, 1024, 1024, 250, 250, 250, 255},
     {-4, 9, 0, 0, 1024, 250, 250, 250, 255},
 };
+#endif
 
 /** Green quad for a single-digit amount drawn on the flower. */
+#ifdef TARGET_PORT
+effN64Vtx size24x24_tex32x32_flower_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size24x24_tex32x32_flower_vtx, geo_eff_recover_heart_n64_size24x24_tex32x32_flower_vtx)
+#else
 effN64Vtx size24x24_tex32x32_flower_vtx[] = {
     {-12, -15, 0, 0, 0, 36, 190, 20, 255},
     {12, -15, 0, 1024, 0, 36, 190, 20, 255},
     {12, 9, 0, 1024, 1024, 36, 190, 20, 255},
     {-12, 9, 0, 0, 1024, 36, 190, 20, 255},
 };
+#endif
 
 /** Green quad for the left-hand digit of a two-digit amount on the flower. */
+#ifdef TARGET_PORT
+effN64Vtx size16x24_tex32x32_l_flower_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x24_tex32x32_l_flower_vtx, geo_eff_recover_heart_n64_size16x24_tex32x32_l_flower_vtx)
+#else
 effN64Vtx size16x24_tex32x32_l_flower_vtx[] = {
     {-16, -15, 0, 0, 0, 36, 190, 20, 255},
     {4, -15, 0, 1024, 0, 36, 190, 20, 255},
     {4, 9, 0, 1024, 1024, 36, 190, 20, 255},
     {-16, 9, 0, 0, 1024, 36, 190, 20, 255},
 };
+#endif
 
 /** Green quad for the right-hand digit of a two-digit amount on the flower. */
+#ifdef TARGET_PORT
+effN64Vtx size16x24_tex32x32_r_flower_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x24_tex32x32_r_flower_vtx, geo_eff_recover_heart_n64_size16x24_tex32x32_r_flower_vtx)
+#else
 effN64Vtx size16x24_tex32x32_r_flower_vtx[] = {
     {-4, -15, 0, 0, 0, 36, 190, 20, 255},
     {16, -15, 0, 1024, 0, 36, 190, 20, 255},
     {16, 9, 0, 1024, 1024, 36, 190, 20, 255},
     {-4, 9, 0, 0, 1024, 36, 190, 20, 255},
 };
+#endif
 
 static void effRecoverHeartMain(EffectEntry* effect);
 static void effRecoverHeartDisp(CameraId cameraId, EffectEntry* effect);

@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: star power: a glowing star sprite (colors set by id) with a fading halo.
+#include "port_disc_data.h"
 #include "eff/n64/eff_star_power_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -168,6 +169,10 @@ static void effStarPowerMain(EffectEntry* effect) {
  * The star power mesh (akari, "light"): the five-pointed star body first,
  * then from vertex 20 the glow shell around it, each shaded light at the tips and dark inside.
  */
+#ifdef TARGET_PORT
+effN64Vtx testsrc_akari_v[40]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(testsrc_akari_v, geo_eff_star_power_n64_testsrc_akari_v)
+#else
 effN64Vtx testsrc_akari_v[] = {
     {147, -202, 0, 0, 0, 255, 255, 255, 255},
     {143, -46, 0, 0, 0, 0, 0, 0, 255},
@@ -210,6 +215,7 @@ effN64Vtx testsrc_akari_v[] = {
     {-163, -53, 0, 407, 698, 0, 0, 0, 255},
     {-107, -35, 0, 620, 770, 0, 0, 0, 255},
 };
+#endif
 
 /**
  * Draws the star mesh (testsrc_akari_v) camera-facing at 0.4 x scale,

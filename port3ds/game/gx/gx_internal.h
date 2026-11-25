@@ -307,7 +307,7 @@ void gx_rec_init(void);
 void gx_rec_call(u32 id, const u32* w, u32 n);
 extern int gx_dl_has_ops;
 void gx_rec_state_list(const void* list); /* a list the game built holds state calls */
-/* Switch gxstatecache (default 0; PORT_3DS_GX_PERF.md, "Core-2 round 2", stage 2):
+/* Switch gxstatecache (default 1; PORT_3DS_GX_PERF.md, "Core-2 round 2", stage 2):
  *   1: a state call whose words equal the last ones applied for the same piece of state returns before it
  *      touches anything (no version change, so no rebuild), and compiled TEV setups are kept and reused;
  *   2: as 1, and every reused TEV result is compiled again and compared.
@@ -593,7 +593,7 @@ int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nb
 int gx_pipe_in_list(void);
 void gx_pipe_cur_list(const void** list, u32* nbytes); /* the display list being run */
 
-/* ---- gxbatch (gx_dlcache.c): prebuilt batches of cached lists (PORT_3DS_GX_PERF.md, "Core-2 round 2") ----
+/* ---- gxbatch (gx_dlcache.c, default 1): prebuilt batches of cached lists (PORT_3DS_GX_PERF.md, "Core-2 round 2") ----
  * A run of consecutive cache hits under one GX state is built once into a batch: its members, the vertex state
  * they were validated under, the GPU draws they merge into and their indices in linear memory. A list call that
  * continues the open batch is a compare; the batch's draws are recorded when it ends, so every other thing that

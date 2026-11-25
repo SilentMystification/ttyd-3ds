@@ -649,7 +649,7 @@ Identity, `determ`, 6 consecutive shots, byte for byte, off against on: gor_01 6
 
 Both switches together (`gxbatch=1 gxstatecache=1`) against the default, same method, frames 780 to 785, in all ten scenes: **60 of 60 shots byte-identical**. (The check script's blank-shot heuristic flagged the six shots of jin_00 and of usu_00; whether those shots have content was not looked at, so count those two scenes as unconfirmed.)
 
-**Defaults: both stay 0.** The remaining gate is `gw_diff.py` on the 1600-frame padscript, which was not run.
+**Defaults: both stay 0.** The remaining gate is `gw_diff.py` on the 1600-frame padscript, which was not run. (Later: the gate passed, and both are 1 by default since 2026-11-24, owner's decision; see below.)
 
 **Stage 2 as measured** (on top of `gxbatch=1`):
 
@@ -670,7 +670,7 @@ So the plan's "a setter compares and stores" does not pay through the record's d
 - **`gw_diff.py` on the 1600-frame padscript** (PORT_3DS_TEST_INFRA.md: `map=gor_01 story=30 determ gwdump=10` and the A2 padscript, to frame 1600), build `7dd7bbc5`, default switches against `gxbatch=1 gxstatecache=1`, two Azahar runs and `gw_diff.py --logs`: `gw_diff: A 160 records, B 160 records` / `gw_diff: 160 records equal (f 10..1600, fields compared: 23)`. A long run by necessity (two runs to frame 1600, about 3 minutes each).
 - **jin_00 and usu_00**, the two scenes the blank-shot heuristic flagged: the shots have scene content (jin_00: the steeple's interior with the stained-glass windows, 69% of pixels off the commonest colour, about 78 000 colours; usu_00: the town under the moon, 71%, about 10 500 colours; the black rows are the letterbox). Taken again with `tools/port3ds/determ_ab.py`, default against `gxbatch=1 gxstatecache=1`, frames 780 to 785: **jin_00 6 of 6, usu_00 6 of 6 byte-identical**. So the earlier 60 of 60 stands with no unconfirmed scene.
 
-Both defaults stay 0 (owner's decision).
+Both defaults stayed 0 at that point (owner's decision). **Defaults since 2026-11-24 (owner's decision): `gxbatch=1`, `gxstatecache=1`;** `gxbatch=0` and `gxstatecache=0` still turn each off. `gxstatededup` and `gxdirty` stay 0.
 
 ### Stage 2 rest, `gxdirty`: per-class dirty bits (built)
 

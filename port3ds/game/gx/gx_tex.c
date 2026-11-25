@@ -897,16 +897,21 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
     CacheExtra* xe = &s_x[free_e - s_cache];
     e->handle = upload_rgba8(s_rgba, t->width, t->height, &e->tex_w, &e->tex_h, t, tl, mips, &xe->levels, &xe->bytes0, &xe->bytes_mip);
     if (e->handle == 0) {
-        /* texture memory full: free everything not used this frame, retry */
-        for (int i = 0; i < CACHE_SIZE; i++) {
-            if (s_cache[i].handle && s_cache[i].last_frame != s_frame) {
-                entry_free(&s_cache[i]);
+        /* texture memory full: free everything not used this frame, retry. At most once per frame: a second
+         * miss in the same frame would free nothing new and repeat the full GPU sync every state rebuild. */
+        static u32 s_reclaim_frame = ~0u;
+        if (s_reclaim_frame != (u32)s_frame) {
+            s_reclaim_frame = (u32)s_frame;
+            for (int i = 0; i < CACHE_SIZE; i++) {
+                if (s_cache[i].handle && s_cache[i].last_frame != s_frame) {
+                    entry_free(&s_cache[i]);
+                }
             }
+            /* the freed textures wait out their frames in flight: wait for the GPU and release them now */
+            plat_gpu_tex_reclaim();
+            e->handle = upload_rgba8(s_rgba, t->width, t->height, &e->tex_w, &e->tex_h, t, tl, mips, &xe->levels,
+                                     &xe->bytes0, &xe->bytes_mip);
         }
-        /* the freed textures wait out their frames in flight: wait for the GPU and release them now */
-        plat_gpu_tex_reclaim();
-        e->handle = upload_rgba8(s_rgba, t->width, t->height, &e->tex_w, &e->tex_h, t, tl, mips, &xe->levels,
-                                 &xe->bytes0, &xe->bytes_mip);
         if (e->handle == 0) {
             /* A texture that cannot be made is not worth a crash (hardware build #461: a 608x480 texture in the
              * opening demo with linear memory fragmented): the draw goes without it. */
@@ -917,6 +922,7 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
             }
             memset(e, 0, sizeof(*e));
             memset(xe, 0, sizeof(*xe));
+            s_last.levels = 0;
             return 0;
         }
     }

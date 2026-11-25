@@ -597,7 +597,9 @@ void plat_hud_frame(const PlatHudStats* stats) {
     }
     /* the touch hint on row 1, where the line leaves room */
     if (strlen(l[0]) <= 30) {
-        snprintf(l[0], sizeof(l[0]), "%-31s[Options]", l[0]);
+        char head[sizeof(l[0])];
+        memcpy(head, l[0], sizeof(head));
+        snprintf(l[0], sizeof(l[0]), "%-31.31s[Options]", head);
     }
     for (int r = 0; r < HUD_ROWS; r++) {
         hud_line(1 + r, l[r]);

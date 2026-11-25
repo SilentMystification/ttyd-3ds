@@ -99,13 +99,35 @@ static void gpu_done_publish(u32 seq) {
     LightEvent_Signal(&s_fence_ev);
 }
 
+/* Hang diagnosis: the render thread's phase and the record it works on, and the last plat_gpu_* call the game
+ * thread entered. The watchdog report prints both (plat_gpu_phase_line); gpu_fence_wait logs them on a timeout. */
+static u32 s_frame_counter;
+static volatile int s_busy;
+static volatile u32 s_rphase, s_rseq;
+static const char* volatile s_gmark = "none";
+#define RPHASE(n) (s_rphase = (n))
+#define GMARK(name) (s_gmark = (name))
+
+const char* plat_gpu_phase_line(void) {
+    static char buf[160];
+    snprintf(buf, sizeof(buf), "gpu: render phase %lu rec %lu busy %d done %lu game frame %lu last gpu call %s",
+             (unsigned long)s_rphase, (unsigned long)s_rseq, (int)s_busy, (unsigned long)s_gpu_done_seq,
+             (unsigned long)s_frame_counter, s_gmark);
+    return buf;
+}
+
 static void gpu_fence_wait(u32 seq) {
     while ((s32)(__atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE) - seq) < 0) {
         LightEvent_Clear(&s_fence_ev);
         if ((s32)(__atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE) - seq) >= 0) {
             break;
         }
-        LightEvent_Wait(&s_fence_ev);
+        u64 tw = svcGetSystemTick();
+        if (LightEvent_WaitTimeout(&s_fence_ev, 2000000000LL) != 0 && svcGetSystemTick() - tw >= SYSCLOCK_ARM11 * 3 / 2) {
+            PLOG_W("gpu: fence wait for seq %lu: done seq %lu, busy %d, game frame %lu, render phase %lu (rec %lu)",
+                   (unsigned long)seq, (unsigned long)__atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE),
+                   (int)s_busy, (unsigned long)s_frame_counter, (unsigned long)s_rphase, (unsigned long)s_rseq);
+        }
     }
 }
 
@@ -700,6 +722,7 @@ void plat_gpu_clear(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint32_t rgb
 
 void plat_gpu_copy_tex(uint16_t x, uint16_t y, uint16_t w, uint16_t h, int half, uint32_t handle, uint32_t dst_w,
                        uint32_t dst_h) {
+    GMARK("copy_tex");
     u32* d = rec_put(CMD_COPY, 20);
     if (d != NULL) {
         d[0] = (u32)x | (u32)y << 16;
@@ -716,6 +739,7 @@ static uint32_t s_presents;
 uint32_t plat_gpu_present_count(void) { return s_presents; }
 
 void plat_gpu_frame_end(uint16_t efb_w, uint16_t efb_h) {
+    GMARK("frame_end");
     s_presents++;
     (void)efb_w;
     (void)efb_h;
@@ -740,6 +764,7 @@ void plat_gpu_frame_end(uint16_t efb_w, uint16_t efb_h) {
 }
 
 void plat_gpu_sync(void) {
+    GMARK("sync");
     s_stats.syncs++;
     end_segment();
     if (s_gpu_fence) {
@@ -783,15 +808,20 @@ static u32 tex_alloc_slot(void) {
 
 /* Render thread, between frames: frees the copy targets whose textures were
  * released (C3D_RenderTargetDelete panics inside a frame). */
+static int s_copy_full = 1; /* switch copyfull: a copy fills its whole power-of-two texture (e31fb632) */
 static int s_gx_entries; /* GX queue entries the strip copies of this record use (the queue holds 32) */
 
 static void reap_targets(void) {
     s_gx_entries = 0;
+    RPHASE(4);
     LightLock_Lock(&s_tex_lock);
     for (u32 i = 1; i < MAX_TEX; i++) {
         TexSlot* t = &s_tex[i];
         if (t->pending_free && t->target != NULL && s_frame_counter >= t->free_after_frame) {
+            PLOG_I("gpu: reap copy target %lu at frame %lu", (unsigned long)i, (unsigned long)s_frame_counter);
+            RPHASE(5);
             C3D_RenderTargetDelete(t->target);
+            RPHASE(4);
             C3D_TexDelete(&t->tex);
             memset(t, 0, sizeof(*t));
         }
@@ -800,6 +830,7 @@ static void reap_targets(void) {
 }
 
 uint32_t plat_gpu_tex_create(uint32_t width, uint32_t height, uint32_t fmt, const void* pixels, uint32_t bytes) {
+    GMARK("tex_create");
     if (width < 8 || height < 8 || width > 1024 || height > 1024) {
         return 0;
     }
@@ -868,6 +899,7 @@ static void* s_scratch_mem; /* VRAM for the strip copies (scratch_get); NULL: no
 #define SCRATCH_BYTES (256 * 1024)
 
 uint32_t plat_gpu_tex_create_target(uint32_t width, uint32_t height, uint32_t fmt) {
+    GMARK("tex_create_target");
     u32 h = tex_alloc_slot();
     if (h == 0) {
         return 0;
@@ -903,6 +935,7 @@ uint32_t plat_gpu_tex_create_target(uint32_t width, uint32_t height, uint32_t fm
 }
 
 void plat_gpu_tex_free(uint32_t handle) {
+    GMARK("tex_free");
     if (handle == 0 || handle >= MAX_TEX) {
         return;
     }
@@ -915,6 +948,7 @@ void plat_gpu_tex_free(uint32_t handle) {
 }
 
 void plat_gpu_tex_reclaim(void) {
+    GMARK("tex_reclaim");
     plat_gpu_sync();
     LightLock_Lock(&s_tex_lock);
     for (u32 i = 1; i < MAX_TEX; i++) {
@@ -1186,8 +1220,10 @@ static void copy_to_texture(u16 x, u16 y, u16 w, u16 h, u32 handle, u32 dst_w, u
     /* The copy fills the whole power-of-two texture, stretched as gx_tex.c resamples a loaded texture: a
      * draw's texture coordinates are fractions of the GX size (608 x 480 is a 1024 x 512 texture here),
      * and an image kept at 1:1 in the corner came out magnified, black beyond its edge (the pause menu). */
-    dst_w = slot->tex.width;
-    dst_h = slot->tex.height;
+    if (s_copy_full) {
+        dst_w = slot->tex.width;
+        dst_h = slot->tex.height;
+    }
     if (slot->via_scratch) {
         /* Strips: the copy is rendered R rows at a time into the scratch target, and each strip is copied
          * (a raw memory copy, both are in the PICA's tiled layout) to its place in the linear texture. Memory
@@ -1200,11 +1236,12 @@ static void copy_to_texture(u16 x, u16 y, u16 w, u16 h, u32 handle, u32 dst_w, u
             lmax = th;
         }
         u32 nstrips = sc ? (lmax + sc->rows - 1) / sc->rows : 0;
-        if (sc == NULL || s_gx_entries + 2 * (int)nstrips > 24) {
+
+        if (sc == NULL) {
             if (!s_warned) {
                 s_warned = 1;
-                PLOG_E("gpu: copy target %lu (%lux%lu) cannot be filled: %s", (unsigned long)handle,
-                       (unsigned long)slot->tex.width, (unsigned long)th, sc ? "GX queue budget" : "no scratch target");
+                PLOG_E("gpu: copy target %lu (%lux%lu) cannot be filled: no scratch target", (unsigned long)handle,
+                       (unsigned long)slot->tex.width, (unsigned long)th);
             }
             return;
         }
@@ -1212,6 +1249,21 @@ static void copy_to_texture(u16 x, u16 y, u16 w, u16 h, u32 handle, u32 dst_w, u
         u32 rowbytes = slot->tex.width * 8 * bpp; /* one tile row */
         for (u32 r0 = 0; r0 < lmax; r0 += sc->rows) {
             u32 n = lmax - r0 < sc->rows ? lmax - r0 : sc->rows;
+            if (s_gx_entries + 2 > 24) {
+                /* The GX queue (32 entries) only runs at C3D_FrameEnd: finish the frame so far, and open a new one
+                 * (C3D_FrameBegin waits until the queue is empty). The strips so far are in memory by then. */
+                PLOG_I("gpu: copy target %lu (%lux%lu) needs %lu strips: GX queue full at strip row %lu, new frame",
+                       (unsigned long)handle, (unsigned long)slot->tex.width, (unsigned long)th, (unsigned long)nstrips,
+                       (unsigned long)r0);
+                RPHASE(7);
+                C3D_FrameEnd(0);
+                RPHASE(1);
+                C3D_FrameBegin(0);
+                RPHASE(6);
+                C3D_BindProgram(&s_prog);
+                C3D_SetAttrInfo(&s_attr);
+                s_gx_entries = 0;
+            }
             copy_pass(sc->target, slot->tex.width, sc->rows, r0, x, y, w, h, dst_w, dst_h);
             C3D_FrameSplit(GX_CMDLIST_FLUSH);
             u8* src = (u8*)sc->tex.data + ((sc->rows - n) / 8) * rowbytes;
@@ -1578,6 +1630,7 @@ static u32 s_begin_records;
 
 static void render_record(Record* r) {
     u64 t0 = svcGetSystemTick();
+    s_rseq = r->seq;
     vunif_reset();
     reap_targets();
     /* stereo (stereo.h): 0 mono, else the 2D tail's start; the 3D part is replayed once */
@@ -1589,6 +1642,7 @@ static void render_record(Record* r) {
      * only before a frame's first record, since a segment or a mid-frame sync (plat_gpu_sync) after it would
      * wait for one more vblank each (gpusyncall=1: before every record, as before Step 1). */
     u64 tw = svcGetSystemTick();
+    RPHASE(1);
     if (s_gpu_fence) {
         C3D_FrameBegin(0);
         gpu_done_publish(r->seq - 1);
@@ -1598,6 +1652,7 @@ static void render_record(Record* r) {
     } else {
         C3D_FrameBegin(s_begin_records == 0 || s_sync_all ? C3D_FRAME_SYNCDRAW : 0);
     }
+    RPHASE(2);
     s_begin_wait_acc += svcGetSystemTick() - tw;
     if (svcGetSystemTick() - tw > SYSCLOCK_ARM11) {
         PLOG_W("gpu: C3D_FrameBegin took %lu ms (a vblank or GX interrupt was missed, or the process was suspended)",
@@ -1805,8 +1860,10 @@ eye_again:
         case CMD_COPY: {
             const u32* d = (const u32*)body;
             LEAVE_VSH();
+            RPHASE(6);
             copy_to_texture((u16)d[0], (u16)(d[0] >> 16), (u16)d[1], (u16)(d[1] >> 16), d[3], d[4] & 0xFFFF,
                             d[4] >> 16);
+            RPHASE(3);
             n_copy++;
             after_last_draw |= 2;
             C3D_SetAttrInfo(&s_attr);
@@ -1856,7 +1913,9 @@ eye_again:
     }
 #undef STEREO_SPLIT
 #undef LEAVE_VSH
+    RPHASE(7);
     C3D_FrameEnd(0);
+    RPHASE(0);
     s_stats.render_us = (u32)((svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000000u));
     s_stats.gpu_us = (u32)(C3D_GetDrawingTime() * 1000.0f);
     if (r->present) {
@@ -2225,6 +2284,7 @@ void plat_gpu_init(void) {
     plat_set_gpu_abort(gpu_abort);
     s_rot = plat_switch_int("rot", 0) & 3;
     s_merge = plat_switch_int("gxmerge", 1) != 0;
+    s_copy_full = plat_switch_int("copyfull", 1) != 0;
     s_efb = C3D_RenderTargetCreate(TARGET_W, TARGET_H, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     if (s_efb == NULL) {
         plat_fatal("gpu: no VRAM for the %dx%d EFB", TARGET_W, TARGET_H);

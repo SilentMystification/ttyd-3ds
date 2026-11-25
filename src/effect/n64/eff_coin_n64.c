@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: coin, four sprites at preset offsets around a point, each starting after its own delay.
+#include "port_disc_data.h"
 #include "eff/n64/eff_coin_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -34,12 +35,17 @@ static EffCoinN64Data _data[] = {
 };
 
 /** Camera-facing 16x16 coin sprite. */
+#ifdef TARGET_PORT
+static effN64Vtx size16x16_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex32x32_vtx, geo_eff_coin_n64_size16x16_tex32x32_vtx)
+#else
 static effN64Vtx size16x16_tex32x32_vtx[] = {
     {-8, -8, 0, 0, 0, 0, 0, 0, 255},
     {8, -8, 0, 1024, 0, 0, 0, 0, 255},
     {8, 8, 0, 1024, 1024, 0, 0, 0, 255},
     {-8, 8, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 static void effCoinMain(EffectEntry* effect);
 static void effCoinDisp(CameraId cameraId, EffectEntry* effect);

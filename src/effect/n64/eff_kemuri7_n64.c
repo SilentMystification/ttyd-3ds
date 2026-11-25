@@ -1,4 +1,5 @@
 // Paper Mario 64 smoke effect 7 (kemuri: smoke) at a point with an angle and a side.
+#include "port_disc_data.h"
 #include "eff/n64/eff_kemuri7_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -32,12 +33,17 @@ typedef struct EffKemuri7N64Work {
 } EffKemuri7N64Work;
 
 /** Flat 10x10 snow footprint quad lying on the ground. */
+#ifdef TARGET_PORT
+effN64Vtx foot_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(foot_vtx, geo_eff_kemuri7_n64_foot_vtx)
+#else
 effN64Vtx foot_vtx[] = {
     {-5, 0, -5, 0, 1024, 0, 0, 0, 255},
     {5, 0, -5, 1024, 1024, 0, 0, 0, 255},
     {5, 0, 5, 1024, 0, 0, 0, 0, 255},
     {-5, 0, 5, 0, 0, 0, 0, 0, 255},
 };
+#endif
 
 static void effKemuri7Main(EffectEntry* effect);
 static void effKemuri7Disp(CameraId cameraId, EffectEntry* effect);

@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: a rubble chunk thrown with velocity and gravity until it lands, then kicks up dust (hokori).
+#include "port_disc_data.h"
 #include "eff/n64/eff_rubble_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -35,6 +36,10 @@ typedef struct EffRubbleN64Work {
  * Shaded meshes of the three rubble chunk shapes (hahen, "fragment"): a small cube for types 2 and 5,
  * a low wedge from vertex 23 for types 1 and 4, and a faceted rock from vertex 28 for types 0 and 3.
  */
+#ifdef TARGET_PORT
+effN64Vtx stg_hahen_v[58]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(stg_hahen_v, geo_eff_rubble_n64_stg_hahen_v)
+#else
 effN64Vtx stg_hahen_v[58] = {
     {3, 3, -3, 0, 0, 50, 50, 50, 255},
     {-3, -3, -3, -579, 0, 50, 50, 50, 255},
@@ -95,6 +100,7 @@ effN64Vtx stg_hahen_v[58] = {
     {0, 0, -6, 0, 0, 120, 120, 120, 255},
     {-1, -3, -1, -282, 0, 140, 140, 140, 255},
 };
+#endif
 
 static void effRubbleMain(EffectEntry* effect);
 static void effRubbleDisp(CameraId cameraId, EffectEntry* effect);

@@ -1,5 +1,6 @@
 // Paper Mario 64 effect: one glass shard that flies off in a random direction, falls and spins while its texture
 // shimmers; types 0-1 white, 2-3 green, odd types add a glint. Used when a Yux barrier shatters and for ice shards.
+#include "port_disc_data.h"
 #include "driver/effdrv.h"
 #include "eff/n64/eff_glass_n64.h"
 #include "eff/eff_n64.h"
@@ -11,14 +12,23 @@
 #include <stdlib.h>
 
 /** 16x16 glass shard sprite. */
+#ifdef TARGET_PORT
+static effN64Vtx size16x16_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex32x32_vtx, geo_eff_glass_n64_size16x16_tex32x32_vtx)
+#else
 static effN64Vtx size16x16_tex32x32_vtx[] = {
     {-8, -8, 0, 0, 0, 0, 0, 0, 255},
     {8, -8, 0, 1024, 0, 0, 0, 0, 255},
     {8, 8, 0, 1024, 1024, 0, 0, 0, 255},
     {-8, 8, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 /** 48x48 four-point flash the odd shard types add at the end of their glint cycle; its edges fade out. */
+#ifdef TARGET_PORT
+static effN64Vtx size48x48_tex32x32_vtx[5]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size48x48_tex32x32_vtx, geo_eff_glass_n64_size48x48_tex32x32_vtx)
+#else
 static effN64Vtx size48x48_tex32x32_vtx[5] = {
     {-32, 0, 0, 0, 0, 255, 255, 255, 0},
     {0, -32, 0, 1024, 0, 255, 255, 255, 0},
@@ -26,6 +36,7 @@ static effN64Vtx size48x48_tex32x32_vtx[5] = {
     {0, 32, 0, 0, 1024, 255, 255, 255, 0},
     {0, 0, 0, 0, 0, 255, 255, 255, 200},
 };
+#endif
 
 static void effGlassDisp(CameraId cameraId, EffectEntry* effect);
 static void effGlassMain(EffectEntry* effect);

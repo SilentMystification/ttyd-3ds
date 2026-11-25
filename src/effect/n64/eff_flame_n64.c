@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: flame with scrolling textures; type picks the colour pair and shape.
+#include "port_disc_data.h"
 #include "eff/n64/eff_flame_n64.h"
 #include "driver/camdrv.h"
 #include "driver/dispdrv.h"
@@ -62,6 +63,10 @@ static inline void xf(Mtx m, effN64Vtx* dst, effN64Vtx* src) {
 }
 
 /** Flame mesh for the default (yellowish) flame: eight vertices in two layers for the scrolling textures. */
+#ifdef TARGET_PORT
+static effN64Vtx stg_flame_v[8]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(stg_flame_v, geo_eff_flame_n64_stg_flame_v)
+#else
 static effN64Vtx stg_flame_v[] = {
     {-50, -20, 2, 0, 0, 255, 255, 255, 255},
     {50, -20, 2, 1024, 0, 255, 255, 255, 255},
@@ -72,8 +77,13 @@ static effN64Vtx stg_flame_v[] = {
     {50, 100, -2, 1024, 1024, 255, 255, 255, 255},
     {-50, 100, -2, 0, 1024, 255, 255, 255, 255},
 };
+#endif
 
 /** Flame mesh for type 2 (the blue-green flame that spins about Y). */
+#ifdef TARGET_PORT
+static effN64Vtx stg_flame_2_v[8]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(stg_flame_2_v, geo_eff_flame_n64_stg_flame_2_v)
+#else
 static effN64Vtx stg_flame_2_v[] = {
     {-60, 0, 18, 0, 0, 255, 255, 255, 255},
     {60, 0, 18, 2048, 0, 255, 255, 255, 255},
@@ -84,8 +94,13 @@ static effN64Vtx stg_flame_2_v[] = {
     {60, 120, -18, 2048, 2048, 255, 255, 255, 255},
     {-60, 120, -18, 0, 2048, 255, 255, 255, 255},
 };
+#endif
 
 /** Flame mesh for type 0 (the grey flame). */
+#ifdef TARGET_PORT
+static effN64Vtx stg_flame_3_v[8]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(stg_flame_3_v, geo_eff_flame_n64_stg_flame_3_v)
+#else
 static effN64Vtx stg_flame_3_v[] = {
     {-50, -50, 2, 0, 0, 255, 255, 255, 255},
     {50, -50, 2, 1024, 0, 255, 255, 255, 255},
@@ -96,6 +111,7 @@ static effN64Vtx stg_flame_3_v[] = {
     {50, 50, -2, 1024, 1024, 255, 255, 255, 255},
     {-50, 50, -2, 0, 1024, 255, 255, 255, 255},
 };
+#endif
 
 /**
  * Spawns a flame at (x, y, z) scaled by scale.

@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: snowfall: `count` snow particles drifting down the screen.
+#include "port_disc_data.h"
 #include "eff/n64/eff_snowfall_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -47,6 +48,10 @@ static void cam_clip_chk(EffSnowfallParticle* p, s32 w, s32 h, s32 life);
  * A loose cluster of eight small flake quads drawn for every snowfall particle,
  * so each one reads as several flakes.
  */
+#ifdef TARGET_PORT
+static effN64Vtx eff_snowfall_v[32]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(eff_snowfall_v, geo_eff_snowfall_n64_eff_snowfall_v)
+#else
 static effN64Vtx eff_snowfall_v[] = {
     {-78, 3, -38, 0, 2048, 0xFF, 0xFF, 0xFF, 0xFF},
     {-68, 3, -38, 2048, 2048, 0xFF, 0xFF, 0xFF, 0xFF},
@@ -80,6 +85,7 @@ static effN64Vtx eff_snowfall_v[] = {
     {37, -53, -57, 2048, 2048, 0xFF, 0xFF, 0xFF, 0xFF},
     {37, -44, -57, 2048, 0, 0xFF, 0xFF, 0xFF, 0xFF},
     {27, -44, -57, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF},};
+#endif
 
 /**
  * Wraps a particle back into the box of half-width w and half-height h around the camera target;

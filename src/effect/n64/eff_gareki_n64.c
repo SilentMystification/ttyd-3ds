@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: rubble (gareki), eight debris pieces that fall to a ground height and fade.
+#include "port_disc_data.h"
 #include "eff/n64/eff_gareki_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -37,6 +38,10 @@ static f32 vx_data[] = {-1.0f, -0.5f, 0.5f, 1.0f, -1.0f, -0.5f, 0.5f, 1.0f};
 static f32 trans_data[] = {-5.0f, -4.0f, -3.0f, -2.0f, 2.0f, -3.0f, 5.0f, -4.0f, -4.0f, 2.0f, -1.0f, 4.0f, 3.0f, 2.0f, 5.0f, 4.0f};
 
 /** Rubble mesh: the whole chunk first, then the eight pieces it breaks into. */
+#ifdef TARGET_PORT
+static effN64Vtx stg__s_v[60]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(stg__s_v, geo_eff_gareki_n64_stg__s_v)
+#else
 static effN64Vtx stg__s_v[] = {
     {-6, -6, 0, 0, 0, 255, 255, 255, 255},
     {6, -6, 0, 1024, 0, 255, 255, 255, 255},
@@ -99,6 +104,7 @@ static effN64Vtx stg__s_v[] = {
     {1, 2, 0, 1024, 3072, 255, 255, 255, 255},
     {1, -4, 0, 1024, 2304, 255, 255, 255, 255},
 };
+#endif
 
 /**
  * Spawns a falling rubble chunk (gareki = rubble) at (x, y, z) that drops until it reaches groundY,

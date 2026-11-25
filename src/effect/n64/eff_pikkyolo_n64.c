@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: pikkyolo effect at a point with a scale and life.
+#include "port_disc_data.h"
 #include "eff/n64/eff_pikkyolo_n64.h"
 #include "driver/effdrv.h"
 #include "driver/camdrv.h"
@@ -31,6 +32,10 @@ typedef struct EffPikkyoloN64Work {
  * Four 16x16 quads, one per animation cell of the fragment texture,
  * that each tumbling fragment steps through.
  */
+#ifdef TARGET_PORT
+static effN64Vtx size16x16_tex16x16_vtx[16]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex16x16_vtx, geo_eff_pikkyolo_n64_size16x16_tex16x16_vtx)
+#else
 static effN64Vtx size16x16_tex16x16_vtx[] = {
     {-8, -8, 0, 0, 0, 0, 0, 0, 255},
     {8, -8, 0, 512, 0, 0, 0, 0, 255},
@@ -49,6 +54,7 @@ static effN64Vtx size16x16_tex16x16_vtx[] = {
     {8, 8, 0, 512, 2048, 0, 0, 0, 255},
     {-8, 8, 0, 0, 2048, 0, 0, 0, 255},
 };
+#endif
 
 static void effPikkyoloMain(EffectEntry* effect);
 static void effPikkyoloDisp(CameraId cameraId, EffectEntry* effect);

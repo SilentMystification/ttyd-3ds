@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: fire flower, 30 fireballs shot out one after another; type 1 mirrors the direction.
+#include "port_disc_data.h"
 #include "eff/n64/eff_fireflower_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -39,28 +40,43 @@ static s8 scale_data[] = "27<AFKPUZ_dgigd";
  * Small red 4x4 spark quad, drawn only for a spark of type 0;
  * every spark is spawned with type 1, so it goes unused.
  */
+#ifdef TARGET_PORT
+effN64Vtx size4x4_tex4x4_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size4x4_tex4x4_vtx, geo_eff_fireflower_n64_size4x4_tex4x4_vtx)
+#else
 effN64Vtx size4x4_tex4x4_vtx[] = {
     {-2, -2, 0, 0, 0, 255, 0, 0, 255},
     {2, -2, 0, 512, 0, 255, 0, 0, 255},
     {2, 2, 0, 512, 512, 255, 0, 0, 255},
     {-2, 2, 0, 0, 512, 255, 0, 0, 255},
 };
+#endif
 
 /** 16x16 sprite of the fireballs the flower shoots. */
+#ifdef TARGET_PORT
+static effN64Vtx size16x16_tex16x16_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex16x16_vtx, geo_eff_fireflower_n64_size16x16_tex16x16_vtx)
+#else
 static effN64Vtx size16x16_tex16x16_vtx[] = {
     {-8, -8, 0, 0, 0, 255, 255, 255, 255},
     {8, -8, 0, 512, 0, 255, 255, 255, 255},
     {8, 8, 0, 512, 512, 255, 255, 255, 255},
     {-8, 8, 0, 0, 512, 255, 255, 255, 255},
 };
+#endif
 
 /** The Fire Flower itself: 32x32 quads, one vertex set per bloom stage. */
+#ifdef TARGET_PORT
+static effN64Vtx size32x32_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size32x32_tex32x32_vtx, geo_eff_fireflower_n64_size32x32_tex32x32_vtx)
+#else
 static effN64Vtx size32x32_tex32x32_vtx[] = {
     {-16, 0, 2, 0, 0, 255, 255, 255, 255},
     {16, 0, 2, 1024, 0, 255, 255, 255, 255},
     {16, 32, 2, 1024, 1024, 255, 255, 255, 255},
     {-16, 32, 2, 0, 1024, 255, 255, 255, 255},
 };
+#endif
 
 static void effFireFlowerMain(EffectEntry* effect);
 static void effFireFlowerDisp(CameraId cameraId, EffectEntry* effect);

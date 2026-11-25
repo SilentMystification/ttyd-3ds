@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: ice shards, eight ice pieces thrown up and spinning.
+#include "port_disc_data.h"
 #include "eff/n64/eff_ice_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -36,19 +37,29 @@ typedef struct EffIceN64Work {
 } EffIceN64Work;
 
 /** Large 32x32 ice shard with texture 7, used by the even-numbered (spinning) shards. */
+#ifdef TARGET_PORT
+effN64Vtx ice_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(ice_vtx, geo_eff_ice_n64_ice_vtx)
+#else
 effN64Vtx ice_vtx[] = {
     {-16, -16, 0, 0, 0, 0, 0, 0, 255},
     {16, -16, 0, 2048, 0, 0, 0, 0, 255},
     {16, 16, 0, 2048, 2048, 0, 0, 0, 255},
     {-16, 16, 0, 0, 2048, 0, 0, 0, 255},
 };
+#endif
 /** Small 8x8 ice shard with texture 8, used by the odd-numbered (plain) shards. */
+#ifdef TARGET_PORT
+effN64Vtx ice_s_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(ice_s_vtx, geo_eff_ice_n64_ice_s_vtx)
+#else
 effN64Vtx ice_s_vtx[] = {
     {-4, -4, 0, 0, 0, 0, 0, 0, 255},
     {4, -4, 0, 2048, 0, 0, 0, 0, 255},
     {4, 4, 0, 2048, 2048, 0, 0, 0, 255},
     {-4, 4, 0, 0, 2048, 0, 0, 0, 255},
 };
+#endif
 
 static void effIceMain(EffectEntry* effect);
 static void effIceDisp(CameraId cameraId, EffectEntry* effect);

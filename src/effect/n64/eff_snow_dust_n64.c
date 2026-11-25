@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: puffs of snowy dust; used by the freeze and Crystal Star effects.
+#include "port_disc_data.h"
 #include "eff/n64/eff_snow_dust_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -30,38 +31,62 @@ static u8 a_data[] = {
 };
 
 /** 8x8 quad drawn for each type 1 snowflake. */
+#ifdef TARGET_PORT
+effN64Vtx size8x8_tex64x64_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size8x8_tex64x64_vtx, geo_eff_snow_dust_n64_size8x8_tex64x64_vtx)
+#else
 effN64Vtx size8x8_tex64x64_vtx[] = {
     {-4, -4, 0, 0, 0, 0, 0, 0, 255},
     {4, -4, 0, 2048, 0, 0, 0, 0, 255},
     {4, 4, 0, 2048, 2048, 0, 0, 0, 255},
     {-4, 4, 0, 0, 2048, 0, 0, 0, 255},
 };
+#endif
 
 /** 4x4 quad drawn for each type 0 and type 6 snowflake. */
+#ifdef TARGET_PORT
+effN64Vtx size4x4_tex64x64_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size4x4_tex64x64_vtx, geo_eff_snow_dust_n64_size4x4_tex64x64_vtx)
+#else
 effN64Vtx size4x4_tex64x64_vtx[] = {
     {-2, -2, 0, 0, 0, 0, 0, 0, 255},
     {2, -2, 0, 2048, 0, 0, 0, 0, 255},
     {2, 2, 0, 2048, 2048, 0, 0, 0, 255},
     {-2, 2, 0, 0, 2048, 0, 0, 0, 255},
 };
+#endif
 
 /** 12x12 quad drawn for each type 2 and type 3 puff. */
+#ifdef TARGET_PORT
+static effN64Vtx size12x12_tex64x64_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size12x12_tex64x64_vtx, geo_eff_snow_dust_n64_size12x12_tex64x64_vtx)
+#else
 static effN64Vtx size12x12_tex64x64_vtx[] = {
     {-6, -6, 0, 0, 0, 0, 0, 0, 255},
     {6, -6, 0, 2048, 0, 0, 0, 0, 255},
     {6, 6, 0, 2048, 2048, 0, 0, 0, 255},
     {-6, 6, 0, 0, 2048, 0, 0, 0, 255},
 };
+#endif
 
 /** 16x16 quad drawn for each type 4 and type 5 sparkle. */
+#ifdef TARGET_PORT
+static effN64Vtx size16x16_tex64x64_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex64x64_vtx, geo_eff_snow_dust_n64_size16x16_tex64x64_vtx)
+#else
 static effN64Vtx size16x16_tex64x64_vtx[] = {
     {-8, -8, 0, 0, 0, 0, 0, 0, 255},
     {8, -8, 0, 2048, 0, 0, 0, 0, 255},
     {8, 8, 0, 2048, 2048, 0, 0, 0, 255},
     {-8, 8, 0, 0, 2048, 0, 0, 0, 255},
 };
+#endif
 
 /** 32x32 glow diamond behind each sparkle: clear corners fading in to a solid centre vertex. */
+#ifdef TARGET_PORT
+static effN64Vtx size32x32_tex32x32_vtx[5]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size32x32_tex32x32_vtx, geo_eff_snow_dust_n64_size32x32_tex32x32_vtx)
+#else
 static effN64Vtx size32x32_tex32x32_vtx[5] = {
     {-32, 0, 0, 0, 0, 255, 255, 255, 0},
     {0, -32, 0, 1024, 0, 255, 255, 255, 0},
@@ -69,6 +94,7 @@ static effN64Vtx size32x32_tex32x32_vtx[5] = {
     {0, 32, 0, 0, 1024, 255, 255, 255, 0},
     {0, 0, 0, 0, 0, 255, 255, 255, 255},
 };
+#endif
 
 /**
  * Spawns `count` snow dust particles at (x, y, z) in a w by h area;

@@ -1,5 +1,6 @@
 // Paper Mario 64 effect: expanding water ripple rings on a surface; base of eff_ripple.c.
 #pragma defer_codegen off
+#include "port_disc_data.h"
 #include "eff/n64/eff_ripple_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -10,12 +11,17 @@
 #include <stdlib.h>
 
 /** 16x16 quad lying flat on the water surface, scaled up into each ripple ring. */
+#ifdef TARGET_PORT
+effN64Vtx size16x16_tex32x32_0_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex32x32_0_vtx, geo_eff_ripple_n64_size16x16_tex32x32_0_vtx)
+#else
 effN64Vtx size16x16_tex32x32_0_vtx[] = {
     {-8, 0, -8, 0, 0, 0, 0, 0, 255},
     {8, 0, -8, 1024, 0, 0, 0, 0, 255},
     {8, 0, 8, 1024, 1024, 0, 0, 0, 255},
     {-8, 0, 8, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 static void effRippleMain(EffectEntry* effect);
 static void effRippleDisp(CameraId cameraId, EffectEntry* effect);

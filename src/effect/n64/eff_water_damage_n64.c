@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: water damage: a splash of water droplets and mist at a point.
+#include "port_disc_data.h"
 #include "eff/n64/eff_water_damage_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -31,26 +32,41 @@ typedef struct EffWaterDamageN64Work {
 } EffWaterDamageN64Work;
 
 /** Round 8x8 droplet quad; with the wide and tall shapes below it is cycled so each droplet wobbles. */
+#ifdef TARGET_PORT
+effN64Vtx size8x8_tex16x16_0_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size8x8_tex16x16_0_vtx, geo_eff_water_damage_n64_size8x8_tex16x16_0_vtx)
+#else
 effN64Vtx size8x8_tex16x16_0_vtx[] = {
     {-4, -4, 0, 0, 0, 0, 0, 0, 255},
     {4, -4, 0, 512, 0, 0, 0, 0, 255},
     {4, 4, 0, 512, 512, 0, 0, 0, 255},
     {-4, 4, 0, 0, 512, 0, 0, 0, 255},
 };
+#endif
 /** Wide, squashed droplet quad used in the wobble cycle. */
+#ifdef TARGET_PORT
+effN64Vtx size8x8_tex16x16_1_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size8x8_tex16x16_1_vtx, geo_eff_water_damage_n64_size8x8_tex16x16_1_vtx)
+#else
 effN64Vtx size8x8_tex16x16_1_vtx[] = {
     {-5, -3, 0, 0, 0, 0, 0, 0, 255},
     {5, -3, 0, 512, 0, 0, 0, 0, 255},
     {5, 3, 0, 512, 512, 0, 0, 0, 255},
     {-5, 3, 0, 0, 512, 0, 0, 0, 255},
 };
+#endif
 /** Tall, stretched droplet quad used in the wobble cycle. */
+#ifdef TARGET_PORT
+effN64Vtx size8x8_tex16x16_2_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size8x8_tex16x16_2_vtx, geo_eff_water_damage_n64_size8x8_tex16x16_2_vtx)
+#else
 effN64Vtx size8x8_tex16x16_2_vtx[] = {
     {-3, -5, 0, 0, 0, 0, 0, 0, 255},
     {3, -5, 0, 512, 0, 0, 0, 0, 255},
     {3, 5, 0, 512, 512, 0, 0, 0, 255},
     {-3, 5, 0, 0, 512, 0, 0, 0, 255},
 };
+#endif
 
 #if VERSION >= VERSION_JP
 u32 water_damage_tex[32] __attribute__((aligned(32))) = {

@@ -1,4 +1,5 @@
 // Paper Mario 64 smoke effect 12 (kemuri: smoke) with a duration and scale; types 0-2.
+#include "port_disc_data.h"
 #include "eff/n64/eff_kemuri12_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -8,14 +9,23 @@
 #include <dolphin/mtx.h>
 
 /** Camera-facing 32x32 smoke puff, used by types 0-2. */
+#ifdef TARGET_PORT
+static effN64Vtx size32x32_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size32x32_tex32x32_vtx, geo_eff_kemuri12_n64_size32x32_tex32x32_vtx)
+#else
 static effN64Vtx size32x32_tex32x32_vtx[] = {
     {-16, -16, 0, 0, 0, 0, 0, 0, 255},
     {16, -16, 0, -1024, 0, 0, 0, 0, 255},
     {16, 16, 0, -1024, 1024, 0, 0, 0, 255},
     {-16, 16, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 /** Lava-coloured (yougan) smoke mesh with extra quads, used by types above 2. */
+#ifdef TARGET_PORT
+effN64Vtx size32x32_tex32x32_yougan_vtx[12]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size32x32_tex32x32_yougan_vtx, geo_eff_kemuri12_n64_size32x32_tex32x32_yougan_vtx)
+#else
 effN64Vtx size32x32_tex32x32_yougan_vtx[] = {
     {-16, -16, 15, 0, 0, 0, 0, 0, 255},
     {16, -16, 15, -1024, 0, 0, 0, 0, 255},
@@ -30,6 +40,7 @@ effN64Vtx size32x32_tex32x32_yougan_vtx[] = {
     {6, 16, -15, -1024, 1024, 0, 0, 0, 255},
     {-26, 16, -15, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 static void effKemuri12Main(EffectEntry* effect);
 static void effKemuri12Disp(CameraId cameraId, EffectEntry* effect);

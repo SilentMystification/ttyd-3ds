@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: fire breath, a stream of flames from a start point toward an end point; types 0-2.
+#include "port_disc_data.h"
 #include "eff/n64/eff_breath_fire_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -12,6 +13,10 @@ static void effBreathFireMain(EffectEntry* effect);
 static void effBreathFireDisp(CameraId cameraId, EffectEntry* effect);
 
 /** Mesh of a fire-breath flame: two stacked quads whose texture strip frame advances as the flame ages. */
+#ifdef TARGET_PORT
+static effN64Vtx stg_fire_breath_v[10]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(stg_fire_breath_v, geo_eff_breath_fire_n64_stg_fire_breath_v)
+#else
 static effN64Vtx stg_fire_breath_v[] = {
     {100, -100, 0, 3072, 0, 0, 0, 0, 255},
     {100, 100, 0, 3072, 1024, 0, 0, 0, 255},
@@ -24,6 +29,7 @@ static effN64Vtx stg_fire_breath_v[] = {
     {-100, 100, 5, 0, 1024, 0, 0, 0, 255},
     {-100, -100, 5, 0, 0, 0, 0, 0, 255},
 };
+#endif
 
 /**
  * Spawns `count` flames (random `seed`) living `lifetime` frames,

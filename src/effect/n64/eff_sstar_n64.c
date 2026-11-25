@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: a star that streaks across the screen toward a target point, leaving a trail of 8 copies.
+#include "port_disc_data.h"
 #include "eff/n64/eff_sstar_n64.h"
 #include "driver/camdrv.h"
 #include "driver/dispdrv.h"
@@ -40,14 +41,23 @@ typedef struct EffSstarN64Work {
 } EffSstarN64Work;
 
 /** 60x60 camera-facing quad drawn for the shooting star itself. */
+#ifdef TARGET_PORT
+static effN64Vtx size64x64_tex64x64_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size64x64_tex64x64_vtx, geo_eff_sstar_n64_size64x64_tex64x64_vtx)
+#else
 static effN64Vtx size64x64_tex64x64_vtx[] = {
     {-30, -30, 0, 0, 0, 0, 0, 0, 191},
     {30, -30, 0, 2048, 0, 0, 0, 0, 191},
     {30, 30, 0, 2048, 2048, 0, 0, 0, 191},
     {-30, 30, 0, 0, 2048, 0, 0, 0, 191},
 };
+#endif
 
 /** 128x128 glow diamond around the star: clear corners fading in to a solid centre vertex. */
+#ifdef TARGET_PORT
+effN64Vtx size128x128_tex32x32_vtx[5]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size128x128_tex32x32_vtx, geo_eff_sstar_n64_size128x128_tex32x32_vtx)
+#else
 effN64Vtx size128x128_tex32x32_vtx[] = {
     {-128, 0, 0, 0, 0, 255, 255, 255, 0},
     {0, -128, 0, 1024, 0, 255, 255, 255, 0},
@@ -55,11 +65,16 @@ effN64Vtx size128x128_tex32x32_vtx[] = {
     {0, 128, 0, 0, 1024, 255, 255, 255, 0},
     {0, 0, 0, 0, 0, 255, 255, 255, 255},
 };
+#endif
 
 /**
  * Template for the star's dust trail: five pairs of top and bottom points, widening along the trail,
  * copied into the work and placed along the last eight frames' positions.
  */
+#ifdef TARGET_PORT
+effN64Vtx shooting_dust_vtx[10]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(shooting_dust_vtx, geo_eff_sstar_n64_shooting_dust_vtx)
+#else
 effN64Vtx shooting_dust_vtx[10] = {
     {0, 8, 0, 0, 0, 0, 0, 0, 191},
     {0, -8, 0, 0, 2048, 0, 0, 0, 191},
@@ -72,6 +87,7 @@ effN64Vtx shooting_dust_vtx[10] = {
     {0, 11, 0, 896, 0, 0, 0, 0, 191},
     {0, -11, 0, 896, 2048, 0, 0, 0, 191},
 };
+#endif
 
 static void effSstarMain(EffectEntry* effect);
 static void effSstarDisp(CameraId cameraId, EffectEntry* effect);

@@ -1,5 +1,6 @@
 // Paper Mario 64 effect: fire ring, one 90-vertex mesh with two scrolling flame textures that grows, spawns fire
 // dust and fades out over its last 10 frames.
+#include "port_disc_data.h"
 #include "eff/n64/eff_fire_ring_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -29,6 +30,10 @@ static void effFireRingMain(EffectEntry* effect);
 static void effFireRingDisp(CameraId cameraId, EffectEntry* effect);
 
 /** The fire ring mesh: 90 vertices of a flat ring, with coordinates for the two scrolling flame textures. */
+#ifdef TARGET_PORT
+static effN64Vtx stg__s_v[60]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(stg__s_v, geo_eff_fire_ring_n64_stg__s_v)
+#else
 static effN64Vtx stg__s_v[] = {
     {99, 0, 205, 9173, 4096, 255, 255, 255, 255},
     {54, 0, 113, 9641, 2048, 255, 255, 255, 255},
@@ -91,6 +96,7 @@ static effN64Vtx stg__s_v[] = {
     {-98, 0, 78, 13993, 2048, 255, 255, 255, 255},
     {-178, 0, 142, 14461, 4096, 255, 255, 255, 255},
 };
+#endif
 
 /**
  * Spawns an expanding ring of fire at (x, y, z) that grows by 0.1 * scale per frame for lifetime frames

@@ -1,5 +1,6 @@
 // Paper Mario 64 effect: camera-facing explosion sprite; type 0 grows by 0.1 per frame, other types keep their scale
 // and step a 40-degree-per-frame spin angle that the draw code never uses.
+#include "port_disc_data.h"
 #include "eff/n64/eff_explosion_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -23,12 +24,17 @@ typedef struct EffExplosionN64Work {
 } EffExplosionN64Work;
 
 /** Camera-facing 32x32 explosion sprite. */
+#ifdef TARGET_PORT
+static effN64Vtx size32x32_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size32x32_tex32x32_vtx, geo_eff_explosion_n64_size32x32_tex32x32_vtx)
+#else
 static effN64Vtx size32x32_tex32x32_vtx[] = {
     {-16, -16, 0, 0, 0, 0, 0, 0, 255},
     {16, -16, 0, -1024, 0, 0, 0, 0, 255},
     {16, 16, 0, -1024, 1024, 0, 0, 0, 255},
     {-16, 16, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 static void effExplosionMain(EffectEntry* effect);
 static void effExplosionDisp(CameraId cameraId, EffectEntry* effect);

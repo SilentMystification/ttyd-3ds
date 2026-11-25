@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: hit flash made of radiating pieces; size sets the piece count and the type the colour.
+#include "port_disc_data.h"
 #include "eff/n64/eff_hit_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -27,6 +28,10 @@ typedef struct EffHitN64Work {
 } EffHitN64Work;
 
 /** Radiating pieces of the hit flash: five quads, each on its own row of the texture. */
+#ifdef TARGET_PORT
+static effN64Vtx size32x32_tex32x32_vtx[20]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size32x32_tex32x32_vtx, geo_eff_hit_n64_size32x32_tex32x32_vtx)
+#else
 static effN64Vtx size32x32_tex32x32_vtx[] = {
     {-16, -16, 0, 0, 0, 120, 120, 0, 255},
     {16, -16, 0, 1024, 0, 120, 120, 0, 255},
@@ -49,6 +54,7 @@ static effN64Vtx size32x32_tex32x32_vtx[] = {
     {16, 16, 0, 1024, 5120, 120, 120, 0, 255},
     {-16, 16, 0, 0, 5120, 120, 120, 0, 255},
 };
+#endif
 
 /** Length in frames of the hit flash for each type (13 for all four). */
 static u8 cnt_table[4] = {13, 13, 13, 13};

@@ -1,4 +1,5 @@
 // Shadow driver: blob, cylinder, projected and depth shadows (shadowInit, shadowMain, shadowDisp).
+#include "port_disc_data.h"
 #include "version.h"
 // Shadow driver: blob, cylinder, projected and depth shadows.
 #if VERSION <= VERSION_DEMO_JP
@@ -58,6 +59,10 @@ static f32 testKagePosArray[18] ATTRIBUTE_ALIGN(32) = {
     1.0f,
 };
 
+#ifdef TARGET_PORT
+static u8 cylinder_dl_top[64] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(cylinder_dl_top, geo_shadowdrv_cylinder_dl_top)
+#else
 static u8 cylinder_dl_top[64] ATTRIBUTE_ALIGN(32) = {
     0xA0,
     0x00,
@@ -124,7 +129,12 @@ static u8 cylinder_dl_top[64] ATTRIBUTE_ALIGN(32) = {
     0x00,
     0x00,
 };
+#endif
 
+#ifdef TARGET_PORT
+static u8 cylinder_dl_bottom[64] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(cylinder_dl_bottom, geo_shadowdrv_cylinder_dl_bottom)
+#else
 static u8 cylinder_dl_bottom[64] ATTRIBUTE_ALIGN(32) = {
     0xA0,
     0x00,
@@ -191,7 +201,12 @@ static u8 cylinder_dl_bottom[64] ATTRIBUTE_ALIGN(32) = {
     0x00,
     0x00,
 };
+#endif
 
+#ifdef TARGET_PORT
+static u8 cylinder_dl_side[64] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(cylinder_dl_side, geo_shadowdrv_cylinder_dl_side)
+#else
 static u8 cylinder_dl_side[64] ATTRIBUTE_ALIGN(32) = {
     0x98,
     0x00,
@@ -258,7 +273,12 @@ static u8 cylinder_dl_side[64] ATTRIBUTE_ALIGN(32) = {
     0x02,
     0x00,
 };
+#endif
 
+#ifdef TARGET_PORT
+static u8 cylinder_dl_top_inside[64] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(cylinder_dl_top_inside, geo_shadowdrv_cylinder_dl_top_inside)
+#else
 static u8 cylinder_dl_top_inside[64] ATTRIBUTE_ALIGN(32) = {
     0xA0,
     0x00,
@@ -325,7 +345,12 @@ static u8 cylinder_dl_top_inside[64] ATTRIBUTE_ALIGN(32) = {
     0x00,
     0x00,
 };
+#endif
 
+#ifdef TARGET_PORT
+static u8 cylinder_dl_top_outside[64] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(cylinder_dl_top_outside, geo_shadowdrv_cylinder_dl_top_outside)
+#else
 static u8 cylinder_dl_top_outside[64] ATTRIBUTE_ALIGN(32) = {
     0x98,
     0x00,
@@ -392,7 +417,12 @@ static u8 cylinder_dl_top_outside[64] ATTRIBUTE_ALIGN(32) = {
     0x00,
     0x00,
 };
+#endif
 
+#ifdef TARGET_PORT
+static u8 cube_dl_top[64] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(cube_dl_top, geo_shadowdrv_cube_dl_top)
+#else
 static u8 cube_dl_top[64] ATTRIBUTE_ALIGN(32) = {
     0x80,
     0x00,
@@ -459,6 +489,7 @@ static u8 cube_dl_top[64] ATTRIBUTE_ALIGN(32) = {
     0x00,
     0x00,
 };
+#endif
 
 #if VERSION <= VERSION_DEMO_JP
 // the demo's -sdata 8 keeps these in .data, ahead of the vertex table
@@ -503,6 +534,10 @@ u8 cube_dl_side[32] ATTRIBUTE_ALIGN(32) = {
     0x00,
 };
 #endif
+#ifdef TARGET_PORT
+static f32 vertex_tbl[180] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(vertex_tbl, geo_shadowdrv_vertex_tbl)
+#else
 static f32 vertex_tbl[180] ATTRIBUTE_ALIGN(32) = {
     0.0f,
     0.0f,
@@ -685,6 +720,7 @@ static f32 vertex_tbl[180] ATTRIBUTE_ALIGN(32) = {
     -1.0f,
     1.0f,
 };
+#endif
 
 //.bss
 CharShadowWork char_shadow_work;
@@ -705,6 +741,10 @@ DepthShadowWork* dswp = &depth_shadow_work;
 /** Side lengths of the square shadow textures (400, 256, 128, 64 pixels) that a shadow config picks from. */
 u16 ShadowSizeTbl[4] = {0x190, 0x100, 0x80, 0x40};
 #if VERSION >= VERSION_JP
+#ifdef TARGET_PORT
+u8 cube_dl_bottom[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(cube_dl_bottom, geo_shadowdrv_cube_dl_bottom)
+#else
 u8 cube_dl_bottom[32] ATTRIBUTE_ALIGN(32) = {
     0x80,
     0x00,
@@ -719,6 +759,11 @@ u8 cube_dl_bottom[32] ATTRIBUTE_ALIGN(32) = {
     0x01,
     0x00,
 };
+#endif
+#ifdef TARGET_PORT
+u8 cube_dl_side[32] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(cube_dl_side, geo_shadowdrv_cube_dl_side)
+#else
 u8 cube_dl_side[32] ATTRIBUTE_ALIGN(32) = {
     0x98,
     0x00,
@@ -745,6 +790,7 @@ u8 cube_dl_side[32] ATTRIBUTE_ALIGN(32) = {
     0x01,
     0x00,
 };
+#endif
 #endif
 static GXColor color_tbl[3] ATTRIBUTE_ALIGN(32) = {
     { 0x00, 0x00, 0x00, 0x6E },

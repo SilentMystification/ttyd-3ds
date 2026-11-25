@@ -1,5 +1,6 @@
 // The Great Tree (mri): punidrv, the billboard renderer for the Puni crowd (a copy of the DOL extdrv): sorts the
 // poses by depth and draws each puni as a textured quad with its shadow.
+#include "port_disc_data.h"
 #include "battle/battle_unit.h"
 #include "evt/evt_cmd.h"
 
@@ -473,6 +474,10 @@ static u8 shadow_dl[32] ATTRIBUTE_ALIGN(32) = {
     0xA0, 0x00, 0x12, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x01,
 };
 
+#ifdef TARGET_PORT
+static f32 shadow_vtx[56] ATTRIBUTE_ALIGN(32); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(shadow_vtx, geo_punidrv_shadow_vtx)
+#else
 static f32 shadow_vtx[56] ATTRIBUTE_ALIGN(32) = {
     0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.707107f, 0.0f,
     0.707107f, 1.0f, 0.0f, 0.0f, 0.707107f, 0.0f, -0.707106f, 1e-06f,
@@ -482,6 +487,7 @@ static f32 shadow_vtx[56] ATTRIBUTE_ALIGN(32) = {
     0.0f, -1.0f, -0.707105f, 0.0f, -0.707109f, -1.0f, 0.0f, -2e-06f,
     -0.707108f, 0.0f, 0.707105f,
 };
+#endif
 
 GXColor shadow_col[8] ATTRIBUTE_ALIGN(32) = {
     {0x00, 0x00, 0x00, 0x80},

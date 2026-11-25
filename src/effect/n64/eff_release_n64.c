@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: a flickering glowing orb that drifts, then flashes into expanding glow rings.
+#include "port_disc_data.h"
 #include "eff/n64/eff_release_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -114,14 +115,23 @@ AnimeEntry anime_data_2[30] = {
 };
 
 /** 16x16 quad drawn for the orb's flickering core. */
+#ifdef TARGET_PORT
+static effN64Vtx size16x16_tex64x64_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex64x64_vtx, geo_eff_release_n64_size16x16_tex64x64_vtx)
+#else
 static effN64Vtx size16x16_tex64x64_vtx[] = {
     {-8, -8, 0, 0, 0, 0, 0, 0, 255},
     {8, -8, 0, 2048, 0, 0, 0, 0, 255},
     {8, 8, 0, 2048, 2048, 0, 0, 0, 255},
     {-8, 8, 0, 0, 2048, 0, 0, 0, 255},
 };
+#endif
 
 /** The ring strip as eight thin bands, each half mirrored, drawn in pairs from the outside in. */
+#ifdef TARGET_PORT
+effN64Vtx size16x16_tex256x32_vtx[32]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex256x32_vtx, geo_eff_release_n64_size16x16_tex256x32_vtx)
+#else
 effN64Vtx size16x16_tex256x32_vtx[] = {
     {-8, -8, 0, 0, 0, 0, 0, 0, 255},
     {8, -8, 0, 8192, 0, 0, 0, 0, 255},
@@ -156,16 +166,26 @@ effN64Vtx size16x16_tex256x32_vtx[] = {
     {8, 8, 0, 0, 0, 0, 0, 0, 255},
     {-8, 8, 0, 8192, 0, 0, 0, 0, 255},
 };
+#endif
 
 /** 16x16 quad lying flat in the ground plane, drawn for the large glow. */
+#ifdef TARGET_PORT
+effN64Vtx size16x16_tex128x128_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex128x128_vtx, geo_eff_release_n64_size16x16_tex128x128_vtx)
+#else
 effN64Vtx size16x16_tex128x128_vtx[] = {
     {-8, 0, -8, 0, 0, 0, 0, 0, 255},
     {8, 0, -8, 4096, 0, 0, 0, 0, 255},
     {8, 0, 8, 4096, 4096, 0, 0, 0, 255},
     {-8, 0, 8, 0, 4096, 0, 0, 0, 255},
 };
+#endif
 
 /** The release flash as two mirrored halves of one 16x16 quad. */
+#ifdef TARGET_PORT
+effN64Vtx size16x16_tex64x64_0_vtx[8]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex64x64_0_vtx, geo_eff_release_n64_size16x16_tex64x64_0_vtx)
+#else
 effN64Vtx size16x16_tex64x64_0_vtx[] = {
     {-8, -8, 0, 0, 0, 0, 0, 0, 255},
     {8, -8, 0, 2048, 0, 0, 0, 0, 255},
@@ -176,14 +196,20 @@ effN64Vtx size16x16_tex64x64_0_vtx[] = {
     {8, 8, 0, 0, 0, 0, 0, 0, 255},
     {-8, 8, 0, 2048, 0, 0, 0, 0, 255},
 };
+#endif
 
 /** Full-screen 640x480 rectangle drawn for the light-grey screen flash of variants 2 and 3. */
+#ifdef TARGET_PORT
+effN64Vtx rectangle_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(rectangle_vtx, geo_eff_release_n64_rectangle_vtx)
+#else
 effN64Vtx rectangle_vtx[] = {
     {0, 0, 0, 2048, 1024, 0, 0, 0, 255},
     {640, 0, 0, 0, 1024, 0, 0, 0, 255},
     {640, 480, 0, 0, 0, 0, 0, 0, 255},
     {0, 480, 0, 2048, 0, 0, 0, 0, 255},
 };
+#endif
 
 /**
  * Spawns the glowing orb at (x, y, z); the 0xFF00 bits of `type` pick the variant,

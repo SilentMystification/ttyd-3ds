@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: crystal shine that scales in over its lifetime; types 0-9 pick the variant.
+#include "port_disc_data.h"
 #include "eff/n64/eff_crystal_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -209,20 +210,30 @@ static void effCrystalMain(EffectEntry* effect) {
 }
 
 /** Outer 108x108 glint quad of the crystal shine, spun slowly with texture 0x6D (types below 3). */
+#ifdef TARGET_PORT
+effN64Vtx size108x108_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size108x108_tex32x32_vtx, geo_eff_crystal_n64_size108x108_tex32x32_vtx)
+#else
 effN64Vtx size108x108_tex32x32_vtx[] = {
     {-54, -54, 1, 0, 0, 0, 0, 0, 255},
     {54, -54, 1, 1024, 0, 0, 0, 0, 255},
     {54, 54, 1, 1024, 1024, 0, 0, 0, 255},
     {-54, 54, 1, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 /** Inner 100x100 glint quad: spun fast against the outer one for types below 3, drawn alone for the rest. */
+#ifdef TARGET_PORT
+effN64Vtx size100x100_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size100x100_tex32x32_vtx, geo_eff_crystal_n64_size100x100_tex32x32_vtx)
+#else
 effN64Vtx size100x100_tex32x32_vtx[] = {
     {-50, -50, -1, 0, 0, 0, 0, 0, 255},
     {50, -50, -1, 1024, 0, 0, 0, 0, 255},
     {50, 50, -1, 1024, 1024, 0, 0, 0, 255},
     {-50, 50, -1, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 /** Draws a camera-facing glint of 108x108 or 100x100 units; types below 3 use textures 0x6D and 0x6E. */
 static void effCrystalDisp(CameraId cameraId, EffectEntry* effect) {

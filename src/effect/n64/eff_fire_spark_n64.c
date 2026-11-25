@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: fire sparks, count sparks launched within a range with a set upward and forward speed.
+#include "port_disc_data.h"
 #include "eff/n64/eff_fire_spark_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -37,12 +38,17 @@ static f32 scale_data[30] = {
 };
 
 /** Camera-facing 4x4 spark sprite. */
+#ifdef TARGET_PORT
+effN64Vtx size4x4_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size4x4_tex32x32_vtx, geo_eff_fire_spark_n64_size4x4_tex32x32_vtx)
+#else
 effN64Vtx size4x4_tex32x32_vtx[] = {
     {-2, -2, 0, 0, 0, 0, 0, 0, 255},
     {2, -2, 0, 1024, 0, 0, 0, 0, 255},
     {2, 2, 0, 1024, 1024, 0, 0, 0, 255},
     {-2, 2, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 /**
  * Spawns count small sparks that rise from a strip of width rangeX and height rangeY around (x, y, z);

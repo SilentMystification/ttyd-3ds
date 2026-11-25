@@ -1,4 +1,5 @@
 // Paper Mario 64 smoke effect 5 (kemuri: smoke) at a point, oriented by an angle.
+#include "port_disc_data.h"
 #include "eff/n64/eff_kemuri5_n64.h"
 #include "driver/camdrv.h"
 #include "driver/dispdrv.h"
@@ -32,12 +33,17 @@ typedef struct EffKemuri5N64Work {
 } EffKemuri5N64Work;
 
 /** Camera-facing landing puff quad. */
+#ifdef TARGET_PORT
+static effN64Vtx kmr_a_1_v[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(kmr_a_1_v, geo_eff_kemuri5_n64_kmr_a_1_v)
+#else
 static effN64Vtx kmr_a_1_v[] = {
     {-8, 7, 0, 0, 0, 255, 255, 255, 255},
     {7, 7, 0, 512, 0, 255, 255, 255, 255},
     {-8, -8, 0, 0, 512, 255, 255, 255, 255},
     {7, -8, 0, 512, 512, 255, 255, 255, 255},
 };
+#endif
 
 static void effKemuri5Main(EffectEntry* effect);
 /** Returns the brown-yellow puff tint with the given alpha. */

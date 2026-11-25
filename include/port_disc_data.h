@@ -7,7 +7,8 @@
 #ifdef TARGET_PORT
 #include "port_disc_data_gen.h"
 
-void port_disc_data_register(void* dst, const char* rel, int section, unsigned int offset, unsigned int size);
+/* fmt: how the big-endian disc bytes become the port's memory (0 raw, 1 s16, 2 swap32, 3 effN64Vtx, 4 u32 display list: raw). */
+void port_disc_data_register(void* dst, const char* rel, int section, unsigned int offset, unsigned int size, int fmt);
 
 #define PORT_DISC_DATA_REGISTER(var, ...) port_disc_data_register(var, __VA_ARGS__)
 /* A function that runs once after every array is filled (byte swaps and the like). */

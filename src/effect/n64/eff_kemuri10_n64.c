@@ -1,4 +1,5 @@
 // Paper Mario 64 smoke effect 10 (kemuri: smoke) moving along a direction vector with a scale.
+#include "port_disc_data.h"
 #include "eff/n64/eff_kemuri10_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -13,6 +14,10 @@
 #include "version.h"
 
 /** Smoke cloud mesh (192 vertices) of the puff left beside a moving NPC. */
+#ifdef TARGET_PORT
+static effN64Vtx stg_houki_kemuri_v[36]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(stg_houki_kemuri_v, geo_eff_kemuri10_n64_stg_houki_kemuri_v)
+#else
 static effN64Vtx stg_houki_kemuri_v[] = {
     {0, -50, 20, 0, 512, 255, 255, 255, 255},
     {35, -35, 20, 256, 512, 255, 255, 255, 255},
@@ -51,6 +56,7 @@ static effN64Vtx stg_houki_kemuri_v[] = {
     {0, 70, 0, 1024, 256, 255, 255, 255, 255},
     {0, 50, 20, 1024, 512, 255, 255, 255, 255},
 };
+#endif
 
 static void effKemuri10Main(EffectEntry* effect);
 static void effKemuri10Disp(CameraId cameraId, EffectEntry* effect);

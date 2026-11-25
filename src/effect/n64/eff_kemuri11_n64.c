@@ -1,4 +1,5 @@
 // Paper Mario 64 smoke effect 11 (kemuri: smoke) at a point; types 0-5 pick the smoke pattern.
+#include "port_disc_data.h"
 #include "eff/n64/eff_kemuri11_n64.h"
 #include "eff/n64/eff_kemuri1_n64.h"
 #include "eff/eff_n64.h"
@@ -31,6 +32,10 @@ typedef struct EffKemuri11N64Work {
 } EffKemuri11N64Work;
 
 /** Smoke body mesh (54 vertices) each puff of smoke effect 11 is drawn with. */
+#ifdef TARGET_PORT
+static effN64Vtx stg_thruhammer_v[20]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(stg_thruhammer_v, geo_eff_kemuri11_n64_stg_thruhammer_v)
+#else
 static effN64Vtx stg_thruhammer_v[] = {
     {-34, -2, 20, 4267, 1024, 255, 255, 255, 255},
     {-52, 50, 0, 3840, 2048, 255, 255, 255, 0},
@@ -53,6 +58,7 @@ static effN64Vtx stg_thruhammer_v[] = {
     {26, 50, 45, 427, 2048, 255, 255, 255, 0},
     {0, -2, 40, 0, 1024, 255, 255, 255, 255},
 };
+#endif
 
 static void effKemuri11Main(EffectEntry* effect);
 static void effKemuri11Disp(CameraId cameraId, EffectEntry* effect);

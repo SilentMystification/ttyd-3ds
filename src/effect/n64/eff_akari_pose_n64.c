@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: akari (light) pose, count flares step through a texture sequence and fade around a point.
+#include "port_disc_data.h"
 #include "eff/n64/eff_akari_pose_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -52,12 +53,17 @@ static u8 a_data2[] = {
 };
 
 /** Camera-facing 16x16 quad each flare is drawn with. */
+#ifdef TARGET_PORT
+static effN64Vtx size16x16_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size16x16_tex32x32_vtx, geo_eff_akari_pose_n64_size16x16_tex32x32_vtx)
+#else
 static effN64Vtx size16x16_tex32x32_vtx[] = {
     {-8, -8, 0, 0, 0, 0, 0, 0, 255},
     {8, -8, 0, 1024, 0, 0, 0, 0, 255},
     {8, 8, 0, 1024, 1024, 0, 0, 0, 255},
     {-8, 8, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 static void effAkariPoseMain(EffectEntry* effect);
 static void effAkariPoseDisp(CameraId cameraId, EffectEntry* effect);

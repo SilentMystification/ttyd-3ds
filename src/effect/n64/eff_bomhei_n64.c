@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: Bob-omb (bomhei) sprite scaled over its duration; non-zero types also spin it.
+#include "port_disc_data.h"
 #include "eff/n64/eff_bomhei_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -21,12 +22,17 @@ typedef struct EffBomheiN64Work {
 } EffBomheiN64Work;
 
 /** Camera-facing 32x32 Bob-omb sprite, cross-faded between frames of its texture sheet. */
+#ifdef TARGET_PORT
+static effN64Vtx size32x32_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size32x32_tex32x32_vtx, geo_eff_bomhei_n64_size32x32_tex32x32_vtx)
+#else
 static effN64Vtx size32x32_tex32x32_vtx[] = {
     {-16, -16, 0, 0, 0, 0, 0, 0, 255},
     {16, -16, 0, 1024, 0, 0, 0, 0, 255},
     {16, 16, 0, 1024, 1024, 0, 0, 0, 255},
     {-16, 16, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 static void effBomheiMain(EffectEntry* effect);
 static void effBomheiDisp(CameraId cameraId, EffectEntry* effect);

@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: cloud fragments (kumokumo: cloud) flying from a point toward a target.
+#include "port_disc_data.h"
 #include "eff/n64/eff_kumokumo_chip_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -28,12 +29,17 @@ typedef struct EffKumokumoChipN64Work {
 } EffKumokumoChipN64Work;
 
 /** 32x32 cloud chip quad. */
+#ifdef TARGET_PORT
+static effN64Vtx size32x32_tex32x32_vtx[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(size32x32_tex32x32_vtx, geo_eff_kumokumo_chip_n64_size32x32_tex32x32_vtx)
+#else
 static effN64Vtx size32x32_tex32x32_vtx[] = {
     {-16, 0, 0, 0, 0, 0, 0, 0, 255},
     {16, 0, 0, 1024, 0, 0, 0, 0, 255},
     {16, 32, 0, 1024, 1024, 0, 0, 0, 255},
     {-16, 32, 0, 0, 1024, 0, 0, 0, 255},
 };
+#endif
 
 static void effKumokumoChipMain(EffectEntry* effect);
 static void effKumokumoChipDisp(CameraId cameraId, EffectEntry* effect);

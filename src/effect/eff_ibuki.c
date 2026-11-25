@@ -1,4 +1,5 @@
 // Breath puff (ibuki: breath): a stream of 32 timed puffs from a point, with vapor puffs spawned along the way.
+#include "port_disc_data.h"
 #include "eff/eff_ibuki.h"
 #include "driver/camdrv.h"
 #include "driver/dispdrv.h"
@@ -33,19 +34,69 @@ typedef struct EffIbukiWork {
 // Model data in the exporter's layout: indexed vertex arrays (positions, normals, colours, texture coordinates),
 // display lists of GX commands (each padded to 32 bytes with GX_NOP) and, per list table, the list sizes in
 // 32-byte units for GXCallDisplayList.
+#ifdef TARGET_PORT
+static s16 ibuki_vertex_tbl[48] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(ibuki_vertex_tbl, geo_eff_ibuki_ibuki_vertex_tbl)
+#else
 static s16 ibuki_vertex_tbl[] __attribute__((aligned(32))) = {0, 0, 0, 3840, 0, 0, 7679, 0, 0, 17919, 0, 0, 21760, 0, 0, 0, 1280, 0, 3840, 1280, 0, 7679, 1280, 0, 17919, 1280, 0, 21760, 1280, 0, 0, 2560, 0, 3840, 3840, 0, 7679, 5120, 0, 17919, 8960, 0, 21760, 10240, 0, 0, 0, 0};
+#endif
+#ifdef TARGET_PORT
+static s16 ibuki_texcoord0_tbl[30] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(ibuki_texcoord0_tbl, geo_eff_ibuki_ibuki_texcoord0_tbl)
+#else
 static s16 ibuki_texcoord0_tbl[] __attribute__((aligned(32))) = {0, 8192, 2891, 11468, 2891, 16384, 0, 16384, 5782, 13107, 5782, 16384, 13492, 14336, 13492, 16384, 16384, 14336, 16384, 16384, 0, 0, 2891, 0, 5782, 0, 13492, 0, 16384, 0};
+#endif
+#ifdef TARGET_PORT
+static s16 ibuki_texcoord1_tbl[30] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(ibuki_texcoord1_tbl, geo_eff_ibuki_ibuki_texcoord1_tbl)
+#else
 static s16 ibuki_texcoord1_tbl[] __attribute__((aligned(32))) = {0, 8192, 2891, 11468, 2891, 16384, 0, 16384, 5782, 13107, 5782, 16384, 13492, 14336, 13492, 16384, 16384, 14336, 16384, 16384, 0, 0, 2891, 0, 5782, 0, 13492, 0, 16384, 0};
+#endif
+#ifdef TARGET_PORT
+static s8 ibuki_normal_tbl[3] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(ibuki_normal_tbl, geo_eff_ibuki_ibuki_normal_tbl)
+#else
 static s8 ibuki_normal_tbl[] __attribute__((aligned(32))) = {0, 0, 64};
+#endif
+#ifdef TARGET_PORT
+static u8 ibuki_color0_tbl[16] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(ibuki_color0_tbl, geo_eff_ibuki_ibuki_color0_tbl)
+#else
 static u8 ibuki_color0_tbl[] __attribute__((aligned(32))) = {0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0x66, 0xFF, 0xFF, 0xFF, 0x4C, 0xFF, 0xFF, 0xFF, 0x7F};
+#endif
+#ifdef TARGET_PORT
+static u8 ibuki_dl_0_0[63] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(ibuki_dl_0_0, geo_eff_ibuki_ibuki_dl_0_0)
+#else
 static u8 ibuki_dl_0_0[] __attribute__((aligned(32))) = {0x98, 0x00, 0x06, 0x0A, 0x00, 0x00, 0x0A, 0x0A, 0x0B, 0x00, 0x02, 0x0B, 0x0B, 0x05, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x03, 0x03, 0x01, 0x00, 0x00, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+#endif
+#ifdef TARGET_PORT
+static u8 ibuki_dl_0_1[63] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(ibuki_dl_0_1, geo_eff_ibuki_ibuki_dl_0_1)
+#else
 static u8 ibuki_dl_0_1[] __attribute__((aligned(32))) = {0x98, 0x00, 0x06, 0x0B, 0x00, 0x02, 0x0B, 0x0B, 0x0C, 0x00, 0x03, 0x0C, 0x0C, 0x06, 0x00, 0x01, 0x01, 0x01, 0x07, 0x00, 0x01, 0x04, 0x04, 0x01, 0x00, 0x00, 0x02, 0x02, 0x02, 0x00, 0x00, 0x05, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+#endif
+#ifdef TARGET_PORT
+static u8 ibuki_dl_0_2[63] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(ibuki_dl_0_2, geo_eff_ibuki_ibuki_dl_0_2)
+#else
 static u8 ibuki_dl_0_2[] __attribute__((aligned(32))) = {0x98, 0x00, 0x06, 0x0C, 0x00, 0x03, 0x0C, 0x0C, 0x0D, 0x00, 0x01, 0x0D, 0x0D, 0x07, 0x00, 0x01, 0x04, 0x04, 0x08, 0x00, 0x01, 0x06, 0x06, 0x02, 0x00, 0x00, 0x05, 0x05, 0x03, 0x00, 0x00, 0x07, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+#endif
+#ifdef TARGET_PORT
+static u8 ibuki_dl_0_3[64] __attribute__((aligned(32))); // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(ibuki_dl_0_3, geo_eff_ibuki_ibuki_dl_0_3)
+#else
 static u8 ibuki_dl_0_3[] __attribute__((aligned(32))) = {0x98, 0x00, 0x06, 0x0D, 0x00, 0x01, 0x0D, 0x0D, 0x0E, 0x00, 0x00, 0x0E, 0x0E, 0x08, 0x00, 0x01, 0x06, 0x06, 0x09, 0x00, 0x00, 0x08, 0x08, 0x03, 0x00, 0x00, 0x07, 0x07, 0x04, 0x00, 0x00, 0x09, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+#endif
 /** The four display lists of the breath stream's strip mesh. */
 static u8* ibuki_dl_0_tbl[] = {ibuki_dl_0_0, ibuki_dl_0_1, ibuki_dl_0_2, ibuki_dl_0_3};
 /** Sizes in 32-byte units of the four display lists of the breath stream's strip mesh; used by effIbukiDisp. */
+#ifdef TARGET_PORT
+static u8 ibuki_dl_0_size_tbl[4]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(ibuki_dl_0_size_tbl, geo_eff_ibuki_ibuki_dl_0_size_tbl)
+#else
 static u8 ibuki_dl_0_size_tbl[4] = {2, 2, 2, 2};
+#endif
 
 /**
  * Spawns a breath puff stream of 32 puffs from (x, y, z); life <= 0 keeps it endless.

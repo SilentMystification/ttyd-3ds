@@ -1,4 +1,5 @@
 // Paper Mario 64 effect: fireworks, a rocket launched with a velocity vector and trailing points; w is the target scale.
+#include "port_disc_data.h"
 #include "eff/n64/eff_fireworks_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -36,6 +37,10 @@ typedef struct EffFireworksN64Work {
 } EffFireworksN64Work;
 
 /** Burst pattern 0 of the firework: 95 points, one twinkling spark at each. */
+#ifdef TARGET_PORT
+static s8 vtx[285]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(vtx, geo_eff_fireworks_n64_vtx)
+#else
 static s8 vtx[285] = {
     36, 0, 93, 54, -40, 74, 67, 0, 74, 82, -36, 45, 89, 0, 45, 60, -66, 45, 21, -64, 74, 28, -85, 45,
     10, -98, 15, 49, -86, 15, -90, -40, 15, -87, -19, 45, -99, 0, 15, -72, -53, 45, -87, 19, 45, -90, 40, 15,
@@ -49,8 +54,13 @@ static s8 vtx[285] = {
     -9, -89, 45, -45, -77, 45, -72, -53, 45, 60, 66, 45, 28, 85, 45, 82, 36, 45, 28, 85, 45, 89, 0, 45,
     -9, 89, 45, -45, 77, 45, -72, 53, 45, 49, 86, 15, 10, 98, 15, 82, 36, 45, 97, -21, 15, 97, 21, 15,
     60, 66, 45, 28, 85, 45, -87, 19, 45, -66, 73, 15, -90, 40, 15, -87, -19, 45, -72, -53, 45};
+#endif
 
 /** Burst pattern 1 of the firework: 66 points, one twinkling spark at each. */
+#ifdef TARGET_PORT
+static s8 vtx2[198]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(vtx2, geo_eff_fireworks_n64_vtx2)
+#else
 static s8 vtx2[198] = {
     -48, -15, 0, -36, -26, 22, -45, 0, 22, -48, 15, 0, -36, 26, 22, -29, 40, 0, -36, 26, 22, -14, 43, 22,
     0, 50, 0, 14, 43, 22, 8, -25, 43, 14, -43, 22, 36, -26, 22, 26, 0, 43, 0, 0, 50, 0, -50, 0,
@@ -61,8 +71,13 @@ static s8 vtx2[198] = {
     -36, 26, 22, -14, 43, 22, -36, 26, 22, 29, 40, 0, 0, 50, 0, 36, 26, 22, 48, -15, 0, 48, 15, 0,
     14, 43, 22, -14, -43, 22, -48, -15, 0, -29, -40, 0, 14, -43, 22, -45, 0, 22, -36, -26, 22, -29, 40, 0,
     -48, 15, 0, 0, 0, 0};
+#endif
 
 /** Burst pattern 2 of the firework: 56 points of a flat shape, one twinkling spark at each. */
+#ifdef TARGET_PORT
+static s8 vtx3[168]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(vtx3, geo_eff_fireworks_n64_vtx3)
+#else
 static s8 vtx3[168] = {
     -9, 105, 0, -17, 87, 0, 17, 87, 0, 9, 105, 0, 0, 122, 0, -26, 69, 0, 26, 69, 0, -35, 52, 0,
     35, 52, 0, -54, 49, 0, -70, -1, 0, -56, -15, 0, 0, -56, 0, 56, -15, 0, 70, -1, 0, 54, 49, 0,
@@ -71,6 +86,7 @@ static s8 vtx3[168] = {
     -24, 22, 0, -24, 45, 0, 113, 40, 0, -63, -53, 0, -66, -73, 0, -74, 46, 0, -93, 43, 0, 35, -74, 0,
     52, -83, 0, 12, 45, 0, -12, 22, 0, -12, 33, 0, -24, 10, 0, -12, 10, 0, -12, 45, 0, -52, -83, 0,
     -35, -74, 0, -70, -92, 0, -85, 13, 0, -99, 27, 0, -113, 40, 0, 63, -53, 0, 66, -73, 0, 70, -92, 0};
+#endif
 
 struct {
     s8* v;

@@ -1,4 +1,5 @@
 // Paper Mario 64 magic effect 2 at a point with a scale and life.
+#include "port_disc_data.h"
 #include "eff/n64/eff_magic2_n64.h"
 #include "eff/eff_n64.h"
 #include "driver/camdrv.h"
@@ -43,6 +44,10 @@ static void magic2_2_line_dl(void);
 static void magic2_4_dl(void);
 
 /** Type 0 mesh: a 12-sided tube of long streaks reaching 2000 units deep. */
+#ifdef TARGET_PORT
+effN64Vtx stg_magic2_2_line_v[26]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(stg_magic2_2_line_v, geo_eff_magic2_n64_stg_magic2_2_line_v)
+#else
 effN64Vtx stg_magic2_2_line_v[] = {
     {-87, 50, 0, 5461, 2048, 255, 255, 255, 0},
     {-87, 50, -2000, 5461, 0, 255, 255, 255, 255},
@@ -71,8 +76,13 @@ effN64Vtx stg_magic2_2_line_v[] = {
     {87, 50, 0, 2731, 2048, 255, 255, 255, 0},
     {87, 50, -2000, 2731, 0, 255, 255, 255, 255},
 };
+#endif
 
 /** Type 1 mesh: a 12-sided short ring, 50 units deep. */
+#ifdef TARGET_PORT
+effN64Vtx stg_magic2_1_v[26]; // filled from the disc (port_disc_data.h)
+PORT_DISC_DATA(stg_magic2_1_v, geo_eff_magic2_n64_stg_magic2_1_v)
+#else
 effN64Vtx stg_magic2_1_v[] = {
     {-87, 50, 0, 5461, 512, 255, 255, 255, 255},
     {-87, 50, -50, 5461, 0, 255, 255, 255, 255},
@@ -101,6 +111,7 @@ effN64Vtx stg_magic2_1_v[] = {
     {87, 50, 0, 2731, 512, 255, 255, 255, 255},
     {87, 50, -50, 2731, 0, 255, 255, 255, 255},
 };
+#endif
 
 /**
  * Spawns a screen-space magic burst for life frames, centered on the projection of world point (x, y, z).

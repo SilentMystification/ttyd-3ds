@@ -24,7 +24,7 @@ ALLOWED = []  # (symbol, size): none
 
 # Arrays that used to be compiled in; each is filled from the disc now.
 KNOWN_IMAGE_ARRAYS = ["texture_0", "torch_obj2_texture", "torch_obj22t_texture", "cubeDN", "_mariost_icon_tex",
-                      "_mariost_icon_tlut", "_mariost_banner_tex", "ach_01_v", "Ncube_inazuma_v", "but_02_v"]
+                      "_mariost_icon_tlut", "_mariost_banner_tex", "ach_01_v", "Ncube_inazuma_v", "but_02_v", "water_damage_tex"]
 IMAGE_NAME = re.compile(r"(texture|_tex$|_tex_|tex_\d|tlut|banner|cubeDN)", re.I)
 DATA_MIN = 256
 GEOMETRY_NAME = re.compile(r"(_vtx\d*|_v|vertex_tbl|_dl|_dl_(\d+_)*\d+)$|^vtx\d*$|^(cube|cylinder)_dl_")

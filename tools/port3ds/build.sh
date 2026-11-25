@@ -15,9 +15,10 @@
 # with -DTTYD_LTO=OFF -DTTYD_GX_O3=OFF, so the release directory keeps its LTO build.
 # Explicit -D options after it still win. Dev builds do not archive the ELF.
 #
-# TTYD_CCACHE=1 sends compile jobs through ccache (cache shared in ${XDG_CACHE_HOME:-~/.cache}/ttyd3ds/ccache).
-# The ELF of a ccache build is byte-identical to a no-ccache build of the same commit (checked: cold, warm).
-# (CCACHE_BASEDIR used to break that: it made the debug paths and LTO names relative.) Still opt-in.
+# Compile jobs go through ccache by default (TTYD_CCACHE=0 turns it off; cache shared in
+# ${XDG_CACHE_HOME:-~/.cache}/ttyd3ds/ccache). The ELF of a ccache build is byte-identical to a no-ccache
+# build of the same commit (checked: cold, warm). (CCACHE_BASEDIR used to break that: it made the debug
+# paths and LTO names relative.)
 # BUILD_JOBS unset: all host threads when no other build holds a build slot, else 8.
 #
 # The image is built from tools/port3ds/docker/Dockerfile on first use and
@@ -158,7 +159,7 @@ fi
 # commit recompiles only the sources whose preprocessed text is new to the cache. Only the compile
 # lines are wrapped; LTO and link are not.
 ccmount=
-if [ "${TTYD_CCACHE:-0}" = 1 ]; then
+if [ "${TTYD_CCACHE:-1}" = 1 ]; then
     # One cache for every checkout: sources are always at /work inside the container, so worktrees share hits.
     ccdir="${XDG_CACHE_HOME:-$HOME/.cache}/ttyd3ds/ccache"
     mkdir -p "$ccdir"

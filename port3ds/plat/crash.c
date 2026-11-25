@@ -68,8 +68,11 @@ static void line_sink(const char* line, int len, void* user) {
     plat_crash_line(line, len);
 }
 
+const char* plat_gpu_phase_line(void); /* gpu.c: render thread phase and last game-thread gpu call */
+
 static void app_info(CrashAppInfo* out, void* user) {
     (void)user;
+    out->lines[0] = plat_gpu_phase_line();
     out->build = plat_build_string();
     out->phase = (const char*)s_phase;
     out->scene_label = "map";

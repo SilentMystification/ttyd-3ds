@@ -50,7 +50,7 @@ typedef struct {
  * the generation is unchanged the per-frame hash is skipped. Memory the game writes without DCFlushRange is
  * not revoked by a report; texverify=1 hashes anyway and counts trust decisions the hash contradicts
  * (texstats "stale", must be 0). */
-static int s_trust_on = 1, s_verify;
+static int s_trust_on = 1, s_verify, s_copy_evict = 1; /* switch copyevict: per-frame age eviction of copy slots */
 static unsigned s_st_trusted, s_st_stale, s_st_grants;
 
 /* Per cache entry, parallel to s_cache but on the heap (the exe's static data must stay under 16 MB). */
@@ -1103,7 +1103,7 @@ void gx_tex_frame_end(void) {
         }
     }
     for (int i = 0; i < (int)(sizeof(s_copies) / sizeof(s_copies[0])); i++) {
-        if (s_copies[i].handle && s_frame - s_copies[i].last_frame > EVICT_FRAMES) {
+        if (s_copy_evict && s_copies[i].handle && s_frame - s_copies[i].last_frame > EVICT_FRAMES) {
             plat_gpu_tex_free(s_copies[i].handle);
             s_copies[i].handle = 0;
             s_copies[i].addr = NULL;
@@ -1173,6 +1173,7 @@ void gx_tex_init(void) {
     s_stats_every = plat_switch_int("texstats", 0);
     s_trust_on = plat_switch_int("textrust", 1) != 0;
     s_verify = plat_switch_int("texverify", 0) != 0;
+    s_copy_evict = plat_switch_int("copyevict", 1) != 0;
     mode_init();
     s_x = calloc(CACHE_SIZE, sizeof(CacheExtra));
     if (s_x == NULL) {

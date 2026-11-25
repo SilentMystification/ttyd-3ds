@@ -69,6 +69,7 @@ typedef struct {
     u8 is_const;
     u8 inv;     /* for constants: 1 - value (folded into the value) */
     u8 val[4];  /* constant RGBA */
+    u8 neg;     /* constant from a negative S10 register value: val is the magnitude */
 } Opnd;
 
 /* Where a GX register's value is: */
@@ -81,6 +82,7 @@ typedef struct {
     int unit_of_stage[GX_MAX_TEV];
     u8 loc_c[4], loc_a[4]; /* location of PREV, REG0..2 (color, alpha) */
     int buf_c_reg, buf_a_reg; /* which GX reg the buffer holds, -1 none */
+    s16 ks[4][4];       /* the S10 value of a GXSetTevColorS10 register before clamping (-1024..1023) */
     u8 kv[4][4];        /* value of a register at LOC_CONST: GXSetTevColor's, or a constant a stage wrote */
     int sharp;          /* compare ops: further x4 threshold stages still allowed (each multiplies the slope by 4) */
     const char* approx;
@@ -148,6 +150,20 @@ static Opnd reg_opnd(Ctx* c, int reg, int alpha_part, int is_alpha) {
         o = k_const(v[0], v[1], v[2], v[3]);
         if (alpha_part) {
             o.val[0] = o.val[1] = o.val[2] = o.val[3];
+        }
+        /* GX S10 registers can be negative; as an addend that is a subtract (resolve_neg). */
+        const s16* sv = c->ks[reg];
+        int lo = alpha_part ? 3 : 0, hi = alpha_part ? 3 : 2, anyneg = 0, allnonpos = 1;
+        for (int i = lo; i <= hi; i++) {
+            anyneg |= sv[i] < 0;
+            allnonpos &= sv[i] <= 0;
+        }
+        if (anyneg && allnonpos) {
+            o.neg = 1;
+            for (int i = 0; i < 4; i++) {
+                int k = alpha_part ? 3 : (i < 3 ? i : 0);
+                o.val[i] = clamp8(-sv[k]);
+            }
         }
         return o;
     }
@@ -433,6 +449,35 @@ static Opnd inv_opnd(Opnd o) {
 
 static const Opnd k_own_prev_c = {SRC_PREV, OPC_COLOR, 0, 2, {0}};
 static const Opnd k_own_prev_a = {SRC_PREV, OPA_ALPHA, 0, 2, {0}};
+
+/* A negative S10 constant: an add of it becomes a subtract of its magnitude
+ * (GX clamps the sum at 0, PICA's SUBTRACT does too); anywhere else it reads
+ * as 0 (its clamped value). Mixed-sign registers keep the clamped value. */
+static void resolve_neg(Ctx* c, Half* h, int n) {
+    for (int k = 0; k < n; k++) {
+        Half* x = &h[k];
+        int ns = nsrc(x->func);
+        if (x->func == F_ADD && x->s[0].is_const != x->s[1].is_const) {
+            int ci = x->s[0].is_const ? 0 : 1;
+            if (x->s[ci].neg) {
+                Opnd other = x->s[1 - ci];
+                Opnd m = x->s[ci];
+                m.neg = 0;
+                x->func = F_SUBTRACT;
+                x->s[0] = other;
+                x->s[1] = m;
+                continue;
+            }
+        }
+        for (int i = 0; i < ns; i++) {
+            if (x->s[i].is_const && x->s[i].neg) {
+                memset(x->s[i].val, 0, 4);
+                x->s[i].neg = 0;
+                approx(c, "negative S10 TEV constant outside an add");
+            }
+        }
+    }
+}
 
 /* Rewrites the planned halves so that none uses two different constants.
  * Returns the new count (at most 8). */
@@ -759,6 +804,7 @@ static int tev_compile_pass(PlatGpuState* st, int sharp, const char** why) {
     for (int r = 0; r < 4; r++) {
         GXColorS10 v = gx.tev_reg[r];
         c.kv[r][0] = clamp8(v.r), c.kv[r][1] = clamp8(v.g), c.kv[r][2] = clamp8(v.b), c.kv[r][3] = clamp8(v.a);
+        c.ks[r][0] = v.r, c.ks[r][1] = v.g, c.ks[r][2] = v.b, c.ks[r][3] = v.a;
     }
     memcpy(c.unit_of_stage, gx_unit_of_stage, sizeof(c.unit_of_stage));
     for (int r = 0; r < 4; r++) {
@@ -785,6 +831,8 @@ static int tev_compile_pass(PlatGpuState* st, int sharp, const char** why) {
         Opnd ad = alpha_arg(&c, s, gx.tev[s].a_in[3]);
         int na = aop > GX_TEV_SUB ? plan_cmp(&c, ha, aa, ab, ac, ad, a, b, aop, 1)
                                   : plan(ha, aa, ab, ac, ad, aop, gx.tev[s].a_bias, gx.tev[s].a_scale, 1);
+        resolve_neg(&c, hc, nc);
+        resolve_neg(&c, ha, na);
         nc = legalize(hc, nc, 0);
         na = legalize(ha, na, 1);
         /* A half that comes out a constant needs no stage: the register holds that constant from here on. */
@@ -793,10 +841,14 @@ static int tev_compile_pass(PlatGpuState* st, int sharp, const char** why) {
         int const_a = na == 1 && ha[0].func == F_REPLACE && ha[0].s[0].is_const && ha[0].scale == 0;
         if (const_c) {
             memcpy(c.kv[out_c], hc[0].s[0].val, 3);
+            for (int i = 0; i < 3; i++) {
+                c.ks[out_c][i] = hc[0].s[0].val[i];
+            }
             nc = 0;
         }
         if (const_a) {
             c.kv[out_a][3] = ha[0].s[0].val[3];
+            c.ks[out_a][3] = ha[0].s[0].val[3];
             na = 0;
         }
         int steps = nc > na ? nc : na;

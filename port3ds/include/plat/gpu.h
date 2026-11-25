@@ -288,6 +288,8 @@ void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uin
  * stands for (the counters only). */
 void plat_gpu_vsh_drawp(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, const uint16_t* idx,
                         uint32_t nidx, uint32_t calls);
+/* The index pool the DRAWP indices come from (gxbatch); a draw outside it is skipped at replay. NULL: unchecked. */
+void plat_gpu_set_index_pool(const void* base, uint32_t bytes);
 
 typedef struct {
     uint32_t draws, vertices, state_changes;

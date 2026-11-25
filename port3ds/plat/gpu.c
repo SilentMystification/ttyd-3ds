@@ -507,6 +507,9 @@ void plat_gpu_set_state_dirty(const PlatGpuState* state, uint32_t regions) {
         *dst = *state;
         s_last_state = *state;
         s_stats_frame.state_changes++;
+    } else {
+        memset(&s_last_state, 0xFF, sizeof(s_last_state)); /* the record is full: the next state is whole */
+        s_last_state_valid = 0;
     }
 }
 
@@ -685,6 +688,12 @@ void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uin
         s_last_vdraw = d;
         s_stats_frame.vsh_draws++;
     }
+}
+
+static const u8 *s_ixpool_lo, *s_ixpool_hi; /* gxbatch's index pool: every DRAWP index range lies inside it */
+void plat_gpu_set_index_pool(const void* base, uint32_t bytes) {
+    s_ixpool_lo = base;
+    s_ixpool_hi = base ? (const u8*)base + bytes : NULL;
 }
 
 void plat_gpu_vsh_drawp(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, const uint16_t* idx,
@@ -1808,6 +1817,14 @@ eye_again:
                 d_idx = ((const VshDrawP*)body)->idx;
                 d_count = ((const VshDrawP*)body)->count;
                 if (d_count < 3) {
+                    break;
+                }
+                if (s_ixpool_hi != NULL && ((const u8*)d_idx < s_ixpool_lo || (const u8*)(d_idx + d_count) > s_ixpool_hi)) {
+                    static u32 s_logged;
+                    if (s_logged++ == 0) {
+                        PLOG_E("gpu: drawp indices %p +%lu outside the index pool %p..%p: draw skipped", (const void*)d_idx,
+                               (unsigned long)d_count, (const void*)s_ixpool_lo, (const void*)s_ixpool_hi);
+                    }
                     break;
                 }
             } else {

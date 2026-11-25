@@ -709,7 +709,7 @@ static inline BatDraw* b_draws(const Batch* b) { return (BatDraw*)(b_members(b) 
 static inline GxAttrFmt* b_vat(const Batch* b) { return (GxAttrFmt*)(b_draws(b) + b->ndraws); }
 
 static void bat_init(void) {
-    s_bat_on = plat_switch_int("gxbatch", 0);
+    s_bat_on = plat_switch_int("gxbatch", 1);
     if (s_bat_on < 0 || s_bat_on > 2 || s_enabled != 1 || s_scribble_at != 0 || plat_switch_int("gxthread", 0) == 3) {
         s_bat_on = 0;
     }

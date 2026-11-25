@@ -649,7 +649,7 @@ Identity, `determ`, 6 consecutive shots, byte for byte, off against on: gor_01 6
 
 Both switches together (`gxbatch=1 gxstatecache=1`) against the default, same method, frames 780 to 785, in all ten scenes: **60 of 60 shots byte-identical**. (The check script's blank-shot heuristic flagged the six shots of jin_00 and of usu_00; whether those shots have content was not looked at, so count those two scenes as unconfirmed.)
 
-**Defaults: both stay 0.** The remaining gate is `gw_diff.py` on the 1600-frame padscript, which was not run.
+**Defaults: both stay 0.** The remaining gate is `gw_diff.py` on the 1600-frame padscript, which was not run. (Later: the gate passed, and both are 1 by default since 2026-11-24, owner's decision; see below.)
 
 **Stage 2 as measured** (on top of `gxbatch=1`):
 
@@ -670,7 +670,7 @@ So the plan's "a setter compares and stores" does not pay through the record's d
 - **`gw_diff.py` on the 1600-frame padscript** (PORT_3DS_TEST_INFRA.md: `map=gor_01 story=30 determ gwdump=10` and the A2 padscript, to frame 1600), build `7dd7bbc5`, default switches against `gxbatch=1 gxstatecache=1`, two Azahar runs and `gw_diff.py --logs`: `gw_diff: A 160 records, B 160 records` / `gw_diff: 160 records equal (f 10..1600, fields compared: 23)`. A long run by necessity (two runs to frame 1600, about 3 minutes each).
 - **jin_00 and usu_00**, the two scenes the blank-shot heuristic flagged: the shots have scene content (jin_00: the steeple's interior with the stained-glass windows, 69% of pixels off the commonest colour, about 78 000 colours; usu_00: the town under the moon, 71%, about 10 500 colours; the black rows are the letterbox). Taken again with `tools/port3ds/determ_ab.py`, default against `gxbatch=1 gxstatecache=1`, frames 780 to 785: **jin_00 6 of 6, usu_00 6 of 6 byte-identical**. So the earlier 60 of 60 stands with no unconfirmed scene.
 
-Both defaults stay 0 (owner's decision).
+Both defaults stayed 0 at that point (owner's decision). **Defaults since 2026-11-24 (owner's decision): `gxbatch=1`, `gxstatecache=1`;** `gxbatch=0` and `gxstatecache=0` still turn each off. `gxstatededup` and `gxdirty` stay 0.
 
 ### Stage 2 rest, `gxdirty`: per-class dirty bits (built)
 
@@ -705,6 +705,25 @@ Same-build A/B, `tools/port3ds/gx_perf_ab.py`, windows ending at frames 722 to 8
 - **Not run:** `vsh_accept.py`, `gw_diff.py` and the `gxcache=2` sweep with `gxdirty=1`; the other six scenes of the ten; the pipelined layout (`gxthread=2`) with `gxdirty`; `gxdirty` without `gxbatch`. **Default stays 0.**
 
 `tools/port3ds/determ_ab.py` (new): `determ` shots of two switch sets of one build, compared byte for byte, with a content line per shot (share of pixels off the commonest colour, number of colours), so a blank shot is visible.
+
+### `gxdirty` remaining gates (2026-11-24, with `gxbatch=1 gxstatecache=1` as the defaults)
+
+Build `ff42ccc` (the new defaults), release, `gxthread=0`, `gxdirty=0` against `gxdirty=1`, no other switch:
+
+- **`gw_diff.py` on the 1600-frame padscript** (`map=gor_01 story=30 determ gwdump=10` and the A2 padscript, two Azahar runs to frame 1600, `--logs`): `gw_diff: A 160 records, B 160 records` / `gw_diff: 160 records equal (f 10..1600, fields compared: 23)`.
+- **`determ`** (`determ_ab.py`, shots 780 to 785) in the six scenes not run before: gon_02, tik_01, jin_00, eki_00, usu_00, pik_00 **6 of 6 byte-identical each** (36 of 36). Every shot has content (69 to 87% of pixels off the commonest colour, 10 500 to 78 000 colours).
+- **Same-build A/B** (`gx_perf_ab.py`, windows ending at frames 722 to 841, one run per cell):
+
+| Scene | frame A -> B (ms) | core-0 busy A -> B (ms) | render (ms) |
+|---|---|---|---|
+| gon_02 | 39.0 -> 29.4 | 27.2 -> **22.8** (-16%) | 6.9 -> 6.9 |
+| tik_01 | 20.4 -> 16.7 | 15.7 -> **12.8** (-18%) | 4.5 -> 4.4 |
+| jin_00 | 33.4 -> 33.4 | 23.9 -> **20.0** (-16%) | 6.3 -> 6.3 |
+| eki_00 | 19.5 -> 16.7 | 16.0 -> **12.8** (-20%) | 6.0 -> 5.9 |
+| usu_00 | 50.2 -> 37.1 | 39.3 -> **31.4** (-20%) | 12.8 -> 12.8 |
+| pik_00 | 66.9 -> 50.2 | 54.3 -> **44.9** (-17%) | 15.7 -> 15.7 |
+
+No scene is slower. With the four scenes above, `gxdirty=1` is now measured in all ten scenes. **Not run:** `vsh_accept.py`, the `gxcache=2` sweep with `gxdirty=1`, `gxthread=2` with `gxdirty`. Default stays 0 (owner's decision).
 
 ## Risks of the cache
 

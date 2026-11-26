@@ -34,6 +34,10 @@
 #define NSHADER 6
 #define NVERT 12
 #define TICKS_PER_MS 268111.856
+#define MAIN_BYTES (64 * 1024)  /* hand-built main lists (K_CB, K_THRU) */
+#define CHUNK_BYTES (32 * 1024) /* chunks they jump to or call */
+#define NEST_B_OFF (16 * 1024)  /* cb_call_nest: chunk B inside the chunk buffer */
+#define MAXCALL 512
 
 typedef enum { R_OK, R_WRONG, R_HANG, R_FAULT, R_ERR, R_SKIP, R_NONE } ResCode;
 static const char* const k_res_name[] = {"OK", "WRONG", "HANG", "FAULT", "ERR", "SKIP", "-"};
@@ -45,10 +49,11 @@ typedef struct {
 
 typedef enum {
     K_DRAW, K_SCISSOR, K_VIEWPORT, K_SHADER, K_NOSHADER, K_VBUF, K_IBUF, K_ATTR13, K_TEX, K_CMD, K_RAWREG, K_RT,
-    K_RTDEL, K_SELFTEST
+    K_RTDEL, K_SELFTEST, K_CB, K_THRU, K_DT
 } Kind;
 
-typedef enum { EX_RED, EX_CLEAR, EX_LEFT, EX_RIGHT } Expect;
+/* EX_COUNT: exactly Scene.want_red red pixels in the target, the rest untouched */
+typedef enum { EX_RED, EX_CLEAR, EX_LEFT, EX_RIGHT, EX_COUNT } Expect;
 
 typedef struct {
     const char* id;
@@ -79,6 +84,19 @@ typedef struct {
 #define TF_565 0
 #define TF_RGBA8 1
 #define TF_ETC1 2
+/* K_CB modes (a) */
+#define CB_JUMP0 1
+#define CB_JUMP1 2
+#define CB_CALL 3
+#define CB_NEST 4
+#define CB_IRQ 5
+/* K_CB chunk placement (p[3]) */
+#define PL_LIN 0
+#define PL_VRAM 1
+#define PL_QTM 2
+/* K_VBUF / K_IBUF buffer in QTM */
+#define VB_QTM 3
+#define IB_QTM 2
 
 #define CASE(id, grp, dng, pred, kind, a, p0, p1, p2, p3, ex, desc) \
     {id, grp, dng, pred, kind, a, {p0, p1, p2, p3}, ex, desc}
@@ -202,6 +220,34 @@ static const Case k_cases[] = {
     CASE("vb_heap", "buffer", 3, "?", K_VBUF, 2, 0, 0, 0, 0, EX_RED, "attribute buffer in the normal heap (no physical address)"),
     CASE("ib_heap", "buffer", 3, "?", K_IBUF, 1, 0, 1, 0, 0, EX_RED, "index buffer in the normal heap"),
     CASE("tex_heap", "texture", 3, "?", K_TEX, TF_RGBA8, 0, 8, 8, 1, EX_RED, "texture in the normal heap"),
+
+    /* command processor: jump and two-channel call (GX native plan step 0). Call: the caller sets ADDR0/SIZE0
+     * to its own continuation and ADDR1/SIZE1 to the chunk, writes JUMP1; the chunk ends with a JUMP0 write.
+     * p: calls, chunk address offset (bytes past a 64-byte boundary), chunk size mode, placement */
+    CASE("cb_jump0", "cmdlist", 2, "?", K_CB, CB_JUMP0, 0, 0, 0, PL_LIN, EX_RED, "main list jumps (JUMP0) to a chunk holding state, draw and FINALIZE"),
+    CASE("cb_jump1", "cmdlist", 2, "?", K_CB, CB_JUMP1, 0, 0, 0, PL_LIN, EX_RED, "main list jumps (JUMP1) to a chunk holding state, draw and FINALIZE"),
+    CASE("cb_call1", "cmdlist", 2, "?", K_CB, CB_CALL, 1, 0, 0, PL_LIN, EX_RED, "call: channel 1 call of a draw chunk, channel 0 return to the main list, 1 call"),
+    CASE("cb_call500", "cmdlist", 2, "?", K_CB, CB_CALL, 500, 0, 0, PL_LIN, EX_COUNT, "500 calls of one static draw chunk, a 1x1 scissor per call: exactly 500 pixels"),
+    CASE("cb_call_nest", "cmdlist", 2, "?", K_CB, CB_NEST, 1, 0, 0, PL_LIN, EX_RED, "main calls A, A calls the draw chunk B (return into A's tail), A's tail jumps back to main"),
+    CASE("cb_call_a8", "cmdlist", 2, "?", K_CB, CB_CALL, 1, 8, 0, PL_LIN, EX_RED, "call: chunk address 8 bytes past a 16-byte boundary, size a multiple of 16"),
+    CASE("cb_call_a16", "cmdlist", 2, "?", K_CB, CB_CALL, 1, 16, 0, PL_LIN, EX_RED, "call: chunk address 16 bytes past a 64-byte boundary"),
+    CASE("cb_call_size8", "cmdlist", 2, "?", K_CB, CB_CALL, 1, 0, 1, PL_LIN, EX_RED, "call: chunk size 8 bytes past a multiple of 16"),
+    CASE("cb_call_size16", "cmdlist", 2, "?", K_CB, CB_CALL, 1, 0, 2, PL_LIN, EX_RED, "call: chunk size 16 bytes past a multiple of 32"),
+    CASE("cb_vram", "cmdlist", 2, "?", K_CB, CB_CALL, 1, 0, 0, PL_VRAM, EX_RED, "call: chunk in VRAM, written there by TextureCopy"),
+    CASE("cb_irq", "cmdlist", 2, "?", K_CB, CB_IRQ, 0, 0, 0, PL_LIN, EX_RED, "draw in the main list, then JUMP0 to a chunk with only flush and FINALIZE: one P3D"),
+    CASE("cp_thru", "thru", 1, "OK (timing)", K_THRU, 0, 0, 0, 0, 0, EX_RED, "command-processor time: 8 K words as single writes, bursts, and 8 calls of a 1 K chunk"),
+
+    /* DisplayTransfer linear -> tiled, same format in and out, sizes 8..256, vs the app's CPU Morton tiler */
+    CASE("dt_tile_rgba8", "dt", 2, "?", K_DT, 0, 0, 0, 0, 0, EX_RED, "DisplayTransfer RGBA8 linear to tiled, byte compare with the CPU tiler"),
+    CASE("dt_tile_rgb8", "dt", 2, "?", K_DT, 1, 0, 0, 0, 0, EX_RED, "DisplayTransfer RGB8 linear to tiled (probe's own tiler as reference)"),
+    CASE("dt_tile_rgb565", "dt", 2, "?", K_DT, 2, 0, 0, 0, 0, EX_RED, "DisplayTransfer RGB565 linear to tiled, byte compare with the CPU tiler"),
+    CASE("dt_tile_rgba5551", "dt", 2, "?", K_DT, 3, 0, 0, 0, 0, EX_RED, "DisplayTransfer RGBA5551 linear to tiled, byte compare with the CPU tiler"),
+    CASE("dt_tile_rgba4", "dt", 2, "?", K_DT, 4, 0, 0, 0, 0, EX_RED, "DisplayTransfer RGBA4 linear to tiled, byte compare with the CPU tiler"),
+
+    /* New 3DS extra RAM (QTM, physical 0x1F000000): does each GPU unit fetch from it (Azahar: no evidence) */
+    CASE("cb_qtm", "qtm", 3, "?", K_CB, CB_CALL, 1, 0, 0, PL_QTM, EX_RED, "call: chunk in QTM (address 0x1F000000>>3 range), CPU written, GSP flush"),
+    CASE("vb_qtm", "qtm", 3, "?", K_VBUF, VB_QTM, 0, 0, 0, 0, EX_RED, "vertex buffer in QTM"),
+    CASE("ib_qtm", "qtm", 3, "?", K_IBUF, 1, 0, IB_QTM, 0, 0, EX_RED, "u16 index buffer in QTM"),
     CASE("rt_deleted", "frame", 3, "?", K_RTDEL, 0, 0, 0, 0, 0, EX_RED, "citro3d: render target deleted inside the frame (must stay last)"),
 };
 #define NCASES ((int)(sizeof(k_cases) / sizeof(k_cases[0])))
@@ -234,6 +280,9 @@ static struct {
     u8* vb;     /* linear, 64 KiB */
     u8* ib;     /* linear, 4 KiB */
     u8* tex;    /* linear, TEX_SMALL */
+    u32* main;  /* linear, MAIN_BYTES */
+    u32* chunk; /* linear, CHUNK_BYTES */
+    u32* cvram; /* VRAM, CHUNK_BYTES (cb_vram) */
     bool dead;
     bool c3d_ready;
     int resets;
@@ -325,12 +374,15 @@ static bool gpu_setup(void) {
     g.vb = linearMemAlign(64 * 1024, 256);
     g.ib = linearMemAlign(4096, 256);
     g.tex = linearMemAlign(TEX_SMALL, 256);
+    g.main = linearMemAlign(MAIN_BYTES, 64);
+    g.chunk = linearMemAlign(CHUNK_BYTES, 64);
+    g.cvram = vramMemAlign(CHUNK_BYTES, 64);
     plog("gpuprobe: memory (virt/phys): cmd %p/%08lX vram %p/%08lX lin-target %p/%08lX vb %p/%08lX ib %p/%08lX tex %p/%08lX",
          (void*)g.cmd, (unsigned long)osConvertVirtToPhys(g.cmd), (void*)g.blk_v,
          (unsigned long)osConvertVirtToPhys(g.blk_v), (void*)g.blk_l, (unsigned long)osConvertVirtToPhys(g.blk_l),
          (void*)g.vb, (unsigned long)osConvertVirtToPhys(g.vb), (void*)g.ib, (unsigned long)osConvertVirtToPhys(g.ib),
          (void*)g.tex, (unsigned long)osConvertVirtToPhys(g.tex));
-    return g.cmd && g.blk_v && g.blk_l && g.stage && g.vb && g.ib && g.tex;
+    return g.cmd && g.blk_v && g.blk_l && g.stage && g.vb && g.ib && g.tex && g.main && g.chunk && g.cvram;
 }
 
 static void gpu_teardown(void) {
@@ -349,6 +401,9 @@ static void gpu_teardown(void) {
     if (g.vb) linearFree(g.vb);
     if (g.ib) linearFree(g.ib);
     if (g.tex) linearFree(g.tex);
+    if (g.main) linearFree(g.main);
+    if (g.chunk) linearFree(g.chunk);
+    if (g.cvram) vramFree(g.cvram);
 }
 
 static Res run_scene_ctl(void);
@@ -389,7 +444,7 @@ typedef struct {
     int sc_mode;
     u32 sc[4];
     /* vertex buffer */
-    int vb_mode; /* 0 offset register, 1 base address, 2 heap */
+    int vb_mode; /* 0 offset register, 1 base address, 2 heap, VB_QTM */
     int vb_k;
     bool attr13;
     /* draw */
@@ -397,6 +452,10 @@ typedef struct {
     int count;
     int ib_off;
     bool ib_heap;
+    bool ib_qtm;
+    /* command-processor cases (K_CB): mode CB_*, calls, chunk offset, size mode, placement PL_* */
+    int cb, cb_calls, cb_off, cb_size, cb_place;
+    int want_red; /* EX_COUNT */
     /* texture */
     void* tdata;
     int tfmt;
@@ -522,6 +581,23 @@ static Res classify(const Scene* s, bool timed_out, Result rc) {
             guard_bad++;
         }
     }
+    if (s->exp == EX_COUNT) {
+        u32 red = 0, other = 0;
+        for (u32 i = RT_OFF / 4; i < (RT_OFF + RT_BYTES) / 4; i++) {
+            if (near_px(w[i], RED, 6)) {
+                red++;
+            } else if (w[i] != SENT) {
+                other++;
+            }
+        }
+        if (red != (u32)s->want_red || other != 0 || guard_bad != 0) {
+            res_set(&r, R_WRONG, "%lu red px (want %d), %lu other px, %lu guard words changed", (unsigned long)red,
+                    s->want_red, (unsigned long)other, (unsigned long)guard_bad);
+        } else {
+            res_set(&r, R_OK, "%lu red px", (unsigned long)red);
+        }
+        return r;
+    }
     static const u32 colx[4] = {8, 24, 40, 56};
     u32 want[4];
     for (int i = 0; i < 4; i++) {
@@ -561,9 +637,32 @@ static Res classify(const Scene* s, bool timed_out, Result rc) {
     return r;
 }
 
+static Res cb_run(Scene* s, const u32* rec, u32 m, u32 e);
+
+/* QTM bytes used by the buffer cases: vertices at +0, indices at +QTM_IB_OFF, chunks at +QTM_CB_OFF */
+#define QTM_IB_OFF 4096u
+#define QTM_CB_OFF 8192u
+#define QTM_NEED (QTM_CB_OFF + CHUNK_BYTES)
+
+static u32 qtm_flush(const void* p, u32 n, char* note, size_t nn) {
+    /* GSP flushes only what it accepts as process memory; the SVC is the fallback, both results are reported */
+    Result a = GSPGPU_FlushDataCache(p, n);
+    Result b = svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)p, n);
+    snprintf(note, nn, "flush gsp %08lX svc %08lX pa %08lX", (unsigned long)a, (unsigned long)b,
+             (unsigned long)osConvertVirtToPhys(p));
+    return (u32)a;
+}
+
 /* Builds the list for the scene, submits it, classifies. */
 static Res run_scene(Scene* s) {
     Res r = {R_OK, ""};
+    char qnote[80] = "";
+    bool qtm_used = s->vb_mode == VB_QTM || s->ib_qtm || s->cb_place == PL_QTM;
+    if (qtm_used && (g.cfg.qtm == NULL || g.cfg.qtm_bytes < QTM_NEED)) {
+        res_set(&r, R_SKIP, "no QTM given (3dsx, Old 3DS, or not mapped)");
+        return r;
+    }
+    u8* qtm = (u8*)g.cfg.qtm;
     u8* blk = s->rt_linear ? g.blk_l : g.blk_v;
     /* CPU fill: a GX fill of the whole block overlaps the render target surface in an emulator's cache. */
     {
@@ -579,6 +678,9 @@ static Res run_scene(Scene* s) {
     if (s->vb_mode == 2) {
         heapv = malloc(NVERT * sizeof(Vtx) + 64);
         make_vertices(heapv);
+    } else if (s->vb_mode == VB_QTM) {
+        make_vertices((Vtx*)qtm);
+        qtm_flush(qtm, 4096, qnote, sizeof(qnote));
     } else {
         /* mode 0: data at vb+k, attribute offset register k; mode 1: data and base at vb+k */
         make_vertices((Vtx*)(g.vb + s->vb_k));
@@ -593,12 +695,16 @@ static Res run_scene(Scene* s) {
         memset(ibheap, 0, 256);
     }
     u8* ibdst = s->ib_heap ? ibheap : ibp;
+    u8* ibfill = s->ib_qtm ? qtm + QTM_IB_OFF : ibdst;
     if (s->draw == DRAW_E8) {
-        for (int i = 0; i < 12; i++) ibdst[i] = (u8)(i % 3);
+        for (int i = 0; i < 12; i++) ibfill[i] = (u8)(i % 3);
     } else {
-        for (int i = 0; i < 12; i++) ((u16*)ibdst)[i] = (u16)(i % 3);
+        for (int i = 0; i < 12; i++) ((u16*)ibfill)[i] = (u16)(i % 3);
     }
     flush_dc(g.ib, 4096);
+    if (s->ib_qtm) {
+        qtm_flush(qtm + QTM_IB_OFF, 256, qnote, sizeof(qnote));
+    }
 
     GPUCMD_SetBuffer(g.cmd, CMD_BYTES / 4, 0);
     C3D_BindProgram(&g.prog[s->shader]);
@@ -618,6 +724,10 @@ static Res run_scene(Scene* s) {
     BufInfo_Init(bi);
     if (s->vb_mode == 2) {
         BufInfo_Add(bi, heapv, sizeof(Vtx), 3, 0x210);
+    } else if (s->vb_mode == VB_QTM) {
+        /* the buffer offset is relative to citro3d's base 0x18000000; QTM is physical 0x1F000000 + n */
+        BufInfo_Add(bi, g.vb, sizeof(Vtx), 3, 0x210);
+        bi->buffers[0].offset = g.cfg.qtm_phys - bi->base_paddr;
     } else if (s->vb_mode == 1) {
         /* citro3d's base is the constant 0x18000000 and each buffer carries its offset from it; here the base
          * register (ATTRIBBUFFERS_LOC) is moved to the data address and the buffer offset is 0 */
@@ -641,7 +751,8 @@ static Res run_scene(Scene* s) {
     } else {
         C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, RTW, RTW);
     }
-    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    /* K_CB: the first draw writes nothing (it only carries the state); the second draw is the chunk */
+    C3D_DepthTest(false, GPU_ALWAYS, s->cb ? 0 : GPU_WRITE_COLOR);
     C3D_CullFace(GPU_CULL_NONE);
     C3D_AlphaTest(false, GPU_ALWAYS, 0);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
@@ -688,6 +799,18 @@ static Res run_scene(Scene* s) {
         break;
     }
 
+    if (s->cb) {
+        u32 *base, sz, m, e;
+        GPUCMD_GetBuffer(&base, &sz, &m);
+        C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+        C3D_DrawArrays(GPU_TRIANGLES, 0, 3); /* state unchanged except the write mask: only the draw packet */
+        GPUCMD_GetBuffer(&base, &sz, &e);
+        r = cb_run(s, base, m, e);
+        free(heapv);
+        free(ibheap);
+        return r;
+    }
+
     if (s->raw_n > 0) {
         u32 vals[8] = {0, 0, 0, 0, 0, 0, 0, 0};
         vals[0] = s->raw_val;
@@ -708,6 +831,14 @@ static Res run_scene(Scene* s) {
     GPUCMD_Split(&b, &nw);
     if (s->noshader) {
         kill_vsh_writes(b, nw);
+    }
+    if (s->ib_qtm) {
+        /* citro3d wrote the linear index address; point INDEXBUFFER_CONFIG at the QTM copy */
+        for (u32 i = 0; i + 1 < nw; i = cmd_next(b, i)) {
+            if ((b[i + 1] & 0xFFFF) == GPUREG_INDEXBUFFER_CONFIG && ((b[i + 1] >> 20) & 0xFF) == 0) {
+                b[i] = (b[i] & 0x80000000u) | ((g.cfg.qtm_phys + QTM_IB_OFF - 0x18000000u) & 0x0FFFFFFFu);
+            }
+        }
     }
     u32 bytes = nw * 4;
     /* nw is a multiple of 4 words from GPUCMD_Split in libctru; cmd_mode picks the variants */
@@ -738,6 +869,10 @@ static Res run_scene(Scene* s) {
         snprintf(n, sizeof(n), "size %lu (mod 16 = %lu)", (unsigned long)bytes, (unsigned long)(bytes & 15));
         res_set(&r, R_OK, "%s", n);
     }
+    if (qnote[0] != '\0') {
+        size_t l = strlen(r.note);
+        snprintf(r.note + l, sizeof(r.note) - l, "%s%s", l ? "; " : "", qnote);
+    }
     free(heapv);
     free(ibheap);
     return r;
@@ -748,6 +883,496 @@ static Res run_scene_ctl(void) {
     Case c = {"ctl_recover", "control", 0, "OK", K_DRAW, 0, {3, 0, 0, 0}, EX_RED, ""};
     scene_default(&s, &c);
     return run_scene(&s);
+}
+
+/* ---- command processor: hand-built main lists and chunks (K_CB, K_THRU) ----
+ * The PICA command processor fetches SIZEn*8 bytes at physical ADDRn*8 when CMDBUF_JUMPn is written; it has no
+ * return stack. A call uses both channels: the caller sets ADDR0/SIZE0 to its own continuation and ADDR1/SIZE1
+ * to the chunk and writes JUMP1; the chunk ends with a JUMP0 write. Every jump write here is the last command of
+ * a 16-byte block, so the continuation starts on a 16-byte boundary. */
+
+typedef struct {
+    u32* w;
+    u32 n, cap; /* words */
+    bool ovf;
+} LB;
+
+typedef struct {
+    u32 at[MAXCALL];  /* word index of the SIZE0 value of a call */
+    u32 ret[MAXCALL]; /* word index of its return point */
+    int n;
+} Patch;
+
+static Patch s_pm, s_pa;
+
+static void lb_init(LB* l, u32* w, u32 bytes) {
+    l->w = w;
+    l->n = 0;
+    l->cap = bytes / 4;
+    l->ovf = false;
+}
+
+static void lb_put(LB* l, u32 reg, u32 val) {
+    if (l->n + 2 > l->cap) {
+        l->ovf = true;
+        return;
+    }
+    l->w[l->n++] = val;
+    l->w[l->n++] = reg | 0x000F0000u;
+}
+
+static void lb_copy(LB* l, const u32* src, u32 nw) {
+    if (l->n + nw > l->cap) {
+        l->ovf = true;
+        return;
+    }
+    memcpy(l->w + l->n, src, nw * 4);
+    l->n += nw;
+}
+
+/* a defined write that changes nothing in these lists: FACECULLING_CONFIG = 0 (cull none, set by every case) */
+static void lb_pad(LB* l) { lb_put(l, GPUREG_FACECULLING_CONFIG, 0); }
+
+/* pads so that `more` words added next end on a 16-byte boundary (n and more are even) */
+static void lb_align(LB* l, u32 more) {
+    if (((l->n + more) & 3) != 0) {
+        lb_pad(l);
+    }
+}
+
+static void lb_finalize(LB* l, bool flush) {
+    if (flush) {
+        lb_put(l, GPUREG_FRAMEBUFFER_FLUSH, 1);
+        lb_put(l, GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+    }
+    lb_align(l, 2);
+    lb_put(l, GPUREG_FINALIZE, 0x12345678);
+}
+
+static void lb_jump(LB* l, int ch, u32 phys, u32 bytes) {
+    lb_put(l, GPUREG_CMDBUF_SIZE0 + (u32)ch, bytes >> 3);
+    lb_put(l, GPUREG_CMDBUF_ADDR0 + (u32)ch, phys >> 3);
+    lb_align(l, 2);
+    lb_put(l, GPUREG_CMDBUF_JUMP0 + (u32)ch, 1);
+}
+
+/* Call of the chunk at cphys from list l (at physical lphys); the return size is patched by lb_patch. */
+static void lb_call(LB* l, u32 lphys, u32 cphys, u32 cbytes, Patch* p) {
+    lb_put(l, GPUREG_CMDBUF_SIZE1, cbytes >> 3);
+    lb_put(l, GPUREG_CMDBUF_ADDR1, cphys >> 3);
+    u32 at = l->n;
+    lb_put(l, GPUREG_CMDBUF_SIZE0, 0);
+    lb_put(l, GPUREG_CMDBUF_ADDR0, 0);
+    lb_align(l, 2);
+    lb_put(l, GPUREG_CMDBUF_JUMP1, 1);
+    if (l->ovf || p->n >= MAXCALL) {
+        l->ovf = true;
+        return;
+    }
+    l->w[at + 2] = (lphys + l->n * 4) >> 3;
+    p->at[p->n] = at;
+    p->ret[p->n] = l->n;
+    p->n++;
+}
+
+/* Each return runs from its return point to the end of the list. */
+static void lb_patch(LB* l, const Patch* p) {
+    for (int i = 0; i < p->n && !l->ovf; i++) {
+        l->w[p->at[i]] = ((l->n - p->ret[i]) * 4) >> 3;
+    }
+}
+
+/* End of a called chunk: pads, then JUMP0 (back to the caller). size_mode 0: size a multiple of 16;
+ * 1: 8 past a multiple of 16; 2: 16 past a multiple of 32. */
+static void lb_ret(LB* l, int size_mode) {
+    u32 mask = size_mode == 2 ? 7 : 3, want = size_mode == 0 ? 0 : size_mode == 1 ? 2 : 4;
+    while (((l->n + 2) & mask) != want && !l->ovf) {
+        lb_pad(l);
+    }
+    lb_put(l, GPUREG_CMDBUF_JUMP0, 1);
+}
+
+static void dump_named(const char* id, const char* ext, const void* w, u32 bytes) {
+    char path[220];
+    snprintf(path, sizeof(path), "%s/gpuprobe/%s%s", g.dir, id, ext);
+    FILE* f = fopen(path, "wb");
+    if (f != NULL) {
+        fwrite(w, 1, bytes, f);
+        fclose(f);
+    }
+}
+
+static void note_add(Res* r, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+static void note_add(Res* r, const char* fmt, ...) {
+    size_t l = strlen(r->note);
+    if (l + 3 >= sizeof(r->note)) {
+        return;
+    }
+    if (l > 0) {
+        r->note[l++] = ';';
+        r->note[l++] = ' ';
+        r->note[l] = '\0';
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(r->note + l, sizeof(r->note) - l, fmt, ap);
+    va_end(ap);
+}
+
+static u32 ticks_us(u64 t) { return (u32)(t * 1000ull / 268112ull); } /* 268.111856 ticks per us */
+
+/* rec: the scene list; [0, m) state plus a draw that writes nothing, [m, e) the draw packet (write mask + draw). */
+static Res cb_run(Scene* s, const u32* rec, u32 m, u32 e) {
+    Res r = {R_OK, ""};
+    const u32* P = rec;
+    const u32* D = rec + m;
+    u32 nd = e - m;
+    LB mn, ck;
+    lb_init(&mn, g.main, MAIN_BYTES);
+    lb_init(&ck, g.chunk, CHUNK_BYTES);
+    u32 mphys = osConvertVirtToPhys(g.main);
+    u32 kphys = osConvertVirtToPhys(g.chunk);
+    u32 cphys = kphys, cbytes = 0, dump_bytes = 0;
+    char extra[80] = "";
+    s_pm.n = 0;
+    s_pa.n = 0;
+    switch (s->cb) {
+    case CB_JUMP0:
+    case CB_JUMP1:
+        lb_copy(&ck, P, m);
+        lb_copy(&ck, D, nd);
+        lb_finalize(&ck, true);
+        lb_jump(&mn, s->cb == CB_JUMP1, kphys, ck.n * 4);
+        dump_bytes = ck.n * 4;
+        break;
+    case CB_IRQ:
+        lb_copy(&mn, P, m);
+        lb_copy(&mn, D, nd);
+        lb_finalize(&ck, true); /* the chunk: flush, invalidate, FINALIZE */
+        lb_jump(&mn, 0, kphys, ck.n * 4);
+        dump_bytes = ck.n * 4;
+        break;
+    case CB_NEST: {
+        LB b;
+        lb_init(&b, g.chunk + NEST_B_OFF / 4, CHUNK_BYTES - NEST_B_OFF);
+        lb_copy(&b, D, nd);
+        lb_ret(&b, 0);
+        u32 bphys = kphys + NEST_B_OFF;
+        /* A: call B with the return into A's tail; the tail sets channel 0 to main's continuation and jumps */
+        lb_call(&ck, kphys, bphys, b.n * 4, &s_pa);
+        u32 tail_at = ck.n;
+        lb_put(&ck, GPUREG_CMDBUF_SIZE0, 0);
+        lb_put(&ck, GPUREG_CMDBUF_ADDR0, 0);
+        lb_align(&ck, 2);
+        lb_put(&ck, GPUREG_CMDBUF_JUMP0, 1);
+        lb_patch(&ck, &s_pa);
+        lb_copy(&mn, P, m);
+        lb_call(&mn, mphys, kphys, ck.n * 4, &s_pm);
+        lb_finalize(&mn, true);
+        lb_patch(&mn, &s_pm);
+        if (!ck.ovf && !mn.ovf && s_pm.n == 1) {
+            ck.w[tail_at] = ((mn.n - s_pm.ret[0]) * 4) >> 3;
+            ck.w[tail_at + 2] = (mphys + s_pm.ret[0] * 4) >> 3;
+        }
+        dump_bytes = NEST_B_OFF + b.n * 4;
+        ck.ovf |= b.ovf;
+        break;
+    }
+    default: { /* CB_CALL */
+        u32 off = (u32)s->cb_off & ~3u;
+        lb_init(&ck, g.chunk + off / 4, CHUNK_BYTES - off);
+        lb_copy(&ck, D, nd);
+        lb_ret(&ck, s->cb_size);
+        cbytes = ck.n * 4;
+        dump_bytes = off + cbytes;
+        cphys = kphys + off;
+        if (s->cb_place == PL_VRAM) {
+            /* TextureCopy linear -> VRAM, then a CPU read back to check the copy */
+            u32 nb = (off + cbytes + 15) & ~15u;
+            flush_dc(g.chunk, nb);
+            LightEvent_Clear(&g.ev[GSPGPU_EVENT_PPF]);
+            Result rc = GX_TextureCopy(g.chunk, GX_BUFFER_DIM(nb >> 4, 0), g.cvram, GX_BUFFER_DIM(nb >> 4, 0), nb,
+                                       GX_TRANSFER_RAW_COPY(1));
+            if (R_FAILED(rc)) {
+                res_set(&r, R_ERR, "GX_TextureCopy rc=%08lX", (unsigned long)rc);
+                return r;
+            }
+            if (!ev_wait(GSPGPU_EVENT_PPF, g.timeout_ms)) {
+                res_set(&r, R_HANG, "TextureCopy to VRAM: no PPF in %d ms", g.timeout_ms);
+                return r;
+            }
+            inval_dc(g.cvram, nb);
+            bool same = memcmp(g.cvram, g.chunk, nb) == 0;
+            snprintf(extra, sizeof(extra), "VRAM copy %s", same ? "equal" : "differs (CPU read)");
+            cphys = osConvertVirtToPhys(g.cvram) + off;
+        } else if (s->cb_place == PL_QTM) {
+            u8* q = (u8*)g.cfg.qtm + QTM_CB_OFF;
+            memcpy(q, g.chunk, off + cbytes);
+            qtm_flush(q, (off + cbytes + 63) & ~63u, extra, sizeof(extra));
+            cphys = g.cfg.qtm_phys + QTM_CB_OFF + off;
+        }
+        lb_copy(&mn, P, m);
+        int calls = s->cb_calls < 1 ? 1 : s->cb_calls;
+        if (calls > 1) {
+            lb_put(&mn, GPUREG_SCISSORTEST_MODE, SC_NORMAL);
+        }
+        for (int i = 0; i < calls; i++) {
+            if (calls > 1) {
+                /* call i draws pixel (i & 63, i >> 6) only: left/top and right-1/bottom-1 */
+                u32 xy = ((u32)(i >> 6) << 16) | (u32)(i & 63);
+                lb_put(&mn, GPUREG_SCISSORTEST_POS, xy);
+                lb_put(&mn, GPUREG_SCISSORTEST_DIM, xy);
+            }
+            lb_call(&mn, mphys, cphys, cbytes, &s_pm);
+        }
+        lb_finalize(&mn, true);
+        lb_patch(&mn, &s_pm);
+        if (calls > 1) {
+            s->exp = EX_COUNT;
+            s->want_red = calls;
+        }
+        break;
+    }
+    }
+    if (mn.ovf || ck.ovf) {
+        res_set(&r, R_ERR, "list buffer overflow (main %lu words)", (unsigned long)mn.n);
+        return r;
+    }
+    dump_named(s->id, ".bin", g.main, mn.n * 4);
+    dump_named(s->id, ".chunk", g.chunk, dump_bytes);
+    flush_dc(g.main, mn.n * 4);
+    flush_dc(g.chunk, CHUNK_BYTES);
+
+    LightEvent_Clear(&g.ev[GSPGPU_EVENT_P3D]);
+    u64 t0 = svcGetSystemTick();
+    Result rc = GX_ProcessCommandList(g.main, mn.n * 4, 0);
+    bool timed_out = R_SUCCEEDED(rc) && !ev_wait(GSPGPU_EVENT_P3D, g.timeout_ms);
+    u32 us = ticks_us(svcGetSystemTick() - t0);
+    r = classify(s, timed_out, rc);
+    if (!timed_out && R_SUCCEEDED(rc)) {
+        if (s->cb == CB_IRQ) {
+            LightEvent_Clear(&g.ev[GSPGPU_EVENT_P3D]);
+            bool again = ev_wait(GSPGPU_EVENT_P3D, 20);
+            note_add(&r, "P3D after %lu us, second P3D in 20 ms: %s", (unsigned long)us, again ? "yes" : "no");
+        } else {
+            note_add(&r, "%lu us", (unsigned long)us);
+        }
+    }
+    if (extra[0] != '\0') {
+        note_add(&r, "%s", extra);
+    }
+    return r;
+}
+
+/* ---- cp_thru: command-processor time per list shape ---- */
+
+#define THRU_REG 0x0081 /* TEXUNIT0_BORDER_COLOR: no case samples the border */
+#define THRU_WORDS 8192
+
+/* Submits w and waits; best of 3 in us. 0: no completion (hang), -1: GSP refused. */
+static int thru_best(u32* w, u32 nw, u32* best) {
+    *best = 0xFFFFFFFFu;
+    flush_dc(w, nw * 4);
+    for (int k = 0; k < 3; k++) {
+        LightEvent_Clear(&g.ev[GSPGPU_EVENT_P3D]);
+        u64 t0 = svcGetSystemTick();
+        Result rc = GX_ProcessCommandList(w, nw * 4, 0);
+        if (R_FAILED(rc)) {
+            return -1;
+        }
+        if (!ev_wait(GSPGPU_EVENT_P3D, g.timeout_ms)) {
+            return 0;
+        }
+        u32 us = ticks_us(svcGetSystemTick() - t0);
+        if (us < *best) {
+            *best = us;
+        }
+    }
+    return 1;
+}
+
+/* words per us x10, net of the empty list's time */
+static u32 per_us_x10(u32 words, u32 us, u32 base) { return us > base ? words * 10u / (us - base) : 0; }
+
+static Res run_thru(void) {
+    Res r = {R_OK, ""};
+    static const char* const name[4] = {"empty", "single", "burst", "called"};
+    u32 us[4] = {0, 0, 0, 0};
+    for (int mode = 0; mode < 4; mode++) {
+        LB l;
+        lb_init(&l, g.main, MAIN_BYTES);
+        s_pm.n = 0;
+        if (mode == 1) {
+            for (u32 i = 0; i < THRU_WORDS / 2; i++) lb_put(&l, THRU_REG, i);
+        } else if (mode == 2) {
+            /* 32 commands of one header + 255 values to the same register (extra = 254): 256 words each */
+            for (u32 c = 0; c < THRU_WORDS / 256; c++) {
+                l.w[l.n] = c;
+                l.w[l.n + 1] = THRU_REG | 0x000F0000u | (254u << 20);
+                for (u32 k = 0; k < 254; k++) l.w[l.n + 2 + k] = k;
+                l.n += 256;
+            }
+        } else if (mode == 3) {
+            LB c;
+            lb_init(&c, g.chunk, CHUNK_BYTES);
+            for (u32 i = 0; i < 1020 / 2; i++) lb_put(&c, THRU_REG, i);
+            lb_ret(&c, 0); /* 1024 words with the return */
+            flush_dc(g.chunk, c.n * 4);
+            for (int k = 0; k < THRU_WORDS / 1024; k++) {
+                lb_call(&l, osConvertVirtToPhys(g.main), osConvertVirtToPhys(g.chunk), c.n * 4, &s_pm);
+            }
+        }
+        lb_finalize(&l, false);
+        lb_patch(&l, &s_pm);
+        int ok = thru_best(g.main, l.n, &us[mode]);
+        if (ok <= 0) {
+            res_set(&r, ok == 0 ? R_HANG : R_ERR, "%s list: %s", name[mode], ok == 0 ? "no P3D" : "GSP refused");
+            return r;
+        }
+    }
+    u32 v[4];
+    for (int i = 1; i < 4; i++) v[i] = per_us_x10(THRU_WORDS, us[i], us[0]);
+    plog("gpuprobe: cp_thru: %u words per list, best of 3: empty list %lu us; single writes %lu us (%lu.%lu w/us); "
+         "bursts %lu us (%lu.%lu w/us); 8 calls of a 1 K chunk %lu us (%lu.%lu w/us); w/us net of the empty list",
+         THRU_WORDS, (unsigned long)us[0], (unsigned long)us[1], (unsigned long)(v[1] / 10),
+         (unsigned long)(v[1] % 10), (unsigned long)us[2], (unsigned long)(v[2] / 10), (unsigned long)(v[2] % 10),
+         (unsigned long)us[3], (unsigned long)(v[3] / 10), (unsigned long)(v[3] % 10));
+    res_set(&r, R_OK, "us per 8K words: empty %lu single %lu burst %lu called %lu", (unsigned long)us[0],
+            (unsigned long)us[1], (unsigned long)us[2], (unsigned long)us[3]);
+    return r;
+}
+
+/* ---- dt_tile: DisplayTransfer linear -> tiled vs a CPU Morton tiler ---- */
+
+static const u16 k_dt_size[][2] = {{8, 8},   {16, 16}, {32, 32}, {64, 64},  {128, 128},
+                                   {256, 256}, {64, 32}, {32, 64}, {128, 16}, {16, 128}};
+#define NDT ((int)(sizeof(k_dt_size) / sizeof(k_dt_size[0])))
+#define DT_MAX (256 * 256 * 4)
+
+static u32 dt_bpp(int fmt) { return fmt == 0 ? 4 : fmt == 1 ? 3 : 2; }
+static const char* dt_name(int fmt) {
+    return fmt == 0 ? "rgba8" : fmt == 1 ? "rgb8" : fmt == 2 ? "rgb565" : fmt == 3 ? "rgba5551" : "rgba4";
+}
+
+static u32 xs_next(u32* x) {
+    u32 v = *x;
+    v ^= v << 13;
+    v ^= v >> 17;
+    v ^= v << 5;
+    *x = v;
+    return v;
+}
+
+/* one RGBA8 texel (bytes R,G,B,A) as format fmt, in PICA memory byte order */
+static void dt_encode(int fmt, const u8* p, u8* o) {
+    u16 v;
+    switch (fmt) {
+    case 0: {
+        u32 w = (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3];
+        memcpy(o, &w, 4);
+        return;
+    }
+    case 1:
+        o[0] = p[2];
+        o[1] = p[1];
+        o[2] = p[0];
+        return;
+    case 2: v = (u16)(((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3)); break;
+    case 3: v = (u16)(((p[0] >> 3) << 11) | ((p[1] >> 3) << 6) | ((p[2] >> 3) << 1) | (p[3] >> 7)); break;
+    default: v = (u16)((p[0] >> 4) << 12 | (p[1] >> 4) << 8 | (p[2] >> 4) << 4 | (p[3] >> 4)); break;
+    }
+    memcpy(o, &v, 2);
+}
+
+/* the probe's own tiler: linear rows (row 0 first) into 8x8 Morton tiles, row 0 into the last tile row */
+static void dt_tile_cpu(const u8* lin, u32 w, u32 h, u32 bpp, u8* out) {
+    for (u32 my = 0; my < h; my++) {
+        const u8* row = lin + (h - 1 - my) * w * bpp;
+        for (u32 mx = 0; mx < w; mx++) {
+            memcpy(out + tile_off(mx, my, w) * bpp, row + mx * bpp, bpp);
+        }
+    }
+}
+
+static Res run_dt(int fmt) {
+    Res r = {R_OK, ""};
+    u8* in = linearMemAlign(DT_MAX, 128);
+    u8* out = linearMemAlign(DT_MAX, 128);
+    u8* ref = malloc(DT_MAX);
+    u8* rgba = malloc(DT_MAX);
+    u32 bpp = dt_bpp(fmt);
+    int match[2] = {0, 0}, app_ref = 0, first_bad = -1;
+    u32 seed = 0x2545F491u;
+    if (in == NULL || out == NULL || ref == NULL || rgba == NULL) {
+        res_set(&r, R_SKIP, "allocation failed");
+        goto done;
+    }
+    for (int si = 0; si < NDT; si++) {
+        u32 w = k_dt_size[si][0], h = k_dt_size[si][1], n = w * h;
+        for (u32 i = 0; i < n * 4; i++) {
+            u8 v = (u8)xs_next(&seed);
+            rgba[i] = fmt == 4 ? (u8)((v & 15) * 17) : v; /* RGBA4: exact nibbles (n * 17 >> 4 == n) */
+        }
+        for (u32 i = 0; i < n; i++) dt_encode(fmt, rgba + i * 4, in + i * bpp);
+        if (g.cfg.tile_ref != NULL && g.cfg.tile_ref(fmt, rgba, w, h, ref, g.cfg.user)) {
+            app_ref = 1;
+        } else {
+            dt_tile_cpu(in, w, h, bpp, ref);
+        }
+        flush_dc(in, n * bpp);
+        int ok_flip[2] = {0, 0};
+        for (int flip = 0; flip < 2; flip++) {
+            memset(out, 0xA5, n * bpp);
+            flush_dc(out, n * bpp);
+            LightEvent_Clear(&g.ev[GSPGPU_EVENT_PPF]);
+            Result rc = GX_DisplayTransfer((u32*)in, GX_BUFFER_DIM(w, h), (u32*)out, GX_BUFFER_DIM(w, h),
+                                           GX_TRANSFER_FLIP_VERT(flip) | GX_TRANSFER_OUT_TILED(1) |
+                                               GX_TRANSFER_IN_FORMAT(fmt) | GX_TRANSFER_OUT_FORMAT(fmt) |
+                                               GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+            if (R_FAILED(rc)) {
+                res_set(&r, R_ERR, "GX_DisplayTransfer %lux%lu rc=%08lX", (unsigned long)w, (unsigned long)h,
+                        (unsigned long)rc);
+                goto done;
+            }
+            if (!ev_wait(GSPGPU_EVENT_PPF, g.timeout_ms)) {
+                res_set(&r, R_HANG, "%lux%lu flip %d: no PPF in %d ms", (unsigned long)w, (unsigned long)h, flip,
+                        g.timeout_ms);
+                goto done;
+            }
+            inval_dc(out, n * bpp);
+            u32 bad = 0, at = 0;
+            for (u32 i = 0; i < n * bpp; i++) {
+                if (out[i] != ref[i] && bad++ == 0) {
+                    at = i;
+                }
+            }
+            ok_flip[flip] = bad == 0;
+            match[flip] += bad == 0;
+            plog("gpuprobe: dt %s %lux%lu flip %d: %s (%lu of %lu bytes differ, first at %lu)", dt_name(fmt),
+                 (unsigned long)w, (unsigned long)h, flip, bad ? "differs" : "equal", (unsigned long)bad,
+                 (unsigned long)(n * bpp), (unsigned long)at);
+        }
+        if (!ok_flip[0] && !ok_flip[1] && first_bad < 0) {
+            first_bad = si;
+        }
+    }
+    {
+        const char* rs = app_ref ? "app tiler" : "probe tiler";
+        if (match[1] == NDT || match[0] == NDT) {
+            res_set(&r, R_OK, "all %d sizes equal to the %s with FLIP_VERT %d (other: %d/%d)", NDT, rs,
+                    match[1] == NDT ? 1 : 0, match[1] == NDT ? match[0] : match[1], NDT);
+        } else {
+            res_set(&r, R_WRONG, "sizes equal: flip %d/%d, noflip %d/%d vs %s; first bad %ux%u", match[1], NDT,
+                    match[0], NDT, rs, first_bad >= 0 ? k_dt_size[first_bad][0] : 0u,
+                    first_bad >= 0 ? k_dt_size[first_bad][1] : 0u);
+        }
+    }
+done:
+    if (in) linearFree(in);
+    if (out) linearFree(out);
+    free(ref);
+    free(rgba);
+    return r;
 }
 
 /* ---- textures ---- */
@@ -802,8 +1427,20 @@ static Res run_case(const Case* c) {
     case K_IBUF:
         s.draw = c->a ? DRAW_E16 : DRAW_E8;
         s.ib_off = c->p[0];
-        s.ib_heap = c->p[1] != 0;
+        s.ib_heap = c->p[1] == 1;
+        s.ib_qtm = c->p[1] == IB_QTM;
         break;
+    case K_CB:
+        s.cb = c->a;
+        s.cb_calls = c->p[0];
+        s.cb_off = c->p[1];
+        s.cb_size = c->p[2];
+        s.cb_place = c->p[3];
+        break;
+    case K_THRU:
+        return run_thru();
+    case K_DT:
+        return run_dt(c->a);
     case K_ATTR13:
         s.attr13 = true;
         break;

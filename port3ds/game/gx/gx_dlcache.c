@@ -44,6 +44,7 @@
 
 #include "gx_bigmem.h"
 #include "gx_internal.h"
+#include "gx_lobj.h"
 #include "plat/memstable.h"
 #include "plat/plat.h"
 
@@ -104,6 +105,11 @@ typedef struct {
 
 static DlcEntry* s_e; /* DLC_ENTRIES, heap (gx_bigmem.h) */
 static u16 s_bucket[DLC_BUCKETS];
+/* gxlobj (gx_lobj.h): the ListObj index in place of the buckets for every key it can hold; its value is the
+ * first entry of the key, and .next chains only entries of that key. 2^15 slots: at most DLC_ENTRIES keys. */
+static int s_lobj;
+static GxLobjTab s_lt;
+#define LOBJ_BITS 15
 static u16 s_free_head; /* free list through .next */
 static u16 s_lru_head, s_lru_tail; /* head = most recently used */
 static int s_enabled = -1;
@@ -191,6 +197,13 @@ static void init(void) {
     s_trust = plat_switch_int("gxtrust", 1) != 0;
     s_scribble_at = (u32)plat_switch_int("gxscribble", 0);
     s_spread = (u32)plat_switch_int("dlspread", 0);
+    s_lobj = s_enabled > 0 && gx_lobj_switch();
+    if (s_lobj) {
+        _Static_assert((1u << (LOBJ_BITS - 1)) >= DLC_ENTRIES, "the ListObj index holds a key per entry");
+        gx_lobj_init(&s_lt, "gxlobj index", LOBJ_BITS);
+        PLOG_I("gxlobj: cache entries found by the ListObj index (%u slots, %lu KB)", 1u << LOBJ_BITS,
+               (unsigned long)((sizeof(GxLobjHot) << LOBJ_BITS) / 1024));
+    }
     for (int i = 0; i < DLC_ENTRIES; i++) {
         s_e[i].next = (u16)(i + 2 <= DLC_ENTRIES ? i + 2 : 0);
     }
@@ -235,14 +248,43 @@ static void lru_front(DlcEntry* e) {
     }
 }
 
-static void entry_drop(DlcEntry* e) {
-    u32 b = bucket_of(e->list, e->nbytes);
-    u16* link = &s_bucket[b];
-    while (*link && E(*link) != e) {
-        link = &E(*link)->next;
+/* The first entry of the key's chain (0: none): the ListObj index (gxlobj) or the bucket, whose chain also holds
+ * other keys. Either way the entries of one key are in the same order, so a walk finds what it found before. */
+static inline u16 chain_first(const void* list, u32 nbytes) {
+    if (s_lobj && gx_lobj_key_ok(list, nbytes)) {
+        const GxLobjHot* h = gx_lobj_find(&s_lt, list, nbytes);
+        return h != NULL ? h->val : 0;
     }
-    if (*link) {
-        *link = e->next;
+    return s_bucket[bucket_of(list, nbytes)];
+}
+
+static void entry_drop(DlcEntry* e) {
+    if (s_lobj && gx_lobj_key_ok(e->list, e->nbytes)) {
+        GxLobjHot* h = gx_lobj_find(&s_lt, e->list, e->nbytes);
+        if (h != NULL && h->val == IDX(e)) {
+            if (e->next) {
+                h->val = e->next;
+            } else {
+                gx_lobj_delete(&s_lt, h); /* the key's last entry */
+            }
+        } else if (h != NULL) {
+            u16* link = &E(h->val)->next;
+            while (*link && E(*link) != e) {
+                link = &E(*link)->next;
+            }
+            if (*link) {
+                *link = e->next;
+            }
+        }
+    } else {
+        u32 b = bucket_of(e->list, e->nbytes);
+        u16* link = &s_bucket[b];
+        while (*link && E(*link) != e) {
+            link = &E(*link)->next;
+        }
+        if (*link) {
+            *link = e->next;
+        }
     }
     lru_unlink(e);
     free_blob(e);
@@ -305,9 +347,21 @@ static DlcEntry* entry_new(const void* list, u32 nbytes) {
     e->gen = gen;
     e->list = list;
     e->nbytes = nbytes;
-    u32 b = bucket_of(list, nbytes);
-    e->next = s_bucket[b];
-    s_bucket[b] = IDX(e);
+    if (s_lobj && gx_lobj_key_ok(list, nbytes)) {
+        GxLobjHot* h = gx_lobj_find(&s_lt, list, nbytes);
+        if (h != NULL) {
+            e->next = h->val;
+            h->val = IDX(e);
+        } else {
+            e->next = 0;
+            /* cannot fail: every key in the index has an entry, and there are DLC_ENTRIES of them */
+            gx_lobj_insert(&s_lt, list, nbytes, IDX(e));
+        }
+    } else {
+        u32 b = bucket_of(list, nbytes);
+        e->next = s_bucket[b];
+        s_bucket[b] = IDX(e);
+    }
     lru_front(e);
     s_live++;
     return e;
@@ -430,7 +484,7 @@ u32 gx_dlcache_spans(const void* list, u32 nbytes, PlatMemSpan* sp, u32 max) {
         return 0;
     }
     u32 frame = gx_perf_frame_no();
-    for (DlcEntry* e = E(s_bucket[bucket_of(list, nbytes)]); e; e = E(e->next)) {
+    for (DlcEntry* e = E(chain_first(list, nbytes)); e; e = E(e->next)) {
         if (e->list != list || e->nbytes != nbytes || e->state != E_BUILT || e->last_frame != frame) {
             continue;
         }
@@ -482,7 +536,12 @@ static inline __attribute__((always_inline)) int call_slow_body(const GxState* s
 #define LIST_HASH() (have_h ? h : (have_h = 1, h = gx_hash32(list, nbytes, 0xD15Cu)))
     DlcEntry* same_list_changed = NULL;
     int variants = 0;
-    for (DlcEntry* e = E(s_bucket[bucket_of(list, nbytes)]); e; e = E(e->next)) {
+    u16 first = chain_first(list, nbytes);
+    if (s_lobj && first != 0) {
+        /* gxlobj: the key's first entry holds the list's gxsdl slot hint, whatever the entries' states */
+        gx_sdl_hint = &E(first)->sdl;
+    }
+    for (DlcEntry* e = E(first); e; e = E(e->next)) {
         if (e->list != list || e->nbytes != nbytes) {
             continue;
         }
@@ -492,7 +551,9 @@ static inline __attribute__((always_inline)) int call_slow_body(const GxState* s
              * reused for another list, that one goes uncached until the entry
              * is evicted) */
             s_st.nocache++;
-            gx_sdl_hint = &e->sdl;
+            if (!s_lobj) {
+                gx_sdl_hint = &e->sdl;
+            }
             e->last_frame = frame;
             lru_unlink(e);
             lru_front(e);
@@ -620,6 +681,11 @@ static inline __attribute__((always_inline)) int call_slow_body(const GxState* s
     s_cap_abort = 0;
     gx_dlc_nidx = 0;
 decode_plain:
+    if (s_lobj && first != 0) {
+        /* the decode's draws route the list: its record hint is in the key's first entry (cleared after the list,
+         * gx_dlc_cap_finish) */
+        gx_vsh_rec_hint = &E(first)->vsh_rec;
+    }
     if (gx_perf_on > 0) {
         gx_perf.t_cache += plat_ticks() - t0;
     }
@@ -1595,6 +1661,9 @@ static u32 elem_bytes(int a, const GxAttrFmt* f) {
 
 /* After the list ran: `kind` is what it held (1 primitives, 2 port opcodes, 4 raw primitives). */
 void gx_dlc_cap_finish(const GxState* st, u32 kind) {
+    if (s_lobj) {
+        gx_vsh_rec_hint = NULL; /* a hint call_slow left that no draw of the list took */
+    }
     if (!gx_dlc_capturing) {
         return;
     }
@@ -1832,7 +1901,48 @@ static void scribble(void) {
            pick->trust_gen != 0 && pick->trust_gen == plat_memstable_gen() ? "trusted" : "not trusted");
 }
 
+/* gxlobj=2: the index and the entries agree. Every slot's chain holds only live entries of its key, without a
+ * loop; every live entry of an indexed key is in its key's chain, and the slot is where a lookup finds it. */
+static u32 s_lobj_checks, s_lobj_bad, s_lobj_frames;
+static void lobj_check(void) {
+    u32 bad = 0, chained = 0, live = 0;
+    for (u32 i = 0; i <= s_lt.mask; i++) {
+        const GxLobjHot* h = &s_lt.hot[i];
+        if (h->val == 0) {
+            continue;
+        }
+        const void* list = (const void*)(uintptr_t)h->list;
+        u32 nbytes = (u32)h->nb32 << 5;
+        bad += gx_lobj_find(&s_lt, list, nbytes) != h;
+        u32 n = 0;
+        for (const DlcEntry* e = E(h->val); e != NULL && n <= DLC_ENTRIES; e = E(e->next), n++) {
+            bad += e->list != list || e->nbytes != nbytes;
+        }
+        bad += n > DLC_ENTRIES;
+        chained += n;
+    }
+    for (u32 i = 0; i < DLC_ENTRIES; i++) {
+        live += s_e[i].list != NULL && gx_lobj_key_ok(s_e[i].list, s_e[i].nbytes);
+    }
+    bad += live != chained;
+    s_lobj_checks++;
+    if (bad != 0 && s_lobj_bad == 0) {
+        PLOG_W("gxlobj verify: index and cache entries disagree (%lu errors; %lu entries chained, %lu live indexed)",
+               (unsigned long)bad, (unsigned long)chained, (unsigned long)live);
+    }
+    s_lobj_bad += bad;
+    if ((s_lobj_checks & 15) == 0) {
+        PLOG_I("gxlobj verify frame %lu: %lu checks, %lu errors | index %lu keys of %lu, %lu inserts %lu deletes",
+               (unsigned long)gx_perf_frame_no(), (unsigned long)s_lobj_checks, (unsigned long)s_lobj_bad,
+               (unsigned long)s_lt.live, (unsigned long)s_lt.cap, (unsigned long)s_lt.inserts,
+               (unsigned long)s_lt.deletes);
+    }
+}
+
 void gx_dlcache_frame(void) {
+    if (s_lobj == 2 && (++s_lobj_frames & 63) == 0) {
+        lobj_check();
+    }
     u32* d = (u32*)&s_sum;
     const u32* s = (const u32*)&s_st;
     for (size_t i = 0; i < sizeof(s_st) / 4; i++) {

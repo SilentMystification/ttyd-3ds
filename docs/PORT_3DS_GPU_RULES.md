@@ -169,3 +169,41 @@ Results seen in Azahar worth knowing:
 | ib_heap | buffer | ? | WRONG | 3 | | index buffer in the normal heap |
 | tex_heap | texture | ? | WRONG | 3 | | texture in the normal heap |
 | rt_deleted | frame | ? | FAULT | 3 | | citro3d: render target deleted inside the frame (must stay last) |
+
+## Command processor, transfer engine and QTM cases (GX native plan step 0)
+
+Added 2026-11-27 for `docs/PORT_3DS_GX_NATIVE.md` step 0. Only CALL mode (step 5), the chunk placements and `texdt` (step 3b) depend on them. Azahar is no evidence for jump/call semantics, QTM or command-processor timing: only the New 3DS column decides.
+
+- **Lists.** The case records the citro3d scene twice: the state with a draw that writes nothing (color write mask 0), then the draw packet alone (write mask on + draw). The harness builds the main list and the chunks from these words by hand. Every jump write is the last command of a 16-byte block; pads are `FACECULLING_CONFIG = 0` (the value every case sets). The main list goes to `gpuprobe/<case>.bin`, the chunk buffer to `gpuprobe/<case>.chunk` (not read by `gpu_cmd_diff.py --probe-dir`).
+- **Call** (two channels, no return stack): the caller writes `CMDBUF_SIZE1/ADDR1` (chunk), `CMDBUF_SIZE0/ADDR0` (its own continuation, to the end of the main list), then `CMDBUF_JUMP1`; the chunk ends with `CMDBUF_JUMP0`. Sizes and addresses are bytes >> 3, physical.
+- **cb_call500:** before each call the main list sets a 1x1 scissor at pixel (i & 63, i >> 6); OK = exactly 500 red pixels, the rest untouched.
+- **cb_vram:** the chunk is written to VRAM by `GX_TextureCopy` (PPF timeout = HANG), read back by the CPU (note: "VRAM copy equal"), then called.
+- **QTM** (`cb_qtm`, `vb_qtm`, `ib_qtm`, danger 3): the probe gets the free part of the application's QTM after the placements (`plat/gpuprobe_mode.c`; CPU 0x1E800000 + n = physical 0x1F000000 + n). The CPU writes the data; the note gives `GSPGPU_FlushDataCache` and `svcFlushProcessDataCache` result codes on the QTM range and what `osConvertVirtToPhys` returns for it. Buffer offsets are relative to citro3d's base 0x18000000 (0x07000000 + n); the chunk address is (0x1F000000 + n) >> 3. A 3dsx has no QTM mapping: SKIP.
+- **cb_irq:** draw in the main list, then `JUMP0` to a chunk of flush + FINALIZE; the note gives the time to P3D and whether a second P3D comes within 20 ms.
+- **cp_thru:** best of 3, from `GX_ProcessCommandList` to the P3D event: an empty list, 8192 words of single writes (to `TEXUNIT0_BORDER_COLOR`), 8192 words of 255-value bursts, and 8 calls of a 1024-word chunk of single writes. The log line `cp_thru:` gives words per us net of the empty list. OK = every list finished.
+- **dt_tile_\*:** `GX_DisplayTransfer` linear to tiled, same format in and out, no scaling, sizes 8x8 to 256x256 and 64x32, 32x64, 128x16, 16x128, each with `FLIP_VERT` 0 and 1, compared byte for byte with the game's CPU tiler (`plat_probe_tile_ref` = `tile_level` in `game/gx/gx_tex.c`, row 0 to the last tile row; RGB8 has no game tiler and uses the probe's own). OK = every size equal with one flip setting (the note says which). One log line per size and flip.
+
+| Case | Group | Expected | Azahar | Danger | New 3DS | What |
+| --- | --- | --- | --- | --- | --- | --- |
+| cp_thru | thru | OK (timing) | OK: 86 us per 8K words in all four modes (no timing evidence) | 1 | | command-processor time: 8 K words as single writes, bursts, 8 calls of a 1 K chunk |
+| cb_jump0 | cmdlist | ? | OK, 86 us (no evidence for jump semantics) | 2 | | main list jumps (JUMP0) to a chunk holding state, draw and FINALIZE |
+| cb_jump1 | cmdlist | ? | OK, 86 us (no evidence for jump semantics) | 2 | | main list jumps (JUMP1) to a chunk holding state, draw and FINALIZE |
+| cb_call1 | cmdlist | ? | OK, 86 us | 2 | | call: channel 1 call of a draw chunk, channel 0 return, 1 call |
+| cb_call500 | cmdlist | ? | OK, 500 red px, 86 us | 2 | | 500 calls of one static draw chunk, a 1x1 scissor per call: exactly 500 pixels |
+| cb_call_nest | cmdlist | ? | OK, 86 us | 2 | | main calls A, A calls the draw chunk B (return into A's tail), A's tail jumps back to main |
+| cb_call_a8 | cmdlist | ? | OK, 86 us | 2 | | call: chunk address 8 bytes past a 16-byte boundary |
+| cb_call_a16 | cmdlist | ? | OK, 86 us | 2 | | call: chunk address 16 bytes past a 64-byte boundary |
+| cb_call_size8 | cmdlist | ? | OK, 86 us | 2 | | call: chunk size 8 bytes past a multiple of 16 |
+| cb_call_size16 | cmdlist | ? | OK, 86 us | 2 | | call: chunk size 16 bytes past a multiple of 32 |
+| cb_vram | cmdlist | ? | OK, VRAM copy equal | 2 | | call: chunk in VRAM, written there by TextureCopy |
+| cb_irq | cmdlist | ? | OK: P3D after 86 us, no second P3D in 20 ms | 2 | | draw in the main list, then JUMP0 to a chunk with only flush and FINALIZE: one P3D |
+| dt_tile_rgba8 | dt | ? | OK: all 10 sizes equal with FLIP_VERT 1, none with 0 | 2 | | DisplayTransfer RGBA8 linear to tiled vs the CPU tiler |
+| dt_tile_rgb8 | dt | ? | OK: all 10 sizes equal with FLIP_VERT 1, none with 0 | 2 | | DisplayTransfer RGB8 linear to tiled (probe's own tiler) |
+| dt_tile_rgb565 | dt | ? | OK: all 10 sizes equal with FLIP_VERT 1, none with 0 | 2 | | DisplayTransfer RGB565 linear to tiled vs the CPU tiler |
+| dt_tile_rgba5551 | dt | ? | OK: all 10 sizes equal with FLIP_VERT 1, none with 0 | 2 | | DisplayTransfer RGBA5551 linear to tiled vs the CPU tiler |
+| dt_tile_rgba4 | dt | ? | OK: all 10 sizes equal with FLIP_VERT 1, none with 0 | 2 | | DisplayTransfer RGBA4 linear to tiled vs the CPU tiler |
+| cb_qtm | qtm | ? | SKIP (3dsx: no QTM; no evidence) | 3 | | call: chunk in QTM ((0x1F000000 + n) >> 3), CPU written, GSP flush |
+| vb_qtm | qtm | ? | SKIP (no evidence) | 3 | | vertex buffer in QTM |
+| ib_qtm | qtm | ? | SKIP (no evidence) | 3 | | u16 index buffer in QTM |
+
+Console run of these cases only (owner-gated): `$D restart "gpuprobe probe=cmdlist,thru,dt,qtm"` (no `probefresh`: earlier results stay in the journal), then `files get @/gpuprobe.txt` and the log lines `gpuprobe: dt ...` and `gpuprobe: cp_thru: ...`.

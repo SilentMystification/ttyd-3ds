@@ -147,6 +147,22 @@ enum {
     PLAT_GPU_R_SCI = 1u << 3, /* scissor_x0 .. depth_far */
 };
 void plat_gpu_set_state_dirty(const PlatGpuState* state, uint32_t regions);
+/* Switch gxone (GX native step 2, docs/PORT_3DS_GX_NATIVE.md): the caller interns each state class and names it by
+ * an id that owns a block of PICA words; below this call only the ids are compared. Classes: */
+enum {
+    PLAT_GPU_C_TEV = 0, /* stages .. buffer_color with fog_enable and fog_color */
+    PLAT_GPU_C_TEX = 1, /* tex[3] */
+    PLAT_GPU_C_PIX = 2, /* alpha_test_enable .. cull, and scissor_x0 .. depth_far */
+};
+int plat_gpu_one_active(void); /* 0: off (the caller uses plat_gpu_set_state_dirty), 1 on, 2 verify */
+/* The block of class `cls` for the class's part of `state`, built now; returns its id, 0 when the class's store is
+ * full (the caller resets its table and the store with plat_gpu_one_reset, then builds again). */
+uint32_t plat_gpu_one_block(int cls, const PlatGpuState* state);
+uint32_t plat_gpu_one_capacity(int cls); /* blocks the class's store holds */
+void plat_gpu_one_reset(int cls);        /* every id of the class becomes invalid */
+/* As plat_gpu_set_state_dirty, with the ids of the classes in force (ids[PLAT_GPU_C_*]; 0: not interned, the class
+ * is compared and encoded from the state). */
+void plat_gpu_set_state_one(const PlatGpuState* state, uint32_t regions, const uint32_t ids[3]);
 /* Triangle list of `count` vertices from plat_gpu_alloc_vertices. */
 void plat_gpu_draw(const PlatGpuVertex* vertices, uint32_t count);
 /* Clears the EFB rectangle (GX copy with clear). */

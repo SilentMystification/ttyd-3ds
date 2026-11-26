@@ -195,6 +195,10 @@ extern u64 gx_vdesc_ver[2];
  *      state, the transform's flags, the uniform block): `gxdirty verify` lines. */
 extern int gx_opt_dirty;
 extern u32 gx_dirty;
+/* Switch gxone (GX native step 2, docs/PORT_3DS_GX_NATIVE.md): 1 the dirty classes are interned by their GX bytes at
+ * the draw boundary and the back end gets their ids (plat_gpu_set_state_one); 2 as 1 plus the back end's and
+ * gxdirty=2's checks. Implies gxdirty, gxonehop=1 and gxthread=0. */
+extern int gx_opt_one;
 enum {
     GXD_TEV = 1u << 0,    /* TEV stages, order, registers, konst colours, swap tables, indirect */
     GXD_TEX = 1u << 1,    /* texture maps, TLUTs (and texture copies, conversions dropped) */

@@ -676,6 +676,18 @@ static void tile_level(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u32 fmt, u8* 
     }
 }
 
+/* gpuprobe dt_tile reference (plat/gpuprobe_mode.c declares it weak): RGBA8 rows w x h tiled exactly as an upload
+ * tiles level 0. fmt is a DisplayTransfer format: 0 RGBA8, 2 RGB565, 3 RGBA5551, 4 RGBA4; others (RGB8) give 0. */
+int plat_probe_tile_ref(int fmt, const unsigned char* rgba, unsigned w, unsigned h, unsigned char* out);
+int plat_probe_tile_ref(int fmt, const unsigned char* rgba, unsigned w, unsigned h, unsigned char* out) {
+    static const s8 k_fmt[5] = {PLAT_TEXFMT_RGBA8, -1, PLAT_TEXFMT_RGB565, PLAT_TEXFMT_RGBA5551, PLAT_TEXFMT_RGBA4};
+    if (fmt < 0 || fmt > 4 || k_fmt[fmt] < 0 || (w & 7) != 0 || (h & 7) != 0) {
+        return 0;
+    }
+    tile_level(rgba, w, h, w, h, (u32)k_fmt[fmt], out);
+    return 1;
+}
+
 static u32 level_bytes(u32 fmt, u32 pw, u32 ph) { return pw * ph * fmt_bits(fmt) / 8; }
 
 /* Box filter of a 2x2 block, colour weighted by alpha (so a transparent texel's colour does not bleed in). */

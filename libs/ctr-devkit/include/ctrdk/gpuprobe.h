@@ -8,7 +8,9 @@
  *   HANG   the GPU never signalled completion (the probe then resets the GPU and goes on)
  *   FAULT  the process died during the case (found on the next run, from the journal)
  *   ERR    GSP refused the command list (no GPU work happened)
- *   SKIP   not run (the GPU did not come back after a reset)
+ *   SKIP   not run (the GPU did not come back after a reset, or a needed resource is absent)
+ * Command-processor cases (cb_jump*, cb_call*, cb_vram, cb_qtm, cb_irq) build the main list and the chunks by
+ * hand; cp_thru measures command-processor time; dt_tile_* compares DisplayTransfer tiling with a CPU tiler.
  * Results go to <dir>/gpuprobe.txt (table), <dir>/gpuprobe.journal (resume file) and
  * <dir>/gpuprobe/<case>.bin (the PICA command list of each case, for gpu_cmd_diff.py).
  *
@@ -36,6 +38,16 @@ typedef struct {
     bool no_dangerous;      /* skip the cases of danger level 3 (memory faults possible) */
     void (*log)(const char* line, void* user); /* NULL: printf */
     void* user;
+    /* Free New 3DS extra RAM ("QTM") the probe may use for the cb_qtm/vb_qtm/ib_qtm cases: CPU address, size and
+     * physical address (0x1F000000 + offset). NULL: those cases are SKIP. */
+    void* qtm;
+    unsigned qtm_bytes;
+    unsigned qtm_phys;
+    /* dt_tile reference: the app's CPU tiler. Puts RGBA8 rows (row 0 first, bytes R,G,B,A) of w x h into the tiled
+     * bytes of DisplayTransfer format fmt (GX_TRANSFER_FMT_*), as the app uploads a texture. Returns 0 when it has
+     * no tiler for fmt; the probe's own Morton tiler (row 0 to the last tile row) is used then. NULL: always the
+     * probe's own. */
+    int (*tile_ref)(int fmt, const unsigned char* rgba, unsigned w, unsigned h, unsigned char* out, void* user);
 } GpuProbeConfig;
 
 typedef struct {

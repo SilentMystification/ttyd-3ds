@@ -139,7 +139,11 @@ Switches the game reads (space-separated words in `--switches`):
 | `sdstats=N` | Every N seconds, an `sdstats` line: SD operations by kind (write, append, writeat, remove, rename, mkdir, read, disc) and the core that asked, queue depth now and at most, bytes written and read, and the **direct SD calls**: from core 1, and from cores 0/2 after the game loop began (must be 0; a warning gives the first caller's address and core). See [PORT_3DS_MULTICORE.md](PORT_3DS_MULTICORE.md) |
 | `jobstats=N` | A `[JOBS]` counter line every N frames while the counters change |
 | `jobcore=C`, `jobprio=P` | Job worker core and priority (defaults 2 and 0x30, below the render thread) |
-| `jobcheck=1` | Each split conversion runs with jobs and again inline from the same bytes, and the two are compared (`[JOBCHECK]` lines) |
+| `jobcheck=1` | Each split conversion runs with jobs and again inline from the same bytes, and the two are compared (`[JOBCHECK]` lines); the workers also assert the submitter's FPSCR |
+| `jobw1=1`, `jobcore1=C`, `jobprio1=P`, `jobspin=US`, `jobtakeover=US` | Job worker 1 on core 1 (default 0x2F) for frame batches; idle spin before sleeping (30); batch takeover delay (300). See [PORT_3DS_GAMEPAR.md](PORT_3DS_GAMEPAR.md) |
+| `gamecnt=N`, `jobprobe=1` | `[GAMECNT]` counters of the game's hot loops every N frames; job wake-up round trips (PORT_3DS_GAMEPAR.md) |
+| `mapnameidx=1/2` | Hash index for mapGetMapObj, hitNameToPtr, lightNameToPtr; 2 also runs the walk and counts mismatches (`[NAMEIDX]`) |
+| `mapdispjob=1/2`, `mapdispgrain=N` | mapDisp's per-object outcomes in parallel; 2 also runs the loop and compares (`[MAPDISPJOB]`) |
 | `loadstats` | A `[LOADCONV]` line per load-time conversion, and a summary per load: per-kind time, DVD reads and wait |
 | `convhash` | Adds an FNV-1a hash of each converted file to the `loadstats` lines |
 | `arqspin` | ARQ waits poll with a yield (the old behaviour) instead of sleeping until the next ARQ callback |

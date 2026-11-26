@@ -4,6 +4,7 @@
 #ifdef TARGET_PORT
 #include "port_addr.h"
 #include "port_formats.h"
+#include "port3ds/gamepar.h"
 #endif
 #include "driver/animdrv.h"
 #include <dolphin/os/OSFastCast.h>
@@ -4420,6 +4421,11 @@ void animPoseMain(s32 poseId) {
     s64 ms;
     s32 paperId;
 
+#ifdef TARGET_PORT
+    if (port_gamecnt_on()) {
+        port_cnt_animpose();
+    }
+#endif
     poses = wp->poses;
     pose = &poses[poseId];
     file = animPoseGetBaseData(pose);

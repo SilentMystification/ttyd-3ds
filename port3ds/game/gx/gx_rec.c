@@ -60,7 +60,7 @@ GxState gx_game;
 
 static __thread int t_game; /* the thread that called GXInit */
 
-enum { GXR_WRAP = 0xF0, GXR_LIST, GXR_PRIM, GXR_RAW };
+enum { GXR_WRAP = 0xF0, GXR_LIST, GXR_PRIM, GXR_RAW, GXR_PRIMD };
 #define HDR(type, n) ((u32)(type) << 24 | (n))
 #define KICK_WORDS 256u
 
@@ -205,6 +205,18 @@ static void run_one(u32 type, const u32* w, u32 n) {
         break;
     }
     case GXR_RAW: gx_run_raw(w, n); break;
+    case GXR_PRIMD: {
+        /* gximmdirect: the vertices are in the game thread's chunks since GXEnd */
+        u8 slots[8];
+        memcpy(slots, w + 6, 8);
+        gx_draw_prim_ring((u8)w[0], (u16)w[1], (const void*)w[2], (const u8*)w[3], w[4], slots, (int)(w[8] & 1),
+                          vtx_state_hash(&gx, w[0] & 7) == w[9]);
+        gx_vsh_gimm_translated(w[5]);
+        if (gx_rec_mode == 3) {
+            check_textures();
+        }
+        break;
+    }
     case REC_CopyDisp: {
         /* the frame's end: its submit waits for the replay of the last frame (counted apart) */
         u64 t0 = plat_ticks();
@@ -720,6 +732,43 @@ void gx_rec_prim(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* sl
     commit(n, 1);
 }
 
+/* gximmdirect: the game thread writes the primitive's vertices into its chunks now, in the ring's PICA layout,
+ * reading indexed attributes from their arrays at once, so no snapshot is taken. 0: record it the old way. */
+int gx_rec_prim_direct(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* slots) {
+    u32 fmt = primfmt & 7;
+    if (s_null || !gx_imm_rec_ok(&gx_game, (u8)(primfmt & 0xF8), nverts)) {
+        gx_imm_rec_count(0);
+        return 0;
+    }
+    const void* base;
+    u32 first, chunk;
+    u8* dst = gx_vsh_gimm_alloc(nverts, &base, &first, &chunk);
+    if (dst == NULL) {
+        gx_imm_rec_count(0);
+        return 0;
+    }
+    u8 attr_slot[8];
+    gx_imm_convert(&gx_game, (u8)fmt, slots, nverts, dst, attr_slot);
+    if (gx_opt_immdirect == 2) {
+        gx_imm_verify(&gx_game, (u8)fmt, slots, nverts, dst, attr_slot);
+    }
+    const u8* d = gx_game.vtx_desc;
+    u32* c = put(GXR_PRIMD, 10);
+    c[0] = primfmt;
+    c[1] = nverts;
+    c[2] = (u32)caller;
+    c[3] = (u32)base;
+    c[4] = first;
+    c[5] = chunk;
+    memcpy(c + 6, attr_slot, 8);
+    c[8] = d[GX_VA_NRM] != GX_NONE || d[GX_VA_NBT] != GX_NONE;
+    c[9] = vtx_state_hash(&gx_game, fmt);
+    s_gs.prims++;
+    gx_imm_rec_count(1);
+    commit(10, 1);
+    return 1;
+}
+
 void gx_rec_raw(const PPCWGPipe* slots, u32 nslots) {
     if (nslots == 0) {
         return;
@@ -1038,6 +1087,7 @@ void gx_rec_frame(void) {
     }
     gx_bbox_stats_log(f);
     gx_dirty_log(f);
+    gx_immdirect_log(f);
     if (gx_rec_mode == 3) {
         u32 gm = 0;
         for (int i = 0; i < GXG_COUNT; i++) {

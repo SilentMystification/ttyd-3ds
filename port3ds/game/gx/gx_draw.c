@@ -107,8 +107,12 @@ void gx_opts_init(void) {
     if (gx_opt_dirty < 0 || gx_opt_dirty > 2) {
         gx_opt_dirty = 1;
     }
-    PLOG_I("gx: statever %d fogcache %d unlit %d dirty %d", gx_opt_statever, gx_opt_fogcache, gx_opt_unlit,
-           gx_opt_dirty);
+    gx_opt_immdirect = plat_switch_int("gximmdirect", 0);
+    if (gx_opt_immdirect < 0 || gx_opt_immdirect > 2) {
+        gx_opt_immdirect = 1;
+    }
+    PLOG_I("gx: statever %d fogcache %d unlit %d dirty %d immdirect %d", gx_opt_statever, gx_opt_fogcache,
+           gx_opt_unlit, gx_opt_dirty, gx_opt_immdirect);
     gx_vsh_init();
 }
 
@@ -2018,6 +2022,56 @@ static int draw_vsh_imm(u8 prim, const GxVertex* v, u32 n, const void* ident, u3
 
 GxVshLast gx_vsh_last;
 
+int gx_opt_immdirect;
+
+/* gximmdirect: an immediate draw routed before its vertices are decoded, as gx_draw_vertices and draw_vsh_imm route
+ * it. GXI_OLD: not handled here (the caller decodes and calls gx_draw_vertices); GXI_SHADER: the caller writes the
+ * ring and calls gx_draw_imm_shader; GXI_CPU: routed to the CPU (decode, gx_draw_vertices_cpu); GXI_NONE: nothing
+ * to draw. ring_given: the vertices are in the game thread's chunks already (no room check in this ring). */
+int gx_draw_imm_route(u8 prim, u32 n, const void* caller, int ring_given) {
+    if (n == 0) {
+        return GXI_NONE;
+    }
+    if (!gx_vsh_on || gx_vsh_noted || gx.vtx_desc[GX_VA_PNMTXIDX] != GX_NONE || gx_bbox_active || s_bref_on ||
+        s_dump) {
+        return GXI_OLD; /* the bounding box and the dump need the assembled vertices */
+    }
+    gx_batch_flush(); /* an open batch's draws come before this one */
+    ensure_state();
+    if (empty_target()) {
+        return GXI_NONE;
+    }
+    vsh_state();
+    u32 why = gx_vsh_imm_on ? s_vsh_reasons | gx_vsh_imm_reasons(prim, n) : GXV_R_IMM;
+    if (why == 0 && !ring_given && !gx_vsh_imm_room(n)) {
+        why = GXV_R_POOL;
+    }
+    if (!gx_vsh_route(gx.cur_pnmtx, why, caller, 0xFFFFFFFFu, n, 1)) {
+        return GXI_CPU;
+    }
+    if (gx.cull == GX_CULL_ALL) {
+        return GXI_NONE;
+    }
+    return GXI_SHADER;
+}
+
+void gx_draw_imm_shader(const GxVshImm* im, u32 n) {
+    u32 scales = 0;
+    for (int u = 0; u < 3; u++) {
+        u8 a = s_vsh_unit_attr[u];
+        u32 slot = a < 8 ? im->attr_slot[a] : 0xFF;
+        scales |= (slot < 3 ? PLAT_VSH_UNIT(slot, 0) : PLAT_VSH_UNIT(3, 0)) << (8 + 8 * u);
+    }
+    if (s_vsh_lit) {
+        plat_gpu_vsh_light(&s_vsh_light, s_vsh_light_id);
+    }
+    plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
+    plat_gpu_vsh_draw(im->base, im->layout, scales, vsh_cull(), im->idx, im->nidx);
+    gx_vsh_count_shader(n, im->nidx);
+    gx_stat_draws++;
+}
+
+
 int gx_draw_batch_begin(const u8 unit_attr[3], u32 bat, const void* list0, u32 nbytes0, u32* hint0, void** group,
                         u32* cull) {
     ensure_state();
@@ -2122,7 +2176,8 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
             if (draw_vsh_imm(prim, v, n, ident, ident_n, !in_list)) {
                 return;
             }
-            goto routed;
+            gx_draw_vertices_cpu(prim, v, n);
+            return;
         }
         /* a draw only the CPU path makes (a decoded list, per-vertex matrices): its group goes to the CPU */
         u32 why = in_list ? GXV_R_MISS : GXV_R_IMM;
@@ -2140,7 +2195,11 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
             gx_vsh_route(v[0].pnmtx, why, NULL, 0, n, !in_list);
         }
     }
-routed:
+    gx_draw_vertices_cpu(prim, v, n);
+}
+
+/* The CPU path of a draw routed already (gx_draw_vertices, gx_draw_imm_route). */
+void gx_draw_vertices_cpu(u8 prim, const GxVertex* v, u32 n) {
     if (empty_target()) {
         return;
     }

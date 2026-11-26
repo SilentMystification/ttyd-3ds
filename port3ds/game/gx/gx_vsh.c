@@ -545,15 +545,25 @@ u32 gx_vsh_imm_reasons(u8 prim, u32 n) {
     return why;
 }
 
+static void imm_layout_init(void) {
+    if (s_imm_stride == 0) {
+        s_imm_stride = plat_vsh_layout_n(0, 3, 0, 1, s_imm_off); /* with the normal, for lit draws */
+        s_imm_layout = plat_vsh_layout_word_n(0, 3, 0, 1);
+    }
+}
+
+u32 gx_vsh_imm_layout(int32_t off[6]) {
+    imm_layout_init();
+    memcpy(off, s_imm_off, sizeof(s_imm_off));
+    return s_imm_stride;
+}
+
 /* Room for n vertices in the ring (a fresh chunk when the current one is full). */
 int gx_vsh_imm_room(u32 n) {
     if (s_imm_cur >= 0 && s_imm[s_imm_cur].used + n <= IMM_CHUNK_VERTS) {
         return 1;
     }
-    if (s_imm_stride == 0) {
-        s_imm_stride = plat_vsh_layout_n(0, 3, 0, 1, s_imm_off); /* with the normal, for lit draws */
-        s_imm_layout = plat_vsh_layout_word_n(0, 3, 0, 1);
-    }
+    imm_layout_init();
     u32 now = plat_gpu_present_count();
     for (int i = 0; i < IMM_CHUNKS; i++) {
         if (i == s_imm_cur) {
@@ -576,20 +586,17 @@ int gx_vsh_imm_room(u32 n) {
     return 0;
 }
 
-/* Writes an immediate draw (room checked) and returns its stream. */
-const GxVshImm* gx_vsh_imm_build(u8 prim, const GxVertex* v, u32 n) {
-    typeof(s_imm[0])* c = &s_imm[s_imm_cur];
-    u32 first = c->used;
+/* The ring layout of n assembled vertices (gx_vsh_imm_build's writer; gximmdirect=2 compares with it). */
+void gx_vsh_imm_write(const GxVertex* v, u32 n, const u8* vtx_desc, u8* out, u8 attr_slot[8]) {
     u8 slot_attr[3] = {0, 0, 0};
     u32 nslots = 0;
-    memset(s_imm_out.attr_slot, 0xFF, sizeof(s_imm_out.attr_slot));
+    memset(attr_slot, 0xFF, 8);
     for (int t = 0; t < 8 && nslots < 3; t++) {
-        if (gx.vtx_desc[GX_VA_TEX0 + t] != GX_NONE) {
-            s_imm_out.attr_slot[t] = (u8)nslots;
+        if (vtx_desc[GX_VA_TEX0 + t] != GX_NONE) {
+            attr_slot[t] = (u8)nslots;
             slot_attr[nslots++] = (u8)t;
         }
     }
-    u8* out = c->base + first * s_imm_stride;
     for (u32 i = 0; i < n; i++) {
         u8* p = out + i * s_imm_stride;
         memcpy(p + s_imm_off[0], v[i].pos, 12);
@@ -612,11 +619,102 @@ const GxVshImm* gx_vsh_imm_build(u8 prim, const GxVertex* v, u32 n) {
         p[s_imm_off[1] + 2] = cl->b;
         p[s_imm_off[1] + 3] = cl->a;
     }
-    plat_gpu_stream_commit(out, n * s_imm_stride);
+}
+
+u8* gx_vsh_imm_dst(void) { return s_imm[s_imm_cur].base + s_imm[s_imm_cur].used * s_imm_stride; }
+
+/* The n vertices written at gx_vsh_imm_dst are a draw: committed, counted, indexed. */
+const GxVshImm* gx_vsh_imm_done(u8 prim, u32 n, const u8 attr_slot[8]) {
+    typeof(s_imm[0])* c = &s_imm[s_imm_cur];
+    u32 first = c->used;
+    plat_gpu_stream_commit(c->base + first * s_imm_stride, n * s_imm_stride);
     c->used += n;
     c->last_frame = plat_gpu_present_count();
     u16* end = emit_tris(prim, first, n, s_imm_idx);
+    memcpy(s_imm_out.attr_slot, attr_slot, sizeof(s_imm_out.attr_slot));
     s_imm_out.base = c->base;
+    s_imm_out.layout = s_imm_layout;
+    s_imm_out.idx = s_imm_idx;
+    s_imm_out.nidx = (u32)(end - s_imm_idx);
+    s_st.imm_vsh++;
+    s_st.imm_verts_vsh += n;
+    return &s_imm_out;
+}
+
+/* Writes an immediate draw (room checked) and returns its stream. */
+const GxVshImm* gx_vsh_imm_build(u8 prim, const GxVertex* v, u32 n) {
+    u8 attr_slot[8];
+    gx_vsh_imm_write(v, n, gx.vtx_desc, gx_vsh_imm_dst(), attr_slot);
+    return gx_vsh_imm_done(prim, n, attr_slot);
+}
+
+/* ---- gximmdirect while recording (gxthread=1..3): the game thread's own chunks ----
+ * The game thread writes a primitive's vertices at GXEnd into these, the
+ * translator draws them from here (or rebuilds GxVertex from them for the CPU
+ * path). A chunk is reused once every draw written to it has been translated
+ * and 3 frames have been presented since the last of them, the rule of the
+ * translator's own ring above. */
+static struct {
+    u8* base;
+    u32 used;         /* game thread */
+    u32 pending;      /* draws written, not yet translated (atomic) */
+    u32 last_frame;   /* translator: presented-frame count when it last translated one (atomic) */
+} s_gimm[IMM_CHUNKS];
+static int s_gimm_cur = -1;
+
+u8* gx_vsh_gimm_alloc(u32 n, const void** base, u32* first, u32* chunk) {
+    if (n == 0 || n > IMM_MAX_VERTS) {
+        return NULL;
+    }
+    if (s_gimm_cur < 0 || s_gimm[s_gimm_cur].used + n > IMM_CHUNK_VERTS) {
+        imm_layout_init();
+        u32 now = plat_gpu_present_count();
+        int found = -1;
+        for (int i = 0; i < IMM_CHUNKS; i++) {
+            if (i == s_gimm_cur) {
+                continue;
+            }
+            if (s_gimm[i].base == NULL) {
+                s_gimm[i].base = plat_gpu_stream_alloc(IMM_CHUNK_VERTS * s_imm_stride);
+                if (s_gimm[i].base == NULL) {
+                    break;
+                }
+                __atomic_store_n(&s_gimm[i].last_frame, now - 3, __ATOMIC_RELAXED);
+            }
+            if (__atomic_load_n(&s_gimm[i].pending, __ATOMIC_ACQUIRE) == 0 &&
+                (s32)(now - __atomic_load_n(&s_gimm[i].last_frame, __ATOMIC_RELAXED)) >= 3) {
+                found = i;
+                break;
+            }
+        }
+        if (found < 0) {
+            return NULL;
+        }
+        s_gimm_cur = found;
+        s_gimm[found].used = 0;
+    }
+    typeof(s_gimm[0])* c = &s_gimm[s_gimm_cur];
+    *base = c->base;
+    *first = c->used;
+    *chunk = (u32)s_gimm_cur;
+    c->used += n;
+    __atomic_fetch_add(&c->pending, 1, __ATOMIC_RELAXED);
+    return c->base + *first * s_imm_stride;
+}
+
+void gx_vsh_gimm_translated(u32 chunk) {
+    if (chunk < IMM_CHUNKS) {
+        __atomic_store_n(&s_gimm[chunk].last_frame, plat_gpu_present_count(), __ATOMIC_RELAXED);
+        __atomic_fetch_sub(&s_gimm[chunk].pending, 1, __ATOMIC_RELEASE);
+    }
+}
+
+/* Translator: a draw the game thread wrote to its chunks, n vertices from `first` of the chunk at `base`. */
+const GxVshImm* gx_vsh_imm_at(u8 prim, const void* base, u32 first, u32 n, const u8 attr_slot[8]) {
+    plat_gpu_stream_commit((const u8*)base + first * s_imm_stride, n * s_imm_stride);
+    u16* end = emit_tris(prim, first, n, s_imm_idx);
+    memcpy(s_imm_out.attr_slot, attr_slot, sizeof(s_imm_out.attr_slot));
+    s_imm_out.base = base;
     s_imm_out.layout = s_imm_layout;
     s_imm_out.idx = s_imm_idx;
     s_imm_out.nidx = (u32)(end - s_imm_idx);

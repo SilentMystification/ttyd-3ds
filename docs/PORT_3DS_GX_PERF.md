@@ -775,6 +775,61 @@ Console command (owner-gated; not run): install the release CIA and set `gxdirec
 
 **Not done:** `vsh_accept.py`, the other six scenes of the ten, the `gxcache=2` sweep with `gxdirect=1`, `gxthread=2` with `gxdirect`, any console run. Default stays 0.
 
+## Stage 4, `gximmdirect`: immediate mode written in PICA form (2026-11-26)
+
+Switch `gximmdirect` (default 0; 2 is a verify mode). Files: `gx_pipe.c` (the converter, the translator's side), `gx_draw.c` (`gx_draw_imm_route`, `gx_draw_imm_shader`, `gx_draw_vertices_cpu`), `gx_vsh.c` (the ring split into write and finish, the game thread's chunks), `gx_rec.c` (`GXR_PRIMD`). Display lists are not touched: only `GXBegin`/`GXEnd` primitives outside a list.
+
+- **Route first.** `gx_draw_imm_route` makes the decisions `gx_draw_vertices` and `draw_vsh_imm` make, in the same order (batch flush, state, empty target, uniform block, reasons, ring room, `gx_vsh_route` with the caller as the group's identity, cull all), before any vertex is decoded. Draws it does not handle (`gxvsh=0`, a draw routed already, per-vertex matrices, the bounding box armed, `gxdump`) take the old path unchanged.
+- **Shader path: no `GxVertex`.** `gx_imm_convert` builds a plan once per primitive from the vertex description and format (skip, components direct or from an array, colour direct or from an array; the first three texture attributes take slots 0 to 2), then runs it per vertex over the pipe slots into the ring chunk: float position, three float slots, float normal (0, 0, 1 when there is none), u8 colour 0, from a template with white colour and zero slots. Each step uses read_vertex's expressions, so the bytes are the ones `gx_vsh_imm_build` wrote from the decoded vertex.
+- **CPU path.** A draw routed to the CPU is decoded as before (`read_vertex`) and goes to `gx_draw_vertices_cpu`, the old code after routing.
+- **While recording (`gxthread=1..3`).** At `GXEnd` the game thread converts the primitive with the shadow's vertex state (`gx_game`) into chunks of its own (8 of 16384 vertices, linear memory, allocated when first needed) and records `GXR_PRIMD` (10 words: primitive, count, caller, chunk, first vertex, slot map, normal flag, vertex-state hash) instead of the pipe words and **array snapshots**. The translator routes it; on the shader path it draws from the chunk (the flush is recorded there); otherwise it rebuilds the `GxVertex` read_vertex would make from the chunk bytes (exact: the draw is taken only without colour 1, matrix indices or a fourth texture attribute). A chunk is reused when every draw in it has been translated and 3 frames have been presented since the last (atomic counters). A primitive that does not qualify, or no free chunk, is recorded the old way. `gxnull` records the old way.
+- **Counters:** with `gxthreadstats=N`, a `gximmdirect frame N:` line (draws to the ring, routed to the CPU, the old way, nothing to draw; recorded at `GXEnd`, recorded the old way; verify checks and mismatches, vertex-state differences between shadow and translator).
+
+Results (Azahar, build `df0a3544` = port3ds `48c6335a` + this change, release unless noted):
+
+| Check | Result |
+|---|---|
+| `gximmdirect=2`, gor_01, `gxthread=0`, frames 1 to 840 (dev build) | 90 832 primitives converted and decoded the old way, **0 mismatches**; 369 to the ring per frame in the map, 0 the old way |
+| `gximmdirect=2`, effects battle, `gxthread=0`, frames 1 to 960 (dev build) | 149 372 checks, **0 mismatches** |
+| `gximmdirect=2`, gor_01, `gxthread=2`, frames 1 to 840 (dev build) | 69 124 checks, **0 mismatches**, 0 vertex-state differences; 318 to 321 primitives per frame recorded at `GXEnd`, 0 the old way; array snapshots 0 bytes per frame |
+| `gximmdirect=2`, pause menu, `gxthread=2`, frames 1 to 900 (dev build) | 85 712 checks, **0 mismatches**; 44 per frame routed to the CPU in one window (the rebuild from the chunk ran) |
+| `gxvsh=0 gxthread=2 gximmdirect=2`, gor_01 to frame 780 (dev build) | every primitive the old way (369 per frame), 330 recorded the old way: the CPU fallback is unchanged |
+| `determ` (`determ_ab.py`), `gxdirect=1` against `gxdirect=1 gximmdirect=1`: gor_01, hei_01, aaa_00, pause shots 780 to 785; effects battle 900 to 905 | **6 of 6 byte-identical in each** (30 of 30; 77 to 98% of pixels off the commonest colour) |
+| `gw_diff.py`, 1600-frame padscript (`map=gor_01 story=30 determ gwdump=10` and the A2 padscript), `gxdirect=1` against `gxdirect=1 gximmdirect=1` | `gw_diff: A 160 records, B 160 records` / `gw_diff: 160 records equal (f 10..1600, fields compared: 23)` |
+
+Same-build A/B, `tools/port3ds/gx_perf_ab.py`, windows ending at frames 722 to 841, base `gxdirect=1` (today's defaults otherwise), `gxthread=0`:
+
+| Scene | frame A -> B (ms) | core-0 busy A -> B (ms) | render A -> B (ms) | runs |
+|---|---|---|---|---|
+| gor_01 | 50.5 -> 50.6 | 45.9 -> 45.9 | 7.9 -> 7.9 | 2 per cell (a first single run: 50.5 -> 50.5, 45.8 -> 45.9) |
+| effects battle | 38.9 -> 38.5 | 27.6 -> 27.5 | 3.8 -> 3.8 | 1 |
+| hei_01 | 33.4 -> 33.4 | 21.0 -> 21.0 | 3.4 -> 3.4 | 2 (single: 33.4 -> 33.6, 21.0 -> 21.1) |
+| aaa_00 | 33.4 -> 33.4 | 22.6 -> 22.5 | 4.2 -> 4.2 | 2 |
+| pause menu | 32.9 -> 33.3 | 18.1 -> **17.7** | 3.8 -> 3.9 | 2 |
+
+The first A/B lost the A runs of aaa_00 and the pause menu (`run_azahar: FAIL: Azahar exited (status 134)`, base switches, which had run before for `determ`); they were run again with the others at 2 runs per cell.
+
+With `gxthread=2` (`gxdirect=1 gxthread=2` against `+ gximmdirect=1`, one run per cell), where the plan expected the saving (no snapshots):
+
+| Scene | frame A -> B | game busy A -> B | fences A -> B | translator A -> B | render |
+|---|---|---|---|---|---|
+| gor_01 | 50.3 -> 50.0 | 28.9 -> 29.2 | 8.9 -> 6.0 | 28.8 -> **26.3** | 7.9 -> 7.9 |
+| pause menu | 24.1 -> 16.7 | 8.7 -> 10.0 | 6.7 -> 3.9 | 13.7 -> **10.5** | 3.9 -> 3.9 |
+
+- In `gxthread=0` the switch changes nothing measurable: busy time moves by 0.1 ms or less, except the pause menu (-0.4 ms, -2%); frames are vblank- or wait-bound. The plan's "about 6%" was `draw_from_reader` and `gx_draw_vertices` together; what the switch removes is only the decode into `GxVertex` and the copy from it. Routing, the uniform block and the ring write stay.
+- With `gxthread=2` the conversion moves to the game thread (busy +0.3 and +1.3 ms) and the translator gets shorter (-9% and -23%), the fences shorter with it. These are single runs with the split's hill climbing in the loop: a hint, not a measurement.
+- No scene is slower by more than the run-to-run spread (0.1 to 0.4 ms in frame); the pause menu's frame 32.9 -> 33.3 comes with lower busy time. Whether that counts as "no scene slower" is the owner's call.
+
+**Console-test items** (Azahar accepts these; hardware is not proven):
+
+1. The game thread's chunks are written on core 0 and flushed by the record's flush list on the translating side (`plat_gpu_stream_commit` at translation): the ring bytes must be in memory when the GPU reads them (with `gxthread=2`, the writing and the flushing thread differ).
+2. Chunk reuse with `gxthread=2`: the atomic pending count and presented-frame stamp between core 0 and core 2. A chunk reused too early shows as wrong immediate geometry (characters, windows, effects) for a frame.
+3. Linear memory: up to 8 more chunks of 832 KB with `gxthread=1..3` (allocated when needed; how many a scene takes was not counted).
+
+Console command (owner-gated; not run): install the release CIA, set `gximmdirect=1 gxthreadstats=60` in `debug3ds.txt` (once with `gxthread=0`, once with `gxthread=2`), compare busy and translator times and look at characters and menus in gor_01, a battle and the pause menu.
+
+**Not done:** `vsh_accept.py`, the other scenes of the ten, `gxthread=1` and `3` (only 0 and 2 ran), stereo on (the record is eye-independent: the draws are ordinary `CMD_VSH_DRAW`s; not run with the 3D slider), `gxdirect=0` with `gximmdirect=1` other than the 0-mismatch verify runs (those ran with `gxdirect=0`), any console run. Default stays 0.
+
 ## Risks of the cache
 
 - **Hash collisions.** A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.

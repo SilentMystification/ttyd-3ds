@@ -776,7 +776,7 @@ void gx_rec_state_list(const void* list, u32 nbytes) {
     }
 }
 
-static int is_state_list(const void* list, u32 nbytes) {
+static inline __attribute__((always_inline)) int is_state_list(const void* list, u32 nbytes) {
     s_sl_hashed = 0;
     u32 h = sl_hash(list);
     for (u32 i = 0; i < SL_SLOTS; i++, h = (h + 1) & (SL_SLOTS - 1)) {
@@ -1135,8 +1135,8 @@ static u32 s_fl_used;
 /* The entry for this list with its bytes as they are now, or NULL. hint (gxlobj): the slot the list had last
  * time, taken when it still holds the list (a key is in at most one slot of its probe window, so the slot is
  * the one the probe finds); the slot used is stored back. */
-static FlEntry* fl_get_body(const void* list, u32 nbytes, u16* hint);
-static FlEntry* fl_get(const void* list, u32 nbytes, u16* hint) {
+static inline __attribute__((always_inline)) FlEntry* fl_get_body(const void* list, u32 nbytes, u16* hint);
+static inline __attribute__((always_inline)) FlEntry* fl_get(const void* list, u32 nbytes, u16* hint) {
     FlEntry* e = fl_get_body(list, nbytes, hint);
     if (hint != NULL) {
         *hint = (u16)(e - s_fl + 1);
@@ -1144,7 +1144,7 @@ static FlEntry* fl_get(const void* list, u32 nbytes, u16* hint) {
     return e;
 }
 
-static FlEntry* fl_get_body(const void* list, u32 nbytes, u16* hint) {
+static inline __attribute__((always_inline)) FlEntry* fl_get_body(const void* list, u32 nbytes, u16* hint) {
     u32 h = ((u32)(uintptr_t)list >> 5 ^ nbytes * 0x9E3779B1u) * 2654435761u >> 21;
     FlEntry* e = NULL;
     FlEntry* freeslot = NULL;
@@ -1254,7 +1254,7 @@ static __attribute__((noinline)) u32 fuse_call_slow(u32 hd, const u32* c, u32 ge
 }
 
 /* A state list's calls through the dedup table: 1 when done, 0 when the list takes the old way. */
-static int fuse_list(const void* list, u32 nbytes, u16* hint) {
+static inline __attribute__((always_inline)) int fuse_list(const void* list, u32 nbytes, u16* hint) {
     if (nbytes == 0 || nbytes > 0x4000) {
         return 0;
     }

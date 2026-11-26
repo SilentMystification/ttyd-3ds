@@ -399,13 +399,14 @@ u32 GXGetTexBufferSize(u16 width, u16 height, u32 format, u8 mipmap, u8 max_lod)
         break;
     }
     u32 size = 0;
+    u32 tws = __builtin_ctz(tile_w), ths = __builtin_ctz(tile_h);
     u32 levels = mipmap ? max_lod : 1;
     if (levels == 0) {
         levels = 1;
     }
     for (u32 l = 0; l < levels; l++) {
-        u32 tw = (width + tile_w - 1) / tile_w;
-        u32 th = (height + tile_h - 1) / tile_h;
+        u32 tw = (width + tile_w - 1) >> tws; /* tile_w and tile_h are 4 or 8 */
+        u32 th = (height + tile_h - 1) >> ths;
         size += tw * th * bpt;
         if (width == 1 && height == 1) {
             break;

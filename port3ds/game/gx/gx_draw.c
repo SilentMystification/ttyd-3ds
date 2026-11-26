@@ -376,6 +376,24 @@ static void assign_units(void) {
         s_unit_coord[s_units] = coord;
         s_units++;
     }
+    /* a projective (MTX3x4) texgen goes on unit 0, the one PICA unit with a projective lookup (shader path: q is
+     * passed on in texcoord0.w; the CPU path has divided already and passes q = 1) */
+    for (int k = 1; k < s_units && gx_opt_vshtg; k++) {
+        if (gx.texgen[s_unit_coord[0]].func != GX_TG_MTX3x4 && gx.texgen[s_unit_coord[k]].func == GX_TG_MTX3x4) {
+            int tm = s_unit_map[0], tc = s_unit_coord[0];
+            s_unit_map[0] = s_unit_map[k];
+            s_unit_coord[0] = s_unit_coord[k];
+            s_unit_map[k] = tm;
+            s_unit_coord[k] = tc;
+            for (int m = 0; m < GX_MAX_TEXMAP; m++) {
+                gx_unit_of_map[m] = gx_unit_of_map[m] == 0 ? k : gx_unit_of_map[m] == k ? 0 : gx_unit_of_map[m];
+            }
+            for (int st = 0; st < GX_MAX_TEV; st++) {
+                gx_unit_of_stage[st] = gx_unit_of_stage[st] == 0 ? k : gx_unit_of_stage[st] == k ? 0 : gx_unit_of_stage[st];
+            }
+            break;
+        }
+    }
     fog_ramp_setup();
     s_color_chan = chan_votes[1] > chan_votes[0] ? 1 : 0;
     if (chan_votes[0] && chan_votes[1]) {
@@ -407,6 +425,7 @@ static void build_tex_units(PlatGpuState* st) { /* the units (TEV order), the te
         static const u8 wrap[3] = {0 /*CLAMP_TO_EDGE*/, 2 /*REPEAT*/, 3 /*MIRRORED_REPEAT*/};
         tu->wrap_s = wrap[t->wrap_s % 3];
         tu->wrap_t = wrap[t->wrap_t % 3];
+        tu->proj = u == 0 && gx.texgen[s_unit_coord[0]].func == GX_TG_MTX3x4;
         gx_tex_unit_sampler(tu, t, map); /* min/mag filter, mip filter, LOD bias (the texfilter option) */
     }
 }

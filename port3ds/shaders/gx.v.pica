@@ -50,6 +50,7 @@
 .out outpos position
 .out outclr color
 .out outtc0 texcoord0
+.out outtc0w texcoord0w
 .out outtc1 texcoord1
 .out outtc2 texcoord2
 
@@ -131,8 +132,8 @@
         mov r8, innrm
         mov r8.w, consts.z
         ; unit 0: source (slot x weight, wtex, 1) + wpos x position + wnrm x normal, then (s, t, q) rows;
-        ; s and t times 1 + w (1/q - 1): w = 1 divides by q (MTX3x4; q = 0 is left undivided, as the CPU path
-        ; does), w = 0 multiplies by exactly 1
+        ; unit 0 is the PICA unit with a projective lookup: texcoord0.w = 1 + w (q - 1), and the unit divides by it
+        ; per pixel (w = 1: MTX3x4, q = 0 is left undivided, as the CPU path does; w = 0: w = 1, a plain lookup)
         mul r4, texsel[0].xxxx, intc0
         mad r4, intc1, texsel[0].yyyy, r4
         mad r4, intc2, texsel[0].zzzz, r4
@@ -147,11 +148,9 @@
         max r14.x, r15.x, -r15.x
         sge r14.x, consts.z, r14.x
         add r15.x, r15.x, r14.x
-        rcp r15.x, r15.x
         add r15.x, -consts.y, r15.x
         mul r15.x, tgsrc[0].wwww, r15.x
-        add r15.x, consts.y, r15.x
-        mul r1.xy, r15.xx, r1.xy
+        add r1.w, consts.y, r15.x
 
         ; unit 1: source (slot x weight, wtex, 1) + wpos x position + wnrm x normal, then (s, t, q) rows;
         ; s and t times 1 + w (1/q - 1): w = 1 divides by q (MTX3x4; q = 0 is left undivided, as the CPU path
@@ -216,6 +215,7 @@
     mov outpos, r0
     mul outclr, inv255, r5
     mov outtc0, r1
+    mov outtc0w, r1.wwww
     mov outtc1, r3
     mov outtc2, r6
     end

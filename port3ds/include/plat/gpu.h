@@ -90,7 +90,8 @@ typedef struct {
     uint32_t handle;
     uint8_t wrap_s, wrap_t;  /* GPU_TEXTURE_WRAP_PARAM */
     uint8_t min_linear, mag_linear, mip_linear; /* mip_linear: linear filter between the levels (only used when the texture has levels) */
-    uint8_t pad[3];
+    uint8_t proj;            /* unit 0 only: projective lookup (texcoord0.w is q); the vertex shader passes q on */
+    uint8_t pad[2];
     float lod_bias;              /* added to the hardware's level of detail, in levels */
 } PlatGpuTexUnit;
 

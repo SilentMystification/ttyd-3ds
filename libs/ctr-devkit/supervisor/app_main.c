@@ -71,6 +71,9 @@ int main(void) {
     s_cfg.kind = "app";
     s_cfg.version = CTRDK_BUILD_STAMP;
     sv_config_defaults(&s_cfg);
+    /* This process holds the GPU itself, and Azahar does not implement ResetGpuCore; its AcquireRight from
+     * the right's holder fails an assertion and ends the emulator (gsp_gpu.cpp). Off unless set. */
+    s_cfg.gpureset = 0;
     sv_config_load(&s_cfg, true);
     sv_log_enable_file(s_cfg.log_file);
     long hb_stop = cfg_int("app_hb_stop", 0);

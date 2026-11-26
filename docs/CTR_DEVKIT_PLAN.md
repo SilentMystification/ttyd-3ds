@@ -264,7 +264,56 @@ How to keep them rare:
   - the game dev build with the Select-menu row.
 - **Run in Azahar (the app build):** `ping` and `status` answered, an unknown command got `error 4`, a bad header got `error 1`.
 - **Not run:** the module itself (Azahar cannot start it, F16); nothing on the console.
-- **Phase 2:** commands `0x102`-`0x106`, push and files, the heartbeat service, `devupdate.py loop`.
+- **Phase 2:** built; see the next section.
+
+### Phase 2 (built 2026-11-26)
+
+**Owner questions still open; each choice is a switch** (`sdmc:/3ds/ctrdk/supervisor.cfg`, `include/ctrdk/supervisor.h` lists every key):
+
+| Question | Default built | Switch |
+|---|---|---|
+| Q1 cold boot | on demand only: no ExHeader override at boot | none in code; an override would be an owner step on the SD card (F2) |
+| Q2 NDM hold | off | `ndm_hold=1` (Rosalina's calls: `NDMU_EnterExclusiveState(INFRASTRUCTURE)`, `NDMU_LockState`) |
+| Q3 watchdog | off until the PC sends `watch N` | `watch=N` arms it at every supervisor start |
+| Q4 carrying the CIA | a separate SD file (`files put`, Select menu), never in the game CIA | remote update: `supervisor self-update` |
+
+Other switches: `gpureset=0|1|2` (default 2), `launch=ns|pm` (default ns), `launch_flags=` (default 1), `terminate_ms=` (3000), `max_relaunches=` (2), `log=0|1` (1, `sdmc:/3ds/ctrdk/supervisor.log`, moved to `supervisor.old.log` past 256 KiB).
+
+**Commands as built** (`supervisor/server.c`):
+
+| Cmd | What it does |
+|---|---|
+| 0x102 terminate `[gpureset=N]` | `PMAPP_TerminateTitle(game, terminate_ms)` (0x100, then PM's forced end); if the process still runs 1 s later, `svcTerminateProcess` on it. Then the GPU reset attempt. Reply: `terminate pm=<rc> pid= ms= forced= kill= state=` and `gpureset ...` |
+| 0x103 launch `<switches>` | ends the game first when it runs (a launch of a running title does nothing, F3), GPU reset, writes `ctrdk:<switches> ctrdk_from=supervisor` to `sdmc:/3ds/ctrdk-launch-args.txt`, `NS_LaunchTitle(game, launch_flags)` (or `PMAPP_LaunchTitle`). A failed launch removes the file, so a later manual start does not pick up the switches |
+| 2 push | terminate, `AM_StartCiaInstall(SD)`, 64 KiB writes at 64 KiB offsets, CRC before `AM_FinishCiaInstall`, cancel on error (devupdate's error codes and `stage=` words), GPU reset, launch. On a failed install the old build is launched again, so the PC can retry here or on 5050. A title other than `game=` is refused (`error 24`); with `game=` empty the pushed title becomes the game. The supervisor's own title: NAND install, launch the game if it is not running, reply, exit |
+| 6 files `get|ls` | read-only, `dir=` (written by the app's `ensure()`: its working directory); `@sv/...` is `sdmc:/3ds/ctrdk/`. Two passes over the first N bytes, so a log the game appends to still matches its CRC |
+| 0x104 watch `N` | arms (0 disarms); the relaunch count starts at 0 |
+| 0x105 reboot `[hard|dry]` | replies first, then `NS_RebootToTitle(SD, game, 0)`; if it fails, or nothing happens for 15 s, `APT_HardwareResetAsync` |
+| 0x106 exit | replies, then the module ends |
+
+**Bounded waits.** The module sets `srvSetBlockingPolicy(true)`: a full service port (pm:app has 4 sessions) fails at once instead of waiting. PM's terminate has its own timeout. `GSPGPU_AcquireRight` can wait while another process holds the right, so the GPU reset runs on its own thread; the server waits 2 s at most, and while an earlier attempt still waits in GSP the next one is skipped. Receives time out after 15 s (push) or 10 s (header). Nothing waits for the game.
+
+**GPU reset** (F13, H4): opens its own `gsp::Gpu` session with raw IPC (no `gspInit`, which would register an interrupt queue and take the right): `ResetGpuCore` (0x001B0000), then `AcquireRight(0)` (0x00160042), `ResetGpuCore`, `ReleaseRight` (0x00170000). Each result is in the reply and the log. Needs only the `gsp::Gpu` session (Luma's sm does not check the RSF list, F5; the RSF lists it anyway).
+
+**Heartbeat** (`supervisor/hb.c`, `client.c`): service `ctrdk:sv`, 3 sessions. Command `0x00010080` (frame, flags) -> `0x00010080` (0, watch seconds). `ctrdk_supervisor_heartbeat(frame, flags)` only stores two words; a client thread (priority 0x3F, the app's core) sends them once per second, so the game's frame loop never waits on IPC. Without the service it looks again every 10 s and calls `ensure()` (every 60 s when the supervisor is not installed). With devupdate linked, the thread adds `paused` while an update holds the app (`devupdate_busy()`) and `recovery` in recovery mode. TTYD (`port3ds/plat/boot.c`, dev builds only): `ensure()` after the log starts, before the GPU, audio and the disc; one heartbeat per `plat_frame_poll`, `loading` while a watchdog hold is up.
+
+**Watchdog** (`supervisor/policy.c`, plain C, tested on the PC by `devupdate.py selftest`): off, or the game stopped -> nothing; `paused`/`recovery` -> the timer restarts; no change of the frame value for N s (4 N with `loading`) -> terminate, GPU reset, relaunch with the last switches, at most `max_relaunches` per push or arm, then it disarms itself. A game that hangs before its first heartbeat counts from the launch. "Unknown" process state (emulators) counts as running.
+
+**PC side** (`devupdate.py`): `supervisor ping|status|terminate|launch|push|files|log|watch|reboot|exit|self-update`, and `loop manifest.json` as in the runner contract above. Manifest entries: `{name, cia, switches, until, frames, timeout_s, watch, collect}`; an entry without `cia` launches the installed build. Per-step limits are manifest fields (`push_timeout_s` 120, `start_timeout_s` 60, `reboot_wait_s` 90, `poll_s` 5, `log_poll_s` 10). Results: `build/loop/<run>/results.tsv`, `loop.log`, and `NN_<name>/` with `latest.log`, `crash.txt`, `gpuhang/*`. Exit 2 (with the entry and the last status in `loop.log`) only when the supervisor stops answering.
+
+**Tested off the console:**
+- `devupdate.py selftest`: 80 of 80 (the push framing as before; each supervisor request through the device's decoder; 29 cases of the watchdog policy and the text helpers, `policy.c` built with gcc; the runner against mock consoles: pattern end, frame-count end, push fallback to 5050 after two refused supervisor pushes, exit 2 when the supervisor is gone).
+- Azahar, the app build (`ctrdk-supervisor-app.3dsx`, which sends itself heartbeats through the real client and service), two sessions, 2026-11-26:
+  - `ctrdk:sv` registered, 1 session, the heartbeat count and frame value rose once per second (status `heartbeat=23 frame=1198`), then froze at `app_hb_stop`;
+  - `files get @/latest.log` (70,890 bytes) and `gpuhang/dump_1.bin` (76,800 bytes) byte-identical; `ls @/`, `ls @/gpuhang` right; `@/../ctrdk/supervisor.cfg` -> `error 20 bad path`; a missing file -> `error 21`; `put` -> `error 20 read-only`; an unknown command -> `error 4`; `log --sv` returned the module's log;
+  - `reboot --dry` answered; `terminate` with the game not running: `state=stopped (nothing to end)`;
+  - `terminate` with `gpureset=2`: Azahar logs `ResetGpuCore` as unimplemented and its `AcquireRight` handler fails an assertion, which ends the emulator. Hence the app build's `gpureset=0` default;
+  - `watch 5` armed; it did not fire, as specified: Azahar's process list reports the game `stopped` (it is not running), and a stopped game is never relaunched. The relaunch decision itself is covered by the policy self-test;
+  - `launch "map=gor_01 wdog=9"`: args file `ctrdk:map=gor_01 wdog=9 ctrdk_from=supervisor` written, `NS_LaunchTitle` rc 0 (Azahar's NS: nothing starts; the supervisor kept answering);
+  - `push build/3ds/game/ttyd.cia` (4,365,760 bytes, 3.3 s): `ok receiving`, `installing`, `installed 000400000fd88600`, launch rc 0;
+  - `self-update ctrdk-supervisor.cia`: installed `0004013000fd8a02` to NAND (the title folder appeared in the profile's NAND), launched the game because it was not running, replied `exiting`, and the app ended.
+
+**Only the console can show:** that PM starts the module and the module runs beside the game (F16); `PMAPP_TerminateTitle` on a hung game (H4); whether GSP accepts `ResetGpuCore` from this process and whether it frees a stuck PICA (H4; Azahar does not implement it, and its `AcquireRight` from the holder of the right fails an assertion that ends the emulator, so the app build defaults to `gpureset=0`); `NS_LaunchTitle` from a module with the HOME Menu in front, and the flags it needs; AM writing the module's own NAND title while it runs (F15); `NS_RebootToTitle` coming back in the game (H5); the heartbeat across two processes; NDM.
 
 ### One-time console install (owner)
 

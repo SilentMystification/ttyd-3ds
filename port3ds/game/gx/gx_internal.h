@@ -329,6 +329,7 @@ void gx_rec_excl_end(void);
 void gx_rec_list(const void* list, u32 nbytes, const void* caller);
 void gx_rec_prim(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* slots, u32 nslots);
 void gx_rec_raw(const PPCWGPipe* slots, u32 nslots);
+int gx_rec_prim_direct(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* slots); /* gximmdirect */
 void gx_rec_frame(void); /* game thread, GXCopyDisp: per-frame counters */
 void gx_rec_log(u32 frames);
 void gx_rec_frame_start(void); /* game thread, GXInvalidateVtxCache: the retrace wait ended */
@@ -584,6 +585,35 @@ typedef struct {
 u32 gx_vsh_imm_reasons(u8 prim, u32 n);
 int gx_vsh_imm_room(u32 n);
 const GxVshImm* gx_vsh_imm_build(u8 prim, const GxVertex* v, u32 n);
+/* The ring's vertex layout: byte offsets of position, colour, slots 0..2, normal; returns the stride. */
+u32 gx_vsh_imm_layout(int32_t off[6]);
+void gx_vsh_imm_write(const GxVertex* v, u32 n, const u8* vtx_desc, u8* out, u8 attr_slot[8]);
+u8* gx_vsh_imm_dst(void); /* where the next draw's vertices go (gx_vsh_imm_room checked) */
+const GxVshImm* gx_vsh_imm_done(u8 prim, u32 n, const u8 attr_slot[8]);
+/* gximmdirect while recording: the game thread's chunks (gx_vsh.c). */
+u8* gx_vsh_gimm_alloc(u32 n, const void** base, u32* first, u32* chunk); /* game thread; NULL: no room */
+void gx_vsh_gimm_translated(u32 chunk);                                   /* translator: one draw of it done */
+const GxVshImm* gx_vsh_imm_at(u8 prim, const void* base, u32 first, u32 n, const u8 attr_slot[8]);
+
+/* ---- Switch gximmdirect (PORT_3DS_GX_PERF.md, "Core-2 round 2", stage 4; default 0) ----
+ *   1: GXEnd writes an immediate primitive's vertices straight from the pipe writes (indexed attributes read from
+ *      their arrays then) into the ring in its PICA layout, with no GxVertex, when the draw takes the shader path.
+ *      While recording (gxthread=1..3) the game thread does it at GXEnd into its own chunks: no array snapshot.
+ *   2: as 1, and every draw is also decoded the old way and its ring bytes compared (gximmdirect warnings).
+ * gx_draw_imm_route (gx_draw.c) routes the draw before it is decoded. */
+extern int gx_opt_immdirect;
+enum { GXI_OLD, GXI_SHADER, GXI_CPU, GXI_NONE };
+int gx_draw_imm_route(u8 prim, u32 n, const void* caller, int ring_given);
+void gx_draw_imm_shader(const GxVshImm* im, u32 n);
+void gx_draw_vertices_cpu(u8 prim, const GxVertex* v, u32 n); /* routed already: the CPU path */
+/* gx_pipe.c: the converter (vertex state g), the eligibility of a recorded primitive, the translator's side */
+int gx_imm_convert(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, u8* out, u8 attr_slot[8]);
+int gx_imm_rec_ok(const GxState* g, u8 prim, u32 n);
+void gx_imm_verify(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, const u8* got, const u8 attr_slot[8]);
+void gx_imm_rec_count(int ok);
+void gx_draw_prim_ring(u8 primfmt, u16 n, const void* caller, const u8* base, u32 first, const u8 attr_slot[8],
+                       int has_nrm, int state_same);
+void gx_immdirect_log(u32 frames);
 void gx_vsh_count_shader(u32 nverts, u32 nidx);
 void gx_vsh_frame(void); /* frame boundary: hysteresis, decal links, counters */
 void gx_vsh_log(u32 frames);

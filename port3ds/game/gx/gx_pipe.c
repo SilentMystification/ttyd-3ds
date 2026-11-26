@@ -220,25 +220,25 @@ static inline u32 rd_index(Reader* r, u8 type) { return type == GX_INDEX8 ? rd_u
 
 static inline f32 frac_scale(u8 frac) { return 1.0f / (f32)(1u << (frac & 31)); }
 
-/* Decodes one vertex in format `fmt`. */
-static void read_vertex(Reader* r, u8 fmt, GxVertex* v) {
-    const GxAttrFmt* vat = gx.vat[fmt];
-    v->pnmtx = (u8)gx.cur_pnmtx;
-    memcpy(v->texmtx, gx.cur_texmtx, sizeof(v->texmtx));
+/* Decodes one vertex in format `fmt` under vertex state g. */
+static inline __attribute__((always_inline)) void read_vertex_g(Reader* r, u8 fmt, GxVertex* v, const GxState* g) {
+    const GxAttrFmt* vat = g->vat[fmt];
+    v->pnmtx = (u8)g->cur_pnmtx;
+    memcpy(v->texmtx, g->cur_texmtx, sizeof(v->texmtx));
     v->has_nrm = 0;
     v->clr[0] = v->clr[1] = (GXColor){255, 255, 255, 255};
 
-    if (gx.vtx_desc[GX_VA_PNMTXIDX] != GX_NONE) {
+    if (g->vtx_desc[GX_VA_PNMTXIDX] != GX_NONE) {
         v->pnmtx = (u8)(rd_u8(r) / 3);
     }
     for (int t = 0; t < 8; t++) {
-        if (gx.vtx_desc[GX_VA_TEX0MTXIDX + t] != GX_NONE) {
+        if (g->vtx_desc[GX_VA_TEX0MTXIDX + t] != GX_NONE) {
             v->texmtx[t] = (u8)rd_u8(r);
         }
     }
     /* position */
     {
-        u8 d = gx.vtx_desc[GX_VA_POS];
+        u8 d = g->vtx_desc[GX_VA_POS];
         const GxAttrFmt* f = &vat[GX_VA_POS];
         int n = f->cnt == GX_POS_XY ? 2 : 3;
         f32 sc = f->type == GX_F32 ? 1.0f : frac_scale(f->frac);
@@ -252,7 +252,7 @@ static void read_vertex(Reader* r, u8 fmt, GxVertex* v) {
             if (gx_dlc_capturing) {
                 gx_dlc_track(GX_VA_POS, idx);
             }
-            const u8* p = gx.array_base[GX_VA_POS] + idx * gx.array_stride[GX_VA_POS];
+            const u8* p = g->array_base[GX_VA_POS] + idx * g->array_stride[GX_VA_POS];
             for (int i = 0; i < n; i++) {
                 v->pos[i] = mem_comp(p, f->type, sc, (u32)i);
             }
@@ -260,7 +260,7 @@ static void read_vertex(Reader* r, u8 fmt, GxVertex* v) {
     }
     /* normal (NBT: normal, binormal, tangent; only the normal is used) */
     {
-        u8 d = gx.vtx_desc[GX_VA_NRM] != GX_NONE ? gx.vtx_desc[GX_VA_NRM] : gx.vtx_desc[GX_VA_NBT];
+        u8 d = g->vtx_desc[GX_VA_NRM] != GX_NONE ? g->vtx_desc[GX_VA_NRM] : g->vtx_desc[GX_VA_NBT];
         if (d != GX_NONE) {
             const GxAttrFmt* f = &vat[GX_VA_NRM];
             int vecs = f->cnt == GX_NRM_XYZ ? 1 : 3;
@@ -286,7 +286,7 @@ static void read_vertex(Reader* r, u8 fmt, GxVertex* v) {
                     if (k > 0 && per_vec_index) {
                         idx = rd_index(r, d);
                     }
-                    const u8* p = gx.array_base[GX_VA_NRM] + idx * gx.array_stride[GX_VA_NRM];
+                    const u8* p = g->array_base[GX_VA_NRM] + idx * g->array_stride[GX_VA_NRM];
                     if (k == 0) {
                         for (int i = 0; i < 3; i++) {
                             v->nrm[i] = mem_comp(p, f->type, sc, (u32)i);
@@ -298,7 +298,7 @@ static void read_vertex(Reader* r, u8 fmt, GxVertex* v) {
     }
     /* colors */
     for (int c = 0; c < 2; c++) {
-        u8 d = gx.vtx_desc[GX_VA_CLR0 + c];
+        u8 d = g->vtx_desc[GX_VA_CLR0 + c];
         const GxAttrFmt* f = &vat[GX_VA_CLR0 + c];
         if (d == GX_DIRECT) {
             v->clr[c] = rd_color(r, f->type);
@@ -307,7 +307,7 @@ static void read_vertex(Reader* r, u8 fmt, GxVertex* v) {
             if (gx_dlc_capturing) {
                 gx_dlc_track(GX_VA_CLR0 + c, idx);
             }
-            v->clr[c] = mem_color(gx.array_base[GX_VA_CLR0 + c] + idx * gx.array_stride[GX_VA_CLR0 + c], f->type);
+            v->clr[c] = mem_color(g->array_base[GX_VA_CLR0 + c] + idx * g->array_stride[GX_VA_CLR0 + c], f->type);
         }
         if (f->cnt == GX_CLR_RGB) {
             v->clr[c].a = 255;
@@ -315,7 +315,7 @@ static void read_vertex(Reader* r, u8 fmt, GxVertex* v) {
     }
     /* texture coordinates */
     for (int t = 0; t < 8; t++) {
-        u8 d = gx.vtx_desc[GX_VA_TEX0 + t];
+        u8 d = g->vtx_desc[GX_VA_TEX0 + t];
         if (d == GX_NONE) {
             v->tex[t][0] = v->tex[t][1] = 0.0f;
             continue;
@@ -333,12 +333,389 @@ static void read_vertex(Reader* r, u8 fmt, GxVertex* v) {
             if (gx_dlc_capturing) {
                 gx_dlc_track(GX_VA_TEX0 + t, idx);
             }
-            const u8* p = gx.array_base[GX_VA_TEX0 + t] + idx * gx.array_stride[GX_VA_TEX0 + t];
+            const u8* p = g->array_base[GX_VA_TEX0 + t] + idx * g->array_stride[GX_VA_TEX0 + t];
             for (int i = 0; i < n; i++) {
                 v->tex[t][i] = mem_comp(p, f->type, sc, (u32)i);
             }
         }
     }
+}
+
+static void read_vertex(Reader* r, u8 fmt, GxVertex* v) { read_vertex_g(r, fmt, v, &gx); }
+
+/* ---- Switch gximmdirect: pipe writes straight into the ring's PICA layout ----
+ * A plan of steps is built once per primitive from the vertex description and
+ * format, then run per vertex over the slots. Each step reads what read_vertex
+ * reads and converts it with the same expressions, so the bytes equal those
+ * gx_vsh_imm_write makes from read_vertex's GxVertex (gximmdirect=2 checks). */
+enum { IS_SKIP, IS_COMP, IS_COMP_IDX, IS_CLR, IS_CLR_IDX };
+typedef struct {
+    u8 op;
+    u8 type;  /* GXCompType, or the colour format */
+    u8 n;     /* components (IS_COMP*), slots skipped (IS_SKIP) */
+    u8 idx16; /* the index is u16 */
+    s16 dst;  /* byte offset in the vertex */
+    u8 rgb;   /* colour: alpha forced to 255 */
+    u8 pad;
+    f32 sc;
+    const u8* base;
+    u32 stride;
+} ImmStep;
+
+static u32 s_imm_stride_c;
+static int32_t s_imm_off_c[6];
+
+static inline u32 slot_index(const PPCWGPipe** sl, int idx16) {
+    const PPCWGPipe* p = (*sl)++;
+    return idx16 ? p->u16 : p->u8;
+}
+
+static inline f32 slot_comp(const PPCWGPipe* p, u8 type, f32 scale) {
+    switch (type) {
+    case GX_U8: return (f32)(u8)p->u8 * scale;
+    case GX_S8: return (f32)(s8)p->u8 * scale;
+    case GX_U16: return (f32)(u16)p->u16 * scale;
+    case GX_S16: return (f32)(s16)p->u16 * scale;
+    default: return p->f32;
+    }
+}
+
+static inline void put_color(u8* o, GXColor c, int rgb) {
+    o[0] = c.r;
+    o[1] = c.g;
+    o[2] = c.b;
+    o[3] = rgb ? 255 : c.a;
+}
+
+static void imm_layout_c(void) {
+    if (s_imm_stride_c == 0) {
+        s_imm_stride_c = gx_vsh_imm_layout(s_imm_off_c);
+    }
+}
+
+int gx_imm_convert(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, u8* out, u8 attr_slot[8]) {
+    imm_layout_c();
+    const u32 stride = s_imm_stride_c;
+    const int32_t* off = s_imm_off_c;
+    const u8* d = g->vtx_desc;
+    const GxAttrFmt* vat = g->vat[fmt];
+    ImmStep st[24];
+    u32 ns = 0;
+    /* the vertex every step writes into: white colour, zero texture slots, the normal (0, 0, 1) when there is none */
+    u8 tmpl[64];
+    memset(tmpl, 0, sizeof(tmpl));
+    tmpl[off[1]] = tmpl[off[1] + 1] = tmpl[off[1] + 2] = tmpl[off[1] + 3] = 255;
+    u32 skip = 0;
+#define FLUSH_SKIP()                                                                                                   \
+    do {                                                                                                               \
+        if (skip != 0) {                                                                                               \
+            st[ns++] = (ImmStep){IS_SKIP, 0, (u8)skip, 0, 0, 0, 0, 0.0f, NULL, 0};                                     \
+            skip = 0;                                                                                                  \
+        }                                                                                                              \
+    } while (0)
+    if (d[GX_VA_PNMTXIDX] != GX_NONE) {
+        skip++;
+    }
+    for (int t = 0; t < 8; t++) {
+        skip += d[GX_VA_TEX0MTXIDX + t] != GX_NONE;
+    }
+    /* position */
+    {
+        u8 dp = d[GX_VA_POS];
+        const GxAttrFmt* f = &vat[GX_VA_POS];
+        u8 cnt = f->cnt == GX_POS_XY ? 2 : 3;
+        f32 sc = f->type == GX_F32 ? 1.0f : frac_scale(f->frac);
+        if (dp == GX_DIRECT) {
+            FLUSH_SKIP();
+            st[ns++] = (ImmStep){IS_COMP, f->type, cnt, 0, (s16)off[0], 0, 0, sc, NULL, 0};
+        } else if (dp != GX_NONE) {
+            FLUSH_SKIP();
+            st[ns++] = (ImmStep){IS_COMP_IDX, f->type,   cnt, dp != GX_INDEX8, (s16)off[0], 0, 0, sc,
+                                 g->array_base[GX_VA_POS], g->array_stride[GX_VA_POS]};
+        }
+    }
+    /* normal (only the first vector of NBT is used) */
+    {
+        u8 dn = d[GX_VA_NRM] != GX_NONE ? d[GX_VA_NRM] : d[GX_VA_NBT];
+        if (dn != GX_NONE) {
+            const GxAttrFmt* f = &vat[GX_VA_NRM];
+            u32 vecs = f->cnt == GX_NRM_XYZ ? 1 : 3;
+            f32 sc = f->type == GX_S8 ? 1.0f / 64.0f : f->type == GX_S16 ? 1.0f / 16384.0f : 1.0f;
+            FLUSH_SKIP();
+            if (dn == GX_DIRECT) {
+                st[ns++] = (ImmStep){IS_COMP, f->type, 3, 0, (s16)off[5], 0, 0, sc, NULL, 0};
+                skip += (vecs - 1) * 3;
+            } else {
+                st[ns++] = (ImmStep){IS_COMP_IDX, f->type,   3, dn != GX_INDEX8, (s16)off[5], 0, 0, sc,
+                                     g->array_base[GX_VA_NRM], g->array_stride[GX_VA_NRM]};
+                skip += f->cnt == GX_NRM_NBT3 ? 2 : 0;
+            }
+        } else {
+            static const f32 up[3] = {0, 0, 1}; /* as the CPU path lights a vertex without a normal */
+            memcpy(tmpl + off[5], up, 12);
+        }
+    }
+    /* colours: 0 into the vertex, 1 read and dropped (the shader path has one colour) */
+    for (int c = 0; c < 2; c++) {
+        u8 dc = d[GX_VA_CLR0 + c];
+        const GxAttrFmt* f = &vat[GX_VA_CLR0 + c];
+        if (dc == GX_NONE) {
+            continue;
+        }
+        if (c == 1) {
+            u8 ty = f->type;
+            skip += dc != GX_DIRECT ? 1u : ty == GX_RGB565 || ty == GX_RGBA4 ? 1u : ty == GX_RGB8 || ty == GX_RGBA6 ? 3u : 4u;
+            continue;
+        }
+        FLUSH_SKIP();
+        st[ns++] = (ImmStep){dc == GX_DIRECT ? IS_CLR : IS_CLR_IDX,
+                             f->type,
+                             0,
+                             dc != GX_INDEX8,
+                             (s16)off[1],
+                             f->cnt == GX_CLR_RGB,
+                             0,
+                             0.0f,
+                             g->array_base[GX_VA_CLR0],
+                             g->array_stride[GX_VA_CLR0]};
+    }
+    /* texture coordinates: the first three present attributes take slots 0..2 */
+    memset(attr_slot, 0xFF, 8);
+    u32 nslots = 0;
+    for (int t = 0; t < 8; t++) {
+        u8 dt = d[GX_VA_TEX0 + t];
+        if (dt == GX_NONE) {
+            continue;
+        }
+        const GxAttrFmt* f = &vat[GX_VA_TEX0 + t];
+        u8 cnt = f->cnt == GX_TEX_S ? 1 : 2;
+        if (nslots == 3) {
+            skip += dt == GX_DIRECT ? cnt : 1u; /* a fourth: never drawn from the ring (GXV_R_SLOTS) */
+            continue;
+        }
+        attr_slot[t] = (u8)nslots;
+        f32 sc = f->type == GX_F32 ? 1.0f : frac_scale(f->frac);
+        FLUSH_SKIP();
+        if (dt == GX_DIRECT) {
+            st[ns++] = (ImmStep){IS_COMP, f->type, cnt, 0, (s16)off[2 + nslots], 0, 0, sc, NULL, 0};
+        } else {
+            st[ns++] = (ImmStep){IS_COMP_IDX, f->type,   cnt, dt != GX_INDEX8, (s16)off[2 + nslots], 0, 0, sc,
+                                 g->array_base[GX_VA_TEX0 + t], g->array_stride[GX_VA_TEX0 + t]};
+        }
+        nslots++;
+    }
+    FLUSH_SKIP();
+#undef FLUSH_SKIP
+    for (u32 v = 0; v < n; v++) {
+        u8* o = out + v * stride;
+        memcpy(o, tmpl, stride);
+        for (u32 k = 0; k < ns; k++) {
+            const ImmStep* p = &st[k];
+            switch (p->op) {
+            case IS_SKIP: sl += p->n; break;
+            case IS_COMP: {
+                f32 c[3];
+                for (u32 i = 0; i < p->n; i++) {
+                    c[i] = slot_comp(sl++, p->type, p->sc);
+                }
+                memcpy(o + p->dst, c, p->n * sizeof(f32));
+                break;
+            }
+            case IS_COMP_IDX: {
+                u32 i_ = slot_index(&sl, p->idx16);
+                const u8* a = p->base + i_ * p->stride;
+                f32 c[3];
+                for (u32 i = 0; i < p->n; i++) {
+                    c[i] = mem_comp(a, p->type, p->sc, i);
+                }
+                memcpy(o + p->dst, c, p->n * sizeof(f32));
+                break;
+            }
+            case IS_CLR: {
+                Reader r = {sl, NULL, NULL};
+                GXColor c = rd_color(&r, p->type);
+                sl = r.slot;
+                put_color(o + p->dst, c, p->rgb);
+                break;
+            }
+            default: { /* IS_CLR_IDX */
+                u32 i_ = slot_index(&sl, p->idx16);
+                put_color(o + p->dst, mem_color(p->base + i_ * p->stride, p->type), p->rgb);
+                break;
+            }
+            }
+        }
+    }
+    return 1;
+}
+
+/* Whether the game thread can write a recorded primitive to its chunks (gx_rec.c): what the ring holds must
+ * rebuild the GxVertex read_vertex would make, for the draws the translator routes to the CPU. */
+int gx_imm_rec_ok(const GxState* g, u8 prim, u32 n) {
+    const u8* d = g->vtx_desc;
+    if (!gx_vsh_on || !gx_vsh_imm_on || n == 0 || n > VERTS_MAX || d[GX_VA_PNMTXIDX] != GX_NONE ||
+        d[GX_VA_CLR1] != GX_NONE || d[GX_VA_POS] == GX_NONE) {
+        return 0;
+    }
+    if (prim != GX_QUADS && prim != GX_TRIANGLES && prim != GX_TRIANGLESTRIP && prim != GX_TRIANGLEFAN) {
+        return 0;
+    }
+    u32 slots = 0;
+    for (int t = 0; t < 8; t++) {
+        if (d[GX_VA_TEX0MTXIDX + t] != GX_NONE) {
+            return 0;
+        }
+        slots += d[GX_VA_TEX0 + t] != GX_NONE;
+    }
+    return slots <= 3;
+}
+
+/* counters (switch gximmdirect; the gxthreadstats line) */
+static struct {
+    u32 shader, cpu, old, none, rec, rec_fail, verify, mism, state_diff;
+} s_id;
+/* gximmdirect=2: the reference decode and bytes, one set per thread (the game thread's GXEnd while recording, the
+ * translating thread) */
+static u8* s_id_ref_t[2];
+static GxVertex* s_id_verts_t[2];
+
+/* gximmdirect=2: decodes the primitive the old way (read_vertex under g) and compares the ring bytes. */
+void gx_imm_verify(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, const u8* got, const u8 attr_slot[8]) {
+    int t = gx_tls_translator != 0;
+    if (s_id_ref_t[t] == NULL) {
+        s_id_ref_t[t] = gx_big_alloc("gximmdirect verify", (u32)VERTS_MAX * 64u);
+        s_id_verts_t[t] = gx_big_alloc("gximmdirect verify vertices", sizeof(GxVertex) * VERTS_MAX);
+    }
+    u8* s_id_ref = s_id_ref_t[t];
+    GxVertex* s_id_verts = s_id_verts_t[t];
+    Reader r = {sl, NULL, NULL};
+    for (u32 i = 0; i < n; i++) {
+        read_vertex_g(&r, fmt, &s_id_verts[i], g);
+    }
+    u8 slots[8];
+    gx_vsh_imm_write(s_id_verts, n, g->vtx_desc, s_id_ref, slots);
+    u32 bytes = n * s_imm_stride_c;
+    s_id.verify++;
+    if (!gx_mem_equal(s_id_ref, got, bytes) || memcmp(slots, attr_slot, 8) != 0) {
+        u32 at = 0;
+        while (at < bytes && s_id_ref[at] == got[at]) {
+            at++;
+        }
+        if (s_id.mism++ < 8) {
+            PLOG_W("gximmdirect verify: primitive of %lu vertices (fmt %u, from %p) differs at vertex %lu byte %lu: "
+                   "%02x, decoded %02x",
+                   (unsigned long)n, fmt, gx_begin_caller, (unsigned long)(at / s_imm_stride_c),
+                   (unsigned long)(at % s_imm_stride_c), at < bytes ? got[at] : 0u, at < bytes ? s_id_ref[at] : 0u);
+        }
+    }
+}
+
+/* The immediate primitive in pipe slots `sl` (gxthread=0, the split's direct part, a recorded GXR_PRIM). 0: the
+ * caller takes the GxVertex path. */
+static int imm_direct(const PPCWGPipe* sl, u8 prim, u8 fmt, u32 n) {
+    int k = gx_draw_imm_route(prim, n, gx_begin_caller, 0);
+    switch (k) {
+    case GXI_SHADER: {
+        u8 attr_slot[8];
+        u8* dst = gx_vsh_imm_dst();
+        gx_imm_convert(&gx, fmt, sl, n, dst, attr_slot);
+        if (gx_opt_immdirect == 2) {
+            gx_imm_verify(&gx, fmt, sl, n, dst, attr_slot);
+        }
+        gx_draw_imm_shader(gx_vsh_imm_done(prim, n, attr_slot), n);
+        s_id.shader++;
+        return 1;
+    }
+    case GXI_CPU: {
+        Reader r = {sl, NULL, NULL};
+        for (u32 i = 0; i < n; i++) {
+            read_vertex(&r, fmt, &s_verts[i]);
+        }
+        gx_draw_vertices_cpu(prim, s_verts, n);
+        s_id.cpu++;
+        return 1;
+    }
+    case GXI_NONE: s_id.none++; return 1;
+    default: s_id.old++; return 0;
+    }
+}
+
+/* Translator: a primitive the game thread wrote to its chunks at GXEnd (gx_rec.c, GXR_PRIMD). */
+void gx_draw_prim_ring(u8 primfmt, u16 n, const void* caller, const u8* base, u32 first, const u8 attr_slot[8],
+                       int has_nrm, int state_same) {
+    u8 prim = (u8)(primfmt & 0xF8);
+    gx_begin_caller = (void*)caller;
+    if (!state_same) {
+        s_id.state_diff++; /* the translator's vertex state is not the shadow's (never seen): drawn as written */
+    }
+    if (gx_perf_on > 0) {
+        gx_perf.imm_verts += n;
+        gx_perf.imm_prims++;
+    }
+    int k = gx_draw_imm_route(prim, n, caller, 1);
+    if (k == GXI_SHADER) {
+        gx_draw_imm_shader(gx_vsh_imm_at(prim, base, first, n, attr_slot), n);
+        s_id.shader++;
+        return;
+    }
+    if (k == GXI_NONE) {
+        s_id.none++;
+        return;
+    }
+    /* the CPU path: the GxVertex read_vertex makes, rebuilt from the ring (no colour 1, no matrix indices) */
+    imm_layout_c();
+    const int32_t* off = s_imm_off_c;
+    const u8* src = base + first * s_imm_stride_c;
+    for (u32 i = 0; i < n; i++, src += s_imm_stride_c) {
+        GxVertex* v = &s_verts[i];
+        v->pnmtx = (u8)gx.cur_pnmtx;
+        memcpy(v->texmtx, gx.cur_texmtx, sizeof(v->texmtx));
+        memcpy(v->pos, src + off[0], 12);
+        v->has_nrm = (u8)has_nrm;
+        if (has_nrm) {
+            memcpy(v->nrm, src + off[5], 12);
+        }
+        v->clr[0] = (GXColor){src[off[1]], src[off[1] + 1], src[off[1] + 2], src[off[1] + 3]};
+        v->clr[1] = (GXColor){255, 255, 255, 255};
+        for (int t = 0; t < 8; t++) {
+            if (attr_slot[t] < 3) {
+                memcpy(v->tex[t], src + off[2 + attr_slot[t]], 8);
+            } else {
+                v->tex[t][0] = v->tex[t][1] = 0.0f;
+            }
+        }
+    }
+    if (k == GXI_CPU) {
+        gx_draw_vertices_cpu(prim, s_verts, n);
+        s_id.cpu++;
+    } else {
+        gx_draw_vertices(prim, s_verts, n);
+        s_id.old++;
+    }
+}
+
+/* Game thread, recording: a primitive written at GXEnd (1) or recorded the old way (0). */
+void gx_imm_rec_count(int ok) {
+    if (ok) {
+        s_id.rec++;
+    } else {
+        s_id.rec_fail++;
+    }
+}
+
+void gx_immdirect_log(u32 frames) {
+    if (!gx_opt_immdirect) {
+        return;
+    }
+    u32 f = frames ? frames : 1;
+    PLOG_I("gximmdirect frame %lu: per frame %lu to the ring, %lu routed to the cpu, %lu the old way, %lu nothing to "
+           "draw | recorded at GXEnd %lu, the old way %lu | verify %lu checks, %lu mismatches, %lu vertex-state "
+           "differences (total)",
+           (unsigned long)gx_perf_frame_no(), (unsigned long)(s_id.shader / f), (unsigned long)(s_id.cpu / f),
+           (unsigned long)(s_id.old / f), (unsigned long)(s_id.none / f), (unsigned long)(s_id.rec / f),
+           (unsigned long)(s_id.rec_fail / f), (unsigned long)s_id.verify, (unsigned long)s_id.mism,
+           (unsigned long)s_id.state_diff);
+    s_id.shader = s_id.cpu = s_id.old = s_id.none = s_id.rec = s_id.rec_fail = 0;
 }
 
 /* ---- Encoding a primitive into a recorded display list ---- */
@@ -511,6 +888,10 @@ static void draw_from_reader(Reader* r, u8 prim, u8 fmt, u32 n) {
             gx_perf.imm_verts += n;
         }
     }
+    if (gx_opt_immdirect && !s_in_list && r->slot != NULL && n <= VERTS_MAX && !gx_dlc_capturing &&
+        imm_direct(r->slot, prim, fmt, n)) {
+        return; /* immediate mode written straight into the ring (or routed to the CPU first) */
+    }
     while (done < n) {
         u32 chunk = n - done;
         if (chunk > VERTS_MAX) {
@@ -589,8 +970,10 @@ void GXEnd(void) {
             }
         }
     } else if (s_nverts > 0 && gx_rec_on()) {
-        gx_rec_prim((u8)(s_prim | s_fmt), s_nverts, s_begin_ra, s_pipe,
-                    (u32)((const PPCWGPipe*)port_gx_wg_ptr - s_pipe));
+        if (!gx_opt_immdirect || !gx_rec_prim_direct((u8)(s_prim | s_fmt), s_nverts, s_begin_ra, s_pipe)) {
+            gx_rec_prim((u8)(s_prim | s_fmt), s_nverts, s_begin_ra, s_pipe,
+                        (u32)((const PPCWGPipe*)port_gx_wg_ptr - s_pipe));
+        }
     } else if (s_nverts > 0) {
         gx_begin_caller = s_begin_ra;
         u64 t0 = GX_PERF_T();

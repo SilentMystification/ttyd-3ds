@@ -91,6 +91,8 @@ typedef struct {
     u16* idx; /* index arena (linear) of the shader-path draws */
     u32 nidx;
     int present;
+    int shot;          /* plat_gpu_shot: capture this record's frame to shot_path (set at submit, with present) */
+    char shot_path[48];
     /* stream ranges the CPU wrote for this record: flushed by the render thread before it replays (a flush is a
      * blocking GSP request; on the recording thread it cost 5-8% of its time) */
     struct {
@@ -396,9 +398,12 @@ static int gpu_reset_pending(void);
 static void stream_flush_dirty(void);
 static void stream_take_dirty(Record* r);
 
+static void shot_attach(Record* r);
+
 static void submit(int present) {
     Record* r = &s_rec[s_cur];
     r->present = present;
+    shot_attach(r);
     r->seq = ++s_submit_seq;
     r->frame = s_frame_counter;
     stream_take_dirty(r); /* the streams this record draws: the render thread flushes them */
@@ -2091,7 +2096,8 @@ static void take_shot(void);
 static u32 s_shot_due;
 static void capture_efb(const Record* r, const char* path);
 static char s_named_path[48];
-static int s_named_shot; /* plat_gpu_shot: the next presented frame goes to s_named_path */
+static int s_named_shot; /* plat_gpu_shot: the next record submitted with a present takes s_named_path */
+static int (*s_shot_hook)(const char* path);
 
 /* The top screen's render target, linked to the framebuffer: citro3d
  * transfers it and swaps at C3D_FrameEnd. */
@@ -4883,9 +4889,9 @@ eye_again:
             stereo_shot(path, stereo);
         }
     }
-    if (r->present && __atomic_load_n(&s_named_shot, __ATOMIC_ACQUIRE)) {
-        capture_efb(r, s_named_path);
-        __atomic_store_n(&s_named_shot, 0, __ATOMIC_RELEASE);
+    if (r->shot) {
+        capture_efb(r, r->shot_path);
+        r->shot = 0;
     }
 }
 
@@ -5123,12 +5129,30 @@ static void take_shot(void) {
     s_shot_due = frame;
 }
 
+void plat_gpu_set_shot_hook(int (*hook)(const char* path)) {
+    s_shot_hook = hook;
+}
+
 void plat_gpu_shot(const char* path) {
+    if (s_shot_hook != NULL && s_shot_hook(path)) {
+        return; /* recorded: the submitting thread asks again in order */
+    }
     if (__atomic_load_n(&s_named_shot, __ATOMIC_ACQUIRE)) {
         return; /* the last one is not taken yet */
     }
     snprintf(s_named_path, sizeof(s_named_path), "%s", path);
     __atomic_store_n(&s_named_shot, 1, __ATOMIC_RELEASE);
+}
+
+/* At submit (recording thread): the request goes with the next record that presents, not with whichever record
+ * the render thread replays next, so the picture is the same frame however far the replay lags. */
+static void shot_attach(Record* r) {
+    r->shot = 0;
+    if (r->present && __atomic_load_n(&s_named_shot, __ATOMIC_ACQUIRE)) {
+        memcpy(r->shot_path, s_named_path, sizeof(r->shot_path));
+        r->shot = 1;
+        __atomic_store_n(&s_named_shot, 0, __ATOMIC_RELEASE);
+    }
 }
 
 /* Switch gxdepthshot (debug only): the EFB's depth buffer next to each shot,

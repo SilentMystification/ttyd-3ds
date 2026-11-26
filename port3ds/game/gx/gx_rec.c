@@ -71,6 +71,8 @@ static __thread int t_game; /* the thread that called GXInit */
 
 enum { GXR_WRAP = 0xF0, GXR_LIST, GXR_PRIM, GXR_RAW, GXR_PRIMD };
 enum { GXR_FCHK_LIST = 0xE0, GXR_FCHK_VD }; /* gxrecfuse=2's checks */
+enum { GXR_SHOT = 0xE8 }; /* plat_gpu_shot from the game thread: asked again when translated, in order */
+#define SHOT_WORDS 12u /* the path, 48 bytes */
 /* gxrecfuse counters (game thread; the checks' on the translator) */
 static struct {
     u32 vd_calls, vd_flushes, vd_sent, lists, list_calls, list_sent, list_decoded, list_other;
@@ -333,6 +335,13 @@ static inline __attribute__((always_inline)) void run_one(u32 type, const u32* w
         break;
     }
     case GXR_RAW: gx_run_raw(w, n); break;
+    case GXR_SHOT: {
+        char path[SHOT_WORDS * 4];
+        memcpy(path, w, sizeof(path));
+        path[sizeof(path) - 1] = 0;
+        plat_gpu_shot(path);
+        break;
+    }
     case GXR_FCHK_LIST: {
         /* gxrecfuse=2: the list's calls went through the dedup table; applying the list now must change nothing */
         static GxState s_before;
@@ -1701,6 +1710,23 @@ void gx_rec_raw(const PPCWGPipe* slots, u32 nslots) {
     commit(nslots, 1);
 }
 
+/* plat_gpu_shot's hook: a shot asked for by the game thread while it records goes into the record, so the
+ * translator asks for it after the calls recorded before it, and the picture is the frame it is with gxthread=0
+ * (with gxpipeline=1 the next frame submitted after the call is otherwise one frame earlier). */
+static int shot_hook(const char* path) {
+    if (!t_game || !gx_rec_on()) {
+        return 0;
+    }
+    if (s_vd_n != 0) {
+        fuse_vd_flush();
+    }
+    u32* c = put(GXR_SHOT, SHOT_WORDS);
+    memset(c, 0, SHOT_WORDS * 4);
+    strncpy((char*)c, path, SHOT_WORDS * 4 - 1);
+    commit(SHOT_WORDS, 1);
+    return 1;
+}
+
 /* ---- Fences ---- */
 
 static void frame_sync(u64 waited, u64 now);
@@ -2176,6 +2202,7 @@ void gx_rec_init(void) {
     gx_rec_mode = mode;
     gx_rec_fast_update();
     plat_memstable_set_hook(mem_hook);
+    plat_gpu_set_shot_hook(shot_hook);
     PLOG_I("gxthread=%d: GX calls recorded into a %lu KB ring, translated %s%s", mode,
            (unsigned long)(words / 256u), mode == 2 ? "on core 2" : "on the game thread at each fence",
            mode == 3 ? " (verify)" : "");

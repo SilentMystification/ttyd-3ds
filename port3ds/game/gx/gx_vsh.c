@@ -70,6 +70,11 @@ static int s_s16 = 1;   /* switch gxvshs16 (default 1): s16 attributes where exa
 static u32 s_seg_budget; /* switch gxvshkb: linear memory for the segments */
 static u32 s_iseg_budget; /* switch gxvshib: linear memory for the index segments (a stream beyond it keeps heap indices) */
 static int s_decal_rule = 1; /* switch gxvshdecal (default 1): decal links; 0 only for measuring the path itself */
+/* switch gximmnow (default 0; owner question open): a new immediate draw's record (GXBegin's caller) starts with the
+ * streak K, so its group takes the shader path in its first frame when nothing in it is ineligible, instead of after
+ * K eligible frames. A set that is not eligible at a frame's end still drops the streak to 0 (then K frames again).
+ * Not the gximmnow=0 picture: the first frames after a load (up to K) differ where immediate draws start. */
+static int s_imm_now;
 
 /* ---- Pool segments ---- */
 
@@ -221,9 +226,11 @@ void gx_vsh_init(void) {
     s_seg_budget = (u32)plat_switch_int("gxvshkb", 6144) * 1024u;
     s_iseg_budget = (u32)plat_switch_int("gxvshib", 1536) * 1024u;
     s_decal_rule = plat_switch_int("gxvshdecal", 1) != 0;
-    PLOG_I("gxvsh: %s, hysteresis %lu frames, s16 %d, decal links %d, segments up to %lu KB%s", gx_vsh_on ? "on" : "off",
-           (unsigned long)s_k, s_s16, s_decal_rule, (unsigned long)(s_seg_budget / 1024),
-           s_check_at ? ", census logged" : "");
+    s_imm_now = plat_switch_int("gximmnow", 0) != 0;
+    PLOG_I("gxvsh: %s, hysteresis %lu frames, s16 %d, decal links %d, segments up to %lu KB%s%s",
+           gx_vsh_on ? "on" : "off", (unsigned long)s_k, s_s16, s_decal_rule, (unsigned long)(s_seg_budget / 1024),
+           s_check_at ? ", census logged" : "",
+           s_imm_now ? ", gximmnow: new immediate records start decided (not the gximmnow=0 picture)" : "");
 }
 
 /* ---- Stream build ---- */
@@ -581,6 +588,30 @@ u32 gx_vsh_imm_reasons(u8 prim, u32 n) {
     return why;
 }
 
+/* gximmfl: the vertex description's part of gx_vsh_imm_reasons (kept in the vertex class's plan, gx_pipe.c). */
+u32 gx_vsh_imm_vtx_reasons(const u8* vd) {
+    u32 why = vd[GX_VA_PNMTXIDX] != GX_NONE ? GXV_R_PNMTXIDX : 0u;
+    u32 slots = 0;
+    for (int t = 0; t < 8; t++) {
+        if (vd[GX_VA_TEX0MTXIDX + t] != GX_NONE) {
+            why |= GXV_R_TEXMTXIDX;
+        }
+        slots += vd[GX_VA_TEX0 + t] != GX_NONE;
+    }
+    return slots > 3 ? why | GXV_R_SLOTS : why;
+}
+
+/* 3 x tri_count(prim, n), with shifts and a multiply in place of the divides (n < 2^16). */
+u32 gx_vsh_imm_nidx(u8 prim, u32 n) {
+    switch (prim) {
+    case GX_QUADS: return (n >> 2) * 6u;
+    case GX_TRIANGLES: return ((n * 0xAAABu) >> 17) * 3u; /* n / 3 for n < 2^16 */
+    case GX_TRIANGLESTRIP:
+    case GX_TRIANGLEFAN: return n >= 3 ? (n - 2) * 3u : 0u;
+    default: return 0;
+    }
+}
+
 static void imm_layout_init(void) {
     if (s_imm_stride == 0) {
         s_imm_stride = plat_vsh_layout_n(0, 3, 0, 1, s_imm_off); /* with the normal, for lit draws */
@@ -677,6 +708,21 @@ const GxVshImm* gx_vsh_imm_done(u8 prim, u32 n, const u8 attr_slot[8]) {
     s_st.imm_verts_vsh += n;
     return &s_imm_out;
 }
+
+const void* gx_vsh_imm_commit(u32 n, u32* first, u32* layout) {
+    typeof(s_imm[0])* c = &s_imm[s_imm_cur];
+    u32 f = c->used;
+    plat_gpu_stream_commit(c->base + f * s_imm_stride, n * s_imm_stride);
+    c->used += n;
+    c->last_frame = plat_gpu_present_count();
+    s_st.imm_vsh++;
+    s_st.imm_verts_vsh += n;
+    *first = f;
+    *layout = s_imm_layout;
+    return c->base;
+}
+
+u32 gx_vsh_imm_emit(u8 prim, u32 first, u32 n, u16* ix) { return (u32)(emit_tris(prim, first, n, ix) - ix); }
 
 /* Writes an immediate draw (room checked) and returns its stream. */
 const GxVshImm* gx_vsh_imm_build(u8 prim, const GxVertex* v, u32 n) {
@@ -1002,6 +1048,11 @@ static u32 rec_for(const void* list, u32 nbytes) {
     r->list = list;
     r->nbytes = nbytes;
     r->last_frame = now;
+    if (s_imm_now && nbytes == 0xFFFFFFFFu) {
+        r->streak = (u16)(s_k < 0xFFFFu ? s_k : 0xFFFFu); /* gximmnow: decided at once (an immediate draw's record) */
+        r->decision = 1;
+        gx_vsh_dec_epoch++;
+    }
     if (hint != NULL) {
         *hint = victim + 1;
     }

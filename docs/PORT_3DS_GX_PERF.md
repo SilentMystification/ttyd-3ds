@@ -1018,6 +1018,9 @@ Rows for the switch table:
 | `gxstatever=0/1` | 0 (default): every state version change rebuilds the PICA state. 1: matrix and projection loads do not bump the version, and a version change whose state (texgen to pixel engine without the lights, viewport) equals the last build skips `build_state` (`builds N (unchanged M)` in `gxstats`). Fewer rebuilds, but no time saved yet (see Results) |
 | `gxdirty=0/1/2` | 0 (default): every state version change rebuilds the whole PICA state. 1: setters return early when their values are in force, others mark their class dirty; only dirty classes are rebuilt and sent (`plat_gpu_set_state_dirty`), and the uniform block by parts. 2: as 1, plus a full rebuild compared at every switch-off rebuild (`gxdirty verify` warnings, `gxdirty frame N:` line with `gxthreadstats`) |
 | `gxone=0/1/2` | GX native step 2 (docs/PORT_3DS_GX_NATIVE.md, "Step 2 as built"). 0 (default) off. 1: the dirty state classes (TEV with fog, textures, pixel with scissor/viewport) are interned at the draw boundary by their GX bytes; each id owns a PICA block built once by the port's own encoders (`plat/pica_enc.c`); the back end compares only ids and copies the blocks into the record. Implies `gxdirty`, `gxonehop=1`, `gximmdirect=1`, `gxthread=0`. 2: as `gxonehop=1` (keys and citro3d captures write the record) with every id block compared to the key path's words, the send decisions and the regions checked, and `gxdirty=2`; `gxone frame N:` lines with `gxthreadstats=N` |
+| `gxchunk=0/1/2` | GX native step 3 (docs/PORT_3DS_GX_NATIVE.md, "Step 3 as built"). Needs `gxone=1` (off with `gxone=2`, `gpufence=0`, `gpudrawcut`, `gpudrawskip`). 0 (default) off. 1: each gxbatch batch gets one prebuilt chunk of PICA words (attribute setup, scale rows, cull, draw packets) that the game thread copies into the frame list at a use; every word run of the frame list (placement `gx frame list`, linear memory) is submitted by the render thread as a command list of its own (`GX_ProcessCommandList`) instead of being copied into citro3d's buffer. 2: as 1, and the per-draw words of every chunk use are built beside it; when the record comes back both go through a PICA register-file model, compared at every chunk draw (`gxchunk verify` warnings). `gxchunkkb=N`: the chunk store (placement `gx chunks`, default 256). With `gxthreadstats=N`: a `gxchunk frame N:` line (chunk uses, draws, words, builds, store resets, lists submitted, citro3d splits, runs copied; verify draws compared, differ, one-sided, not compared) |
+| `gximmfl=0/1/2` | GX native step 4 (docs/PORT_3DS_GX_NATIVE.md, "Step 4 as built"). Needs `gxchunk=1` or `2` (so `gxone=1`, `gxthread=0`). 0 (default) off. 1: `GXEnd` routes an immediate primitive with the eligibility bits of its classes (vertex class plan, uniform block parts), converts it into the ring chunk and writes the draw into the frame list in one pass; the triangle indices go straight into the record's index arena. The pass-group route and the K hysteresis are unchanged (same words as 0). 2: as 1, and each immediate draw's old route bits and index list are compared on the game thread, its words (the old path's, built beside) through the register-file model (`gximmfl verify` and `gxchunk verify` warnings). With `gxthreadstats=N`: a `gximmfl frame N:` line (draws, merged, none; front-end checks, route differ, index differ) |
+| `gximmnow=0/1` | 0 (default). 1: a new immediate draw's pass-group record starts with the streak K (its group takes the shader path in its first frame when nothing in it is ineligible). **Not identical** to 0: up to K frames after a load, immediate draws that 0 keeps on the CPU path take the shader. Owner question open |
 | `gxfogcache=0/1` | 1 (default): the fog LUT is recomputed only when the fog parameters change and goes to the back end with an id instead of being hashed; 0 recomputes and hashes it on every rebuild (A/B) |
 | `gxunlit=0/1` | 1 (default): unlit colour channels skip `channel_color` and the eye-space normal; 0 the general path (A/B) |
 | `gxmerge=0/1` | 1 (default): consecutive draws with nothing recorded between them extend one draw command (`plat/gpu.c`); 0 one command per draw (A/B). `gxstats` shows `gpu draws N (of M calls)` |
@@ -1338,6 +1341,71 @@ Build the release CIA first: `TTYD_CCACHE=1 tools/port3ds/build.sh` (QTM placeme
 6. GPU hang: `run_azahar.py --build build/3ds/game/ttyd.cia --frames 840 --switches "map=gor_01 story=30 G gpuhangtest=700 gpuhangrecover=1 shots=1 shotfrom=820 shotmax=1"`: `reset #1 done`, the shot has content.
 7. Timings per thread: `gx_perf_ab.py --repeat 2 --scenes gor_01,pik_00,usu_00,battle --a "C1" --b "G"` and `--a "C3" --b "G"` (`--allow-hw-faults` if the boot fault lines of the release build appear, as in the Stage 5 runs). Report frame, core-0 busy, render; with `gxthreadstats=60` the `gxone frame` lines give blocks built/sent per frame, texture re-encodes and resets (a reset per frame or many re-encodes means a table or the texture epoch is too small/too busy).
 
+## Step 3 of the native plan: `gxchunk` (2026-11-27)
+
+Design and files: docs/PORT_3DS_GX_NATIVE.md, "Step 3 as built". Switch row: "For PORT_3DS_TESTING.md" above. Default 0. Built on `gxone` (step 2, `18709394`).
+
+### What changes on the shader path (C1 + `gxone=1 gxchunk=1`)
+
+| Per frame | `gxone=1` | `gxone=1 gxchunk=1` |
+|---|---|---|
+| a batch use (gor_01: about 245 per frame) | per draw `plat_gpu_vsh_drawp`: room checks, `oh_draw` (layout key compare and DTab hash + copy, scale rows through the row cache, cull, row flush, packet) | one `plat_gpu_chunk_draw`: one id compare, the prelude once, the pending rows, one copy of the chunk's words |
+| word runs on the render thread | copied into citro3d's command buffer (`cmd_put`, about 222 KB per frame in gor_01) | one `GX_ProcessCommandList` each (plus a `C3D_FrameSplit` when citro3d has words pending); copied only when the GX queue is near full |
+| flushes for the words | covered by `C3D_FrameEnd(0)`'s flush of the linear heap (citro3d's buffer) | the same flush covers the frame list (placement in linear memory); none added |
+| end of a run | none | framebuffer flush/invalidate, early-depth clear (after draws), FINALIZE: what citro3d writes at a split |
+
+Expected effect (not measured): core 0 loses the per-draw work of batch draws (`oh_draw` and the drawp room checks per draw, the layout DTab hash); the render thread loses the 222 KB copy per frame and keeps the citro3d work. Some extra GPU work: one framebuffer flush per word run with draws (a handful per frame).
+
+### Checks done without the emulator
+
+- Builds: dev and release (`--no-cia`) clean, no new warnings; no `src/` change, so the GameCube matching build is unchanged.
+- Host test (`tools/port3ds/pica_enc_test/build.sh`): `pica_model_test` ok (list ends for every even length against GPUCMD_Split's rule; model cases; the two gpuhang/gpudump lists, 585 and 559 draws: 0 differ with every state command written twice, and a difference at every draw with every cull value changed); `pica_enc_test` on the same lists still OK.
+- Hot setter sizes (release, LTO, `nm -S`, this build against a release build of `18709394` made the same way): every `GXSet*`, `GXLoad*`, `GXBegin`, `GXCallDisplayList`, `gx_rec_call`, `gx_rec_list` the same size, except `GXSetDispCopyDst` (+120 bytes, once per frame: the same code with its statics addressed through literal words instead of one base register, LTO section layout; the same calls). Changed with the same calls: `vsh_prepare` (+52, its call to `vsh_light_block` now goes to an LTO-private copy), `gx_call_list` (+52, `bat_close` inlined: one more call, `plat_gpu_chunk_active` at init), `bat_open` (+64, the chunk check), `bat_close` (+324, the chunk use), `plat_gpu_vsh_drawp` (+4), `oh_draw` (-476, `oh_unif_flush` and `oh_state_one` no longer inlined into it), `oh_close` (+256, the list end), `vsh_part_color` (+36) and `vsh_state` (-64) (LTO layout, the same calls).
+
+### Gates (to run; Azahar was not available)
+
+Build the release CIA first: `TTYD_CCACHE=1 tools/port3ds/build.sh`. C1 = `gxdirty=1 gxdirect=1 gximmdirect=1 texfast=1 texasync=1`; C3 = C1 + `gxthread=2 gxpipeline=1 gxsdl=1 gxrecfuse=1 gxreclgroup=1`; G = C1 + `gxone=1`; K = G + `gxchunk=1`; KV = G + `gxchunk=2`.
+
+1. Verify mode, 4 scenes: `run_azahar.py --build build/3ds/game/ttyd.cia --frames 841 --switches "<scene> KV gxthreadstats=60"` for gor_01 (`map=gor_01 story=30`), pik_00 (`map=pik_00 story=30`), usu_00 (`map=usu_00 story=30`), battle (`map=gon_02 story=30 battle=1 btlauto=perfect`). Pass: the start line `gxchunk=2: batch chunks (...)`, every `gxchunk frame N:` line with chunk uses above 0, `verify draws` above 0, `differ 0`, `records over 0`, "not compared" small; no `gxchunk verify` warning; the gxone lines as in step 2 (`mismatches 0 missed 0 stale 0`).
+2. Sweeps: `map_sweep.py --area tik --story 30 --switches "KV gxthreadstats=60"` and `--area jin`: every map ok, the same log conditions in every map's log.
+3. `determ_ab.py --a "C1" --b "K" --scenes gor_01,pik_00,usu_00,battle` (shots 780-785, 6 of 6 per scene), then `--a "C3" --b "K"`.
+4. `gw_diff.py` 1600-frame padscript in gor_01 (`map=gor_01 story=30 determ gwdump=10` and the A2 padscript), A = C1, B = K: 160 records equal.
+5. Stereo: `stereo_ab.py --a "C1 stereoforce=1" --b "K stereoforce=1" --scenes gor_01 --count 3`: EFB, left, right identical.
+6. GPU hang: `run_azahar.py --build build/3ds/game/ttyd.cia --frames 840 --switches "map=gor_01 story=30 K gpuhangtest=700 gpuhangrecover=1 shots=1 shotfrom=820 shotmax=1"`: `reset #1 done`, the shot has content.
+7. Timings per thread: `gx_perf_ab.py --repeat 2 --scenes gor_01,pik_00,usu_00,battle --a "G" --b "K"`, `--a "C1" --b "K"`, `--a "C3" --b "K"`, and with the render thread on core 1: `--a "G gpucore=1" --b "K gpucore=1"` (`--allow-hw-faults` if the release build's boot fault lines appear). Report frame, core-0 busy, render. With `gxthreadstats=60` the `gxchunk frame` line gives chunk uses and words per frame, builds ("not yet" should fall to 0 after the first frames of a scene), store resets (a reset per frame means `gxchunkkb` is too small), lists submitted, citro3d splits, and runs copied (more than a few per frame means the GX queue budget is too small). Note: docs/PORT_3DS_QTM_BENCH.md says Azahar delivers GSP completions only to threads on core 0; if `gpucore=1` stalls in Azahar, that is the emulator.
+
+**Console-test items** (owner-gated; Azahar proves none of them):
+
+1. The frame list is written on core 0 and flushed by `C3D_FrameEnd(0)` on the render thread's core (as the vertex and index arenas today). A stale word would show as a wrong state or a GPU hang (gpuhang dump: the frame list is not in citro3d's buffer, so gpudump's list dumps do not contain these runs).
+2. One `GX_ProcessCommandList` per run (a handful per frame) instead of one list per record: GSP and P3D interrupt cost per list.
+3. The framebuffer flush at the end of every run with draws (more flushes than citro3d's one per split).
+4. QTM for the frame list (`place=gx_frame_list:qtm qtmgpu`): only after `cb_qtm` passes; GSP's address check of a QTM command list is unknown.
+
+### Gate results of step 3 (`gxchunk`, 2026-11-27, branch gate-gxchunk = gxchunk + port3ds, Azahar)
+
+Identity runs on the dev build (3dsx), verify, sweep, hang and timing runs on the release build (CIA or 3dsx). Verify runs need `--long 200` (the 60 s default times out).
+
+1. **KV verify** (C1 + `gxone=1 gxchunk=2 gxthreadstats=60`, to frame 841): gor_01, pik_00, usu_00, battle all pass. Start line present; every `gxchunk frame` line from the map on has chunk uses above 0 (gor_01 244-245, pik_00 358, usu_00 135-153, battle 124-132), verify draws 14 880 / 22 060 / 9 313 / 7 508 in the last window, `differ 0`; no `gxchunk verify` warning; gxone `mismatches 0 missed 0 stale 0` in every line. **Not checked: `records over`.** The log line is cut at 255 characters, so its last fields (`not compared N records over N`) are missing from the log in the busy scenes (`not compared` is cut in battle). Shorten the format string in `plat/gpu.c` (the `verify draws %lu differ %lu one-sided %lu not compared %lu records over %lu` line) or split it into two lines.
+2. **Sweeps** (KV, `--story 30`): `--area tik` 22 of 22 ok, `--area jin` 12 of 12 ok; every map segment of verify.log has a chunk line with uses above 0, `differ 0` everywhere, 0 `gxchunk verify` warnings, every gxone line `mismatches 0 missed 0 stale 0` (58 and 41 lines).
+3. **determ_ab** shots 780-785 in gor_01, pik_00, usu_00, battle: C1 vs K 24 of 24 identical, C3 vs K 24 of 24 identical.
+4. **gw_diff** 1600 frames gor_01: C1 vs K `160 records equal (f 10..1600, fields compared: 32)`.
+5. **Stereo** (`stereoforce=1`, gor_01, 780-782): C1 vs K 9 of 9 identical (EFB, left, right).
+6. **GPU hang** (K, `gpuhangtest=700 gpuhangrecover=1`): `reset #1 done`, `citro3d state marked dirty after GPU reset #1`, shot 820 has content (36 970 colours, 92 % of pixels off the commonest colour).
+7. **Timing** (release 3dsx, `gx_perf_ab --repeat 2`, windows 722-841, ms per frame: frame / core-0 busy / render):
+
+| Scene | G | K | C1 | C3 (busy / translator / render) | G gpucore=1 | K gpucore=1 |
+|---|---|---|---|---|---|---|
+| gor_01 | 50.0 / 35.2 / 1.4 | 50.0 / 35.7 / 0.9 | 34.8 / 31.7 / 7.2 | 33.4 / 22.5 / 13.3 / 7.4 | 50.3 / 35.5 / 2.4 | 50.3 / 36.1 / 1.2 |
+| pik_00 | 50.2 / 42.6 / 1.5 | 50.2 / 43.2 / 0.9 | 50.2 / 38.7 / 7.5 | 33.4 / 27.3 / 15.5 / 7.5 | 50.2 / 42.9 / 1.7 | 50.2 / 43.2 / 1.1 |
+| usu_00 | 36.4 / 30.9 / 1.5 | 36.8 / 31.7 / 1.6 | 33.6 / 28.2 / 6.4 | 32.2 / 18.9 / 13.2 / 6.3 | 36.0 / 31.1 / 1.7 | 38.5 / 32.0 / 2.4 |
+| battle | 28.4 / 21.0 / 1.1 | 29.5 / 21.2 / 0.9 | 27.3 / 19.4 / 3.7 | 25.3 / 15.8 / 14.4 / 3.8 (fence 5.4) | 29.5 / 21.4 / 2.4 | 30.7 / 21.6 / 2.0 |
+
+  (K measured four times, in the four A/B runs: busy 35.7, 43.0-43.2, 31.7-31.8, 21.2-21.3.) **`gxchunk=1` brings no gain in Azahar:** core-0 busy is 0.2-0.8 ms above G (the chunk use costs as much as the per-draw `oh_draw` work it replaces), the render thread is 0.2-0.6 ms lower, and the frame is the same or up to 1 ms worse (usu_00, battle). `gpucore=1` timings are suspect (Azahar delivers GSP completions to core 0 only) and show the same picture.
+
+   Counters (K, `gxthreadstats=60`, frame 840): chunk uses per frame gor_01 245 (draws 247, 28 752 words), pik_00 358 (367, 42 987), usu_00 153 (155, 18 034), battle 125 (126, 14 789). "not yet" 0 and "never" 0 in all four, "built" 0 (battle 2: after its TEV table reset); store resets 0 (store 54 000-62 600 of 65 536 words, 449-530 chunks in gor_01, pik_00, battle; 42 880 and 366 chunks in usu_00); lists submitted 3 / 3 / 10 / 2, citro3d splits 1 / 1 / 9 / 1, runs copied 0 / 0 / 21 / 0 (usu_00 splits often: 9 splits a frame, and 21 copied runs means the GX queue budget is near full there).
+
+**Flush finding (report only, no change).** `render_record` flushes the record's stream ranges (`r->dirty`), `r->verts` and `r->idx` with `GSPGPU_FlushDataCache` before it replays the record (3 calls, 68-259 KB a frame, `gxdirect ... GSP data-cache flushes` line). The vertex arena (`linearAlloc`), the stream blocks (`linearMemAlign`) and the index arena (placed in LINEAR) are all in the linear heap, and `C3D_FrameEnd(0)` flushes the whole linear heap before the GX queue runs (docs/PORT_3DS_GX_NATIVE.md, libcitro3d 1.7.1 disassembly; the same call covers the gxchunk frame list). The GX queue only runs at `C3D_FrameEnd`, after these flushes, so for linear memory the three explicit flushes are duplicate work. They are needed only for memory outside the linear heap (QTM or `place=` tiers), which the code does not use for these three. Not measured: the saving (a local patch with the flushes removed, A/B in `gx_perf_ab`, would show it; the ranges are small next to the whole-heap flush, so it is likely small).
+
 ### Gate results of steps 0-2 (2026-11-27, merged on port3ds `1630266e`, Azahar)
 
 C1, C3, G, V as above. Identity runs on the dev build (`--dev --no-cia`), verify, hang and timing runs on the release build.
@@ -1354,6 +1422,65 @@ C1, C3, G, V as above. Identity runs on the dev build (`--dev --no-cia`), verify
 | battle | 27.6 / 19.6 / 3.7 | 28.9 / 20.9 / 1.1 | 27.1 / 15.6 / 13.9 / 3.8 (fence 5.4) |
 
   `gxone=1` moves the state work to core 0: render thread -5.0..-5.8 ms, core-0 busy +1.3..+3.9 ms, frame not better (gor_01 50.0 against 34.2: the game thread now misses the second vblank). C3 stays the faster config (core-0 busy 15.6-27.3 ms). The base build (port3ds `1630266e`, release) gives the same C1 and C3 numbers as this build (C3 busy 22.5, 27.2, 18.8, 15.6; C1 31.7, 38.7, 28.2, 19.4): the merge adds no cost with the switches off.
+
+## Step 4 of the native plan: `gximmfl` (2026-11-27)
+
+Design and files: docs/PORT_3DS_GX_NATIVE.md, "Step 4 as built". Switch rows: "For PORT_3DS_TESTING.md" above. Default 0. Built on `gxchunk` (step 3, `f1d66a5d`).
+
+### What changes per immediate draw (C1 + `gxone=1 gxchunk=1 gximmfl=1`)
+
+| Per immediate draw (pik_00: about 1 150 per frame) | `gxchunk=1` | `+ gximmfl=1` |
+|---|---|---|
+| route bits | `gx_vsh_imm_reasons` (8-attribute loop, `tri_count` with divides) | the vertex class plan's bits (computed once per plan) + the primitive's bit (shifts and a multiply) |
+| plan | looked up in `gx_imm_convert`, after the route | looked up once, before the route, and given to the conversion |
+| pass-group route | `gx_vsh_route` | the same call (K hysteresis, decal links unchanged) |
+| index list | `emit_tris` into a static buffer, `memcpy` into the record's index arena | `emit_tris` straight into the index arena |
+| hand-over | `gx_vsh_imm_done` (a `GxVshImm`), `plat_gpu_vsh_light`, `plat_gpu_vsh_const`, `plat_gpu_vsh_draw`, `oh_draw` (with its pool and DRAWP tests) | `plat_gpu_imm_begin` (light and block by id, room), `plat_gpu_imm_end` (merge test, `oh_draw`'s words for a draw from the arena) |
+| index address | `osConvertVirtToPhys` per draw | the arena's physical base, once per record (linear memory; a heap placement converts per draw) |
+
+Not removed (needed for the same words): the pass-group key and record probe (`group_for`, `rec_for`, `touch`), `vsh_state` (gxdirty parts), the uniform block compare by id, the room checks, the class blocks by id (`oh_state_one`), the uniform row diff (`vsh_const_rows`).
+
+### Checks done without the emulator
+
+- Builds: dev and release (`--no-cia`) clean, no new warnings in the changed files; no `src/` change, so the GameCube matching build is unchanged.
+- Host: `gx_vsh_imm_nidx` against `tri_count` x 3 and against `emit_tris`' count, every primitive type, n = 0..65535: 0 mismatches (scratch test). `pica_model_test` on the two gpuhang/gpudump lists: ok, 0 differ (585 and 559 draws).
+- Hot sizes (release, LTO, `nm -S`, this build against a release build of `f1d66a5d` made the same way): no `GXSet*`, `GXLoad*`, `GXBegin`, `GXCallDisplayList`, `gx_rec_call`, `gx_rec_list`, `bat_open`, `vsh_prepare` changed size. Changed: `GXInit` +168 (start-up: the switch), `gx_rec_frame` +52 (the verify note in the gxthreadstats log), `rec_for` +100 (`gximmnow`), `gx_imm_convert` 5784 -> 3136 with `imm_plan_build` (2680) now out of line (it is built on a plan miss only, about 4 a frame in pik_00; it is shared with `gx_imm_plan`), `draw_from_reader` 1440 -> 5120 (`gx_draw_imm_fl` with the conversion inlined), `plat_gpu_imm_end` 2356 and `plat_gpu_imm_begin` 268 new, `plat_gpu_vsh_const` -4, `capture_efb` renamed by LTO (same size -16).
+
+### Gates (to run; Azahar was busy)
+
+Build the release CIA first: `TTYD_CCACHE=1 tools/port3ds/build.sh`. C1 = `gxdirty=1 gxdirect=1 gximmdirect=1 texfast=1 texasync=1`; C3 = C1 + `gxthread=2 gxpipeline=1 gxsdl=1 gxrecfuse=1 gxreclgroup=1`; G = C1 + `gxone=1`; K = G + `gxchunk=1`; I = K + `gximmfl=1`; IV = K + `gximmfl=2`.
+
+1. Verify mode, 4 scenes: `run_azahar.py --build build/3ds/game/ttyd.cia --frames 841 --switches "<scene> IV gxthreadstats=60"` for gor_01 (`map=gor_01 story=30`), pik_00 (`map=pik_00 story=30`), usu_00 (`map=usu_00 story=30`), battle (`map=gon_02 story=30 battle=1 btlauto=perfect`). Pass: start line `gximmfl=2: immediate draws straight into the frame list, ...`; every `gximmfl frame N:` line with draws above 0 (pik_00 about 1 150 with merged), `route differ 0 index differ 0`; the `gxchunk frame N:` line (with `gxchunk=1` its verify counts are the immediate draws' alone) `verify draws` above 0, `differ 0`, `records over 0`, "not compared" small; no `gximmfl verify` or `gxchunk verify` warning.
+2. Sweeps: `map_sweep.py --area tik --story 30 --switches "IV gxthreadstats=60"` and `--area jin`: every map ok, the same log conditions in every map's log.
+3. `determ_ab.py --a "C1" --b "I" --scenes gor_01,pik_00,usu_00,battle` (shots 780-785, 6 of 6 per scene), then `--a "C3" --b "I"` and `--a "K" --b "I"`.
+4. `gw_diff.py` 1600-frame padscript in gor_01 (`map=gor_01 story=30 determ gwdump=10` and the A2 padscript), A = C1, B = I: 160 records equal.
+5. Stereo: `stereo_ab.py --a "C1 stereoforce=1" --b "I stereoforce=1" --scenes gor_01 --count 3`: EFB, left, right identical.
+6. GPU hang: `run_azahar.py --build build/3ds/game/ttyd.cia --frames 840 --switches "map=gor_01 story=30 I gpuhangtest=700 gpuhangrecover=1 shots=1 shotfrom=820 shotmax=1"`: `reset #1 done`, the shot has content.
+7. Timings per thread: `gx_perf_ab.py --repeat 2 --scenes gor_01,pik_00,usu_00,battle --a "K" --b "I"`, `--a "C1" --b "I"`, `--a "C3" --b "I"`, and `--a "K gpucore=1" --b "I gpucore=1"` (`--allow-hw-faults` if the release build's boot fault lines appear). Report frame, core-0 busy, render. Expected (not measured): core 0 less by the per-draw hand-over and index copy only; the route and uniform work stay.
+8. Optional, not identical by design: `gximmnow=1` (`determ_ab.py --a "I" --b "I gximmnow=1"`): differences expected only in the first K (30) frames after a map load; shots 780-785 should be identical once the scene is steady.
+
+**Console-test items** (owner-gated): the index arena's physical base taken once per record (linear memory is physically contiguous: the packet's index address must equal `osConvertVirtToPhys` of the draw's indices; `gximmfl=2` compares exactly that on Azahar).
+
+### Gate results of steps 3 and 4 on D2 (2026-11-27, branch native34 = port3ds `a92665c5` + gate-gxchunk + gximm, Azahar)
+
+Merge fixes (D2 draws a batch member's indices in place, `BatDraw.lin`, and `Batch.ix_count` counts only the copied draws' indices): `bat_chunk_build` takes each draw's real index address (`lin`, else the pool copy at `pool_off`) and the last draw's count from the members' `idx_end` (with `ix_count` every in-place batch got 0 indices and was marked "never": gor_01 6 chunk uses a frame instead of 245); `plat_gpu_chunk_build` checks the range with `ixpool_ok` (D2's range list); `plat_gpu_imm_end` uses `s_oh_idx_end` as an address. The `gxchunk frame` line is split in two, so `records over` is in the log.
+
+Release CIA; verify runs `--long 200`, `--allow-hw-faults`.
+
+1. **KV** (C1 + `gxone=1 gxchunk=2`), gor_01, pik_00, usu_00, battle to frame 841: chunk uses per frame 245 / 358 / 153 / 124 (as on gate-gxchunk), verify draws 14 880 / 22 060 / 9 313 / 7 502 in the last window, `differ 0`, **`records over 0`**, not compared 0; no `gxchunk verify` warning; no `drawp indices ... outside the index ranges`; gxone `mismatches 0 missed 0 stale 0`. (`one-sided` is 2 per compared draw in the field scenes: the chunk writes all four scale rows; not a mismatch.) Sweeps: tik 22 of 22, jin 12 of 12 ok, 58 and 41 chunk lines, 0 differ, 0 verify warnings.
+2. **Step 3 identity:** `determ_ab` C1 vs K and C3 vs K 24 of 24 each; `gw_diff` C1 vs K 160 records equal (32 fields).
+3. **IV** (K + `gximmfl=2`), the same 4 scenes: `gximmfl frame` route differ 0, index differ 0 (front-end checks 47 153 / 196 043 / 75 576 / 154 873), gxchunk verify differ 0, records over 0; immediate draws per frame 231 / 122 / 204 / 112 (merged 138 / 1 032 / 273 / 95). Sweeps tik 22 of 22, jin 12 of 12 ok, 0 differ, 0 `gximmfl verify` warnings (map_sweep keeps only lines with "verify", so the `gximmfl frame` totals are not in its log).
+4. **Step 4 identity:** `determ_ab` C1 vs I, C3 vs I, K vs I 24 of 24 each; `gw_diff` C1 vs I 160 records equal; stereo C1 vs I 9 of 9; `gpuhangtest=700 gpuhangrecover=1` with I: `reset #1 done`, state marked dirty, shot 820 has content (36 976 colours, 92 %).
+5. **Timing** (release 3dsx, `gx_perf_ab --repeat 2`, windows 722-841, frame / core-0 busy / render ms):
+
+| Scene | K | I | C3 (busy / translator / render) |
+|---|---|---|---|
+| gor_01 | 50.3 / 35.6 / 0.8 | 50.0 / 35.4 / 0.9 (C3 run: 50.3 / 35.2) | 33.4 / 22.6 / 13.1 / 7.4 |
+| pik_00 | 50.2 / 42.9 / 0.9 | 50.2 / 41.8 / 0.9 | 33.4 / 27.2 / 15.4 / 7.5 |
+| usu_00 | 36.9 / 31.7 / 1.6 | 36.4 / 31.3 / 1.6 | 32.5 / 18.9 / 13.3 / 6.4 |
+| battle | 31.7 / 24.3 / 0.9 | 32.0 / 23.8 / 0.9 | 33.4 / 15.6 / 20.8 / 3.8 (fence 12.4) |
+
+  `gximmfl=1` takes 0.2-1.1 ms of core-0 busy off K (pik_00 most: 1 150 immediate draws a frame); the frame does not change. C3 stays the faster config (busy 15.6-27.2 ms).
 
 ## Heap margin (2026-11-27)
 

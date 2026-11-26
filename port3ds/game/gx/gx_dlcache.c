@@ -758,9 +758,12 @@ typedef struct {
     u8 cur_texmtx[8];
     void* blob;     /* BatMember[n], BatDraw[ndraws], GxAttrFmt[popcount(fmt_mask)][GX_VA_MAX_ATTR] */
     u32 ix_first, ix_count; /* its range of the index pool (the copied draws' indices only) */
+    u32 chunk;      /* gxchunk: the batch's chunk id (0: none yet, PLAT_GPU_CHUNK_NEVER: per draw for good) */
+    u32 chunk_tg;   /* the memory-trust generation the chunk was built in */
 } Batch;
 
 int gx_batch_pending;
+static int s_chunk_on;     /* plat_gpu_chunk_active (switch gxchunk, GX native step 3) */
 static Batch* s_bat;       /* BAT_SLOTS, heap */
 static u16 s_bat_free;     /* free slots through .next_head (index + 1) */
 static u32 s_bat_hand;     /* eviction scan position */
@@ -839,8 +842,9 @@ static void bat_init(void) {
     }
     s_bat_free = 1;
     s_bat_log_every = (u32)plat_switch_int("gxthreadstats", plat_switch_int("gxstats", 0));
-    PLOG_I("gxbatch: %s, %d slots, %lu KB of indices in linear memory", s_bat_on == 2 ? "verify" : "on", BAT_SLOTS,
-           (unsigned long)kb);
+    s_chunk_on = plat_gpu_chunk_active() != 0;
+    PLOG_I("gxbatch: %s, %d slots, %lu KB of indices in linear memory%s", s_bat_on == 2 ? "verify" : "on", BAT_SLOTS,
+           (unsigned long)kb, s_chunk_on ? ", batch chunks (gxchunk)" : "");
 }
 
 int gx_batch_recent(u32 bat) {
@@ -1106,6 +1110,9 @@ static inline __attribute__((always_inline)) int bat_open_body(Batch* b) {
         }
         b->trust_gen = tg;
     }
+    if (b->chunk != 0 && b->chunk_tg != tg && b->chunk != PLAT_GPU_CHUNK_NEVER) {
+        b->chunk = 0; /* gxchunk: built under an older memory-trust generation: built again at a full use */
+    }
     if (!bat_same_state(b)) {
         fail = OF_STATE;
         goto no;
@@ -1172,6 +1179,22 @@ static void bat_verify_life(const Batch* b) {
     }
 }
 
+/* gxchunk: the batch's draws as one prebuilt chunk (after a full use drawn per draw). */
+static __attribute__((noinline)) void bat_chunk_build(Batch* b) {
+    PlatGpuChunkDraw cd[BAT_MAX_DRAWS];
+    const BatDraw* d = b_draws(b);
+    /* D2: ix_count counts the copied draws' indices only; the members' last idx_end is the batch's total */
+    const u32 total = b_members(b)[b->n - 1].idx_end;
+    for (u32 i = 0; i < b->ndraws; i++) {
+        u32 end = i + 1 < b->ndraws ? d[i + 1].idx_first : total;
+        /* D2: in-place draws use the stream's own index segment, the others their copy in the batch's pool range */
+        const u16* src = d[i].lin != NULL ? d[i].lin : s_ix + b->ix_first + d[i].pool_off;
+        cd[i] = (PlatGpuChunkDraw){d[i].stream, d[i].layout, d[i].scales, src, end - d[i].idx_first};
+    }
+    b->chunk = plat_gpu_chunk_build(cd, b->ndraws, s_act_cull);
+    b->chunk_tg = b->trust_gen;
+}
+
 /* Records the draws of the open batch's members called so far. */
 static inline __attribute__((always_inline)) void bat_close_body(void);
 static void bat_close(void) {
@@ -1190,7 +1213,20 @@ static inline __attribute__((always_inline)) void bat_close_body(void) {
     const BatMember* m = b_members(b);
     const BatDraw* d = b_draws(b);
     u32 idx_end = m[p - 1].idx_end;
-    for (u32 i = 0; i < b->ndraws; i++) {
+    int drawn = 0;
+    if (s_chunk_on && b->chunk != 0 && b->chunk != PLAT_GPU_CHUNK_NEVER) {
+        /* gxchunk: the prebuilt chunk, its first k draws (the last of them cut at the members called) */
+        u32 k = 1;
+        while (k < b->ndraws && d[k].idx_first < idx_end) {
+            k++;
+        }
+        u32 mend = d[k - 1].m_end < p ? d[k - 1].m_end : p;
+        drawn = plat_gpu_chunk_draw(b->chunk, s_act_cull, k, m[mend - 1].idx_end - d[k - 1].idx_first, p);
+        if (!drawn) {
+            b->chunk = 0; /* the store started again or the cull mode differs: built again below */
+        }
+    }
+    for (u32 i = 0; i < b->ndraws && !drawn; i++) {
         u32 first = d[i].idx_first;
         if (first >= idx_end) {
             break;
@@ -1201,6 +1237,9 @@ static inline __attribute__((always_inline)) void bat_close_body(void) {
         u32 end = m[mend - 1].idx_end;
         plat_gpu_vsh_drawp(d[i].stream, d[i].layout, d[i].scales, s_act_cull, src + (first - d[i].idx_first), end - first,
                            mend - m0);
+    }
+    if (s_chunk_on && !drawn && b->chunk == 0 && p == b->n) {
+        bat_chunk_build(b);
     }
     gx_draw_batch_end(s_act_group, p, m[p - 1].verts_end, idx_end);
     s_st.hits += p;

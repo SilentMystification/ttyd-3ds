@@ -52,3 +52,22 @@ unsigned char __lower_map[256] = {
 typedef void (*voidfunctionptr)(void);
 voidfunctionptr _ctors[1] = {0};
 voidfunctionptr _dtors[1] = {0};
+
+/* strcmp: byte loop with an early exit. newlib's ARM version spends its first
+ * cycles aligning both strings and reads a word at a time; the game's name
+ * lookups (mapGetMapObj, lightNameToPtr, ...) compare short names that mostly
+ * differ in the first bytes, and the lookups run thousands of times a frame.
+ * Same result as the library's: the difference of the first differing bytes
+ * (unsigned), 0 for equal strings. */
+int strcmp(const char* a, const char* b) {
+    for (;;) {
+        unsigned char x = (unsigned char)*a++;
+        unsigned char y = (unsigned char)*b++;
+        if (x != y) {
+            return (int)x - (int)y;
+        }
+        if (x == 0) {
+            return 0;
+        }
+    }
+}

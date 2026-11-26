@@ -1747,11 +1747,9 @@ static void render_record(Record* r) {
     if (s_gpu_fence) {
         C3D_FrameBegin(0);
         if (gpu_reset_pending()) {
-            /* The GPU was reset while this thread waited in C3D_FrameBegin for the queue: close the frame it
-             * opened, rebuild citro3d, open it again. */
-            C3D_FrameEnd(0);
+            /* The GPU was reset while this thread waited in C3D_FrameBegin for the queue: the frame is open,
+             * and marking the context dirty is all it needs. */
             gpu_reset_apply();
-            C3D_FrameBegin(0);
         }
         gpu_done_publish(r->seq - 1);
         if (s_begin_records == 0 || s_sync_all) {
@@ -2181,10 +2179,11 @@ static void apt_hook_last(APT_HookType type, void* param) {
  * lets the render thread's C3D_FrameBegin return, then asks the render thread to rebuild citro3d. At most 3
  * resets within 10 s: after that the waits go on and the watchdog's crash path takes over.
  * Render thread: gpu_reset_apply runs at the start of the next record or right after C3D_FrameBegin
- * returns. citro3d goes down and up again (C3D_Fini, C3D_Init: a new command buffer and GX queue, all GPU
- * registers sent again at the first frame); the EFB and the screen target (their VRAM stays) are kept, the
- * screen's output links are made again and the EFB is cleared. The record in hand is then replayed whole, so
- * nothing but the frame the GPU hung on is lost. Per-record caches need nothing: the game thread starts every
+ * returns. It calls citro3d's own APT hook with APTHOOK_ONRESTORE, which marks the whole context dirty so the
+ * next frame sends program, shader, buffers, targets, textures and state again (what citro3d does after a
+ * suspend, when the GPU lost its state). Not C3D_Fini and C3D_Init: Fini destroys all render targets and Init
+ * keeps stale pointers undirtied. The record in hand is replayed whole, so nothing but the frame the GPU hung
+ * on is lost. Per-record caches need nothing: the game thread starts every
  * record with a full state and the render thread applies a full state at its first command. */
 static int gpu_reset_pending(void) { return __atomic_load_n(&s_reset_req, __ATOMIC_ACQUIRE) != s_reset_seen; }
 
@@ -2224,20 +2223,33 @@ static void gpu_reset_apply(void) {
     }
     u32 old = s_rphase;
     RPHASE(8);
-    aptUnhook(&s_apt_first); /* citro3d's new hook goes in at the head: ours goes in again after it */
-    C3D_Fini();
-    if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 8)) {
-        plat_fatal("gpu: citro3d init failed after a GPU reset");
+    /* No C3D_Fini and C3D_Init: Fini destroys every render target (and frees their VRAM), and Init keeps the
+     * old bound program and buffers without marking them dirty. citro3d has its own recovery for a GPU that
+     * lost its state, the APT hook's APTHOOK_ONRESTORE branch: it marks the whole context dirty (program,
+     * shader code, buffers, targets, textures, texenv, effects, uniforms) so that the next frame sends
+     * everything again, and starts the vblank callbacks. It is called here with the same argument. The hook is
+     * found in libctru's list (the cookie that is neither of ours). The GX queue is left alone: the next
+     * C3D_FrameBegin waits for it and clears it (gpureset_core already ended it if the GPU was hung). */
+    aptHookCookie* c3d_hook = NULL;
+    for (aptHookCookie* h = s_apt_first.next; h != NULL && c3d_hook == NULL; h = h->next) {
+        if (h->callback != apt_hook_first && h->callback != apt_hook_last) {
+            c3d_hook = h;
+        }
     }
-    aptHook(&s_apt_first, apt_hook_first, NULL);
-    C3D_RenderTargetSetOutput(s_screen, GFX_TOP, GFX_LEFT, SCREEN_TRANSFER_FLAGS);
-    stereo_relink();
-    C3D_RenderTargetClear(s_efb, C3D_CLEAR_ALL, 0x000000FF, 0);
+    for (aptHookCookie* h = s_apt_last.next; h != NULL && c3d_hook == NULL; h = h->next) {
+        if (h->callback != apt_hook_first && h->callback != apt_hook_last) {
+            c3d_hook = h;
+        }
+    }
+    if (c3d_hook == NULL) {
+        plat_fatal("gpu: citro3d's APT hook not found after a GPU reset");
+    }
+    c3d_hook->callback(APTHOOK_ONRESTORE, c3d_hook->param);
     s_begin_records = 0; /* the next record's C3D_FrameBegin takes the vblank wait again */
     s_begin_wait_acc = 0;
     s_reset_seen = req;
     RPHASE(old);
-    PLOG_I("gpu: citro3d rebuilt after GPU reset #%lu", (unsigned long)req);
+    PLOG_I("gpu: citro3d state marked dirty after GPU reset #%lu", (unsigned long)req);
 }
 
 static volatile int s_dead;

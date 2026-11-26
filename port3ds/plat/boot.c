@@ -316,10 +316,15 @@ int main(int argc, char** argv) {
     plat_cpu_limit_init();
     /* After the core-1 limit: the SD worker is a thread on core 1 (include/plat/sdio.h). */
     plat_sd_start();
-    plat_memplace_init();
+    /* Development tool mode (switch gpuprobe, dev builds only): the probe runs instead of the game. */
+    int probe_mode = plat_gpuprobe_requested();
+    plat_memplace_init(); /* the log queue lives in the placed memory */
     plat_log_start_writer();
     plat_crash_init();
     plat_devupdate_init();
+    if (probe_mode) {
+        plat_gpuprobe_mode_run(); /* never returns */
+    }
     plat_memplace_report();
 
     /* libctru gives the heap and the linear heap whatever the APPLICATION

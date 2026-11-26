@@ -1,6 +1,6 @@
 # PICA200 rules probe (gpuprobe)
 
-`libs/ctr-devkit/gpuprobe/` (MIT, libctru and citro3d only) finds which PICA command patterns hang, fault or draw wrong. The qtmbench CIA has it as a mode. Azahar accepts nearly everything below, so only the New 3DS run gives rules; the Azahar column documents what the emulator forgives.
+`libs/ctr-devkit/gpuprobe/` (MIT, libctru and citro3d only) finds which PICA command patterns hang, fault or draw wrong. It runs inside the game CIA (development builds): switch `gpuprobe`, and the game does not start in that mode (`port3ds/plat/gpuprobe_mode.c`). A release build ignores the switch. The qtmbench CIA still has it as a mode too. Azahar accepts nearly everything below, so only the New 3DS run gives rules; the Azahar column documents what the emulator forgives.
 
 ## How it works
 
@@ -8,16 +8,16 @@
 - The probe waits for the P3D event (200 ms on hardware, 5000 ms in an emulator; `probetimeout=ms`).
 - On a timeout the case is `HANG`. The probe calls `GSPGPU_ResetGpuCore`, runs a control draw, and if that fails it restarts gfx and citro3d. If the GPU still does not answer, the other cases are `SKIP`.
 - After a finished case the CPU reads the block. `OK` = 8 sample pixels as expected and no sentinel word changed. `WRONG` = other pixels or a changed guard word (a write past the target). `ERR` = GSP refused the list.
-- Journal `sdmc:/3ds/qtmbench/gpuprobe.journal`: a `B <case>` line before each case and an `R <case> <result> <ms> <note>` line after. A case with `B` and no `R` at the next start is `FAULT` (the process died or froze) and is not run again. Finished cases are kept; `probefresh` starts over.
-- Outputs: `sdmc:/3ds/qtmbench/gpuprobe.txt` (table), the journal, and `sdmc:/3ds/qtmbench/gpuprobe/<case>.bin` (the submitted PICA list, for `gpu_cmd_diff.py`).
+- Journal `sdmc:/3ds/ttyd/gpuprobe.journal`: a `B <case>` line before each case and an `R <case> <result> <ms> <note>` line after. A case with `B` and no `R` at the next start is `FAULT` (the process died or froze) and is not run again. Finished cases are kept; `probefresh` starts over.
+- Outputs: `sdmc:/3ds/ttyd/gpuprobe.txt` (table), the journal, and `sdmc:/3ds/ttyd/gpuprobe/<case>.bin` (the submitted PICA list, for `gpu_cmd_diff.py`).
 - Order: danger 0 (controls), 1, 2 (hang likely), 3 (memory faults possible: heap buffers, 2048 texture, `rt_deleted`, which must stay last). Controls are the `ctl_*`, `*_full`, `*_off0/16`, `*_a256` cases.
 - citro3d facts found while building it: it uploads a shader binary once, so later lists have no code; `ATTRIBBUFFERS_LOC` is the constant `0x18000000` and each buffer carries its offset; `C3D_BoolUnifSet` takes ids from 0x68; `GPU_SCISSOR_NORMAL` is 3.
 
-## Switches (qtmbench)
+## Switches (game CIA, development build)
 
 | Switch | Meaning |
 | --- | --- |
-| `gpuprobe` | run the probe instead of the benchmark, then idle with devupdate up |
+| `gpuprobe` | run the probe instead of the game (no OSInit, disc or GX), log `GPUPROBE DONE ...`, then idle with the devupdate server up (`restart` and `push` work) |
 | `probe=a,b,grp,pre*` | only these case ids, group names or id prefixes |
 | `probefresh` | ignore and delete the journal |
 | `probeselftest` | add `self_timeout` (never submits; tests timeout and reset) |
@@ -27,14 +27,11 @@
 ## Console run (the planner runs it; the owner gates console pushes)
 
 ```sh
-tools/port3ds/build.sh libs/ctr-devkit/qtmbench          # build/3ds/qtmbench/qtmbench.cia
 D="libs/ctr-devkit/devupdate/devupdate.py --ip $N3DS_IP"
-$D push build/3ds/qtmbench/qtmbench.cia --wait 90        # qtmbench already installed: else "bootstrap --cia ..."
-# switches.txt on the SD card (sdmc:/3ds/qtmbench/switches.txt) with:  gpuprobe probefresh probeselftest
-$D restart --switches "gpuprobe probefresh probeselftest"
+$D restart "gpuprobe probefresh probeselftest"           # the game CIA (development build) is installed and running
 ```
 
-The run takes about 1 minute plus 200 ms per hang. A freeze or crash: restart the console app (or power cycle), start qtmbench again with `--switches "gpuprobe"` (no `probefresh`): the journal marks the case that died as FAULT and goes on. Repeat until `GPUPROBE DONE` is in the log. Then:
+The run takes about 1 minute plus 200 ms per hang. A freeze or crash: restart the console app (or power cycle), then `$D restart "gpuprobe"` (no `probefresh`; after a crash the updater's recovery mode accepts the restart too): the journal marks the case that died as FAULT and goes on. Repeat until `GPUPROBE DONE` is in the log. Then:
 
 ```sh
 $D files get @/gpuprobe.txt -o build/gpuprobe_hw.txt         # the table
@@ -43,7 +40,7 @@ $D files ls @/gpuprobe                                       # one .bin per case
 python3 tools/port3ds/gpu_cmd_diff.py --probe-dir build/gpuprobe_hw
 ```
 
-On the console the probe writes to `sdmc:/3ds/qtmbench/` (devupdate's read-only folder): `gpuprobe.txt`, `gpuprobe.journal`, `gpuprobe/<case>.bin`. The Azahar table and lists below were produced by the same build with the same paths (an earlier build used `sdmc:/3ds/qtmbench/`).
+The probe writes to `sdmc:/3ds/ttyd/` (devupdate's read-only folder, `@/`): `gpuprobe.txt`, `gpuprobe.journal`, `gpuprobe/<case>.bin`. Leave probe mode with `$D restart "<game switches>"`. The Azahar table and lists below were produced by the qtmbench build (`sdmc:/3ds/qtmbench/`); the game CIA gives the same results (checked 2026-11-26 in Azahar: `gpuprobe probefresh probeselftest`, then `gpuprobe` resumed `rt_deleted` as FAULT, then a normal restart booted the game).
 
 Fill the "New 3DS" column below. Every row where the console differs from the Azahar result and from "Expected" becomes a rule: add a function to `PROBE_RULES` (or a format to `TEX_ALIGN_PROBE`) in `tools/port3ds/gpu_cmd_diff.py`, tagged `[probe]`.
 

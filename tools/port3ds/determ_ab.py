@@ -60,9 +60,11 @@ def run(scene, config, args, tag):
     n = 0
     if shots.exists():
         for f in sorted(shots.iterdir()):
-            if f.suffix == ".ppm" and args.first <= int(f.stem) < args.first + args.count:
+            # NNNNN.ppm (the EFB) and, with stereo on, NNNNN.L.ppm / NNNNN.R.ppm (the eyes' screens)
+            num = f.name.split(".")[0]
+            if f.suffix == ".ppm" and num.isdigit() and args.first <= int(num) < args.first + args.count:
                 shutil.copy2(f, dest / f.name)
-                n += 1
+                n += f.name.count(".") == 1
     if r.returncode != 0:
         tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or ["?"]
         print(f"{scene} {tag}: run_azahar rc {r.returncode}: {tail[0]}", flush=True)

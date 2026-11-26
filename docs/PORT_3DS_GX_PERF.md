@@ -934,6 +934,64 @@ New `tools/port3ds/stereo_ab.py`: `determ` plus `stereoforce=1` (simulated 3D sl
 
 `gxdirty=2` or `gxdirect=2` together with `gxcache=2`; `gw_diff.py` with `gxdirty` and `gxdirect` together; the combination `gxdirty=1 gxdirect=1`; more than one run per cell for the timing; stereo in the other eight scenes; any console run.
 
+## Stage 5, `gxonehop`: one hop (2026-11-26)
+
+Switch `gxonehop` (default 0; 2 is a verify mode; `gxonehopkb=N` the word arena per record, default 512). Files: `port3ds/plat/gpu.c` (recording side and replay), `gx_rec.c` (`gxthread` off with it), `gx_draw.c` (`gximmdirect=1` with it). It implies `gxdirect=1` and `gximmdirect=1`. `gx_rec.c` and `gxthread` stay.
+
+- **Game thread writes the words.** The plat calls that recorded `CMD_STATE`, deltas, `CMD_VSH_CONST`, `CMD_VSH_LIGHT`, `CMD_FOG`, `CMD_VSH_DRAW(P)` now write, at the call, what the gxdirect replay would write for them into the record's word arena (heap, 2 x 512 KB): the three state class blocks and the attribute setup copied from the game thread's own tables of kept words, the uniform rows, the cull word, the draw packet (index offset and count patched; merged draws patch the count), the fog LUT. The model of what the GPU holds follows the replay's rules exactly: state sent at the next draw, a block only when its key differs from the held one, a record starts with nothing held, a clear, copy or CPU-path draw leaves nothing held. The command encoder is libctru's `GPUCMD_Add` layout (runs of 256, even padding), checked against `GPUCMD_Add` at start-up for 0 to 520 parameters (else the switch turns itself off).
+- **Render thread.** Copies the word runs (`CMD_OH_WORDS`) into citro3d's command buffer and does only what needs citro3d: `CMD_OH_FLUSH` (vsh switch on and citro3d's pending words, the replay's `c3d_flush`, before the first draw after citro3d work), `CMD_OH_UNIF` (the `lit` bool and light-count int uniforms, set only when they change, as the replay), `CMD_OH_CAPTURE` (a key the game thread's tables do not hold yet: citro3d's setters and a capture, as gxdirect; the game thread takes the words into its tables when the record comes back; a second capture of the same key in the same record copies the first), `CMD_STATE` (whole, before a clear, copy or CPU-path draw when it changed), and clears, copies, CPU-path draws, present as before.
+- **Stereo.** A mark (`CMD_OH_MARK`) after a scene draw or copy, before the next screen-layer or no-write draw, clear, CPU-path draw, or the frame's end: the last mark is the split of `stereo_split`. At a mark the game model holds nothing (the next draw sends its full state and layout) and the mark carries the uniform rows set so far, the last fog LUT and the `lit`/light-count values, so the tail after it is self-contained. The render thread applies the mark's words only at the split, for each eye; in mono a mark does nothing.
+- **Counters:** with `gxthreadstats=N`, two `gxonehop frame N:` lines.
+- **gxonehop=2:** renders as gxdirect=1 from the full record and builds the words of mode 1 beside it (side list; the marks also go into the record, where the replay drops what it holds as mode 1 does). After each mono record the render thread compares the one-hop words with the words its replay wrote itself, word for word (a capture's words come from the replay's own table). Its tables are larger in this mode (512/2048/512/1024 slots; with gxdirect's 512 texture slots some keys of gor_01 were evicted within every frame).
+- **Tables:** 512, 2048, 512, 1024 slots (about 1 MB heap) on the game thread; with 512 texture slots gor_01 re-captured about 5 blocks per frame.
+- **GPU hang reset:** every record is self-contained (nothing held at its start, all its rows sent again), and the reset is applied only at a record's start, so nothing needs rebuilding. Captured words do not depend on GPU state.
+- **gpudrawcut / gpudrawskip:** with gxonehop=1 the game thread asks the filter for the shader draws and the CPU-path draws, in record order with one count (the CPU-path decision travels in `CMD_DRAW`'s count bit 31). gxdirect=1 does not filter its shader draws. gpudump's command-list dumps see the copied words.
+
+Results (Azahar; release build `3dc7d695` = port3ds `63cabb92` + this change unless noted):
+
+| Check | Result |
+|---|---|
+| `gxonehop=2`, gor_01, frames 1 to 840 (dev build) | 893 records, 14 781 622 words compared, **0 mismatches**, 0 not compared |
+| `gxonehop=2`, effects battle, frames 1 to 960 (dev build) | 967 records, 8 615 926 words, **0 mismatches**, 0 not compared |
+| `gxonehop=2`, pause menu, frames 1 to 900 (dev build) | 953 records, 10 634 078 words, **0 mismatches**, 0 not compared |
+| `determ` (`determ_ab.py`), `gxdirect=1 gximmdirect=1` against `gxonehop=1`: gor_01, hei_01, aaa_00, pause shots 780 to 785; effects battle 900 to 905 | **6 of 6 byte-identical in each** (30 of 30; 77 to 98% of pixels off the commonest colour) |
+| Stereo, gor_01 `stereoforce=1`, shots 780 to 785 | **18 of 18 byte-identical** (EFB, left and right screen per shot) |
+| `gw_diff.py`, 1600-frame padscript (`map=gor_01 story=30 determ gwdump=10` and the A2 padscript), same A against B | `gw_diff: A 160 records, B 160 records` / `gw_diff: 160 records equal (f 10..1600, fields compared: 23)` |
+| `gpuhangtest=700 gpuhangrecover=1` with gxonehop=1, gor_01 | `reset #1 done`, `citro3d state marked dirty after GPU reset #1`; the shot at frame 820 has 576 draws and content (92% of pixels off the commonest colour) |
+
+Per frame in gor_01 (mode 1): about 573 draws, 303 merged calls, kept blocks tev 43 tex 336 pix 169 lay 137, 0 captures in the steady state (with the larger tables), 3 flushes, 1 uniform op, 2 marks, about 55 600 words (222 KB).
+
+Same-build A/B, `gx_perf_ab.py --allow-hw-faults`, windows ending at frames 722 to 841, 2 runs per cell (a first pass at 1 run gave the same within 0.8 ms):
+
+| Scene | frame A -> B (ms) | core-0 busy A -> B (ms) | render A -> B (ms) | gxthread=2 baseline: frame, game busy, translator, render (1 run) |
+|---|---|---|---|---|
+| gor_01 | 50.5 -> 50.6 | 45.8 -> 46.2 | 8.1 -> **1.4** | 50.2, 31.0, 23.1, 8.2 |
+| effects battle | 39.6 -> 40.4 | 27.6 -> 27.8 | 3.9 -> **1.0** | 35.9, 14.1, 20.5, 3.9 |
+| hei_01 | 33.4 -> 33.6 | 21.1 -> 21.7 | 3.5 -> **1.0** | 21.5, 12.4, 12.2, 3.6 |
+| aaa_00 | 33.4 -> 33.4 | 22.6 -> 22.2 | 4.3 -> **1.0** | 33.5, 13.7, 12.4, 4.4 |
+| pause menu | 32.9 -> 33.4 | 17.8 -> 18.2 | 3.9 -> **1.0** | 16.7, 10.0, 11.3, 4.0 |
+
+A is `gxdirect=1 gximmdirect=1` (gxthread=0), B `gxonehop=1`.
+
+- The render thread's work drops by 65 to 83%: it only copies runs. The game thread's busy time moves by -0.4 to +0.6 ms: writing the words costs about what recording the commands did.
+- **The acceptance gate fails.** Against the better baseline per scene (gxthread=2 in battle, hei_01 and the pause menu), gxonehop=1 is slower in frame time: 40.4 against 35.9, 33.6 against 21.5, 33.4 against 16.7 ms. With gxthread=2 the translation runs on core 2 beside the game; with one hop all of it is on core 0 again (46 ms busy in gor_01 against 31 + 23 split). The hop is gone, the work is not: the plan's end state needs the per-frame translation itself to shrink (front end state path, list calls), which this stage does not touch. gor_01 and aaa_00 are no slower than either baseline.
+- Against gxthread=0 the frame times are within the run-to-run spread except the effects battle (+0.8 ms, busy +0.2) and the pause menu (+0.5 ms, busy +0.4).
+- The release build logs 65 Azahar fault lines at boot in every configuration (A included): `unmapped Write32 0xA5A5A5A5 @ 0x07FFFEFC` in `crash_thread_register` (`libs/ctr-devkit/crash/crash.c:195`, the stack fill below a thread's stack). Not from this change; `gx_perf_ab.py` got `--allow-hw-faults` to measure anyway. Dev builds do not show it.
+
+**Default stays 0.**
+
+**Console-test items** (Azahar accepts these; hardware is not proven):
+
+1. The words are written on core 0 into cached heap memory and copied by the render thread on core 2 into citro3d's command buffer after the record handover (the same handover as the record itself). Any word the render thread sees stale would show as a wrong state or a GPU hang.
+2. Captures happen on the render thread with citro3d's setters while the game thread reads `s_tex` entries for its texture keys (copies, then the sampler setters on the copy): the fields the render thread writes are all rewritten on the copy, so the key does not depend on the timing. A key from a torn read would show as a capture per frame (counters) or a wrong texture filter.
+3. The draw packet's index offset uses `BufInfo_Init`'s base address taken at start-up instead of citro3d's context word at the draw (gxdirect=1 reads the context). The same value in Azahar; checked by the verify mode only there.
+4. Stereo on hardware: the split mark's words (all uniform rows, the fog LUT) go out after the warp, before the tail of each eye.
+5. Memory: 1 MB heap for two word arenas and about 1 MB for the tables (the verify mode needs 384 KB more for side lists and 512 KB for the compare buffer).
+
+Console command (owner-gated; not run): install the release CIA, set `gxonehop=1 gxthreadstats=60` in `debug3ds.txt`, compare frame, busy and render times with `gxdirect=1 gximmdirect=1` and with `gxdirect=1 gximmdirect=1 gxthread=2` in gor_01, a battle and the pause menu; then once with the 3D slider up.
+
+**Not done:** `vsh_accept.py`, the other scenes of the ten, the `gxcache=2` sweep with gxonehop, gxonehop with `gxdirty=1` (its regions are not used to skip key compares), building the layout block's words without a capture (the immediate-mode ring's stream pointers make new layout keys; 0 per frame in the steady state measured here), deleting `gx_rec.c` and `gxthread` (kept until hardware numbers), any console run.
+
 ## Risks of the cache
 
 - **Hash collisions.** A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.

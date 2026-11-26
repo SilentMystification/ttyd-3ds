@@ -52,6 +52,8 @@ def run(scene, config, args, tag):
     cmd = [str(ROOT / "tools/port3ds/run_azahar.py"), "--build", str(args.build), "--log", "3ds/ttyd/latest.log",
            "--switches", sw, "--until", rf"gxthread \d frame {args.to + 1}:", "--long", str(args.long),
            "--last", str(last)]
+    if args.allow_hw_faults:
+        cmd.append("--allow-hw-faults")
     r = subprocess.run(cmd, capture_output=True, text=True)
     log = last / "game_log.txt"
     text = log.read_text(errors="replace") if log.exists() else ""
@@ -90,6 +92,8 @@ def main():
     ap.add_argument("--from", dest="frm", type=int, default=721, help="windows after this game frame count")
     ap.add_argument("--to", type=int, default=840, help="last game frame measured")
     ap.add_argument("--long", type=float, default=100, help="run_azahar.py limit per run in seconds")
+    ap.add_argument("--allow-hw-faults", action="store_true",
+                    help="pass --allow-hw-faults to run_azahar.py (Azahar fault lines do not fail a run)")
     ap.add_argument("--repeat", type=int, default=1, help="runs per cell (the minimum busy time is kept)")
     args = ap.parse_args()
     configs = [("A", args.a)] + ([("B", args.b)] if args.b is not None else [])

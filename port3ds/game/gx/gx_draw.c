@@ -122,6 +122,9 @@ void gx_opts_init(void) {
     if (gx_opt_immdirect < 0 || gx_opt_immdirect > 2) {
         gx_opt_immdirect = 1;
     }
+    if (gx_opt_immdirect == 0 && plat_switch_int("gxonehop", 0) != 0) {
+        gx_opt_immdirect = 1; /* gxonehop (stage 5) builds on stage 4 */
+    }
     PLOG_I("gx: statever %d fogcache %d unlit %d dirty %d immdirect %d", gx_opt_statever, gx_opt_fogcache,
            gx_opt_unlit, gx_opt_dirty, gx_opt_immdirect);
     gx_vsh_init();

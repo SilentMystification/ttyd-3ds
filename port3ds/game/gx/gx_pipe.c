@@ -356,7 +356,7 @@ typedef struct {
     u8 idx16; /* the index is u16 */
     s16 dst;  /* byte offset in the vertex */
     u8 rgb;   /* colour: alpha forced to 255 */
-    u8 pad;
+    u8 so;    /* the step's first slot in a vertex */
     f32 sc;
     const u8* base;
     u32 stride;
@@ -393,17 +393,36 @@ static void imm_layout_c(void) {
     }
 }
 
-int gx_imm_convert(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, u8* out, u8 attr_slot[8]) {
-    imm_layout_c();
-    const u32 stride = s_imm_stride_c;
+/* A primitive's plan: built from the vertex description and the format's attribute formats only (the array bases
+ * and strides of its indexed steps are taken from the state at each primitive), so it is kept and used again while
+ * those bytes are the same. */
+typedef struct {
+    const GxState* g; /* NULL: empty */
+    u8 fmt, ns, vs;
+    u8 vd[GX_VA_MAX_ATTR];
+    GxAttrFmt vat[GX_VA_MAX_ATTR];
+    u8 idx_attr[24]; /* the array of an indexed step, 0xFF for the others */
+    u8 tmpl[64];     /* the vertex every step writes into */
+    u8 attr_slot[8];
+    u8 nfill;
+    u8 fill_w[16];  /* the template's words no step writes */
+    u32 fill_v[16];
+    ImmStep st[24];
+} ImmPlan;
+#define IMM_PLANS 4
+static ImmPlan s_plans[2][IMM_PLANS]; /* per thread (the translating thread, the other), as gx_imm_verify's */
+static u32 s_plan_next[2];
+
+static void imm_plan_build(const GxState* g, u8 fmt, ImmPlan* pl) {
     const int32_t* off = s_imm_off_c;
     const u8* d = g->vtx_desc;
     const GxAttrFmt* vat = g->vat[fmt];
-    ImmStep st[24];
+    ImmStep* st = pl->st;
+    u8* attr_slot = pl->attr_slot;
     u32 ns = 0;
     /* the vertex every step writes into: white colour, zero texture slots, the normal (0, 0, 1) when there is none */
-    u8 tmpl[64];
-    memset(tmpl, 0, sizeof(tmpl));
+    u8* tmpl = pl->tmpl;
+    memset(tmpl, 0, sizeof(pl->tmpl));
     tmpl[off[1]] = tmpl[off[1] + 1] = tmpl[off[1] + 2] = tmpl[off[1] + 3] = 255;
     u32 skip = 0;
 #define FLUSH_SKIP()                                                                                                   \
@@ -506,107 +525,234 @@ int gx_imm_convert(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, u8* out
     }
     FLUSH_SKIP();
 #undef FLUSH_SKIP
-    /* No libc call per vertex: the template is copied a word at a time (four words a turn, so the compiler does
-     * not turn the loop back into a memcpy call), and each component is stored where it is converted. The bytes
-     * are those of memcpy(o, tmpl, stride) and memcpy(o + dst, c, n * 4). */
-    const u32 tw = stride / 4;
-    for (u32 v = 0; v < n; v++) {
-        u8* o = out + v * stride;
-        {
-            u32 i = 0;
-            for (; i + 4 <= tw; i += 4) {
-                u32 a0, a1, a2, a3;
-                __builtin_memcpy(&a0, tmpl + i * 4, 4);
-                __builtin_memcpy(&a1, tmpl + i * 4 + 4, 4);
-                __builtin_memcpy(&a2, tmpl + i * 4 + 8, 4);
-                __builtin_memcpy(&a3, tmpl + i * 4 + 12, 4);
-                __builtin_memcpy(o + i * 4, &a0, 4);
-                __builtin_memcpy(o + i * 4 + 4, &a1, 4);
-                __builtin_memcpy(o + i * 4 + 8, &a2, 4);
-                __builtin_memcpy(o + i * 4 + 12, &a3, 4);
-            }
-            switch (tw - i) {
-            case 3: o[i * 4 + 8] = tmpl[i * 4 + 8], o[i * 4 + 9] = tmpl[i * 4 + 9], o[i * 4 + 10] = tmpl[i * 4 + 10],
-                    o[i * 4 + 11] = tmpl[i * 4 + 11]; /* fallthrough */
-            case 2: o[i * 4 + 4] = tmpl[i * 4 + 4], o[i * 4 + 5] = tmpl[i * 4 + 5], o[i * 4 + 6] = tmpl[i * 4 + 6],
-                    o[i * 4 + 7] = tmpl[i * 4 + 7]; /* fallthrough */
-            case 1: o[i * 4] = tmpl[i * 4], o[i * 4 + 1] = tmpl[i * 4 + 1], o[i * 4 + 2] = tmpl[i * 4 + 2],
-                    o[i * 4 + 3] = tmpl[i * 4 + 3]; /* fallthrough */
-            default: break;
-            }
-            for (u32 b = tw * 4; b < stride; b++) {
-                o[b] = tmpl[b];
+    /* Each step's first slot in a vertex, and the slots a vertex takes: every step takes a fixed count. */
+    u32 vs = 0;
+    for (u32 k = 0; k < ns; k++) {
+        ImmStep* p = &st[k];
+        p->so = (u8)vs;
+        switch (p->op) {
+        case IS_SKIP:
+        case IS_COMP: vs += p->n; break;
+        case IS_CLR: {
+            u8 ty = p->type;
+            vs += ty == GX_RGB565 || ty == GX_RGBA4 ? 1u : ty == GX_RGB8 || ty == GX_RGBA6 ? 3u : 4u;
+            break;
+        }
+        default: vs += 1; break; /* an index */
+        }
+        /* an indexed step's array, from where it writes */
+        u8 a = 0xFF;
+        if (p->op == IS_COMP_IDX || p->op == IS_CLR_IDX) {
+            if (p->dst == off[0]) {
+                a = GX_VA_POS;
+            } else if (p->dst == off[5]) {
+                a = GX_VA_NRM;
+            } else if (p->dst == off[1]) {
+                a = GX_VA_CLR0;
+            } else {
+                for (int t = 0; t < 8; t++) {
+                    if (attr_slot[t] < 3 && p->dst == off[2 + attr_slot[t]]) {
+                        a = (u8)(GX_VA_TEX0 + t);
+                    }
+                }
             }
         }
+        pl->idx_attr[k] = a;
+    }
+    /* the template's words no step writes (each step writes whole words: components, a colour) */
+    {
+        const u32 stride = s_imm_stride_c;
+        u32 covered[2] = {0, 0}; /* a bit per word of the vertex (64 bytes at most) */
         for (u32 k = 0; k < ns; k++) {
             const ImmStep* p = &st[k];
-            switch (p->op) {
-            case IS_SKIP: sl += p->n; break;
-            case IS_COMP: {
-                u8* q = o + p->dst;
-                f32 c;
-                switch (p->n) {
-                case 3: c = slot_comp(sl, p->type, p->sc), __builtin_memcpy(q, &c, 4);
-                        c = slot_comp(sl + 1, p->type, p->sc), __builtin_memcpy(q + 4, &c, 4);
-                        c = slot_comp(sl + 2, p->type, p->sc), __builtin_memcpy(q + 8, &c, 4);
-                        break;
-                case 2: c = slot_comp(sl, p->type, p->sc), __builtin_memcpy(q, &c, 4);
-                        c = slot_comp(sl + 1, p->type, p->sc), __builtin_memcpy(q + 4, &c, 4);
-                        break;
-                default: c = slot_comp(sl, p->type, p->sc), __builtin_memcpy(q, &c, 4); break;
+            u32 words = p->op == IS_COMP || p->op == IS_COMP_IDX ? p->n : p->op == IS_SKIP ? 0u : 1u;
+            for (u32 i = 0; i < words; i++) {
+                u32 w = (u32)p->dst / 4u + i;
+                covered[w >> 5] |= 1u << (w & 31);
+            }
+        }
+        u32 nf = 0;
+        for (u32 w = 0; w < stride / 4u; w++) {
+            if (!(covered[w >> 5] >> (w & 31) & 1)) {
+                pl->fill_w[nf] = (u8)w;
+                __builtin_memcpy(&pl->fill_v[nf], tmpl + w * 4u, 4);
+                nf++;
+            }
+        }
+        pl->nfill = (u8)nf;
+    }
+    pl->g = g;
+    pl->fmt = fmt;
+    pl->ns = (u8)ns;
+    pl->vs = (u8)vs;
+    memcpy(pl->vd, d, sizeof(pl->vd));
+    memcpy(pl->vat, vat, sizeof(pl->vat));
+}
+
+int gx_imm_convert(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, u8* out, u8 attr_slot[8]) {
+    imm_layout_c();
+    const u32 stride = s_imm_stride_c;
+    const int t_ = gx_tls_translator != 0;
+    ImmPlan* pl = NULL;
+    for (u32 i = 0; i < IMM_PLANS; i++) {
+        ImmPlan* e = &s_plans[t_][i];
+        if (e->g == g && e->fmt == fmt && gx_mem_equal(e->vd, g->vtx_desc, sizeof(e->vd)) &&
+            gx_mem_equal(e->vat, g->vat[fmt], sizeof(e->vat))) {
+            pl = e;
+            break;
+        }
+    }
+    if (pl == NULL) {
+        pl = &s_plans[t_][s_plan_next[t_]++ % IMM_PLANS];
+        imm_plan_build(g, fmt, pl);
+    }
+    ImmStep* st = pl->st;
+    const u32 ns = pl->ns, vs = pl->vs;
+    for (u32 k = 0; k < ns; k++) {
+        u8 a = pl->idx_attr[k];
+        if (a != 0xFF) {
+            st[k].base = g->array_base[a];
+            st[k].stride = g->array_stride[a];
+        }
+    }
+    memcpy(attr_slot, pl->attr_slot, 8);
+    /* The template's words that no step writes (the plan's fill list), into every vertex; then step by step over
+     * all vertices: the step's kind, type and count are decided once a primitive, not once a vertex. The steps
+     * write disjoint bytes of a vertex, so the order changes nothing in the result; each component is converted
+     * with read_vertex's expression, and a float component is copied as its bits (a load and store of the f32
+     * writes the same bytes). */
+    {
+        const u32 nf = pl->nfill;
+        const u8* fw = pl->fill_w;
+        const u32* fv = pl->fill_v;
+        u8* o = out;
+        for (u32 v = 0; v < n; v++, o += stride) {
+            for (u32 i = 0; i < nf; i++) {
+                __builtin_memcpy(o + fw[i] * 4u, &fv[i], 4);
+            }
+        }
+    }
+    for (u32 k = 0; k < ns; k++) {
+        const ImmStep* p = &st[k];
+        const PPCWGPipe* s0 = sl + p->so;
+        u8* q0 = out + p->dst;
+        const int flt = p->type != GX_U8 && p->type != GX_S8 && p->type != GX_U16 && p->type != GX_S16;
+        switch (p->op) {
+        case IS_SKIP: break;
+        case IS_COMP: {
+            const u32 cn = p->n;
+            if (flt && cn == 3) {
+                for (u32 v = 0; v < n; v++, s0 += vs, q0 += stride) {
+                    u32 c0 = s0[0].u32, c1 = s0[1].u32, c2 = s0[2].u32;
+                    __builtin_memcpy(q0, &c0, 4);
+                    __builtin_memcpy(q0 + 4, &c1, 4);
+                    __builtin_memcpy(q0 + 8, &c2, 4);
                 }
-                sl += p->n;
                 break;
             }
-            case IS_COMP_IDX: {
-                u32 i_ = slot_index(&sl, p->idx16);
-                const u8* a = p->base + i_ * p->stride;
-                u8* q = o + p->dst;
-                f32 c;
-                switch (p->n) {
-                case 3: c = mem_comp(a, p->type, p->sc, 0), __builtin_memcpy(q, &c, 4);
-                        c = mem_comp(a, p->type, p->sc, 1), __builtin_memcpy(q + 4, &c, 4);
-                        c = mem_comp(a, p->type, p->sc, 2), __builtin_memcpy(q + 8, &c, 4);
-                        break;
-                case 2: c = mem_comp(a, p->type, p->sc, 0), __builtin_memcpy(q, &c, 4);
-                        c = mem_comp(a, p->type, p->sc, 1), __builtin_memcpy(q + 4, &c, 4);
-                        break;
-                default: c = mem_comp(a, p->type, p->sc, 0), __builtin_memcpy(q, &c, 4); break;
+            if (flt && cn == 2) {
+                for (u32 v = 0; v < n; v++, s0 += vs, q0 += stride) {
+                    u32 c0 = s0[0].u32, c1 = s0[1].u32;
+                    __builtin_memcpy(q0, &c0, 4);
+                    __builtin_memcpy(q0 + 4, &c1, 4);
                 }
                 break;
             }
-            case IS_CLR: {
-                if (p->type == GX_RGBA8 || p->type == GX_RGBX8) {
-                    /* four byte writes: rd_color's default case and color_from_bits, without the calls */
-                    u8* q = o + p->dst;
-                    q[0] = sl[0].u8;
-                    q[1] = sl[1].u8;
-                    q[2] = sl[2].u8;
-                    q[3] = p->rgb || p->type == GX_RGBX8 ? 255 : sl[3].u8;
-                    sl += 4;
-                    break;
+            for (u32 v = 0; v < n; v++, s0 += vs, q0 += stride) {
+                for (u32 i = 0; i < cn; i++) {
+                    f32 c = slot_comp(s0 + i, p->type, p->sc);
+                    __builtin_memcpy(q0 + i * 4, &c, 4);
                 }
-                Reader r = {sl, NULL, NULL};
-                GXColor c = rd_color(&r, p->type);
-                sl = r.slot;
-                put_color(o + p->dst, c, p->rgb);
+            }
+            break;
+        }
+        case IS_COMP_IDX: {
+            const u32 cn = p->n;
+            const u8* base = p->base;
+            const u32 as = p->stride;
+            if (flt && (cn == 2 || cn == 3)) {
+                /* the index as slot_index reads it: the u16 or u8 view of the slot */
+#define IDX_LOOP(IDX)                                                                                                  \
+    do {                                                                                                               \
+        if (cn == 3) {                                                                                                 \
+            for (u32 v = 0; v < n; v++, s0 += vs, q0 += stride) {                                                      \
+                const u8* a = base + (u32)(IDX) * as;                                                                  \
+                u32 c0, c1, c2;                                                                                        \
+                __builtin_memcpy(&c0, a, 4);                                                                           \
+                __builtin_memcpy(&c1, a + 4, 4);                                                                       \
+                __builtin_memcpy(&c2, a + 8, 4);                                                                       \
+                __builtin_memcpy(q0, &c0, 4);                                                                          \
+                __builtin_memcpy(q0 + 4, &c1, 4);                                                                      \
+                __builtin_memcpy(q0 + 8, &c2, 4);                                                                      \
+            }                                                                                                          \
+        } else {                                                                                                       \
+            for (u32 v = 0; v < n; v++, s0 += vs, q0 += stride) {                                                      \
+                const u8* a = base + (u32)(IDX) * as;                                                                  \
+                u32 c0, c1;                                                                                            \
+                __builtin_memcpy(&c0, a, 4);                                                                           \
+                __builtin_memcpy(&c1, a + 4, 4);                                                                       \
+                __builtin_memcpy(q0, &c0, 4);                                                                          \
+                __builtin_memcpy(q0 + 4, &c1, 4);                                                                      \
+            }                                                                                                          \
+        }                                                                                                              \
+    } while (0)
+                if (p->idx16) {
+                    IDX_LOOP(s0->u16);
+                } else {
+                    IDX_LOOP(s0->u8);
+                }
+#undef IDX_LOOP
                 break;
             }
-            default: { /* IS_CLR_IDX */
-                u32 i_ = slot_index(&sl, p->idx16);
-                const u8* a = p->base + i_ * p->stride;
-                if (p->type == GX_RGBA8 || p->type == GX_RGBX8 || p->type == GX_RGB8) {
-                    u8* q = o + p->dst; /* mem_color's byte order, without the calls */
-                    q[0] = a[0];
-                    q[1] = a[1];
-                    q[2] = a[2];
-                    q[3] = p->rgb || p->type != GX_RGBA8 ? 255 : a[3];
-                    break;
+            for (u32 v = 0; v < n; v++, s0 += vs, q0 += stride) {
+                u32 i_ = p->idx16 ? s0->u16 : s0->u8;
+                const u8* a = base + i_ * as;
+                for (u32 i = 0; i < cn; i++) {
+                    f32 c = mem_comp(a, p->type, p->sc, i);
+                    __builtin_memcpy(q0 + i * 4, &c, 4);
                 }
-                put_color(o + p->dst, mem_color(a, p->type), p->rgb);
+            }
+            break;
+        }
+        case IS_CLR: {
+            if (p->type == GX_RGBA8 || p->type == GX_RGBX8) {
+                /* four byte writes: rd_color's default case and color_from_bits, without the calls */
+                const int opaque = p->rgb || p->type == GX_RGBX8;
+                for (u32 v = 0; v < n; v++, s0 += vs, q0 += stride) {
+                    q0[0] = s0[0].u8;
+                    q0[1] = s0[1].u8;
+                    q0[2] = s0[2].u8;
+                    q0[3] = opaque ? 255 : s0[3].u8;
+                }
                 break;
             }
+            for (u32 v = 0; v < n; v++, s0 += vs, q0 += stride) {
+                Reader r = {s0, NULL, NULL};
+                put_color(q0, rd_color(&r, p->type), p->rgb);
             }
+            break;
+        }
+        default: { /* IS_CLR_IDX */
+            const u8* base = p->base;
+            const u32 as = p->stride;
+            if (p->type == GX_RGBA8 || p->type == GX_RGBX8 || p->type == GX_RGB8) {
+                /* mem_color's byte order, without the calls: a word copy, alpha 255 when forced */
+                const u32 force = p->rgb || p->type != GX_RGBA8 ? 0xFFu << 24 : 0u;
+                for (u32 v = 0; v < n; v++, s0 += vs, q0 += stride) {
+                    u32 i_ = p->idx16 ? s0->u16 : s0->u8;
+                    u32 c;
+                    __builtin_memcpy(&c, base + i_ * as, 4);
+                    c |= force;
+                    __builtin_memcpy(q0, &c, 4);
+                }
+                break;
+            }
+            for (u32 v = 0; v < n; v++, s0 += vs, q0 += stride) {
+                u32 i_ = p->idx16 ? s0->u16 : s0->u8;
+                put_color(q0, mem_color(base + i_ * as, p->type), p->rgb);
+            }
+            break;
+        }
         }
     }
     return 1;

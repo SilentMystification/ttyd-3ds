@@ -478,9 +478,27 @@ void port_card_frame(u32 frame);
 void plat_memory_log(const char* when);
 int plat_is_dev_build(void);
 
+/* The heap's low-water for the period since the last line (plat_heap_peak_take: two loads, no walk): at
+ * each map change (the period holds the map's load and its play) and, with switch heaplog=N, every N frames. */
+static void heap_log(const char* map, const char* why) {
+    u32 size = plat_heap_size(), peak = plat_heap_peak_take(), now = plat_heap_arena();
+    PLOG_I("heap %s %s: peak arena %lu KiB of %lu, at least %lu KiB free; arena now %lu KiB", why, map,
+           (unsigned long)(peak >> 10), (unsigned long)(size >> 10), (unsigned long)((size - peak) >> 10),
+           (unsigned long)(now >> 10));
+}
+
 /* One log line per map change: "map: <from> -> <to> (entrance <bero>)", "-" for the first map. */
 static void map_log_frame(void) {
     static char from[16];
+    static int heap_every = -1;
+    if (heap_every < 0) {
+        heap_every = plat_switch_int("heaplog", 0);
+    }
+    if (heap_every > 0 && s_frames % (u32)heap_every == 0) {
+        char why[24];
+        snprintf(why, sizeof why, "frame %lu, map", (unsigned long)s_frames);
+        heap_log(from[0] != '\0' ? from : "-", why);
+    }
     if (gp == NULL || gp->currentMapName[0] == '\0') {
         return;
     }
@@ -490,6 +508,7 @@ static void map_log_frame(void) {
     if (strcmp(from, to) == 0) {
         return;
     }
+    heap_log(from[0] != '\0' ? from : "-", "until map change from");
     char bero[17];
     memcpy(bero, gp->beroEnterName, sizeof(bero) - 1);
     bero[sizeof(bero) - 1] = '\0';

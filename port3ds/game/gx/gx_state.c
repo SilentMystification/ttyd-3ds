@@ -17,6 +17,8 @@ GxState gx;
 /* bumped by every write to what the display-list cache's same_state compares (vertex description and formats,
  * arrays, current matrices): an entry that matched at this version still matches */
 u32 gx_vtx_version = 1;
+u64 gx_vdesc_ver[2] = {1, 1};
+#define VDESC_TOUCH(st) (gx_vdesc_ver[(st) == &gx_game]++)
 
 /* ---- Recording ---- */
 
@@ -141,6 +143,7 @@ static u32 c2u(GXColor c) { return (u32)c.r << 24 | (u32)c.g << 16 | (u32)c.b <<
 
 /* The field writes of the calls the game thread's shadow keeps (gx_shadow_call). */
 static void vtx_desc_set(GxState* st, u32 attr, u32 type) {
+    VDESC_TOUCH(st);
     if (attr == GX_VA_NBT) {
         st->vtx_desc[GX_VA_NBT] = (u8)type;
         st->vtx_desc[GX_VA_NRM] = GX_NONE;
@@ -153,6 +156,7 @@ static void vtx_desc_set(GxState* st, u32 attr, u32 type) {
 }
 
 static void vtx_desc_clear(GxState* st) {
+    VDESC_TOUCH(st);
     memset(st->vtx_desc, GX_NONE, sizeof(st->vtx_desc));
     st->vtx_desc[GX_VA_POS] = GX_DIRECT;
 }
@@ -169,6 +173,7 @@ static void vat_set(GxState* st, u32 vtxfmt, u32 attr, u32 cnt, u32 type, u8 fra
         return;
     }
     st->vat[vtxfmt][attr] = (GxAttrFmt){(u8)cnt, (u8)type, frac};
+    VDESC_TOUCH(st);
 }
 
 void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
@@ -1365,6 +1370,7 @@ void gx_shadow_call(u32 id, const u32* w) {
 void gx_state_init(u16 efb_w, u16 efb_h) {
     gx_opts_init();
     memset(&gx, 0, sizeof(gx));
+    gx_vdesc_ver[0]++;
     gx_dd_apply_forget(); /* the setters' table described the state before this */
     gx_dirty = GXD_ALL;    /* gxdirty: everything is built again */
     gx.efb_w = efb_w;

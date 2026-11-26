@@ -686,7 +686,23 @@ void gx_rec_list(const void* list, u32 nbytes, const void* caller) {
  * copy when its own vertex state and array match the shadow's. */
 static u32 comp_bytes(u8 type) { return type == GX_U8 || type == GX_S8 ? 1 : type == GX_U16 || type == GX_S16 ? 2 : 4; }
 
+/* The hash of a state's vertex description and format `fmt` (g is &gx or &gx_game). Kept per state and format
+ * while that state's gx_vdesc_ver stands still (every write to either bumps it), so a run of primitives under one
+ * vertex state hashes once. */
 static u32 vtx_state_hash(const GxState* g, u32 fmt) {
+    static struct {
+        u64 ver; /* 0: nothing kept (the counters start at 1) */
+        u32 hash;
+    } s_kept[2][GX_MAX_VTXFMT];
+    u32 w = g == &gx_game;
+    if ((g == &gx || w) && fmt < GX_MAX_VTXFMT) {
+        typeof(s_kept[0][0])* k = &s_kept[w][fmt];
+        if (k->ver != gx_vdesc_ver[w]) {
+            k->hash = gx_hash32(g->vat[fmt], sizeof(g->vat[fmt]), gx_hash32(g->vtx_desc, sizeof(g->vtx_desc), 0x51A9u));
+            k->ver = gx_vdesc_ver[w];
+        }
+        return k->hash;
+    }
     return gx_hash32(g->vat[fmt], sizeof(g->vat[fmt]), gx_hash32(g->vtx_desc, sizeof(g->vtx_desc), 0x51A9u));
 }
 
@@ -998,6 +1014,7 @@ static void frame_sync(u64 waited, u64 now) {
  * ring is empty since the last fence), so the shadow can start from the translated state. */
 void gx_rec_switch(void) {
     memcpy(&gx_game, &gx, sizeof(gx));
+    gx_vdesc_ver[1]++;
     gx_rec_direct = 0;
     dd_forget();
 }

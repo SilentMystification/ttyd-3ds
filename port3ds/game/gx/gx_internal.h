@@ -178,6 +178,10 @@ typedef struct {
 
 extern GxState gx;
 extern u32 gx_vtx_version; /* gx_state.c: the vertex state same_state compares changed */
+/* Bumped by every write to a state's vertex description or attribute formats: [0] for `gx`, [1] for the game
+ * thread's shadow `gx_game`. gx_rec.c keeps the hash of that state per format while its counter stands still.
+ * 64 bits: never wraps. Each counter is written and read only by the thread that owns its state at the time. */
+extern u64 gx_vdesc_ver[2];
 
 /* Switch gxdirty (default 0; PORT_3DS_GX_PERF.md, "Core-2 round 2", stage 2):
  *   1: a setter compares its arguments with the state it holds and returns at once when they are equal (no

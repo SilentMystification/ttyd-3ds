@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "ctrdk/perf.h"
+#include "port_divconst.h"
 #include "plat_internal.h"
 
 /* The game's own functions, linked from port3ds/game (the generated matrix library and src/system.c).
@@ -203,6 +204,125 @@ static uint32_t k_atan2f(const Bench* b, uint32_t n) {
     s_fsink = acc;
     return (uint32_t)(acc * 100.0f);
 }
+/* ---- rows for the exact-math rewrites (before / after pairs) ---- */
+
+extern double __real_fmod(double x, double y); /* newlib's, behind the linker --wrap=fmod */
+extern unsigned GXGetTexBufferSize(unsigned short w, unsigned short h, unsigned fmt, unsigned char mip, unsigned char lod);
+
+static uint32_t k_ldexpf_var(const Bench* b, uint32_t n) {
+    float acc = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        acc += ldexpf(1.0f, (int)(i & 31) - 16); /* the port_gqr_pow2 before */
+    }
+    s_fsink = acc;
+    return (uint32_t)acc;
+}
+static uint32_t k_ldexpf_bits(const Bench* b, uint32_t n) {
+    float acc = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        union { uint32_t u; float f; } c;
+        c.u = (uint32_t)(127 + (int)(i & 31) - 16) << 23; /* the port_gqr_pow2 after */
+        acc += c.f;
+    }
+    s_fsink = acc;
+    return (uint32_t)acc;
+}
+static uint32_t k_fmod_lib(const Bench* b, uint32_t n) {
+    double acc = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        acc += __real_fmod((double)(int)(i & 1023) * 0.37 - 100.0, 360.0);
+    }
+    s_fsink = (float)acc;
+    return (uint32_t)(int)acc;
+}
+static uint32_t k_fmod_wrap(const Bench* b, uint32_t n) {
+    double acc = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        acc += fmod((double)(int)(i & 1023) * 0.37 - 100.0, 360.0); /* linked to __wrap_fmod */
+    }
+    s_fsink = (float)acc;
+    return (uint32_t)(int)acc;
+}
+static uint32_t k_ms_div64(const Bench* b, uint32_t n) {
+    long long t = (long long)s_sink << 20, acc = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        long long d = t - (long long)(i * 7919u); /* OSTicksToMilliseconds before: s64 / 40500 */
+        acc += d / (long long)(volatile unsigned)40500u;
+    }
+    return (uint32_t)acc;
+}
+static uint32_t k_ms_mulhi(const Bench* b, uint32_t n) {
+    long long t = (long long)s_sink << 20, acc = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        long long d = t - (long long)(i * 7919u);
+        acc += PORT_DIV_C(d, 40500u); /* after */
+    }
+    return (uint32_t)acc;
+}
+static uint32_t k_vdiv_f64(const Bench* b, uint32_t n) {
+    double a = 1000.0, d = 1.00001 + (double)s_fin[1];
+    for (uint32_t i = 0; i < n; i++) {
+        double r;
+        __asm__ volatile("vdiv.f64 %P0, %P1, %P2" : "=w"(r) : "w"(a), "w"(d));
+        a = r + 1.0;
+    }
+    s_fsink = (float)a;
+    return (uint32_t)a;
+}
+static uint32_t k_vsqrt_f64(const Bench* b, uint32_t n) {
+    double a = 1000.0 + (double)s_fin[3];
+    for (uint32_t i = 0; i < n; i++) {
+        double r;
+        __asm__ volatile("vsqrt.f64 %P0, %P1" : "=w"(r) : "w"(a));
+        a = r + 30.0;
+    }
+    s_fsink = (float)a;
+    return (uint32_t)a;
+}
+static uint32_t k_vcmp_vmrs(const Bench* b, uint32_t n) {
+    float x = s_fin[3], y = s_fin[0], acc = 0; /* a float compare and branch: vcmp + vmrs */
+    for (uint32_t i = 0; i < n; i++) {
+        if (x < y) {
+            acc += 1.0f;
+        }
+        x += 0.0007f;
+        if (x > 2.0f) {
+            x -= 2.0f;
+        }
+    }
+    s_fsink = acc;
+    return (uint32_t)acc;
+}
+/* GXGetTexBufferSize before: the divides by the tile size (4 or 8 here, 4 for RGBA8). */
+static uint32_t texbuf_old(unsigned w, unsigned h, unsigned tile_w, unsigned tile_h, unsigned bpt, unsigned levels) {
+    uint32_t size = 0;
+    for (unsigned l = 0; l < levels; l++) {
+        unsigned tw = (w + tile_w - 1) / tile_w, th = (h + tile_h - 1) / tile_h;
+        size += tw * th * bpt;
+        if (w == 1 && h == 1) {
+            break;
+        }
+        w = w > 1 ? w / 2 : 1;
+        h = h > 1 ? h / 2 : 1;
+    }
+    return size;
+}
+static uint32_t k_texbuf_old(const Bench* b, uint32_t n) {
+    uint32_t acc = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        volatile unsigned tw = 4;
+        acc += texbuf_old(256 + (i & 7), 128, tw, tw, 64, 9); /* RGBA8, 9 levels */
+    }
+    return acc;
+}
+static uint32_t k_texbuf_new(const Bench* b, uint32_t n) {
+    uint32_t acc = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        acc += GXGetTexBufferSize((unsigned short)(256 + (i & 7)), 128, 6 /* GX_TF_RGBA8 */, 1, 9);
+    }
+    return acc;
+}
+
 static uint32_t k_ttyd_sincosf(const Bench* b, uint32_t n) {
     float x = s_fin[3], s = 0, c = 0, acc = 0;
     for (uint32_t i = 0; i < n; i++) {
@@ -474,6 +594,17 @@ static void build_table(void) {
     add("libm", "sinf", k_sinf, NULL, NULL, 0, 1, 0);
     add("libm", "cosf", k_cosf, NULL, NULL, 0, 1, 0);
     add("libm", "atan2f", k_atan2f, NULL, NULL, 0, 1, 0);
+    add("exact-math", "ldexpf_var", k_ldexpf_var, NULL, NULL, 0, 1, 0);
+    add("exact-math", "ldexpf_bits", k_ldexpf_bits, NULL, NULL, 0, 1, 0);
+    add("exact-math", "fmod360_lib", k_fmod_lib, NULL, NULL, 0, 1, 0);
+    add("exact-math", "fmod360_wrap", k_fmod_wrap, NULL, NULL, 0, 1, 0);
+    add("exact-math", "ticks2ms_div64", k_ms_div64, NULL, NULL, 0, 1, 0);
+    add("exact-math", "ticks2ms_mulhi", k_ms_mulhi, NULL, NULL, 0, 1, 0);
+    add("exact-math", "vdiv_f64", k_vdiv_f64, NULL, NULL, 0, 1, 0);
+    add("exact-math", "vsqrt_f64", k_vsqrt_f64, NULL, NULL, 0, 1, 0);
+    add("exact-math", "vcmp_vmrs", k_vcmp_vmrs, NULL, NULL, 0, 1, 0);
+    add("exact-math", "texbufsize_old", k_texbuf_old, NULL, NULL, 0, 1, 0);
+    add("exact-math", "texbufsize_new", k_texbuf_new, NULL, NULL, 0, 1, 0);
     add("sdk", "game_sincosf", k_ttyd_sincosf, NULL, NULL, 0, 1, 0);
     add("sdk", "mtxconcat_local", k_mtx_concat_local, NULL, NULL, 0, 1, 0);
     add("sdk", "PSMTXConcat", k_mtx_concat_sdk, NULL, NULL, 0, 1, 0);

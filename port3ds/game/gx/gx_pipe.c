@@ -218,7 +218,12 @@ static GXColor mem_color(const u8* p, u8 type) {
 
 static inline u32 rd_index(Reader* r, u8 type) { return type == GX_INDEX8 ? rd_u8(r) : rd_u16(r); }
 
-static inline f32 frac_scale(u8 frac) { return 1.0f / (f32)(1u << (frac & 31)); }
+/* 1 / 2^frac, exact: the float's bits are (127 - frac) << 23 (a normal power of two for frac 0..31). */
+static inline f32 frac_scale(u8 frac) {
+    union { u32 u; f32 f; } c;
+    c.u = (u32)(127 - (frac & 31)) << 23;
+    return c.f;
+}
 
 /* Decodes one vertex in format `fmt` under vertex state g. */
 static inline __attribute__((always_inline)) void read_vertex_g(Reader* r, u8 fmt, GxVertex* v, const GxState* g) {

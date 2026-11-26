@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "plat/plat.h"
+#include "port_divconst.h"
 #include "plat/thread.h"
 #include "port3ds/os_internal.h"
 #include "port3ds/rel_static.h"
@@ -75,9 +76,10 @@ static void time_init(void) {
 
 OSTime port_os_real_time(void) {
     u64 d = plat_ticks() - s_boot_ticks;
-    u64 whole = d / PLAT_TICKS_PER_SEC;
-    u64 part = d % PLAT_TICKS_PER_SEC;
-    return s_time_base + (s64)(whole * GC_TIMER_HZ + part * GC_TIMER_HZ / PLAT_TICKS_PER_SEC);
+    /* Divides by constants as multiplies (port_divconst.h); same values as / and %. */
+    u64 whole = port_udiv_c(d, PLAT_TICKS_PER_SEC);
+    u64 part = d - whole * PLAT_TICKS_PER_SEC;
+    return s_time_base + (s64)(whole * GC_TIMER_HZ + port_udiv_c(part * GC_TIMER_HZ, PLAT_TICKS_PER_SEC));
 }
 
 /* A test mode can replace the game's clock (port_os_set_time_source). */

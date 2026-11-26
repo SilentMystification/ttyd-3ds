@@ -25,7 +25,11 @@ static inline float port_gqr_pow2(unsigned int scale6, int negate) {
     if (negate) {
         s = -s;
     }
-    return __builtin_ldexpf(1.0f, s);
+    /* s is -32..32 here: 2^s is a normal float, so its bits are (127+s)<<23.
+     * (ldexpf with a variable exponent costs a libm call chain on the ARM11.) */
+    union { unsigned int u; float f; } c;
+    c.u = (unsigned int)(127 + s) << 23;
+    return c.f;
 }
 
 static inline float port_psq_load(unsigned int gqr, const void* in) {

@@ -116,11 +116,11 @@ void gx_opts_init(void) {
     gx_bbx_init();
     gx_opt_vshlit = plat_switch_int("gxvshlit", 1) != 0;
     gx_opt_vshtg = plat_switch_int("gxvshtg", 1) != 0;
-    gx_opt_dirty = plat_switch_int("gxdirty", 0);
+    gx_opt_dirty = plat_switch_int("gxdirty", 1);
     if (gx_opt_dirty < 0 || gx_opt_dirty > 2) {
         gx_opt_dirty = 1;
     }
-    gx_opt_immdirect = plat_switch_int("gximmdirect", 0);
+    gx_opt_immdirect = plat_switch_int("gximmdirect", 1);
     if (gx_opt_immdirect < 0 || gx_opt_immdirect > 2) {
         gx_opt_immdirect = 1;
     }

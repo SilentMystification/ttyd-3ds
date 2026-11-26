@@ -22,6 +22,7 @@
 #include "plat/memstable.h"
 #include "plat/options.h"
 #include "plat/plat.h"
+#include "gx_div.h"
 
 _Static_assert(sizeof(GxTexObj) <= sizeof(GXTexObj), "GxTexObj must fit GXTexObj");
 _Static_assert(sizeof(GxTlutObj) <= sizeof(GXTlutObj), "GxTlutObj must fit GXTlutObj");
@@ -145,6 +146,8 @@ static unsigned s_st_hashes, s_st_bytes, s_st_lookups, s_st_checks, s_st_mism, s
 static unsigned s_st_tot_hashes, s_st_tot_bytes, s_st_tot_lookups, s_st_tot_mism, s_st_tot_frames;
 static u32 s_dbg_tlut_hash[CACHE_SIZE];
 static int s_compact;
+static int s_tex16;
+static unsigned s_ex_n[2], s_ex_old[2], s_ex_new[2], s_ex_all; /* tex16 counters: [0] opaque 565 -> RGB8/RGBA4, [1] 5551 -> RGBA8/RGBA4; atomic */
 static unsigned s_cv_n[16], s_cv_bad[16], s_cv_texels[16], s_cv_old_bad[16], s_cv_saved;
 
 
@@ -237,6 +240,11 @@ static void stat_mismatch(const CacheEntry* e, const GxTexObj* t, u32 bytes, int
 
 static void stat_frame_end(void) {
     s_st_frames++;
+    if (!s_tex16 && s_stats_every && s_st_tot_frames % 120 == 119) {
+        PLOG_I("texexact: %u uploads of colour textures (opaque or cut-out), changed: opaque RGB565->RGB8/RGBA4 %u textures %u->%u KB, "
+               "cut-out RGBA5551->RGBA8/RGBA4 %u textures %u->%u KB (level 0, power-of-two size)",
+               s_ex_all, s_ex_n[0], s_ex_old[0] >> 10, s_ex_new[0] >> 10, s_ex_n[1], s_ex_old[1] >> 10, s_ex_new[1] >> 10);
+    }
     if (s_compact == 2 && s_st_tot_frames % 120 == 119) {
         PLOG_I("texcompact: verify (new fmt: textures/texels/mismatched texels) L4 %u/%u/%u LA4 %u/%u/%u L8 %u/%u/%u RGBA4 %u/%u/%u; "
                "bytes saved at upload %u; baseline lossy textures (old fmt LA8 %u RGB565 %u 5551 %u)",
@@ -406,13 +414,14 @@ u32 GXGetTexBufferSize(u16 width, u16 height, u32 format, u8 mipmap, u8 max_lod)
         break;
     }
     u32 size = 0;
+    u32 tws = __builtin_ctz(tile_w), ths = __builtin_ctz(tile_h);
     u32 levels = mipmap ? max_lod : 1;
     if (levels == 0) {
         levels = 1;
     }
     for (u32 l = 0; l < levels; l++) {
-        u32 tw = (width + tile_w - 1) / tile_w;
-        u32 th = (height + tile_h - 1) / tile_h;
+        u32 tw = (width + tile_w - 1) >> tws; /* tile_w and tile_h are 4 or 8 */
+        u32 th = (height + tile_h - 1) >> ths;
         size += tw * th * bpt;
         if (width == 1 && height == 1) {
             break;
@@ -606,6 +615,7 @@ static u32 morton8(u32 x, u32 y) {
 static u32 fmt_bits(u32 fmt) {
     switch (fmt) {
     case PLAT_TEXFMT_RGBA8: return 32;
+    case PLAT_TEXFMT_RGB8: return 24;
     case PLAT_TEXFMT_L4: return 4;
     case PLAT_TEXFMT_L8:
     case PLAT_TEXFMT_LA4: return 8;
@@ -613,16 +623,36 @@ static u32 fmt_bits(u32 fmt) {
     }
 }
 
+/* tex16 (switch, default 0): 0 = exact: an opaque texture whose colours do not fit RGB565 exactly is stored as RGB8, a
+ * one-bit-alpha one whose colours do not fit RGBA5551 as RGBA8. A channel value v "fits" n bits when the n-bit code
+ * v >> (8 - n) gives v back, either through GX's own widening (code * 255 / (2^n - 1), what RGB565 and RGB5A3 texels
+ * decode to) or through the PICA's bit replication. 1 = the old choice (RGB565 / RGBA5551 whatever the colours). */
+
+static inline int fit5(u32 v) {
+    u32 n = v >> 3;
+    return v == n * 255 / 31 || v == (n << 3 | n >> 2);
+}
+static inline int fit6(u32 v) {
+    u32 n = v >> 2;
+    return v == n * 255 / 63 || v == (n << 2 | n >> 4);
+}
+
 /* Level 0 of a texture in this PICA format: gray, opaque, one-bit alpha or full. `mips`: 0 no chain, 1 a chain
- * made by box filter, 2 a chain taken from the game's own levels. */
-static u32 pick_format_ex(const u8* px, u32 w, u32 h, int compact, int mips) {
-    int gray = 1, opaque = 1, binary = 1, n17 = 1;
+ * made by box filter, 2 a chain taken from the game's own levels. `cutout` (may be NULL): set when the texture is a
+ * one-bit-alpha cut-out (it keeps no mip chain, whatever format it is stored in). */
+static u32 pick_format_ex(const u8* px, u32 w, u32 h, int compact, int mips, int* cutout) {
+    int gray = 1, opaque = 1, binary = 1, n17 = 1, fit565 = 1, fit5551 = 1;
     for (u32 i = 0; i < w * h; i++) {
         const u8* p = px + i * 4;
         gray &= p[0] == p[1] && p[1] == p[2];
         opaque &= p[3] == 255;
         binary &= p[3] == 0 || p[3] == 255;
         n17 &= p[0] % 17 == 0 && p[1] % 17 == 0 && p[2] % 17 == 0 && p[3] % 17 == 0;
+        fit565 &= fit5(p[0]) & fit6(p[1]) & fit5(p[2]);
+        fit5551 &= fit5(p[0]) & fit5(p[1]) & fit5(p[2]);
+    }
+    if (cutout != NULL) {
+        *cutout = !gray && !opaque && binary;
     }
     if (compact) {
         if (gray && n17 && mips == 0) {
@@ -633,16 +663,34 @@ static u32 pick_format_ex(const u8* px, u32 w, u32 h, int compact, int mips) {
         }
     }
     u32 f = gray ? PLAT_TEXFMT_LA8 : opaque ? PLAT_TEXFMT_RGB565 : binary ? PLAT_TEXFMT_RGBA5551 : PLAT_TEXFMT_RGBA8;
+    if (!s_tex16 && !gray && (f == PLAT_TEXFMT_RGB565 || f == PLAT_TEXFMT_RGBA5551)) {
+        int fits = f == PLAT_TEXFMT_RGB565 ? fit565 : fit5551;
+        __atomic_fetch_add(&s_ex_all, 1, __ATOMIC_RELAXED);
+        if (!fits) {
+            u32 k = f == PLAT_TEXFMT_RGB565 ? 0 : 1;
+            u32 nf = k == 0 ? PLAT_TEXFMT_RGB8 : PLAT_TEXFMT_RGBA8;
+            if (compact && n17 && mips == 0) {
+                nf = PLAT_TEXFMT_RGBA4;
+            }
+            u32 px_n = pow2(w) * pow2(h);
+            __atomic_fetch_add(&s_ex_n[k], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&s_ex_old[k], px_n * 2, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&s_ex_new[k], px_n * fmt_bits(nf) / 8, __ATOMIC_RELAXED);
+            return nf;
+        }
+    }
     if (compact && f == PLAT_TEXFMT_RGBA8 && n17 && mips == 0) {
         f = PLAT_TEXFMT_RGBA4;
     }
     return f;
 }
-static u32 pick_format(const u8* px, u32 w, u32 h) { return pick_format_ex(px, w, h, s_compact, 0); }
+static u32 pick_format(const u8* px, u32 w, u32 h) { return pick_format_ex(px, w, h, s_compact, 0, NULL); }
 
 /* RGBA8 rows (row 0 = GX t 0), w x h, resampled (nearest) to pw x ph and Morton tiled into `out`. */
 static void tile_level(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u32 fmt, u8* out) {
     u32 tiles_w = pw >> 3;
+    u16 cols[GX_COLS_MAX];
+    int have_cols = pw != w && gx_build_cols(cols, w, pw);
     if (fmt == PLAT_TEXFMT_L4) {
         memset(out, 0, (size_t)pw * ph / 2); /* nibbles are OR-ed in */
     }
@@ -650,7 +698,7 @@ static void tile_level(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u32 fmt, u8* 
         /* PICA samples t = 0 at the last row in memory */
         const u8* row = px + (size_t)(((ph - 1 - my) * h / ph) * w) * 4;
         for (u32 mx = 0; mx < pw; mx++) {
-            const u8* p = row + (size_t)(pw == w ? mx : mx * w / pw) * 4;
+            const u8* p = row + (size_t)(pw == w ? mx : have_cols ? cols[mx] : mx * w / pw) * 4;
             u32 idx = ((my >> 3) * tiles_w + (mx >> 3)) * 64 + morton8(mx & 7, my & 7);
             switch (fmt) {
             case PLAT_TEXFMT_LA8:
@@ -662,6 +710,11 @@ static void tile_level(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u32 fmt, u8* 
             case PLAT_TEXFMT_L4: out[idx >> 1] |= (u8)((p[0] / 17) << ((idx & 1) * 4)); break;
             case PLAT_TEXFMT_RGBA4:
                 ((u16*)out)[idx] = (u16)((p[0] / 17) << 12 | (p[1] / 17) << 8 | (p[2] / 17) << 4 | (p[3] / 17));
+                break;
+            case PLAT_TEXFMT_RGB8:
+                out[idx * 3] = p[2];
+                out[idx * 3 + 1] = p[1];
+                out[idx * 3 + 2] = p[0];
                 break;
             case PLAT_TEXFMT_RGB565:
                 ((u16*)out)[idx] = (u16)(((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3));
@@ -750,7 +803,7 @@ static u8* dt_stage(const u8* px, u32 pw, u32 ph, u32 fmt, int async) {
 static inline void box4(const u8* a, const u8* b, const u8* c, const u8* d, u8* o) {
     u32 wa = a[3], wb = b[3], wc = c[3], wd = d[3], sw = wa + wb + wc + wd;
     for (int k = 0; k < 3; k++) {
-        o[k] = (u8)(sw != 0 ? (a[k] * wa + b[k] * wb + c[k] * wc + d[k] * wd + sw / 2) / sw
+        o[k] = (u8)(sw != 0 ? port_div_alpha(a[k] * wa + b[k] * wb + c[k] * wc + d[k] * wd + sw / 2, sw)
                             : (u32)(a[k] + b[k] + c[k] + d[k] + 2) >> 2);
     }
     o[3] = (u8)((sw + 2) >> 2);
@@ -759,11 +812,13 @@ static inline void box4(const u8* a, const u8* b, const u8* c, const u8* d, u8* 
 /* Level 1 from level 0 (w x h, resampled as tile_level does to pw x ph): (pw/2) x (ph/2) rows into dst. */
 static void box_first(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u8* dst) {
     u32 qw = pw >> 1, qh = ph >> 1;
+    u16 cols[GX_COLS_MAX];
+    int have_cols = gx_build_cols(cols, w, pw);
     for (u32 y = 0; y < qh; y++) {
         const u8* r0 = px + (size_t)(((2 * y) * h / ph) * w) * 4;
         const u8* r1 = px + (size_t)(((2 * y + 1) * h / ph) * w) * 4;
         for (u32 x = 0; x < qw; x++) {
-            u32 x0 = (2 * x) * w / pw, x1 = (2 * x + 1) * w / pw;
+            u32 x0 = have_cols ? cols[2 * x] : (2 * x) * w / pw, x1 = have_cols ? cols[2 * x + 1] : (2 * x + 1) * w / pw;
             box4(r0 + x0 * 4, r0 + x1 * 4, r1 + x0 * 4, r1 + x1 * 4, dst + ((size_t)y * qw + x) * 4);
         }
     }
@@ -829,6 +884,7 @@ static void sample_tiled(const u8* t, u32 fmt, u32 idx, u8* c) {
         c[0] = (u8)((v >> 12) * 17); c[1] = (u8)((v >> 8 & 15) * 17); c[2] = (u8)((v >> 4 & 15) * 17); c[3] = (u8)((v & 15) * 17);
         break;
     }
+    case PLAT_TEXFMT_RGB8: c[0] = t[idx * 3 + 2]; c[1] = t[idx * 3 + 1]; c[2] = t[idx * 3]; c[3] = 255; break;
     case PLAT_TEXFMT_RGB565: {
         u16 v = ((const u16*)t)[idx];
         u32 r = v >> 11, g = v >> 5 & 63, b = v & 31;
@@ -884,10 +940,11 @@ static void compact_verify(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u32 nf, u
 static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h, const GxTexObj* gxt, const GxTlutObj* tl,
                         int want_mips, u8* out_levels, u32* out_bytes0, u32* out_mip_bytes) {
     int mipk = want_mips ? (gxt != NULL && gxt->mipmap ? 2 : 1) : 0;
-    u32 fmt = pick_format_ex(px, w, h, s_compact, mipk);
+    int cutout = 0;
+    u32 fmt = pick_format_ex(px, w, h, s_compact, mipk, &cutout);
     u32 pw = pow2(w), ph = pow2(h);
     if (s_compact == 2) {
-        compact_verify(px, w, h, pw, ph, fmt, pick_format_ex(px, w, h, 0, mipk));
+        compact_verify(px, w, h, pw, ph, fmt, pick_format_ex(px, w, h, 0, mipk, NULL));
     }
     *out_levels = 0;
     *out_mip_bytes = 0;
@@ -897,7 +954,7 @@ static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h, cons
     s_uploads++;
     /* a one-bit alpha texture keeps no chain (a cut-out: a filtered alpha would thin it, and RGBA5551
      * cannot hold the in-between alphas; the next format up is twice the memory) */
-    u32 levels = want_mips && fmt != PLAT_TEXFMT_RGBA5551 ? plat_gpu_tex_max_levels(pw, ph) : 0;
+    u32 levels = want_mips && fmt != PLAT_TEXFMT_RGBA5551 && !cutout ? plat_gpu_tex_max_levels(pw, ph) : 0;
     if (levels != 0 && !mip_scratch()) {
         levels = 0;
     }
@@ -1967,6 +2024,8 @@ void gx_tex_init(void) {
     s_stats_every = plat_switch_int("texstats", 0);
     s_trust_on = plat_switch_int("textrust", 1) != 0;
     s_compact = plat_switch_int("texcompact", 0);
+    s_tex16 = plat_switch_int("tex16", 0) != 0;
+    PLOG_I("tex16=%d (%s)", s_tex16, s_tex16 ? "RGB565 / RGBA5551 whatever the colours" : "exact: RGB8 / RGBA8 where the colours do not fit 16 bits");
     if (s_compact) {
         PLOG_I("texcompact: %d", s_compact);
     }
@@ -1975,8 +2034,8 @@ void gx_tex_init(void) {
 #ifndef TTYD_RETAIL
     s_tf_on = plat_switch_int("texframe", 0) != 0;
 #endif
-    s_fast_mode = plat_switch_int("texfast", 0);
-    s_async = plat_switch_int("texasync", 0) != 0 && s_trust_on;
+    s_fast_mode = plat_switch_int("texfast", 1);
+    s_async = plat_switch_int("texasync", 1) != 0 && s_trust_on;
     s_dt = plat_gpu_xfer_mode();
     mode_init();
     s_x = calloc(CACHE_SIZE, sizeof(CacheExtra));

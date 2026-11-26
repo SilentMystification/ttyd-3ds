@@ -5474,7 +5474,7 @@ void plat_gpu_init(void) {
     s_urow = plat_switch_int("gxurow", 1) != 0;
     s_sync_all = plat_switch_int("gpusyncall", 0) != 0;
     s_gpu_fence = plat_switch_int("gpufence", 1) != 0;
-    s_direct = plat_switch_int("gxdirect", 0);
+    s_direct = plat_switch_int("gxdirect", 1);
     s_onehop = plat_switch_int("gxonehop", 0);
     if (s_onehop < 0 || s_onehop > 2) {
         s_onehop = 0;

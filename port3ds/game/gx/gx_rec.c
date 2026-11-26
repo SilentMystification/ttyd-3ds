@@ -2100,7 +2100,7 @@ void gx_rec_frame(void) {
 
 void gx_rec_init(void) {
     t_game = 1;
-    gx_opt_sdl = plat_switch_int("gxsdl", 0) != 0;
+    gx_opt_sdl = plat_switch_int("gxsdl", 1) != 0;
     if (s_dda == NULL) {
         int sc = plat_switch_int("gxstatecache", 1);
         s_dda = sc >= 1 && sc <= 2 ? calloc(DD_SLOTS, sizeof(DdSlot)) : NULL;
@@ -2160,7 +2160,7 @@ void gx_rec_init(void) {
     if (s_dd == NULL || s_state_lists == NULL || s_state_content == NULL) {
         s_dedup = 0;
     }
-    s_fuse = s_dedup ? plat_switch_int("gxrecfuse", 0) : 0;
+    s_fuse = s_dedup ? plat_switch_int("gxrecfuse", 1) : 0;
     if (s_fuse < 0 || s_fuse > 2) {
         s_fuse = 0;
     }
@@ -2174,7 +2174,7 @@ void gx_rec_init(void) {
                    1u << GLO_BITS);
         }
     }
-    s_lgroup = plat_switch_int("gxreclgroup", 0) != 0;
+    s_lgroup = plat_switch_int("gxreclgroup", 1) != 0;
     gx_ph_on = plat_switch_int("gxphase", 0);
     if (gx_ph_on < 0) {
         gx_ph_on = 0;

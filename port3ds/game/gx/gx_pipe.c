@@ -1178,7 +1178,16 @@ static void run_commands(Reader* r, int from_list) {
 }
 
 static void run_pending_raw(void) {
-    if (gx_tls_translator && gx_rec_mode) {
+    if (__builtin_expect(gx_rec_fast.w == 1, 1) && !gx_on_translator()) {
+        /* the game thread records with no primitive open and no display list (gx_internal.h): the tests below
+         * end here */
+        if (port_gx_wg_ptr != s_pipe) {
+            gx_rec_raw(s_pipe, (u32)((const PPCWGPipe*)port_gx_wg_ptr - s_pipe));
+            port_gx_wg_ptr = s_pipe;
+        }
+        return;
+    }
+    if (gx_rec_mode && gx_tls_translator) {
         return; /* the pipe is the game thread's; it recorded what was pending */
     }
     if (s_in_begin || port_gx_wg_ptr == s_pipe) {
@@ -1223,6 +1232,13 @@ void gx_pipe_reset(void) {
 }
 
 void GXCallDisplayList(void* list, u32 nbytes) {
+    if (__builtin_expect(gx_rec_fast.w == 1, 1) && !gx_on_translator()) {
+        /* the game thread records with no primitive open and no display list: the tests below end in
+         * gx_rec_list (run_pending_raw takes its own fast case) */
+        run_pending_raw();
+        gx_rec_list(list, nbytes, __builtin_return_address(0));
+        return;
+    }
     if (gx_prim_is_open()) {
         gx_end_open_primitive(__builtin_return_address(0));
     }

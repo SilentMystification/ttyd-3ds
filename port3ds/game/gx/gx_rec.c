@@ -2087,9 +2087,9 @@ void gx_rec_init(void) {
     s_null = plat_switch_int("gxnull", 0) != 0;
     if (s_null) {
         mode = 1;
-    } else if (mode != 0 && plat_switch_int("gxonehop", 0) != 0) {
-        /* gxonehop (plat/gpu.c): the game thread writes the PICA words itself, no translator */
-        PLOG_W("gxthread=%d: off with gxonehop (no translator thread in that mode)", mode);
+    } else if (mode != 0 && (plat_switch_int("gxonehop", 0) != 0 || plat_gpu_one_active())) {
+        /* gxonehop and gxone (plat/gpu.c): the game thread writes the PICA words itself, no translator */
+        PLOG_W("gxthread=%d: off with gxonehop/gxone (no translator thread in that mode)", mode);
         mode = 0;
     }
     if (mode == 0) {

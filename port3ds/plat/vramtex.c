@@ -216,6 +216,7 @@ static int vt_evict(VtEnt* e) {
         return 0;
     }
     e->tex->data = e->lin;
+    plat_tex_epoch_bump();
     e->vram = NULL;
     vt_rebind(e->tex);
     s_st.evicted++;
@@ -407,6 +408,7 @@ static void vt_forget(C3D_Tex* tex, int restore) {
         }
         if (restore) {
             tex->data = e->lin;
+            plat_tex_epoch_bump();
         }
     }
     for (int u = 0; u < 3; u++) {
@@ -525,6 +527,7 @@ static void vt_frame(void) {
             e->vram = v;
             e->arena = arena;
             e->tex->data = v;
+            plat_tex_epoch_bump();
             vt_rebind(e->tex);
             copied += e->bytes;
             s_st.promoted++;

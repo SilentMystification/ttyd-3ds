@@ -100,6 +100,8 @@ int gx_bbox_active;
 int gx_opt_statever = 0, gx_opt_fogcache = 1, gx_opt_unlit = 1;
 
 static void out_alloc(void); /* s_out, below */
+static void one_init(void);  /* switch gxone, below */
+static void one_log(u32 frames);
 static void gx_bbx_init(void); /* switch gxbbox, below */
 
 void gx_opts_init(void) {
@@ -125,8 +127,17 @@ void gx_opts_init(void) {
     if (gx_opt_immdirect == 0 && plat_switch_int("gxonehop", 0) != 0) {
         gx_opt_immdirect = 1; /* gxonehop (stage 5) builds on stage 4 */
     }
-    PLOG_I("gx: statever %d fogcache %d unlit %d dirty %d immdirect %d", gx_opt_statever, gx_opt_fogcache,
-           gx_opt_unlit, gx_opt_dirty, gx_opt_immdirect);
+    one_init(); /* switch gxone (GX native step 2): on when the back end took it */
+    if (gx_opt_one) {
+        if (gx_opt_dirty < gx_opt_one) {
+            gx_opt_dirty = gx_opt_one; /* the setters' dirty bits; gxone=2 adds gxdirty=2's checks */
+        }
+        if (gx_opt_immdirect == 0) {
+            gx_opt_immdirect = 1; /* gxonehop=1 under it */
+        }
+    }
+    PLOG_I("gx: statever %d fogcache %d unlit %d dirty %d immdirect %d one %d", gx_opt_statever, gx_opt_fogcache,
+           gx_opt_unlit, gx_opt_dirty, gx_opt_immdirect, gx_opt_one);
     gx_vsh_init();
 }
 
@@ -579,7 +590,12 @@ static struct {
     u32 builds, classes[5], checks, bad, vchecks, vbad, logged;
 } s_dv;
 
+static void build_one(u32 d);
 static void build_dirty(u32 d) {
+    if (gx_opt_one) {
+        build_one(d);
+        return;
+    }
     PlatGpuState* st = &s_state;
     u32 regions = 0;
     if ((d & GXD_TEV) && gx.fog_type != GX_FOG_NONE) {
@@ -678,6 +694,371 @@ static void verify_dirty(u32 d) {
     memcpy(s_unlit, unlit, 2);
     memcpy(s_mat_vtx_rgb, mrgb, 2);
     memcpy(s_mat_vtx_a, ma, 2);
+}
+
+/* ---- switch gxone: interned class ids (GX native step 2, docs/PORT_3DS_GX_NATIVE.md) ----
+ * gxdirty's setters mark the classes; at the draw boundary build_one looks each dirty class up by its GX bytes (full
+ * key compare) and gets an id whose block of PICA words the back end built once (plat_gpu_one_block, the port's own
+ * encoders); plat_gpu_set_state_one gets the ids and compares only them from there on.
+ *   TEV: the GX TEV bytes the TEV memo keys on (stages, registers, konst colours, swap tables, the unit of each
+ *     stage) with the fog stage's unit and colour; the entry holds the TEV region and the fog unit after the build.
+ *     Its block also holds the fog mode and colour (pixel class): a second table keyed by (TEV entry, fog word)
+ *     owns the block id.
+ *   TEX: the texture units as build_tex_units leaves them (handles from the texture tier, sampler fields): the
+ *     lookups that check the texture memory still run on each TEX change.
+ *   PIX: the GX pixel-engine bytes (alpha compare, blend, depth, colour and alpha update, pixel format) with the
+ *     scissor, its offset, the EFB size and the viewport; the entry holds the PIX region without the fog fields
+ *     (build_fog runs on each PIX change, as the LUT and its id are kept apart) and the scissor/viewport region.
+ * Tables: power-of-two index of (hash, entry) pairs, linear probing, at most half full; entries and keys in order
+ * of first use. A full table is cleared with its back-end store (all ids of the class change). */
+int gx_opt_one;
+#define ONE_TEV_KEYW 168u /* 4 + 16 stages x 35 + 32 + 16 + 16 + 16 + 4 bytes */
+typedef struct {
+    u32* slot; /* 2 words per slot: hash, entry + 1 (0: empty) */
+    u32 smask;
+    u32 n, cap;
+    u32* keys; /* key words of all entries, in order */
+    u32 kused, kcap;
+    u32* kref; /* per entry: key offset << 8 | key words */
+    u32* out;  /* per entry: outw words */
+    u32 outw;
+    u32 hits, misses, resets;
+} OneTab;
+enum { OT_TEV, OT_TEVB, OT_TEX, OT_PIX, OT_N };
+static OneTab s_ot[OT_N];
+static u32 s_one_ids[3];      /* the ids in force (PLAT_GPU_C_*) */
+static s32 s_one_tev_e = -1;  /* the TEV entry in force */
+static u32 s_one_tevb_k[2];   /* the (TEV entry, fog word) the TEV id is for */
+static int s_one_tevb_valid;
+#define OT_PIX_OUTW 14u /* 4 PIX words, cull, 8 scissor/viewport words, id */
+
+static u32 one_hash(const u32* k, u32 n) {
+    u32 h = 2166136261u;
+    for (u32 i = 0; i < n; i++) {
+        h = (h ^ k[i]) * 16777619u;
+    }
+    h ^= h >> 16;
+    h *= 0x85EBCA6Bu;
+    h ^= h >> 13;
+    h *= 0xC2B2AE35u;
+    h ^= h >> 16;
+    return h;
+}
+
+static int one_tab_init(OneTab* t, u32 cap, u32 kcap, u32 outw) {
+    t->cap = cap;
+    t->smask = cap * 2 - 1;
+    t->kcap = kcap;
+    t->outw = outw;
+    t->slot = calloc((size_t)(t->smask + 1) * 2, 4);
+    t->keys = malloc((size_t)kcap * 4);
+    t->kref = malloc((size_t)cap * 4);
+    t->out = malloc((size_t)cap * outw * 4);
+    return t->slot != NULL && t->keys != NULL && t->kref != NULL && t->out != NULL;
+}
+
+static void one_tab_clear(OneTab* t) {
+    memset(t->slot, 0, (size_t)(t->smask + 1) * 8);
+    t->n = 0;
+    t->kused = 0;
+    t->resets++;
+}
+
+static s32 one_find(const OneTab* t, const u32* key, u32 kw, u32 h) {
+    for (u32 i = h & t->smask;; i = (i + 1) & t->smask) {
+        const u32* s = t->slot + 2 * i;
+        if (s[1] == 0) {
+            return -1;
+        }
+        if (s[0] == h) {
+            u32 e = s[1] - 1, r = t->kref[e];
+            if ((r & 0xFFu) == kw && gx_mem_equal(t->keys + (r >> 8), key, kw * 4)) {
+                return (s32)e;
+            }
+        }
+    }
+}
+
+/* -1: full (the caller clears the table) */
+static s32 one_add(OneTab* t, const u32* key, u32 kw, u32 h) {
+    if (t->n >= t->cap || t->kused + kw > t->kcap) {
+        return -1;
+    }
+    u32 e = t->n++;
+    memcpy(t->keys + t->kused, key, kw * 4);
+    t->kref[e] = t->kused << 8 | kw;
+    t->kused += kw;
+    u32 i = h & t->smask;
+    while (t->slot[2 * i + 1] != 0) {
+        i = (i + 1) & t->smask;
+    }
+    t->slot[2 * i] = h;
+    t->slot[2 * i + 1] = e + 1;
+    return (s32)e;
+}
+
+static inline u32* one_out(OneTab* t, s32 e) { return t->out + (size_t)e * t->outw; }
+
+/* the back end's block for the class part of st; a full store is cleared with the table that owns its ids */
+static u32 one_block(int cls, OneTab* owner, const PlatGpuState* st) {
+    u32 id = plat_gpu_one_block(cls, st);
+    if (id == 0) {
+        one_tab_clear(owner);
+        plat_gpu_one_reset(cls);
+        id = plat_gpu_one_block(cls, st);
+    }
+    return id;
+}
+
+static void one_tev(PlatGpuState* st) {
+    u32 key[ONE_TEV_KEYW];
+    u8* k = (u8*)key;
+    u32 n = gx.num_tev ? gx.num_tev : 1;
+    if (n > 16) {
+        n = 16;
+    }
+    k[0] = gx.num_tev;
+    k[1] = (u8)s_fog_unit;
+    k[2] = k[3] = 0;
+    u32 p = 4;
+    memcpy(k + p, gx.tev, n * sizeof(gx.tev[0]));
+    p += n * sizeof(gx.tev[0]);
+    memcpy(k + p, gx.tev_reg, sizeof(gx.tev_reg));
+    p += sizeof(gx.tev_reg);
+    memcpy(k + p, gx.tev_kcolor, sizeof(gx.tev_kcolor));
+    p += sizeof(gx.tev_kcolor);
+    memcpy(k + p, gx.swap_table, sizeof(gx.swap_table));
+    p += sizeof(gx.swap_table);
+    for (u32 i = 0; i < n; i++) {
+        k[p++] = (u8)gx_unit_of_stage[i];
+    }
+    if (s_fog_unit >= 0) { /* the fog stage's colour */
+        k[p++] = gx.fog_color.r;
+        k[p++] = gx.fog_color.g;
+        k[p++] = gx.fog_color.b;
+    }
+    while (p & 3) {
+        k[p++] = 0;
+    }
+    u32 kw = p >> 2;
+    OneTab* t = &s_ot[OT_TEV];
+    u32 h = one_hash(key, kw);
+    s32 e = one_find(t, key, kw, h);
+    if (e >= 0) {
+        t->hits++;
+        const u32* o = one_out(t, e);
+        memcpy(st, o, offsetof(PlatGpuState, tex));
+        s_fog_unit = (int)(s32)o[offsetof(PlatGpuState, tex) / 4];
+    } else {
+        t->misses++;
+        memset(st, 0, offsetof(PlatGpuState, tex));
+        build_tev(st);
+        e = one_add(t, key, kw, h);
+        if (e < 0) { /* full: the TEV ids go with it (their table keys on TEV entries) */
+            one_tab_clear(t);
+            one_tab_clear(&s_ot[OT_TEVB]);
+            plat_gpu_one_reset(PLAT_GPU_C_TEV);
+            s_one_tevb_valid = 0;
+            e = one_add(t, key, kw, h);
+        }
+        if (e >= 0) {
+            u32* o = one_out(t, e);
+            memcpy(o, st, offsetof(PlatGpuState, tex));
+            o[offsetof(PlatGpuState, tex) / 4] = (u32)s_fog_unit;
+        }
+    }
+    if (e != s_one_tev_e) {
+        s_one_tevb_valid = 0;
+    }
+    s_one_tev_e = e;
+}
+
+static void one_tevb(const PlatGpuState* st) {
+    u32 key[2] = {(u32)s_one_tev_e, st->fog_enable ? (st->fog_color & 0xFFFFFFu) | 0x1000000u : 0};
+    if (s_one_tev_e < 0) {
+        s_one_ids[PLAT_GPU_C_TEV] = 0;
+        return;
+    }
+    if (s_one_tevb_valid && key[0] == s_one_tevb_k[0] && key[1] == s_one_tevb_k[1]) {
+        return; /* the id in force */
+    }
+    OneTab* t = &s_ot[OT_TEVB];
+    u32 h = one_hash(key, 2);
+    s32 e = one_find(t, key, 2, h);
+    u32 id;
+    if (e >= 0) {
+        t->hits++;
+        id = *one_out(t, e);
+    } else {
+        t->misses++;
+        if (t->n >= t->cap) {
+            one_tab_clear(t);
+            plat_gpu_one_reset(PLAT_GPU_C_TEV);
+        }
+        id = one_block(PLAT_GPU_C_TEV, t, st);
+        e = one_add(t, key, 2, h);
+        if (e >= 0) {
+            *one_out(t, e) = id;
+        }
+    }
+    s_one_ids[PLAT_GPU_C_TEV] = id;
+    s_one_tevb_k[0] = key[0];
+    s_one_tevb_k[1] = key[1];
+    s_one_tevb_valid = 1;
+}
+
+static void one_tex(const PlatGpuState* st) {
+    const u32* key = (const u32*)st->tex;
+    enum { KW = sizeof(st->tex) / 4 };
+    OneTab* t = &s_ot[OT_TEX];
+    u32 h = one_hash(key, KW);
+    s32 e = one_find(t, key, KW, h);
+    u32 id;
+    if (e >= 0) {
+        t->hits++;
+        id = *one_out(t, e);
+    } else {
+        t->misses++;
+        if (t->n >= t->cap) {
+            one_tab_clear(t);
+            plat_gpu_one_reset(PLAT_GPU_C_TEX);
+        }
+        id = one_block(PLAT_GPU_C_TEX, t, st);
+        e = one_add(t, key, KW, h);
+        if (e >= 0) {
+            *one_out(t, e) = id;
+        }
+    }
+    s_one_ids[PLAT_GPU_C_TEX] = id;
+}
+
+static void one_pix(PlatGpuState* st, u32 d) {
+    u32 key[17];
+    key[0] = gx.alpha_comp0 | (u32)gx.alpha_ref0 << 8 | (u32)gx.alpha_op << 16 | (u32)gx.alpha_comp1 << 24;
+    key[1] = gx.alpha_ref1 | (u32)gx.blend_type << 8 | (u32)gx.blend_src << 16 | (u32)gx.blend_dst << 24;
+    key[2] = gx.blend_logic | (u32)gx.z_enable << 8 | (u32)gx.z_func << 16 | (u32)gx.z_update << 24;
+    key[3] = gx.color_update | (u32)gx.alpha_update << 8 | (u32)gx.pixel_fmt << 16;
+    memcpy(key + 4, gx.scissor, 16);
+    memcpy(key + 8, gx.scissor_off, 8);
+    key[10] = gx.efb_w | (u32)gx.efb_h << 16;
+    memcpy(key + 11, gx.vp, 24);
+    OneTab* t = &s_ot[OT_PIX];
+    u32 h = one_hash(key, 17);
+    s32 e = one_find(t, key, 17, h);
+    u8* pix = (u8*)st + PIX_FROM;
+    u32 id;
+    if (e >= 0) {
+        t->hits++;
+        const u32* o = one_out(t, e);
+        if (d & GXD_PIX) {
+            memset(pix, 0, offsetof(PlatGpuState, fog_lut_id) - PIX_FROM);
+            memcpy(pix, o, 16);
+            st->cull = (u8)o[4];
+            build_fog(st);
+        }
+        if (d & GXD_SCI) {
+            memcpy(&st->scissor_x0, o + 5, 32);
+        }
+        id = o[13];
+    } else {
+        t->misses++;
+        if (d & GXD_PIX) {
+            memset(pix, 0, offsetof(PlatGpuState, fog_lut_id) - PIX_FROM);
+            build_pix(st);
+        }
+        if (d & GXD_SCI) {
+            build_sci(st);
+        }
+        if (t->n >= t->cap) {
+            one_tab_clear(t);
+            plat_gpu_one_reset(PLAT_GPU_C_PIX);
+        }
+        id = one_block(PLAT_GPU_C_PIX, t, st);
+        e = one_add(t, key, 17, h);
+        if (e >= 0) {
+            u32* o = one_out(t, e);
+            memcpy(o, pix, 16);
+            o[4] = st->cull;
+            memcpy(o + 5, &st->scissor_x0, 32);
+            o[13] = id;
+        }
+    }
+    s_one_ids[PLAT_GPU_C_PIX] = id;
+}
+
+_Static_assert(offsetof(PlatGpuState, cull) - offsetof(PlatGpuState, alpha_test_enable) == 16, "PIX words before cull");
+_Static_assert(sizeof(PlatGpuState) - offsetof(PlatGpuState, scissor_x0) == 32, "scissor and viewport words");
+_Static_assert(offsetof(PlatGpuState, tex) % 4 == 0 && sizeof(((PlatGpuState*)0)->tex) % 4 == 0, "TEV and TEX words");
+
+/* build_dirty with ids: the same parts in the same order; a class found by its GX bytes is copied, not built */
+static void build_one(u32 d) {
+    PlatGpuState* st = &s_state;
+    u32 regions = 0;
+    if ((d & GXD_TEV) && gx.fog_type != GX_FOG_NONE) {
+        d |= GXD_PIX; /* the fog ramp takes a stage and a unit, or the PICA fog does */
+    }
+    if (d & GXD_TEV) {
+        assign_units();
+        one_tev(st);
+        regions |= PLAT_GPU_R_TEV;
+    }
+    if (d & (GXD_TEV | GXD_TEX)) {
+        memset(st->tex, 0, sizeof(st->tex));
+        build_tex_units(st);
+        one_tex(st);
+        regions |= PLAT_GPU_R_TEX;
+    }
+    if (d & (GXD_TEV | GXD_CHAN)) {
+        build_chan_flags();
+    }
+    if (d & (GXD_PIX | GXD_SCI)) {
+        one_pix(st, d);
+        regions |= (d & GXD_PIX ? PLAT_GPU_R_PIX : 0) | (d & GXD_SCI ? PLAT_GPU_R_SCI : 0);
+    }
+    if (d & (GXD_TEV | GXD_PIX)) {
+        one_tevb(st);
+    }
+    if (regions != 0) {
+        plat_gpu_set_state_one(st, regions, s_one_ids);
+    }
+    s_dv.builds++;
+    for (int k = 0; k < 5; k++) {
+        s_dv.classes[k] += d >> k & 1;
+    }
+}
+
+/* switch gxone (gx_opts_init): needs the back end's, gxdirty and the tables */
+static void one_init(void) {
+    gx_opt_one = plat_gpu_one_active();
+    if (!gx_opt_one || s_ot[OT_TEV].slot != NULL) {
+        return;
+    }
+    if (!one_tab_init(&s_ot[OT_TEV], 512, 16384, offsetof(PlatGpuState, tex) / 4 + 1) ||
+        !one_tab_init(&s_ot[OT_TEVB], plat_gpu_one_capacity(PLAT_GPU_C_TEV), plat_gpu_one_capacity(PLAT_GPU_C_TEV) * 2, 1) ||
+        !one_tab_init(&s_ot[OT_TEX], plat_gpu_one_capacity(PLAT_GPU_C_TEX), plat_gpu_one_capacity(PLAT_GPU_C_TEX) * 12, 1) ||
+        !one_tab_init(&s_ot[OT_PIX], plat_gpu_one_capacity(PLAT_GPU_C_PIX), plat_gpu_one_capacity(PLAT_GPU_C_PIX) * 17,
+                      OT_PIX_OUTW)) {
+        PLOG_W("gxone: no memory for the class tables: off (the back end encodes the classes from the state)");
+        gx_opt_one = 0;
+        for (int i = 0; i < OT_N; i++) {
+            free(s_ot[i].slot);
+            free(s_ot[i].keys);
+            free(s_ot[i].kref);
+            free(s_ot[i].out);
+            memset(&s_ot[i], 0, sizeof(s_ot[i]));
+        }
+    }
+}
+
+static void one_log(u32 frames) {
+    static const char* const k_name[OT_N] = {"tev", "tevb", "tex", "pix"};
+    for (int i = 0; i < OT_N; i++) {
+        OneTab* t = &s_ot[i];
+        PLOG_I("gxone frame %lu: %s per frame %lu hits %lu misses, %lu entries of %lu, %lu resets (total)",
+               (unsigned long)gx_perf_frame_no(), k_name[i], (unsigned long)(t->hits / frames),
+               (unsigned long)(t->misses / frames), (unsigned long)t->n, (unsigned long)t->cap, (unsigned long)t->resets);
+        t->hits = t->misses = 0;
+    }
 }
 
 /* ---- Lighting ---- */
@@ -2124,6 +2505,9 @@ void gx_dirty_log(u32 frames) {
            (unsigned long)s_dv.bad, (unsigned long)s_dv.vbad);
     s_dv.builds = 0;
     memset(s_dv.classes, 0, sizeof(s_dv.classes));
+    if (gx_opt_one) {
+        one_log(frames);
+    }
 }
 
 static u32 vsh_cull(void) { return gx.cull == GX_CULL_FRONT ? 1u : gx.cull == GX_CULL_BACK ? 2u : 0u; }

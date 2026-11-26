@@ -71,6 +71,7 @@ void plat_calib_mode_run(void) __attribute__((noreturn));
 int plat_menu_input(uint32_t held, uint32_t down);
 void plat_qtm_usage(uint32_t* used, uint32_t* total); /* memplace.c: QTM RAM placed and available, bytes (0, 0 when not mapped) */
 uint32_t plat_gpu_vram_largest_kb(void);              /* gpu.c: the largest block vramAlloc can still give (probes; not every frame) */
+void plat_tex_epoch_bump(void);      /* gpu.c (gxone): a texture object's data or size changed; any thread */
 void plat_pause_grey(void);          /* pause look: the top screen's last frame, greyed and darker (both eyes); the game's next frame replaces it */
 void plat_pause_release(void);
 void plat_pause_begin_updater(int idle); /* the updater's pause, from its server thread: no GPU sync; greys the top screen only when idle (game thread parked) */

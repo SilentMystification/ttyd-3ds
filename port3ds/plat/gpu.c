@@ -31,6 +31,7 @@
 #include "plat/gpu.h"
 #include "plat/hud.h"
 #include "plat/pmu.h"
+#include "pica_enc.h"
 #include "plat_internal.h"
 #include "stereo.h"
 
@@ -215,6 +216,8 @@ static int s_uloc_tgsrc;
 static PlatGpuVshLight s_last_vlight;
 static C3D_AttrInfo s_attr;
 static TexSlot s_tex[MAX_TEX];
+static u32 s_tex_epoch;              /* gxone: bumped when a slot is used again or a texture's data moves */
+static u32 s_tex_seen[MAX_TEX / 32]; /* slots that held a texture before (under s_tex_lock) */
 /* Bound to texture units the draw does not use: citro3d's C3D_TexBind
  * cannot take NULL (it reads the texture's type). 8x8 opaque white. */
 static C3D_Tex s_blank_tex;
@@ -312,6 +315,13 @@ static void oh_import(Record* r);
 static void oh_log(void);
 static int oh_init(void);
 static int s_oh_state_pending; /* the state changed since the words last sent it (mirrors the replay's) */
+static int s_one; /* switch gxone (GX native step 2; the gxone section after oh_import) */
+static u32 s_one_cur[3];
+static void one_vfy(int c, const u32* key, const PlatGpuState* st, int key_sends);
+static int oh_state_one(const PlatGpuState* st);
+struct OhCap;
+static void one_import(const struct OhCap* b);
+static void one_log(u32 frames);
 static u32 s_oh_idx_end;        /* index arena end of the last mergeable shader draw (gxonehop=1) */
 
 static void* rec_put(u16 type, u32 size) {
@@ -574,6 +584,9 @@ void plat_gpu_set_state(const PlatGpuState* state) {
  * regions' words are compared. The record gets what plat_gpu_set_state would put there (the same delta, in the same
  * word order, or the same full state). */
 void plat_gpu_set_state_dirty(const PlatGpuState* state, uint32_t regions) {
+    if (s_one) {
+        memset(s_one_cur, 0, sizeof(s_one_cur)); /* gxone: a state without ids; its classes are encoded from it */
+    }
     if (!s_last_state_valid || !s_state_delta) {
         plat_gpu_set_state(state);
         return;
@@ -1051,6 +1064,10 @@ static u32 tex_alloc_slot(void) {
         TexSlot* t = &s_tex[i];
         if (!t->live && !t->pending_free) {
             t->live = 1;
+            if (s_tex_seen[i >> 5] & 1u << (i & 31)) {
+                plat_tex_epoch_bump(); /* gxone: blocks that named this handle hold the old texture's words */
+            }
+            s_tex_seen[i >> 5] |= 1u << (i & 31);
             LightLock_Unlock(&s_tex_lock);
             return i;
         }
@@ -2583,6 +2600,8 @@ typedef struct OhCap {
     u32 key[DK_MAX];
     u32 res[OH_CAPW];
     u32 dbg[3]; /* texture handles (verify log) */
+    u32 encn;   /* gxone=2: the encoder's words for this key, compared with res when the record comes back */
+    u32 enc[48];
 } OhCap;
 typedef struct {
     s32 lit, lcount;
@@ -2605,6 +2624,7 @@ static struct {
     int given_valid;
     int after_scene, scene_seen;
     u32 gdraw, seq;
+    u32 held[3], held_ep; /* gxone: the class block ids the GPU holds (valid with gpu_valid), the texture epoch */
 } s_om;
 static VshDraw s_oh_md; /* gxonehop=1: the last shader draw, while one may merge into it (s_last_vdraw) */
 static DTab s_otab[DC_N];
@@ -2854,7 +2874,8 @@ static void oh_after_c3d(int what) {
     oh_event();
 }
 
-static int scissor_rect_n(const PlatGpuState* st) {
+/* scissor_rect without its log variables (any thread); `out` (x0 y0 x1 y1) may be NULL */
+static int scissor_rect_n(const PlatGpuState* st, int* out) {
     float sx, sy, sw, sh;
     efb_to_target_rect(st->scissor_x0, st->scissor_y0, (float)(st->scissor_x1 - st->scissor_x0),
                        (float)(st->scissor_y1 - st->scissor_y0), &sx, &sy, &sw, &sh);
@@ -2865,11 +2886,17 @@ static int scissor_rect_n(const PlatGpuState* st) {
     int x0 = (int)cx0, y0 = (int)cy0, x1 = (int)cx1, y1 = (int)cy1;
     x1 += (float)x1 < cx1;
     y1 += (float)y1 < cy1;
+    if (out != NULL) {
+        out[0] = x0;
+        out[1] = y0;
+        out[2] = x1;
+        out[3] = y1;
+    }
     return x1 <= x0 || y1 <= y0;
 }
 
 static int oh_cpu_draw_keep(void) {
-    if (scissor_rect_n(&s_last_state)) {
+    if (scissor_rect_n(&s_last_state, NULL)) {
         return 1; /* skipped by the replay before the filter */
     }
     return plat_gpudump_draw_filter(s_frame_counter, s_om.seq, s_om.gdraw++);
@@ -2951,7 +2978,9 @@ static void oh_pend_put(DTab* t, u32* e, const u32* key, u32 h, const OhCap* b) 
 }
 
 static const PlatGpuState* s_oh_dbg_st;
+static OhCap* s_oh_lastcap; /* the capture the last oh_block made (NULL: none; gxone=2 hands it the encoder's words) */
 static void oh_block(int c, const u32* key) {
+    s_oh_lastcap = NULL;
     DTab* t = &s_otab[c];
     u32 h = dkey_hash(key, t->keyw);
     u32* e = dtab_find(t, key, h);
@@ -2970,6 +2999,7 @@ static void oh_block(int c, const u32* key) {
     b->cls = (u32)c;
     b->n = 0;
     b->ref = NULL;
+    b->encn = 0;
     memcpy(b->key, key, t->keyw * 4);
     if (c == DC_TEX && s_oh_dbg_st != NULL) {
         for (int u = 0; u < 3; u++) {
@@ -2984,6 +3014,7 @@ static void oh_block(int c, const u32* key) {
     if (r->ncaps < sizeof(r->caps) / sizeof(r->caps[0])) {
         r->caps[r->ncaps++] = b;
         oh_pend_put(t, e, key, h, b);
+        s_oh_lastcap = b;
     }
     s_ost.caps++;
 }
@@ -3002,36 +3033,54 @@ static void oh_tex_prepare(const PlatGpuState* st, C3D_Tex out[3]) {
         C3D_TexSetFilterMipmap(t, tu->mip_linear && t->maxLevel != 0 ? GPU_LINEAR : GPU_NEAREST);
         C3D_TexSetLodBias(t, tu->lod_bias);
         C3D_TexSetWrap(t, (GPU_TEXTURE_WRAP_PARAM)tu->wrap_s, (GPU_TEXTURE_WRAP_PARAM)tu->wrap_t);
+        if (s_one) {
+            /* gxone: the lookup mode as tex_prepare sets it (the copy's mode bits are otherwise whatever the render
+             * thread's setters left on the object) */
+            t->param = (t->param & ~GPU_TEXTURE_MODE(7)) |
+                       GPU_TEXTURE_MODE(u == 0 && tu->proj ? GPU_TEX_PROJECTION : GPU_TEX_2D);
+        }
     }
 }
 
-/* direct_state on the recording side */
+/* direct_state on the recording side (gxone=2: every class is also checked against the id path, one_vfy) */
 static int oh_state(const PlatGpuState* st) {
     u32 k[DK_MAX];
     int pix = 0;
     memcpy(k, st, 26 * 4);
     k[26] = st->fog_enable;
     k[27] = st->fog_enable ? st->fog_color : 0;
-    if (!(s_om.gpu_valid & 1) || memcmp(k, s_om.dkey[DC_TEV], DK_TEV * 4) != 0) {
+    int send = !(s_om.gpu_valid & 1) || memcmp(k, s_om.dkey[DC_TEV], DK_TEV * 4) != 0;
+    if (send) {
         oh_block(DC_TEV, k);
         memcpy(s_om.dkey[DC_TEV], k, DK_TEV * 4);
+    }
+    if (s_one == 2) {
+        one_vfy(DC_TEV, k, st, send);
     }
     C3D_Tex t[3];
     oh_tex_prepare(st, t);
     memcpy(k, t, sizeof(t));
-    if (!(s_om.gpu_valid & 2) || memcmp(k, s_om.dkey[DC_TEX], DK_TEX * 4) != 0) {
+    send = !(s_om.gpu_valid & 2) || memcmp(k, s_om.dkey[DC_TEX], DK_TEX * 4) != 0;
+    if (send) {
         s_oh_dbg_st = st;
         oh_block(DC_TEX, k);
         s_oh_dbg_st = NULL;
         memcpy(s_om.dkey[DC_TEX], k, DK_TEX * 4);
     }
+    if (s_one == 2) {
+        one_vfy(DC_TEX, k, st, send);
+    }
     memcpy(k, &st->alpha_test_enable, 16);
     memcpy(k + 4, &st->scissor_x0, 32);
-    if (!(s_om.gpu_valid & 4) || memcmp(k, s_om.dkey[DC_PIX], DK_PIX * 4) != 0) {
+    send = !(s_om.gpu_valid & 4) || memcmp(k, s_om.dkey[DC_PIX], DK_PIX * 4) != 0;
+    if (send) {
         oh_block(DC_PIX, k);
         memcpy(s_om.dkey[DC_PIX], k, DK_PIX * 4);
         pix = 1;
-        s_om.scissor_empty = scissor_rect_n(st);
+        s_om.scissor_empty = scissor_rect_n(st, NULL);
+    }
+    if (s_one == 2) {
+        one_vfy(DC_PIX, k, st, send);
     }
     s_om.gpu_valid = 7;
     return pix;
@@ -3084,7 +3133,7 @@ static void oh_draw(const void* stream, u32 layout, u32 scales, u32 cull, const 
         s_ost.flushes++;
     }
     if (s_oh_state_pending || s_om.gpu_valid != 7) {
-        if (oh_state(&s_last_state)) {
+        if (s_one == 1 ? oh_state_one(&s_last_state) : oh_state(&s_last_state)) {
             s_om.v_cull = 0;
         }
         s_oh_state_pending = 0;
@@ -3198,6 +3247,9 @@ static void oh_capture(OhCap* b) {
 static void oh_import(Record* r) {
     for (u32 i = 0; i < r->ncaps; i++) {
         OhCap* b = r->caps[i];
+        if (b->encn != 0) {
+            one_import(b);
+        }
         DTab* t = &s_otab[b->cls];
         u32 h = dkey_hash(b->key, t->keyw);
         u32* e = dtab_find(t, b->key, h);
@@ -3208,6 +3260,453 @@ static void oh_import(Record* r) {
         }
     }
     r->ncaps = 0;
+}
+
+/* ---- switch gxone: class blocks by id (GX native step 2, docs/PORT_3DS_GX_NATIVE.md) ----
+ * The front end interns each state class (TEV with the fog mode and colour, the texture units, the pixel pipeline
+ * with viewport and scissor) at its draw boundary and gives the ids with the state (plat_gpu_set_state_one). An id
+ * owns a block of PICA words that the port's own encoders (pica_enc.c) build once from the class's state region,
+ * kept in linear memory, 16-byte aligned, handed out in order. Below the front end only ids are compared: the region
+ * copy on an id change replaces plat_gpu_set_state_dirty's word compare, and at a draw a class goes out when its id
+ * differs from the one the GPU holds, which replaces oh_state's key compares, oh_tex_prepare and the DTab hash.
+ * gxone=1 copies the blocks into the record's words (COPY mode; gxonehop=1 is implied). gxone=2 writes the record as
+ * gxonehop=1 does (keys, citro3d captures) and checks the id path beside it: every block the key path sends is
+ * compared word for word with the id's block (with the kept words, or with the capture when the record comes back),
+ * the id path's send decision with the key path's, and the regions of ids that did not change with the state given.
+ * Texture blocks hold the objects' address, size and sampler words: a texture slot used again or texture data moved
+ * (vramtex) bumps s_tex_epoch, and a block built in an older epoch is encoded again before it goes out. */
+#define ONE_CLS 3
+_Static_assert((int)DC_TEV == (int)PLAT_GPU_C_TEV && (int)DC_TEX == (int)PLAT_GPU_C_TEX &&
+                   (int)DC_PIX == (int)PLAT_GPU_C_PIX,
+               "class order");
+_Static_assert(PICA_TEV_WORDS <= 44 && PICA_TEX_WORDS <= 32 && PICA_PIX_WORDS_MAX <= 48, "block strides");
+static PicaEncFixed s_one_fx;
+typedef struct {
+    u32* mem;  /* cap blocks of stride words */
+    u32* meta; /* per block: words | scissor empty << 8 */
+    u32* ep;   /* per block: the texture epoch its words were built in (TEX) */
+    u32 stride, cap, used, gen;
+    int linear;
+} OneStore;
+static OneStore s_one_st[ONE_CLS];
+static u32 s_one_cur[ONE_CLS]; /* the ids of the state given last (0: none, the class is encoded from the state) */
+static struct {
+    u32 built[ONE_CLS], sent[ONE_CLS], direct[ONE_CLS], reenc, resets[ONE_CLS], changes;
+    u32 checks, bad, missed, stale, unver, logged;
+} s_onec;
+static const char* const k_one_name[ONE_CLS] = {"tev", "tex", "pix"};
+
+void plat_tex_epoch_bump(void) { __atomic_add_fetch(&s_tex_epoch, 1, __ATOMIC_RELEASE); }
+static inline u32 tex_epoch(void) { return __atomic_load_n(&s_tex_epoch, __ATOMIC_ACQUIRE); }
+
+/* apply_tev's setters (det) as register values */
+static u32 one_enc_tev(const PlatGpuState* st, u32* w) {
+    PicaTevStage s[6];
+    for (int i = 0; i < 6; i++) {
+        u32* v = s[i].w;
+        if (i < st->num_stages) {
+            const PlatGpuTevStage* g = &st->stages[i];
+            v[0] = (u32)g->src_rgb | (u32)g->src_alpha << 16;
+            v[1] = ((u32)g->op_rgb & 0xFFFu) | ((u32)g->op_alpha & 0xFFFu) << 12;
+            v[2] = (u32)g->func_rgb | (u32)g->func_alpha << 16;
+            v[3] = g->constant;
+            v[4] = (u32)g->scale_rgb | (u32)g->scale_alpha << 16;
+        } else { /* C3D_TexEnvInit */
+            v[0] = 0x000F000Fu;
+            v[1] = 0;
+            v[2] = 0;
+            v[3] = 0xFFFFFFFFu;
+            v[4] = 0;
+        }
+    }
+    u32 bits = (st->fog_enable ? (u32)GPU_FOG : (u32)GPU_NO_FOG) | (st->buffer_input_rgb & 0xFu) << 8 |
+               (st->buffer_input_alpha & 0xFu) << 12;
+    return pica_enc_tev(w, s, bits, st->buffer_color, st->fog_enable ? st->fog_color : 0, &s_one_fx);
+}
+
+/* tex_prepare + tex_bind3 as register values (the objects as oh_tex_prepare copies them) */
+static u32 one_enc_tex(const PlatGpuState* st, u32* w) {
+    C3D_Tex t[3];
+    oh_tex_prepare(st, t);
+    PicaTexUnit u[3];
+    for (int i = 0; i < 3; i++) {
+        u[i] = (PicaTexUnit){t[i].border, t[i].dim, t[i].param, t[i].lodParam, osConvertVirtToPhys(t[i].data) >> 3,
+                             (u32)t[i].fmt};
+    }
+    return pica_enc_tex(w, u, &s_one_fx);
+}
+
+/* apply_pix's setters (det) as register values */
+static u32 one_enc_pix(const PlatGpuState* st, u32* w, int* sc_empty) {
+    PicaPixIn in;
+    memset(&in, 0, sizeof(in));
+    in.alpha_test = (st->alpha_test_enable ? 1u : 0u) | ((u32)st->alpha_test_func & 7u) << 4 | (u32)st->alpha_test_ref << 8;
+    if (st->blend_mode == 1) {
+        in.alpha_blend = (u32)st->blend_eq_rgb | (u32)st->blend_eq_alpha << 8 | (u32)st->blend_src_rgb << 16 |
+                         (u32)st->blend_dst_rgb << 20 | (u32)st->blend_src_alpha << 24 | (u32)st->blend_dst_alpha << 28;
+    } else {
+        in.alpha_blend = 0x01010000u; /* ADD, ADD, ONE, ZERO, ONE, ZERO */
+    }
+    in.logic_op = st->blend_mode == 2 ? st->logic_op : (u32)GPU_LOGICOP_COPY;
+    in.blend_on = st->blend_mode != 2;
+    u32 mask = (st->color_write & 0xFu) | (st->depth_write ? (u32)GPU_WRITE_DEPTH : 0);
+    u32 func = st->depth_test ? st->depth_func : (u32)GPU_ALWAYS;
+    in.depth_test = (st->depth_test || st->depth_write ? 1u : 0u) | (func & 7u) << 4 | mask << 8;
+    in.zscale = st->depth_far - st->depth_near;
+    in.zoffset = st->depth_far;
+    float tx, ty, tw, th;
+    efb_to_target_rect(st->viewport_x, st->viewport_y, st->viewport_w, st->viewport_h, &tx, &ty, &tw, &th);
+    if (tx < 0) tx = 0;
+    if (ty < 0) ty = 0;
+    if (tw >= 1 && th >= 1) {
+        in.viewport = 1;
+        in.vx = (u32)tx;
+        in.vy = (u32)ty;
+        in.vw = (u32)tw;
+        in.vh = (u32)th;
+    }
+    int sc[4];
+    *sc_empty = scissor_rect_n(st, sc);
+    if (!*sc_empty) {
+        in.sc_mode = GPU_SCISSOR_NORMAL;
+        in.sc_x0 = (u32)sc[0];
+        in.sc_y0 = (u32)sc[1];
+        in.sc_x1 = (u32)sc[2];
+        in.sc_y1 = (u32)sc[3];
+    } else { /* mode off, corners 0 (apply_pix's det path) */
+        in.sc_mode = GPU_SCISSOR_DISABLE;
+        in.sc_x1 = in.sc_y1 = 1;
+    }
+    return pica_enc_pix(w, &in, &s_one_fx);
+}
+
+static u32 one_enc(int c, const PlatGpuState* st, u32* w, int* sc_empty) {
+    *sc_empty = 0;
+    if (c == DC_TEV) {
+        return one_enc_tev(st, w);
+    }
+    if (c == DC_TEX) {
+        return one_enc_tex(st, w);
+    }
+    return one_enc_pix(st, w, sc_empty);
+}
+
+int plat_gpu_one_active(void) { return s_one; }
+
+uint32_t plat_gpu_one_capacity(int cls) { return s_one && (u32)cls < ONE_CLS ? s_one_st[cls].cap : 0; }
+
+uint32_t plat_gpu_one_block(int cls, const PlatGpuState* st) {
+    if (!s_one || (u32)cls >= ONE_CLS) {
+        return 0;
+    }
+    OneStore* s = &s_one_st[cls];
+    if (s->used >= s->cap) {
+        return 0;
+    }
+    u32 i = s->used++;
+    s->ep[i] = tex_epoch(); /* before the encoding reads the texture objects */
+    int sce;
+    u32 n = one_enc(cls, st, s->mem + (size_t)i * s->stride, &sce);
+    s->meta[i] = n | (u32)sce << 8;
+    s_onec.built[cls]++;
+    return s->gen << 16 | (i + 1);
+}
+
+void plat_gpu_one_reset(int cls) {
+    if (!s_one || (u32)cls >= ONE_CLS) {
+        return;
+    }
+    OneStore* s = &s_one_st[cls];
+    s->used = 0;
+    s->gen = (s->gen + 1) & 0xFFFFu; /* no id of the old blocks equals a new one */
+    s_one_cur[cls] = 0;
+    s_om.held[cls] = 0;
+    s_onec.resets[cls]++;
+}
+
+/* The words of class c for id (the state's region is the id's): the block's, encoded again first when it is a
+ * texture block of an older epoch; without a valid id, encoded from the state. */
+static u32 one_put(int c, u32 id, const PlatGpuState* st, u32* dst, u32 ep, int* sc_empty) {
+    OneStore* s = &s_one_st[c];
+    u32 i = (id & 0xFFFFu) - 1;
+    s_onec.sent[c]++;
+    if (id == 0 || id >> 16 != s->gen || i >= s->used) {
+        s_onec.direct[c]++;
+        return one_enc(c, st, dst, sc_empty);
+    }
+    u32* b = s->mem + (size_t)i * s->stride;
+    if (c == DC_TEX && s->ep[i] != ep) {
+        int x;
+        s->ep[i] = ep;
+        s->meta[i] = one_enc(c, st, b, &x) | (u32)x << 8;
+        s_onec.reenc++;
+    }
+    u32 n = s->meta[i] & 0xFFu;
+    *sc_empty = (int)(s->meta[i] >> 8 & 1u);
+    memcpy(dst, b, n * 4);
+    return n;
+}
+
+/* oh_state with ids: a class goes out when the GPU does not hold its id (or its texture epoch) */
+static int oh_state_one(const PlatGpuState* st) {
+    int pix = 0;
+    u32 ep = tex_epoch();
+    for (int c = 0; c < ONE_CLS; c++) {
+        u32 id = s_one_cur[c];
+        if ((s_om.gpu_valid >> c & 1) && id != 0 && s_om.held[c] == id && (c != DC_TEX || s_om.held_ep == ep)) {
+            continue;
+        }
+        Record* r = oh_rec();
+        int sce;
+        r->now += one_put(c, id, st, r->ow + r->now, ep, &sce);
+        s_om.held[c] = id;
+        if (c == DC_TEX) {
+            s_om.held_ep = ep;
+        }
+        if (c == DC_PIX) {
+            pix = 1;
+            s_om.scissor_empty = sce;
+        }
+    }
+    s_om.gpu_valid = 7;
+    return pix;
+}
+
+static void one_bad_log(int c, const char* what, const u32* ref, u32 rn, const u32* w, u32 n) {
+    if (s_onec.logged >= 16) {
+        return;
+    }
+    s_onec.logged++;
+    u32 k = 0;
+    while (k < rn && k < n && ref[k] == w[k]) {
+        k++;
+    }
+    PLOG_W("gxone verify: frame %lu, %s block differs from %s (%lu words, encoder %lu) at word %lu: %08lx, encoder %08lx",
+           (unsigned long)s_frame_counter, k_one_name[c], what, (unsigned long)rn, (unsigned long)n, (unsigned long)k,
+           (unsigned long)(k < rn ? ref[k] : 0), (unsigned long)(k < n ? w[k] : 0));
+}
+
+/* gxone=2, in oh_state after class c: the id path's decision and words against the key path's */
+static void one_vfy(int c, const u32* key, const PlatGpuState* st, int key_sends) {
+    u32 id = s_one_cur[c];
+    u32 ep = tex_epoch();
+    int id_sends = !(s_om.gpu_valid >> c & 1) || id == 0 || s_om.held[c] != id || (c == DC_TEX && s_om.held_ep != ep);
+    if (id_sends) {
+        s_om.held[c] = id;
+        if (c == DC_TEX) {
+            s_om.held_ep = ep;
+        }
+    }
+    if (key_sends && !id_sends) {
+        s_onec.missed++;
+        if (s_onec.logged < 16) {
+            s_onec.logged++;
+            PLOG_W("gxone verify: frame %lu, the %s key changed but its id %08lx did not", (unsigned long)s_frame_counter,
+                   k_one_name[c], (unsigned long)id);
+        }
+    }
+    if (!key_sends) {
+        return;
+    }
+    u32 w[64];
+    int sce;
+    u32 n = one_put(c, id, st, w, ep, &sce);
+    if (c == DC_PIX && sce != s_om.scissor_empty) {
+        s_onec.bad++;
+        if (s_onec.logged < 16) {
+            s_onec.logged++;
+            PLOG_W("gxone verify: frame %lu, pix block's empty-scissor flag %d, key path %d", (unsigned long)s_frame_counter,
+                   sce, s_om.scissor_empty);
+        }
+    }
+    DTab* t = &s_otab[c];
+    u32* e = dtab_find(t, key, dkey_hash(key, t->keyw));
+    if (e != NULL && e[1] != OH_PENDING && e[1] != 0) {
+        s_onec.checks++;
+        if (e[1] != n || memcmp(e + 3 + t->keyw, w, n * 4) != 0) {
+            s_onec.bad++;
+            one_bad_log(c, "the kept capture", e + 3 + t->keyw, e[1], w, n);
+        }
+    } else if (s_oh_lastcap != NULL && n <= sizeof(s_oh_lastcap->enc) / 4) {
+        s_oh_lastcap->encn = n; /* compared with the capture when the record comes back (one_import) */
+        memcpy(s_oh_lastcap->enc, w, n * 4);
+    } else {
+        s_onec.unver++;
+    }
+}
+
+static void one_import(const OhCap* b) {
+    if (b->n == 0) {
+        s_onec.unver++;
+        return;
+    }
+    s_onec.checks++;
+    if (b->n != b->encn || memcmp(b->res, b->enc, b->n * 4) != 0) {
+        s_onec.bad++;
+        one_bad_log((int)b->cls, "citro3d's capture", b->res, b->n, b->enc, b->encn);
+    }
+}
+
+/* the bytes of PlatGpuState each class's id stands for: TEV with the fog enable and colour, TEX, PIX with the
+ * scissor, viewport and depth range (the fog LUT and its id travel apart, as with gxdirty) */
+#define ONE_OFF_TEX offsetof(PlatGpuState, tex)
+#define ONE_OFF_PIX offsetof(PlatGpuState, alpha_test_enable)
+#define ONE_OFF_FOG offsetof(PlatGpuState, fog_enable)
+#define ONE_OFF_LUT offsetof(PlatGpuState, fog_lut_id)
+#define ONE_OFF_SCI offsetof(PlatGpuState, scissor_x0)
+static const u16 k_one_rg[ONE_CLS][2][2] = {
+    {{0, ONE_OFF_TEX}, {ONE_OFF_FOG, ONE_OFF_LUT}},
+    {{ONE_OFF_TEX, ONE_OFF_PIX}, {0, 0}},
+    {{ONE_OFF_PIX, ONE_OFF_FOG}, {ONE_OFF_SCI, sizeof(PlatGpuState)}},
+};
+
+static int one_rg_same(int c, const PlatGpuState* st) {
+    for (int k = 0; k < 2; k++) {
+        u32 a = k_one_rg[c][k][0], b = k_one_rg[c][k][1];
+        if (b > a && memcmp((const u8*)&s_last_state + a, (const u8*)st + a, b - a) != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void one_rg_copy(int c, const PlatGpuState* st) {
+    for (int k = 0; k < 2; k++) {
+        u32 a = k_one_rg[c][k][0], b = k_one_rg[c][k][1];
+        if (b > a) {
+            memcpy((u8*)&s_last_state + a, (const u8*)st + a, b - a);
+        }
+    }
+}
+
+void plat_gpu_set_state_one(const PlatGpuState* st, uint32_t regions, const uint32_t ids[3]) {
+    if (s_one == 0) {
+        plat_gpu_set_state_dirty(st, regions);
+        return;
+    }
+    if (!s_last_state_valid) {
+        plat_gpu_set_state(st); /* the record's first state goes whole */
+        memcpy(s_one_cur, ids, sizeof(s_one_cur));
+        return;
+    }
+    if ((regions & PLAT_GPU_R_PIX) && st->fog_enable) { /* the LUT as plat_gpu_set_state_dirty sends it */
+        u32 id = st->fog_lut_id;
+        u32 h = id != 0 ? 0 : fog_hash(st);
+        if (id != 0 ? id != s_last_fog_id : h != s_last_fog_hash) {
+            oh_fog(st->fog_lut);
+            s_last_fog_hash = h;
+            s_last_fog_id = id;
+        }
+        if (st->fog_lut_id == 0 || st->fog_lut_id != s_last_state.fog_lut_id) {
+            memcpy(&s_last_state.fog_lut_id, &st->fog_lut_id, ONE_OFF_SCI - ONE_OFF_LUT);
+        }
+    }
+    int changed = 0;
+    for (int c = 0; c < ONE_CLS; c++) {
+        if (s_one == 2) {
+            /* the key path draws from s_last_state: every class is compared; a change under an unchanged id is stale */
+            if (!one_rg_same(c, st)) {
+                if (ids[c] != 0 && ids[c] == s_one_cur[c]) {
+                    s_onec.stale++;
+                    if (s_onec.logged < 16) {
+                        s_onec.logged++;
+                        PLOG_W("gxone verify: frame %lu, the %s region changed under the same id %08lx",
+                               (unsigned long)s_frame_counter, k_one_name[c], (unsigned long)ids[c]);
+                    }
+                }
+                one_rg_copy(c, st);
+                changed = 1;
+            }
+            s_one_cur[c] = ids[c];
+        } else if (ids[c] != s_one_cur[c] || ids[c] == 0) {
+            one_rg_copy(c, st);
+            s_one_cur[c] = ids[c];
+            changed = 1;
+        }
+    }
+    if (changed) {
+        oh_event();
+        s_oh_state_pending = 1;
+        s_stats_frame.state_changes++;
+        s_onec.changes++;
+    }
+}
+
+static void one_log(u32 f) {
+    PLOG_I("gxone frame %lu: per frame blocks built tev %lu tex %lu pix %lu, sent tev %lu tex %lu pix %lu (encoded at the "
+           "draw %lu), tex re-encoded %lu, state changes %lu; resets %lu %lu %lu; verify checks %lu mismatches %lu missed "
+           "%lu stale %lu not compared %lu",
+           (unsigned long)s_frame_counter, (unsigned long)(s_onec.built[0] / f), (unsigned long)(s_onec.built[1] / f),
+           (unsigned long)(s_onec.built[2] / f), (unsigned long)(s_onec.sent[0] / f), (unsigned long)(s_onec.sent[1] / f),
+           (unsigned long)(s_onec.sent[2] / f),
+           (unsigned long)((s_onec.direct[0] + s_onec.direct[1] + s_onec.direct[2]) / f), (unsigned long)(s_onec.reenc / f),
+           (unsigned long)(s_onec.changes / f), (unsigned long)s_onec.resets[0], (unsigned long)s_onec.resets[1],
+           (unsigned long)s_onec.resets[2], (unsigned long)s_onec.checks, (unsigned long)s_onec.bad,
+           (unsigned long)s_onec.missed, (unsigned long)s_onec.stale, (unsigned long)s_onec.unver);
+    u32 logged = s_onec.logged;
+    memset(&s_onec, 0, sizeof(s_onec));
+    s_onec.logged = logged;
+}
+
+/* Start-up: the float conversions against libctru's, citro3d's fixed context values, the block stores. */
+static int one_init(void) {
+    for (u32 i = 0; i < 8192; i++) {
+        u32 b = i < 4096 ? (i * 0x9E3779B9u) ^ (i << 11) : (0x3A000000u + (i - 4096) * 0x00041000u) ^ ((i & 1) << 31);
+        float v;
+        memcpy(&v, &b, 4);
+        if (pica_f24(v) != f32tof24(v) || pica_f31(v) != f32tof31(v)) {
+            PLOG_W("gxone: the float encoders differ from libctru's at %08lx (f24 %08lx/%08lx, f31 %08lx/%08lx): off",
+                   (unsigned long)b, (unsigned long)pica_f24(v), (unsigned long)f32tof24(v), (unsigned long)pica_f31(v),
+                   (unsigned long)f32tof31(v));
+            return 0;
+        }
+    }
+    /* __C3D_Context fields (citro3d 1.7.1, from the disassembly): texEnvBuf +412, texConfig +272, texShadow +276,
+     * effect: fragOpMode +216, fragOpShadow +220, earlyDepth +234 (byte), earlyDepthFunc +235 (byte), earlyDepthRef
+     * +236, stencilTest +244, stencilOp +248, blendClr +256 */
+    const u8* cb = (const u8*)__C3D_Context;
+    s_one_fx.texenv_buf_hi = __C3D_Context[103] & 0xFFFE0000u;
+    s_one_fx.tex_cfg_hi = __C3D_Context[68] & ~0x10007u;
+    s_one_fx.tex_shadow = __C3D_Context[69];
+    s_one_fx.fragop_lo = __C3D_Context[54] & ~0xFF00u;
+    s_one_fx.fragop_shadow = __C3D_Context[55];
+    s_one_fx.early_depth = cb[234];
+    s_one_fx.early_func = cb[235];
+    s_one_fx.early_ref = __C3D_Context[59];
+    s_one_fx.stencil_test = __C3D_Context[61];
+    s_one_fx.stencil_op = __C3D_Context[62];
+    s_one_fx.blend_color = __C3D_Context[64];
+    static const u16 k_cap[ONE_CLS] = {512, 1024, 512};
+    static const u16 k_stride[ONE_CLS] = {44, 32, 48};
+    u32 kb = 0;
+    int heap = 0;
+    for (int c = 0; c < ONE_CLS; c++) {
+        OneStore* s = &s_one_st[c];
+        s->cap = k_cap[c];
+        s->stride = k_stride[c];
+        size_t bytes = (size_t)s->cap * s->stride * 4;
+        s->mem = linearMemAlign(bytes, 16);
+        s->linear = s->mem != NULL;
+        if (s->mem == NULL) {
+            s->mem = memalign(16, bytes); /* COPY mode reads them with the CPU only */
+            heap = 1;
+        }
+        s->meta = calloc(s->cap, 4);
+        s->ep = calloc(s->cap, 4);
+        if (s->mem == NULL || s->meta == NULL || s->ep == NULL) {
+            PLOG_W("gxone: no memory for the class blocks: off");
+            return 0;
+        }
+        kb += (u32)(bytes >> 10);
+    }
+    PLOG_I("gxone=%d: class blocks by id, own encoders (%lu KB of blocks%s); fixed: texenv %08lx texcfg %08lx shadow %08lx "
+           "fragop %08lx %08lx early %lu %lu %lu stencil %08lx %08lx blend colour %08lx",
+           s_one, (unsigned long)kb, heap ? ", some in the heap" : ", linear memory",
+           (unsigned long)s_one_fx.texenv_buf_hi, (unsigned long)s_one_fx.tex_cfg_hi, (unsigned long)s_one_fx.tex_shadow,
+           (unsigned long)s_one_fx.fragop_lo, (unsigned long)s_one_fx.fragop_shadow, (unsigned long)s_one_fx.early_depth,
+           (unsigned long)s_one_fx.early_func, (unsigned long)s_one_fx.early_ref, (unsigned long)s_one_fx.stencil_test,
+           (unsigned long)s_one_fx.stencil_op, (unsigned long)s_one_fx.blend_color);
+    return 1;
 }
 
 /* gxonehop=2, render thread after a mono record: the one-hop words (side list; a capture's words from the replay's
@@ -3337,6 +3836,9 @@ static int oh_init(void) {
         t->keyw = k_keyw[c];
         t->capw = k_capw[c];
         t->stride = 3 + t->keyw + t->capw;
+        if (s_one == 1 && c != DC_LAY) {
+            continue; /* gxone=1: the three state classes go by id; only the layout keeps its table */
+        }
         t->mem = calloc((size_t)t->slots * t->stride, 4);
         if (t->mem == NULL) {
             PLOG_W("gxonehop: no memory for the tables: off");
@@ -3389,6 +3891,9 @@ static void oh_log(void) {
            (unsigned long)s_orst.caps, (unsigned long)s_orst.refs, (unsigned long)s_orst.marks,
            (unsigned long)s_orst.checks, (unsigned long)s_orst.mismatches, (unsigned long)s_orst.unresolved,
            (unsigned long)s_orst.cmp_words);
+    if (s_one) {
+        one_log(f);
+    }
     memset(&s_ost, 0, sizeof(s_ost));
     u32 logged = s_orst.logged;
     memset(&s_orst, 0, sizeof(s_orst)); /* the render thread's counters: racy, for the log only */
@@ -4485,6 +4990,17 @@ void plat_gpu_init(void) {
     if (s_onehop < 0 || s_onehop > 2) {
         s_onehop = 0;
     }
+    s_one = plat_switch_int("gxone", 0);
+    if (s_one < 0 || s_one > 2) {
+        s_one = 0;
+    }
+    if (s_one) {
+        if (one_init()) {
+            s_onehop = 1; /* gxone builds on gxonehop=1 (its verify mode is gxone=2) */
+        } else {
+            s_one = 0;
+        }
+    }
     if (s_onehop) {
         s_direct = 1; /* gxonehop implies gxdirect=1 (its verify mode is gxonehop=2) */
     }
@@ -4493,6 +5009,10 @@ void plat_gpu_init(void) {
     }
     if (s_onehop && (!s_direct || !oh_init())) {
         s_onehop = 0;
+    }
+    if (!s_onehop && s_one) {
+        PLOG_W("gxone: off (gxonehop could not start)");
+        s_one = 0;
     }
     s_vr.direct = s_direct != 0;
     s_vg.direct = 1;

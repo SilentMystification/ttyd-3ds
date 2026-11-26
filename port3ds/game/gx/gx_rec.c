@@ -49,6 +49,7 @@
 #include <string.h>
 
 #include "gx_internal.h"
+#include "gx_lobj.h"
 #include "plat/memstable.h"
 #include "plat/plat.h"
 #include "plat/pmu.h"
@@ -710,6 +711,25 @@ typedef struct {
 static StateContent* s_state_content; /* SC_SLOTS, allocated with the ring */
 static u32 s_sl_sizes[(0x10000 >> 10) + 1];
 static u32 s_sc_count;
+/* gxlobj: bumped whenever the address table or a size bit gains an entry (an "is not a state list" answer that
+ * hashed nothing holds until then); s_sl_hashed: the last is_state_list answer depended on the list's bytes */
+static u32 s_sl_gen = 1;
+static int s_sl_hashed;
+static int s_glo_on; /* gxlobj on the game thread: 0, 1, 2 verify (below gx_rec_list) */
+static u32 s_glo_checks, s_glo_bad;
+
+/* gxlobj=2: one kept answer or hint checked against the tables' own lookup */
+static void glo_verify(int ok, const char* what, const void* list, u32 nbytes) {
+    s_glo_checks++;
+    if (!ok && s_glo_bad++ == 0) {
+        PLOG_W("gxlobj verify: kept %s of list %p (%lu bytes) differs from the table lookup", what, list,
+               (unsigned long)nbytes);
+    }
+    if ((s_glo_checks & 0xFFFF) == 0) {
+        PLOG_I("gxlobj verify (game thread): %lu checks, %lu mismatches", (unsigned long)s_glo_checks,
+               (unsigned long)s_glo_bad);
+    }
+}
 
 static void sl_add_addr(const void* list) {
     u32 h = sl_hash(list);
@@ -719,6 +739,7 @@ static void sl_add_addr(const void* list) {
         }
         if (s_state_lists[h] == NULL) {
             s_state_lists[h] = list;
+            s_sl_gen++;
             return;
         }
     }
@@ -745,6 +766,7 @@ void gx_rec_state_list(const void* list, u32 nbytes) {
             e->size = nbytes;
             e->hash = hash;
             s_sl_sizes[(nbytes >> 5) >> 5] |= 1u << ((nbytes >> 5) & 31);
+            s_sl_gen++;
             if (++s_sc_count > SC_SLOTS / 2) {
                 s_dedup = 0; /* table (half) full: stop skipping calls */
                 PLOG_W("gxthread: more than %d state list contents: dedup off", SC_SLOTS / 2);
@@ -755,6 +777,7 @@ void gx_rec_state_list(const void* list, u32 nbytes) {
 }
 
 static int is_state_list(const void* list, u32 nbytes) {
+    s_sl_hashed = 0;
     u32 h = sl_hash(list);
     for (u32 i = 0; i < SL_SLOTS; i++, h = (h + 1) & (SL_SLOTS - 1)) {
         if (s_state_lists[h] == list) {
@@ -768,6 +791,7 @@ static int is_state_list(const void* list, u32 nbytes) {
     if (nbytes == 0 || nbytes > 0x10000 || s_state_content == NULL || !(s_sl_sizes[(nbytes >> 5) >> 5] >> ((nbytes >> 5) & 31) & 1)) {
         return 0;
     }
+    s_sl_hashed = 1;
     s_sl_hashes++;
     s_sl_hash_bytes += nbytes;
     u32 hash = gx_hash32(list, nbytes, 0x5EC1u);
@@ -1108,12 +1132,34 @@ static FlEntry* s_fl;
 static u32* s_fl_pool;
 static u32 s_fl_used;
 
-/* The entry for this list with its bytes as they are now, or NULL. */
-static FlEntry* fl_get(const void* list, u32 nbytes) {
+/* The entry for this list with its bytes as they are now, or NULL. hint (gxlobj): the slot the list had last
+ * time, taken when it still holds the list (a key is in at most one slot of its probe window, so the slot is
+ * the one the probe finds); the slot used is stored back. */
+static FlEntry* fl_get_body(const void* list, u32 nbytes, u16* hint);
+static FlEntry* fl_get(const void* list, u32 nbytes, u16* hint) {
+    FlEntry* e = fl_get_body(list, nbytes, hint);
+    if (hint != NULL) {
+        *hint = (u16)(e - s_fl + 1);
+    }
+    return e;
+}
+
+static FlEntry* fl_get_body(const void* list, u32 nbytes, u16* hint) {
     u32 h = ((u32)(uintptr_t)list >> 5 ^ nbytes * 0x9E3779B1u) * 2654435761u >> 21;
     FlEntry* e = NULL;
     FlEntry* freeslot = NULL;
-    for (u32 i = 0; i < 4; i++) {
+    if (hint != NULL && *hint != 0 && s_fl[*hint - 1].list == list && s_fl[*hint - 1].nbytes == nbytes) {
+        e = &s_fl[*hint - 1];
+        if (s_glo_on == 2) {
+            const FlEntry* p = NULL;
+            for (u32 i = 0; i < 4 && p == NULL; i++) {
+                const FlEntry* c = &s_fl[(h + i) & (FL_SLOTS - 1)];
+                p = c->list == list && c->nbytes == nbytes ? c : NULL;
+            }
+            glo_verify(p == e, "gxrecfuse slot", list, nbytes);
+        }
+    }
+    for (u32 i = 0; e == NULL && i < 4; i++) {
         FlEntry* c = &s_fl[(h + i) & (FL_SLOTS - 1)];
         if (c->list == list && c->nbytes == nbytes) {
             e = c;
@@ -1208,7 +1254,7 @@ static __attribute__((noinline)) u32 fuse_call_slow(u32 hd, const u32* c, u32 ge
 }
 
 /* A state list's calls through the dedup table: 1 when done, 0 when the list takes the old way. */
-static int fuse_list(const void* list, u32 nbytes) {
+static int fuse_list(const void* list, u32 nbytes, u16* hint) {
     if (nbytes == 0 || nbytes > 0x4000) {
         return 0;
     }
@@ -1224,7 +1270,7 @@ static int fuse_list(const void* list, u32 nbytes) {
             return 0;
         }
     }
-    const FlEntry* e = fl_get(list, nbytes);
+    const FlEntry* e = fl_get(list, nbytes, hint);
     if (e->words == 0) {
         s_fst.list_other++;
         s_fst.other_why[e->why & 3]++;
@@ -1335,9 +1381,69 @@ static void rec_list_grouped(const void* list, u32 nbytes, const void* caller) {
     s_lg_end = gx_rec_mode == 2 && s_wr_pub == s_wr ? 0 : s_wr;
 }
 
+/* gxlobj, game side (gx_lobj.h): per (address, size) the is_state_list answer and the gxrecfuse slot hint. The
+ * value is an object index + 1; a full object array empties the index (the objects only repeat what the tables
+ * say: losing them costs lookups, not answers). */
+#define GLO_BITS 14
+#define GLO_OBJS (1u << (GLO_BITS - 1))
+enum { GLO_SL_UNKNOWN = 0, GLO_SL_YES, GLO_SL_NO };
+typedef struct {
+    u16 fl;     /* gxrecfuse slot + 1 (fl_get's hint) */
+    u8 sl;      /* GLO_SL_*: YES holds for ever (the address table never loses an address), NO while s_sl_gen is sl_gen */
+    u8 pad;
+    u32 sl_gen;
+} GloObj;
+static GxLobjTab s_glo;
+static GloObj* s_glo_obj;
+static u32 s_glo_nobj;
+
+static GloObj* glo_obj(const void* list, u32 nbytes) {
+    GxLobjHot* h = gx_lobj_find(&s_glo, list, nbytes);
+    if (h != NULL) {
+        return &s_glo_obj[h->val - 1];
+    }
+    if (s_glo_nobj >= GLO_OBJS) {
+        gx_lobj_clear(&s_glo);
+        s_glo_nobj = 0;
+    }
+    GloObj* o = &s_glo_obj[s_glo_nobj++];
+    memset(o, 0, sizeof(*o));
+    gx_lobj_insert(&s_glo, list, nbytes, (u16)s_glo_nobj);
+    return o;
+}
+
+static int is_state_list_lobj(const void* list, u32 nbytes, u16** fl_hint) {
+    *fl_hint = NULL;
+    if (!gx_lobj_key_ok(list, nbytes)) {
+        return is_state_list(list, nbytes);
+    }
+    GloObj* o = glo_obj(list, nbytes);
+    *fl_hint = &o->fl;
+    int kept = o->sl == GLO_SL_YES ? 1 : o->sl == GLO_SL_NO && o->sl_gen == s_sl_gen ? 0 : -1;
+    if (kept >= 0) {
+        if (s_glo_on == 2) {
+            glo_verify(is_state_list(list, nbytes) == kept, "state-list answer", list, nbytes);
+        }
+        return kept;
+    }
+    int r = is_state_list(list, nbytes);
+    /* a "no" that hashed the bytes depends on them: not kept */
+    o->sl = r ? GLO_SL_YES : s_sl_hashed ? GLO_SL_UNKNOWN : GLO_SL_NO;
+    o->sl_gen = s_sl_gen;
+    return r;
+}
+
 void gx_rec_list(const void* list, u32 nbytes, const void* caller) {
-    if (s_dedup && is_state_list(list, nbytes)) {
-        if (s_fuse && (s_fuse_parts & 1) && fuse_list(list, nbytes)) {
+    if (s_glo_on && s_dedup) {
+        u16* fl_hint;
+        if (is_state_list_lobj(list, nbytes, &fl_hint)) {
+            if (s_fuse && (s_fuse_parts & 1) && fuse_list(list, nbytes, fl_hint)) {
+                return;
+            }
+            dd_forget();
+        }
+    } else if (s_dedup && is_state_list(list, nbytes)) {
+        if (s_fuse && (s_fuse_parts & 1) && fuse_list(list, nbytes, NULL)) {
             return;
         }
         dd_forget(); /* its state calls change the translator's state */
@@ -2013,6 +2119,15 @@ void gx_rec_init(void) {
         s_fuse = 0;
     }
     s_fuse_parts = plat_switch_int("gxrecfuseparts", 7) & 7;
+    if (s_dedup && gx_lobj_switch()) {
+        s_glo_obj = calloc(GLO_OBJS, sizeof(GloObj));
+        if (s_glo_obj != NULL) {
+            gx_lobj_init(&s_glo, "gxlobj game index", GLO_BITS);
+            s_glo_on = gx_lobj_switch();
+            PLOG_I("gxlobj: state-list answers and gxrecfuse slots by the ListObj index (game thread, %u slots)",
+                   1u << GLO_BITS);
+        }
+    }
     s_lgroup = plat_switch_int("gxreclgroup", 0) != 0;
     gx_ph_on = plat_switch_int("gxphase", 0);
     if (gx_ph_on < 0) {

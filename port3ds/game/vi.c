@@ -476,6 +476,7 @@ OSTime port_game_time_take(OSTime want) {
 void port_debug_frame(u32 frame);
 void port_card_frame(u32 frame);
 void plat_memory_log(const char* when);
+int plat_is_dev_build(void);
 
 /* One log line per map change: "map: <from> -> <to> (entrance <bero>)", "-" for the first map. */
 static void map_log_frame(void) {
@@ -524,7 +525,8 @@ static void frame_hooks(void) {
                       s_frame_start ? plat_ticks() - s_frame_start - (plat_paused_ticks() - s_pause_base) : 0);
     }
     fastboot_frame(s_sweep_state > 1 || s_warp_switch_done);
-    if (s_frames % 1800 == 0) {
+    /* log output only; mallinfo walks the whole heap (452 us in Azahar, gor_01), a hitch on the game thread: not in release builds */
+    if (s_frames % 1800 == 0 && plat_is_dev_build()) {
         plat_memory_log("now");
     }
     PlatHudStats st;

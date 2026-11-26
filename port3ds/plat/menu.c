@@ -29,6 +29,7 @@
 
 #include <3ds.h>
 
+#include "ctrdk/supervisor.h"
 #include "plat/gpu.h"
 #include "plat/hud.h"
 #include "plat/input.h"
@@ -331,7 +332,27 @@ int plat_take_warp_request(char* map, uint32_t map_size, char* bero, uint32_t be
 
 static const char* const s_level_names[] = {"error", "warn", "info", "debug"};
 
-static int rows_in_tab(void) { return s_tab == TAB_GENERAL ? 5 : 3; }
+static int rows_in_tab(void) { return s_tab == TAB_GENERAL ? 5 : 4; }
+
+/* Debug row 3: the ctr-devkit supervisor (development only; docs/CTR_DEVKIT_PLAN.md "Supervisor"). A installs
+ * (or updates) it from the CIA put in the queue folder with `devupdate.py files put`, or removes it. */
+#define SV_CIA "sdmc:/3ds/ttyd/queue/ctrdk-supervisor.cia"
+static char s_sv_msg[24];
+static void supervisor_toggle(void) {
+    CtrdkSvStatus st;
+    CtrdkSvResult res;
+    u64 tid = 0;
+    ctrdk_supervisor_status(&st);
+    APT_GetProgramID(&tid);
+    if (st.installed) {
+        ctrdk_supervisor_uninstall(&res);
+    } else {
+        ctrdk_supervisor_install(SV_CIA, tid, 0, &res);
+    }
+    snprintf(s_sv_msg, sizeof(s_sv_msg), "%s %08lx", res.stage ? res.stage : "ok", (unsigned long)res.result);
+    PLOG_I("menu: supervisor %s: %s%s", st.installed ? "remove" : "install", s_sv_msg,
+           res.reboot_needed ? " (installed, not started: reboot)" : "");
+}
 
 static void draw_menu(void) {
     if (!s_console_up || !plat_console_trylock()) {
@@ -374,6 +395,13 @@ static void draw_menu(void) {
                          s_map_count ? s_maps[s_map_index] : "(no map list yet)");
                 break;
             case 2: snprintf(line, sizeof(line), "%s Warp now", cur); break;
+            case 3: {
+                CtrdkSvStatus st;
+                ctrdk_supervisor_status(&st);
+                snprintf(line, sizeof(line), "%s Supervisor: %s %s", cur,
+                         !st.installed ? "off" : st.running ? "running" : "installed", s_sv_msg);
+                break;
+            }
             default: break;
             }
         }
@@ -434,6 +462,11 @@ static void activate(int dir) {
                 __atomic_store_n(&s_warp_pending, 1, __ATOMIC_RELEASE);
                 s_open = 0;
                 PLOG_I("menu: warp to %s", s_warp_map);
+            }
+            break;
+        case 3:
+            if (dir == 0) {
+                supervisor_toggle();
             }
             break;
         default: break;

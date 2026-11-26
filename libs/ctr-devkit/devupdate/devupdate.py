@@ -12,6 +12,7 @@
     devupdate.py files put a.tpad b.tpad [--dest sub] | get remote [-o local] | ls [dir] | rm path...
     devupdate.py log [--prev | --crash] [-o FILE]
     devupdate.py queue add manifest.json [files...] | list | clear | start | status | pull DIR
+    devupdate.py supervisor ping | status [--sv-port 5051]
 
 The console runs an app with devupdate_start() (or the bootstrap 3dsx).
 --ip defaults to $N3DS_IP, --port to 5050. Development use only.
@@ -59,7 +60,9 @@ from pathlib import Path
 
 MAGIC = b"CDU1"
 VERSION = 1
-CMD = {"ping": 1, "push": 2, "restart": 3, "report": 4, "launch": 5, "files": 6, "queue": 7}
+CMD = {"ping": 1, "push": 2, "restart": 3, "report": 4, "launch": 5, "files": 6, "queue": 7,
+       "sv_status": 0x101}  # 0x100 and up: the supervisor's own commands (libs/ctr-devkit/supervisor/)
+SV_PORT = 5051
 FLAG_RELAUNCH, FLAG_LAUNCH, FLAG_VERSION, FLAG_STAGE = 1, 2, 4, 8
 VERSION_MAX = 47  # the console keeps at most this many characters of the incoming version text
 # Console errors after which a direct install is worth retrying through the SD card (--stage):
@@ -994,6 +997,30 @@ def cmd_azahar_session(args):
     return 0
 
 
+def sv_request(args, cmd):
+    """One supervisor request (ping or status) on --sv-port; returns (last line, the other lines)."""
+    got = []
+    with socket.create_connection((args.ip, args.sv_port), timeout=args.timeout) as s:
+        s.settimeout(args.timeout)
+        s.sendall(header(cmd, token=args.token))
+        last = Link(args).lines(s, lambda line, *_: got.append(line))
+    return last, got
+
+
+def cmd_supervisor(args):
+    """The supervisor system module (libs/ctr-devkit/supervisor/): ping, status. It answers on its own
+    port (5051) whatever the game does; phase 1 has these two commands only."""
+    cmd = {"ping": "ping", "status": "sv_status"}[args.action]
+    try:
+        last, lines = sv_request(args, cmd)
+    except OSError as e:
+        print(f"devupdate: supervisor: no answer from {args.ip}:{args.sv_port}: {e}")
+        return 2
+    for line in lines:
+        print(f"supervisor: {line}")
+    return finish(last)
+
+
 def cmd_selftest(args):
     """Builds devupdate/selftest_host.c (the device's decoder, proto.c) with gcc and feeds it the
     requests this tool sends: version text of length 0, 1, 14, 47 and (raw) 255, with and without
@@ -1127,6 +1154,10 @@ def main():
     p.add_argument("--switches", default="")
     p.add_argument("--boot-wait", type=float, default=30, help="seconds to wait for the bootstrap to answer")
     p.add_argument("--no-send", action="store_true", help="the bootstrap already runs")
+    p = sub.add_parser("supervisor", help="the supervisor system module on --sv-port (5051): ping, status")
+    p.add_argument("action", choices=["ping", "status"])
+    p.add_argument("--sv-port", type=int, default=int(os.environ.get("CTRDK_SV_PORT", SV_PORT)),
+                   help="the supervisor's TCP port (default $CTRDK_SV_PORT or 5051)")
     p = sub.add_parser("azahar-session", help="one long-lived headless Azahar for the same commands (--ip 127.0.0.1)")
     p.add_argument("action", choices=["start", "stop", "status", "supervise"])
     p.add_argument("--supervise", action="store_true",
@@ -1150,7 +1181,7 @@ def main():
     try:
         return {"ping": cmd_ping, "push": cmd_push, "restart": cmd_restart, "report": cmd_report,
                 "launch": cmd_launch, "bootstrap": cmd_bootstrap, "files": cmd_files, "queue": cmd_queue,
-                "log": cmd_log}[args.cmd](args)
+                "log": cmd_log, "supervisor": cmd_supervisor}[args.cmd](args)
     except OSError as e:
         print(f"devupdate: no connection to {args.ip}:{args.port}: {e}")
         return 2

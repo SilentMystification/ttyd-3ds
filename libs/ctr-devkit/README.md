@@ -7,6 +7,7 @@ Developer tools for any libctru homebrew on the Nintendo 3DS. MIT licence (see `
 | `crash` | Crash and hang handler: one versioned report for CPU exceptions, fatals, `svcBreak` and a hang watchdog. It writes to your log and a report file, shows a crash screen on both displays, dumps every thread's registers on a hang, and ends the process cleanly |
 | `devupdate` | **Development only.** Installs a CIA over the network while the title runs, relaunches it with test switches, and keeps a crashed process reachable (recovery mode) |
 | `devupdate/devupdate.py` | The PC side (Python 3, standard library only): `push`, `ping`, `restart`, `report`, `launch`, `bootstrap`, `files`, `queue`, `azahar-session` |
+| `supervisor` | **Development only, optional.** A system module that stays reachable on TCP 5051 while the app is hung, crashed, ended or not running, and the in-app client that installs, starts and removes it (`include/ctrdk/supervisor.h`). Phase 1: `ping` and `status` |
 | `perf` | ARM11 performance counters (CCNT, two events per core, SCU counters) through `svcControlPerformanceCounter` or Luma's `svcBackdoor`, for per-frame logging (`include/ctrdk/perf.h`) |
 | `qtmbench` | New 3DS memory benchmark CIA (QTM vs FCRAM vs VRAM, CPU and GPU, coherency, contention); see `docs/PORT_3DS_QTM_BENCH.md` in this repository |
 | `examples/crash`, `examples/devupdate` | Standalone example apps (3dsx and CIA). The devupdate example built as a 3dsx is the generic bootstrap `devupdate-boot.3dsx` |
@@ -158,6 +159,25 @@ What Azahar can and cannot show, as checked here (`tools/port3ds/devupdate_azaha
 - **Does not work in Azahar:**
   - Any APT application jump (relaunch, `restart`, the bootstrap's jump). The Flatpak Azahar's Qt frontend aborts (`std::out_of_range`) or never starts the new title. So the deliver arguments of a relaunch can only be checked on hardware.
   - Keeping the old install after a cancelled push. Azahar's AM writes the CIA straight into the installed title's content folder and deletes it on cancel, so a refused push over an installed title removes that install there. The console's AM imports to a temporary area, but this has to be checked on hardware.
+
+## supervisor
+
+> **Development builds only, and optional.** Do not ship it, and do not call the client in a release. It needs Luma3DS: Luma's sm does not check service access, and its kernel extension gives the process list and title IDs. The design, the facts behind it (verified or not) and the test plan: `docs/CTR_DEVKIT_PLAN.md`, "Supervisor".
+
+```sh
+tools/port3ds/build.sh libs/ctr-devkit/supervisor    # build/3ds/supervisor/: ctrdk-supervisor.cia, .cxi, ctrdk-supervisor-app.3dsx
+devupdate.py --ip $N3DS_IP supervisor ping          # pong supervisor version=... kind=sysmodule uptime=... game=<tid> state=running ...
+devupdate.py --ip $N3DS_IP supervisor status        # status key=value lines
+```
+
+- **What it is.** The title is `0004013000FD8A02`. PM starts it on demand, and then it runs outside the app until the console reboots. Nothing starts it at boot, so a broken supervisor can never stop the console from booting. Each fault in it ends it quietly (an exception handler on each thread, `svcBreak` wrapped), never with an exception screen. It uses no GPU, APT or HID. Its heap is fixed at 0x51000 bytes in the SYSTEM region.
+- **Protocol.** It uses devupdate's `CDU1` header and reply lines on port 5051. `ping` is command 1; the supervisor's own commands are `0x100` and up (`0x101` status). Configuration is in `sdmc:/3ds/ctrdk/supervisor.cfg` (`port=`, `game=<title ID>`, `token=`), written by the client at install.
+- **Client** (link `ctrdk_supervisor_client`):
+  - `ctrdk_supervisor_install(cia_path, game_tid, port, &res)` installs the CIA to NAND through AM. It refuses any other title ID. It ends an older running copy first, so it is also the update, and then starts the new one: no reboot.
+  - `ctrdk_supervisor_uninstall(&res)` ends it and deletes the title.
+  - `ctrdk_supervisor_status(&st)` tells whether it is installed and whether it runs.
+  - `ctrdk_supervisor_ensure()` starts it if it is installed and not running. Call it first thing in `main()`, so every launch after a reboot brings it back.
+- **Azahar** cannot start a custom system module. `ctrdk-supervisor-app.3dsx` runs the same server as an ordinary app, for protocol tests: `devupdate.py azahar-session start --boot .../ctrdk-supervisor-app.3dsx --wait 0`, with `port=` in the profile's `sdmc/3ds/ctrdk/supervisor.cfg`. This is not the same as `azahar-session --supervise`, which is the PC-side relaunch stand-in for Azahar.
 
 ## TTYD integration notes
 

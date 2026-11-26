@@ -80,6 +80,13 @@ set(TTYD_C_FLAGS
     # disc's files (NPC tribes in setup files, messages) must match.
     -fexec-charset=CP932
 )
+# -fno-math-errno -fno-trapping-math: values do not change. sqrtf and friends
+# become the VFP instruction with no errno fallback call, and FP divides can
+# move out of loops. OFF until the identity gates (determ_ab.py) pass.
+option(TTYD_FAST_MATH_FLAGS "-fno-math-errno -fno-trapping-math on game code" OFF)
+if(TTYD_FAST_MATH_FLAGS)
+    list(APPEND TTYD_C_FLAGS -fno-math-errno -fno-trapping-math)
+endif()
 if(NOT TTYD_WARNINGS)
     list(APPEND TTYD_C_FLAGS -w)
 endif()
@@ -357,7 +364,7 @@ add_executable(ttyd
 add_dependencies(ttyd ttyd_rels)
 # --no-enum-size-warning: the two enum ABIs are mixed on purpose (see above).
 # --wrap=svcBreak: the crash library turns every svcBreak (libctru and citro3d panics too) into a crash report
-target_link_options(ttyd PRIVATE -Wl,--gc-sections -Wl,--wrap=svcBreak -Wl,--wrap=threadCreate -Wl,--wrap=fopen -Wl,--wrap=open -Wl,--wrap=opendir -Wl,--wrap=remove -Wl,--wrap=rename -Wl,--wrap=mkdir -Wl,--wrap=unlink -Wl,--wrap=fsync -Wl,--wrap=stat -Wl,--wrap=C3D_TexInitWithParams -Wl,--wrap=C3D_TexBind -Wl,--wrap=C3D_TexDelete -Wl,--wrap=C3D_FrameEnd -Wl,--no-enum-size-warning
+target_link_options(ttyd PRIVATE -Wl,--gc-sections -Wl,--wrap=svcBreak -Wl,--wrap=fmod -Wl,--wrap=threadCreate -Wl,--wrap=fopen -Wl,--wrap=open -Wl,--wrap=opendir -Wl,--wrap=remove -Wl,--wrap=rename -Wl,--wrap=mkdir -Wl,--wrap=unlink -Wl,--wrap=fsync -Wl,--wrap=stat -Wl,--wrap=C3D_TexInitWithParams -Wl,--wrap=C3D_TexBind -Wl,--wrap=C3D_TexDelete -Wl,--wrap=C3D_FrameEnd -Wl,--no-enum-size-warning
     -Wl,-Map,${CMAKE_CURRENT_BINARY_DIR}/ttyd.map)
 if(TTYD_LTO)
     target_link_options(ttyd PRIVATE -flto=auto -O2)

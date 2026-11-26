@@ -525,6 +525,19 @@ void qqsort(void* base, u32 n, u32 size, s32 (*compare)(const void* a, const voi
 
     fsort(table, n);
 
+#ifdef TARGET_PORT
+    /* (cur - base) is always a multiple of size, so the divide is exact: shift out the
+     * power of two, then multiply by the inverse of the odd part modulo 2^32. The ARM11
+     * has no divide instruction. Same quotient as the '/' below. */
+    u32 size_shift = size != 0 ? __builtin_ctz(size) : 0;
+    u32 size_odd = size >> size_shift;
+    u32 size_inv = size_odd;
+    size_inv *= 2 - size_odd * size_inv;
+    size_inv *= 2 - size_odd * size_inv;
+    size_inv *= 2 - size_odd * size_inv;
+    size_inv *= 2 - size_odd * size_inv;
+#endif
+
     dst = (u8*)base;
     idx = table;
     i = 0;
@@ -538,7 +551,11 @@ void qqsort(void* base, u32 n, u32 size, s32 (*compare)(const void* a, const voi
                     memcpy(cur, *slot, size);
                     cur = (u8*)*slot;
                     *slot = NULL;
+#ifdef TARGET_PORT
+                    slot = &table[((u32)(cur - (u8*)base) >> size_shift) * size_inv];
+#else
                     slot = &table[(u32)(cur - (u8*)base) / size];
+#endif
                 } while ((p = *slot) != dst);
                 memcpy(cur, buf, size);
                 *slot = NULL;

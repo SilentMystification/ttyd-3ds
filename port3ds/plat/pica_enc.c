@@ -115,3 +115,18 @@ uint32_t pica_enc_pix(uint32_t* out, const PicaPixIn* in, const PicaEncFixed* f)
     w = put(w, 0x7, 0x06A, f->early_ref);
     return (uint32_t)(w - out);
 }
+
+uint32_t pica_enc_list_end(uint32_t* out, uint32_t n_before, int fb_flush) {
+    uint32_t* w = out;
+    if (fb_flush) { /* C3Di_SplitFrame with a draw since the last split */
+        w = put(w, 0xF, 0x111, 1); /* GPUREG_FRAMEBUFFER_FLUSH */
+        w = put(w, 0xF, 0x110, 1); /* GPUREG_FRAMEBUFFER_INVALIDATE */
+        w = put(w, 0xF, 0x063, 1); /* GPUREG_EARLYDEPTH_CLEAR */
+    }
+    /* GPUCMD_Split: GPUREG_FINALIZE, a second one when the list would not end on a 16-byte boundary */
+    w = put(w, 0xF, 0x010, 0x12345678u);
+    if ((n_before + (uint32_t)(w - out)) & 3u) {
+        w = put(w, 0xF, 0x010, 0x12345678u);
+    }
+    return (uint32_t)(w - out);
+}

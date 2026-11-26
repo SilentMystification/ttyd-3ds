@@ -66,6 +66,13 @@ typedef struct {
 #define PICA_PIX_WORDS_MAX 46u
 uint32_t pica_enc_pix(uint32_t* out, const PicaPixIn* in, const PicaEncFixed* f);
 
+/* The end of a command list of n_before words (even), as citro3d's C3Di_SplitFrame and libctru's GPUCMD_Split write
+ * it: with fb_flush the framebuffer flush, invalidate and early-depth clear (citro3d writes them when a draw came
+ * since the last split), then GPUREG_FINALIZE, twice when the list would not end on a 16-byte boundary. At most
+ * PICA_LIST_END_MAX words; n_before + the result is a multiple of 4 when n_before is even. */
+#define PICA_LIST_END_MAX 10u
+uint32_t pica_enc_list_end(uint32_t* out, uint32_t n_before, int fb_flush);
+
 /* libctru's float conversions (f32tof24, f32tof31), bit for bit. */
 uint32_t pica_f24(float v);
 uint32_t pica_f31(float v);

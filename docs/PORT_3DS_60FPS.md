@@ -266,3 +266,33 @@ Rosalina profiles plus `gxthreadstats`, `gxstats`, `stereostats` and the counter
 - `corners`: conservative box from the model AABB. Not for play: a larger box can capture neighbouring objects into offscreen effects and raise smart-heap use.
 A fully-GPU box is not possible on the PICA: it has no bounding-box output or occlusion query, and the game reads the box directly after the draw, before the GPU runs it. QTM does not change this (it changes where data lives, not when it is ready).
 
+
+## Texture work off the game thread (`texasync`, `texframe`; Step 3 lever 3, 2026-11-26)
+
+Azahar, ms are Azahar's (ratios only). Counters: switch `texframe=1` logs one `texframe:` line per frame (lookups, uploads, hashes and bytes, async hits, game-thread microseconds for the lookups, the conversion with decode and PICA create, and the hashes). `texstats=60` adds a `texasync:` line (queued, taken, stale, waits, rejected by reason).
+
+**Measured before** (`texasync=0`, release build, `gxstats=1 texframe=1`, burst = first frame with more than 20 uploads, 120 frames from there):
+
+| Scene | uploads in 120 frames | texture lookups+conversion, game thread | worst frame | steady state | display lists built in the 120 frames |
+|---|---|---|---|---|---|
+| gor_01 (warp at 595) | 212 | 781 ms | 255.6 ms (53 uploads) | 0 uploads, 0 hashes, lookups 562 x 3.9 us = 2.2 ms | 67129 (25595 in the first 10 frames, 0 after frame 30) |
+| pik_00 | n/a | 591 ms | 167 ms | | 21586 |
+| battle (gon_02, btlauto) | | 611 ms | 134 ms | | 15580 (4451 in the first 10 frames; +2511 later) |
+
+Where it goes (gor_01 burst frame, 53 uploads, 302 ms): about two thirds is conversion (pick format and Morton tiling), a third decode, about 5% the PICA create (alloc, copy, flush); hashing was 2.7 ms of the first 120 frames' 781 (trust already covers it: 0-1 hashes a frame in steady state). So hashing is not the cost; the first-use conversion is. Steady state has nothing to move: no uploads, no hashes (the pause menu's CPU-written textures aside).
+
+**What moved.** `portTplPrefetch` (src/sdk/texPalette.c) runs when a TPL is unpacked (`UnpackTexPalette`, and filemgr's type 4 load) and calls `GXPrefetchTexPort` (gx_tex.c) for each texture. Plain textures (not CI, not mip mode) of at most 640x512 texels (1024x512 padded) in covered memory (memstable) are queued: `plat_memstable_trust` vouches the image span at queue time (generation G, span marked relied). One runner job on the core-2 worker (`plat/job.c`) claims queue entries one by one and does decode, format pick, Morton tiling and the hash into private buffers (2 x 1.3 MB scratch, results malloc'd, at most 6 MB held, oldest finished result evicted when full, unused ones dropped after 60 frames). At the first bind (`gx_tex_handle_for` miss path) the result is used only if `plat_memstable_gen() == G` (no relied range written, released or refilled since the queue: the bytes the worker read are the bytes now), else dropped and converted as before. A queued entry the worker has not started is decoded by the bind on the game thread (same code); one being decoded is waited for. The picture comes from the same functions and the same `plat_gpu_tex_create`, so it is the synchronous picture. `texverify=1` also re-hashes at the bind and counts a mismatch (`verify-bad`, 0 in every run below). `textrust=0` or `texfilter=mip` turns the prefetch off. Not covered: CI textures (the TLUT is bound later), textures from non-TPL sources (fonts, generated images, copies), textures over 640x512 (608x448 and 608x480 backgrounds convert at the bind).
+
+**After** (release build, 2 repeats per arm, alternating order; first-120 tex columns = game-thread texture time):
+
+| Scene | tex ms in 120 frames, off -> on | worst texture frame | game busy, first 120 mean (gxstats timers on) | steady busy (90 frames from +150) |
+|---|---|---|---|---|
+| gor_01 | 781 -> 401-414 | 255.7 -> 98.4-98.6 ms | 165.2 -> 162.4 ms (-1.7%) | 72.4-72.6 -> 72.4-72.6 (unchanged) |
+| pik_00 | 592 -> 375-378 | 167 -> 77.4 ms | 118.9-119.0 -> 117.3 (-1.4%) | 88.1-88.3 -> 88.3-88.3 |
+| battle | 611 -> 376-378 | 133.8 -> 113.5 ms | 73.1 -> 71.4-71.6 (-2.2%) | 38.7 -> 38.8-39.1 |
+
+Of gor_01's 212 uploads in the 120 frames, 164 came from the worker (dev build). The worst game-thread frame of the 120 does not change (1080 ms in gor_01, 861 pik_00, 597 battle, all with `gxstats=1` timers): those frames are the display-list builds (lever 4: 25595 lists built in the first 10 frames of gor_01, 683 "new" a frame after that is a stats-table artefact), not textures. Texture work after a warp fell by 35-50%; steady state is unchanged, as expected. What is left of the texture cost at a warp: the big and non-TPL textures, the create (alloc + copy), and a bind that catches the worker in the middle of a decode (one wait of 66 ms in the gor_01 first frame: the worker is slower than the game thread's first draw).
+
+**Identity** (dev build, `determ`, `texverify=1`, shots saved at the same frames, compared byte for byte, `texasync=0` against `1`): gor_01 31 of 31 shots (frames 598-658, warp at 595), pik_00 31 of 31, the battle (gon_02, btlauto=perfect, frames 660-795) 28 of 28, a map-change run (`sweep=60`: gor_01, gor_02, gor_00; shots every 7 frames from 598) 57 of 57 compared (the texasync=0 run timed out at 60 s before its last shot, so 57 shots against 58). `gw_diff` on the 1600-frame padscript (`gwdump=10`, A2 padscript): 160 records equal, 23 fields. `texverify`: 0 stale, 0 verify-bad in every run; in the map-change run 48 results were dropped as stale (a relied range was written between queue and bind) and converted synchronously, as designed.
+
+**Not done / open.** CI textures (animdrv's models; needs the TLUT in the key), a prefetch for textures larger than 640x512, and a smarter queue order (boot TPLs queue about 700 textures that are never drawn for a long time: the worker decodes them and they age out, harmless but wasted; a hint from the loader of which TPL is the map's would avoid it). The default stays 0 until the owner decides; no console test was run.

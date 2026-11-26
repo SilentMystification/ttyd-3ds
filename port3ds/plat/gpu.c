@@ -1674,7 +1674,15 @@ static u8* stereo_split(const Record* r, u32* tail_cmds, u32* tail_zwrites) {
 
 static void fog_bind(const void* body) {
     static C3D_FogLut lut;
-    FogLut_FromArray(&lut, (const float*)body);
+    /* citro3d takes 256 floats: the 128 table values, then each entry's difference to the next; the record holds
+     * the 129 values of PlatGpuState.fog_lut */
+    const float* v = (const float*)body;
+    float data[256];
+    for (int i = 0; i < 128; i++) {
+        data[i] = v[i];
+        data[128 + i] = v[i + 1] - v[i];
+    }
+    FogLut_FromArray(&lut, data);
     C3D_FogLutBind(&lut);
 }
 

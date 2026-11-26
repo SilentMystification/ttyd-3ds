@@ -217,6 +217,43 @@ static void fog_lut(f32* lut) {
         }
         lut[i] = 1.0f - fog; /* PICA: 1 keeps the fragment */
     }
+    /* The PICA looks the table up by window depth, which is nearly 1 - 1/z_eye: with a far plane thousands of
+     * times the near plane the whole fog range (z_eye of a few hundred to a few thousand) falls inside the last
+     * table segment, which the hardware interpolates linearly in depth. Entry 127 stays exact; entry 128 is the
+     * least-squares end of that segment over the eye depths from its start to four times the fog end. */
+    {
+        f32 z0 = 127.0f / 128.0f, den0 = f - z0 * (f - n);
+        f32 ze0 = ortho ? n + z0 * (f - n) : (den0 > 0 ? (f * n) / den0 : f);
+        f32 ze1 = ortho ? f : f;
+        f32 lim = (e > s ? e : s) * 4.0f;
+        if (lim < ze1) {
+            ze1 = lim;
+        }
+        if (ze1 > ze0 * 1.5f) {
+            f32 a = lut[127], num = 0, dd = 0;
+            for (int k = 0; k < 32; k++) {
+                f32 ze = ze0 * powf(ze1 / ze0, (f32)k / 31.0f);
+                f32 z = ortho ? (ze - n) / (f - n) : f * (ze - n) / (ze * (f - n));
+                f32 t = (z - z0) / (1.0f - z0);
+                f32 x = (ze - s) / (e - s);
+                x = x < 0 ? 0 : x > 1 ? 1 : x;
+                f32 fg;
+                switch (fn) {
+                case 4: fg = 1.0f - powf(2.0f, -8.0f * x); break;
+                case 5: fg = 1.0f - powf(2.0f, -8.0f * x * x); break;
+                case 6: fg = powf(2.0f, -8.0f * (1.0f - x)); break;
+                case 7: fg = powf(2.0f, -8.0f * (1.0f - x) * (1.0f - x)); break;
+                default: fg = x; break;
+                }
+                num += t * ((1.0f - fg) - a);
+                dd += t * t;
+            }
+            if (dd > 0) {
+                f32 b = a + num / dd;
+                lut[128] = b < 0 ? 0 : b > 1 ? 1 : b;
+            }
+        }
+    }
 }
 
 /* Texture units: the (texcoord, map) pairs the active TEV stages sample. */

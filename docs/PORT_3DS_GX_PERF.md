@@ -1120,3 +1120,81 @@ Not kept (measured, reverted):
 - The "old way" lists (up to 83 a frame in tik_21, 44 in jin_05): the reason counters added to the `gxrecfuse` line show all of them as "more bytes": lists the game built with state calls that start with a primitive (no leading state calls; first byte 0x98). Fusing them needs the primitive sizes, which come from the translator's vertex state at the call; not done. Dropping a state-list address when the game rebuilds the buffer without state calls was tried: 0 such rebuilds in tik.
 
 Translator profile: `pc_sample` puts 21% of the translator's busy samples in `gx_draw_frame_begin`, which the CopyDisp timer bounds at 0.5 ms a frame; a timer per record adds about 3 us each (translator 14.8 -> 42.6 ms). Neither gives a breakdown of the remaining 13.9 ms. Counters: 243 batch opens drawing 4780 of 5010 lists, 3000 state calls applied, 369 immediate primitives a frame (gor_01).
+
+## Where the record path's time goes (2026-11-26)
+
+Release builds (LTO, GX `-O3`, `TTYD_HOT_O3`), Azahar, ms per frame over windows 722-841 (frame N lines at 781 and 841 for the counters). C3 here is C1 + `gxthread=2 gxpipeline=1 gxsdl=1 gxrecfuse=1 gxreclgroup=1`. Azahar ms are ratios, not console ms.
+
+### Method
+
+- **Translator: switch `gxphase=N`** (default 0, logs with `gxthreadstats`, `gx_rec.c` `consume_ph`; nested hooks in `gx_dlcache.c` and `gx_draw.c`). One outer command in N is timed (each list call of a `GXR_LIST` group counts as one), and inside it every nested phase; time is exclusive. Every timed command starts with an empty nested phase; its segment cost (1.42-1.52 us) is taken off each segment. With `gxphase=1` every command is timed and the sum of the phases equals the translator's busy time without the timers (gor_01 13.9 against 13.9-14.0 ms), so the subtraction holds there. Off cost (port3ds against this build, `gxphase=0`): translator 13.9 / 14.0 ms, game thread 24.6 / 24.5 (C3) and 24.3 / 24.4 (`gxnull`).
+- **Game thread: no timers.** A first version timed the record path too (`gx_rec_call`, lists, primitives, `GXEnd`, `GXCallDisplayList`). It was not usable: (1) its hooks cost 0.3 ms in `gx_rec_call` and about 1 ms more elsewhere with `gxphase=0` (`gxnull` gor_01 24.4 -> 25.7); (2) the timed path ran the generic `gx_rec_call` body (call id not a constant), not the setters' inlined one, so the dedup compare read 7.6 ms where doubling it costs 1.1 ms; the sum of the phases came to 23.8 ms of 24.4. It was removed (commit `14a7bdfa`).
+- **Game thread: ablation under `gxnull=1`.** With `gxnull` the record is dropped, so a part of the record path can be left out without an effect on the game (the shadow that the getters read is kept up to date). A local build (not committed) with switch `gxphx=mask` returns early at one point per bit; the busy time that goes away is that part's cost. Parts that cannot be left out are measured by doubling them (`dd_same` and `gx_imm_convert` give the same result twice). The comparisons are valid only between runs at the same frame period: when the frame changes vblank count, busy also changes by other core-0 work (pik_00 with `gxnull` runs at 50 ms, the others at 33.4 ms; marked "n/a" below).
+
+### Game thread (ms per frame; `gxnull=1` unless marked C3)
+
+| Part (calls per frame, gor_01) | gor_01 | usu_00 | battle | pik_00 |
+|---|---|---|---|---|
+| busy, `gxnull=1` (port3ds) | 24.3 | 21.4 | 18.1 | about 35 (50 ms frames) |
+| all setter recording, the REC macro and in it (15 600 calls + 2 420 vertex-description calls) | 5.5 | n/a | n/a | n/a |
+| - the macro around `gx_rec_call` (primitive close check, `gx_dl_recording`, `gx_rec_on` with its TLS read, argument array) | 1.7 | n/a | n/a | n/a |
+| - `gx_rec_call` body | 3.8-4.1 | n/a | 1.8 | n/a |
+| - - dedup compare `dd_same` (doubled) | 1.1 | 1.3 | 0.5 | 0.9 |
+| - - ring write of the recorded calls (`put`/`commit`, 2 930 of them) | 0.3 | 0.6 | 0.3 | 0.5 |
+| - - vertex-description log / flush | 0.4 / 0.3 | | | |
+| `gx_rec_list` (5 010 list calls) | 4.6 | 2.8 | 2.4 | n/a |
+| - fused state lists (245 lists, 5 856 calls) | 2.3 | 0.1 | 1.2 | n/a |
+| - - their per-call compare loop | 2.0 | 0.1 | 1.0 | n/a |
+| - - `fl_get` (find, compare the bytes) | 0.3 | | 0.2 | |
+| - `is_state_list` (all calls) | about 0.7 | | | |
+| - group write (`rec_list_grouped`) | 0.8 | | | |
+| primitives, `gxnull` path (`gx_rec_prim`: index ranges, snapshot copies; memcpy 0.3) | 2.7 | n/a | n/a | n/a |
+| primitives, C3 path: `gx_imm_convert` (doubled; 376 / 478 / - / 1 155 primitives) | 1.9 | 2.6 | n/a | n/a |
+| left: game logic and the GX entry points not above (`GXCallDisplayList`, `GXBegin`/`GXEnd`, pipe writes, texture binds) | about 11.6 | | | |
+
+Counts per frame, C3, frame 841: gor_01 21 441 state calls through the dedup table (15 585 setter + 5 856 fused-list calls), 18 513 not recorded; 5 010 list calls in 353 group commands; 2 420 vertex-description calls, 80 recorded; 376 immediate primitives. pik_00: 21 649 / 18 954; 5 886 lists in 444 commands; 314 fused lists (7 507 calls); 1 155 primitives. usu_00: 16 196 / 13 897; 4 105 lists; 10 fused lists; 478 primitives.
+
+What this changes: the earlier "game logic is about 25% of the game thread" came from `pc_sample`. The parts above that were measured add up to 12.8 ms of gor_01's 24.4 (setters 5.5, lists 4.6, primitives 2.7); the rest, about 11.6 ms, is game logic plus GX entry-point code not measured here. No single part is larger than 5.5 ms.
+
+A Bloom filter in front of `is_state_list`'s address probe (same answers) was tried: no change (gor_01 `gxnull` 24.4 / 24.4), not kept. Copying `GX_F32` components as bits in `gx_imm_convert` (same bytes) was tried: no change (gor_01 24.3 / 24.4, usu_00 21.1 / 21.3, pik_00 31.2 / 31.8), not kept.
+
+### Translator (C3, `gxphase=1`, frame 841, ms per frame, calls per frame)
+
+| Phase | gor_01 | pik_00 | usu_00 | battle |
+|---|---|---|---|---|
+| list call, own time (batch-member fast path, `gx_call_list`, `gx_sdl_run`, decode of uncached lists) | 2.38 (5 007) | 1.19 (5 886) | 2.88 (4 108) | 5.43 (2 585) |
+| batch open `bat_open` (incl. `gx_draw_batch_begin`) | 2.09 (242) | 2.88 (358) | 2.52 (150) | 0.98 (123) |
+| batch close `bat_close` | 0.19 (242) | 0.28 (358) | 0.12 (150) | 0.10 (123) |
+| per-list slow path `call_slow` | 2.41 (230) | 0.99 (102) | 2.20 (243) | 0.85 (175) |
+| batch forming `form_add`/`form_end` | 0.00 (484) | 0.00 (458) | 0.00 (359) | 0.15 (262) |
+| state build `ensure_state` | 2.30 (846) | 2.34 (1 606) | 1.55 (840) | 1.69 (465) |
+| state calls `gx_apply_call` | 1.24 (3 003) | 0.73 (2 842) | 0.85 (2 345) | 0.68 (1 359) |
+| immediate primitives `GXR_PRIMD` (`gx_draw_prim_ring`) | 2.76 (375) | 6.18 (1 154) | 3.13 (478) | 1.93 (209) |
+| other (CopyDisp) | 0.49 | 0.60 | 0.46 | 0.42 |
+| sum | 13.9 | 15.2 | 13.7 | 12.2 |
+| translator busy, `gxphase=0` | 13.9 | 16.2 | 14.0 | 15.0 |
+
+The battle's content changes from window to window (frame 781: 798 primitives, 6.3 ms; frame 841: 209, 1.9 ms). Per call the large ones are `bat_open` (8-9 us), `call_slow` (10 us in gor_01) and an immediate primitive (5-7 us); a list call is 0.2-0.5 us. With `gxphase=1` the frame takes 77-92 ms (the translator is then the critical path), so render-thread preemption on core 2 may fall inside timed segments; the per-frame sums still match the untimed busy within 1 ms except in the battle.
+
+### Change kept: the fused-list compare loop
+
+`fuse_list`'s loop keeps the unchanged calls (5 519 of 5 856 in gor_01) in a loop with its values in registers and an unrolled compare; a call that compares its own way (channels), has no slot or differs goes to `fuse_call_slow`, which notes and records it as before (same table writes, same records, same order). Release, best of 2, ms (A = port3ds `aa01c44c`, B = this build):
+
+| Scene | C1 frame/busy A -> B | C3 game busy A -> B | C3 translator A -> B | `gxnull` busy A -> B |
+|---|---|---|---|---|
+| gor_01 | 34.3/31.5 -> 34.7/31.6 | 24.5 -> **24.2** | 13.9 -> 14.1 | 24.3 -> **24.1** |
+| pik_00 | 50.2/39.6 -> 50.2/39.8 | 31.6 -> **31.2** | 16.0 -> 16.3 | 33.7 -> **33.4** |
+| usu_00 | 35.0/29.8 -> 34.6/29.9 | 20.9 -> 21.2 | 13.8 -> 14.0 | 20.9 -> 21.1 |
+| battle | 27.0/21.0 -> 26.8/20.9 | 16.1 -> 16.0 | 14.9 -> 14.9 | 18.0 -> 17.9 |
+
+C3 frames stay at 33.4-33.6 (battle 32.7 -> 32.3). The gain is small (0.2-0.4 ms where state lists are fused: 245 a frame in gor_01, 314 in pik_00, 133 in the battle; usu_00 fuses 10 and its +0.2-0.3 is within the spread of two runs). B includes the `gxphase` hooks (translator +0.1-0.3, within the spread; the hooks alone measured 13.9 / 14.0).
+
+Identity (B against A, both `gxsdl=1 gxrecfuse=1 gxreclgroup=1`): `determ` shots 780-785 byte-identical in gor_01, usu_00, battle (C1 and C3) and pik_00 C1, 6 of 6 each. In pik_00 C3 the B runs saved 4 of 6 shots three times (missing 782/785, 782/784, and in one run all 6); every saved shot was identical. A build with only the `gxphase` code loses shots in the same way (782/785), and so does the stereo run in the section above, so this is a capture gap of the run and not a picture change. Shot 782 was not compared in pik_00 C3. `gw_diff` 1600-frame padscript gor_01: 160 records equal in C1 and C3. `gxrecfuse=2`: 0 mismatches in gor_01, pik_00, battle (to frame 841), `map_sweep.py --area tik` (22 of 22 maps ok, 820 K checks) and `--area jin` (12 of 12 ok, 458 K checks). Stereo (`stereoforce=1`, C3, gor_01 780-782): 9 of 9 identical (EFB, left, right); left differs from right.
+
+### Next steps (from the tables)
+
+- Game thread: no part is larger than 5.5 ms, and the measured parts add up to about half of it. To reach 16.7 ms in gor_01 (-7.7 ms) several parts must go at once, or work must move off the thread. The largest: the setters (5.5 ms, of which 1.7 ms is the macro around `gx_rec_call`: TLS read in `gx_rec_on`, `gx_dl_recording`, primitive close check, argument array), the list path (4.6 ms, of which 2.0 ms is the fused-list compare), and immediate-mode conversion in C3 (1.9-2.6 ms; with `gximmdirect=0` it goes back to the translator).
+- The macro cost is a candidate: one flag that combines "recording for a translator, not in a display list, no primitive open" and that the setters read in one load in place of three tests and a TLS read.
+- The unmeasured 11.6 ms (gor_01) needs a split between game logic and the GX entry points that are not measured here (`GXCallDisplayList`, `GXBegin`/`GXEnd`, pipe writes), by the same ablation under `gxnull`.
+- Translator: `bat_open` (8-9 us a call), `call_slow` and immediate primitives (5-7 us each, 6.2 ms in pik_00) are the largest per call. pik_00's translator (16.0-16.3 ms) is close to 16.7.
+

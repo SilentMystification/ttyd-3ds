@@ -358,8 +358,9 @@ static inline __attribute__((always_inline)) void run_one(u32 type, const u32* w
         /* gximmdirect: the vertices are in the game thread's chunks since GXEnd */
         u8 slots[8];
         memcpy(slots, w + 6, 8);
+        /* the vertex-state check only counts (the primitive is drawn as written): gximmdirect=2 */
         gx_draw_prim_ring((u8)w[0], (u16)w[1], (const void*)w[2], (const u8*)w[3], w[4], slots, (int)(w[8] & 1),
-                          vtx_state_hash(&gx, w[0] & 7) == w[9]);
+                          gx_opt_immdirect != 2 || vtx_state_hash(&gx, w[0] & 7) == w[9]);
         gx_vsh_gimm_translated(w[5]);
         if (gx_rec_mode == 3) {
             check_textures();
@@ -1556,7 +1557,7 @@ int gx_rec_prim_direct(u8 primfmt, u16 nverts, const void* caller, const PPCWGPi
     c[5] = chunk;
     memcpy(c + 6, attr_slot, 8);
     c[8] = d[GX_VA_NRM] != GX_NONE || d[GX_VA_NBT] != GX_NONE;
-    c[9] = vtx_state_hash(&gx_game, fmt);
+    c[9] = gx_opt_immdirect == 2 ? vtx_state_hash(&gx_game, fmt) : 0; /* for the translator's check (verify) */
     s_gs.prims++;
     gx_imm_rec_count(1);
     commit(10, 1);

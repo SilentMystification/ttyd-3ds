@@ -66,6 +66,7 @@ enum { GXR_FCHK_LIST = 0xE0, GXR_FCHK_VD }; /* gxrecfuse=2's checks */
 static struct {
     u32 vd_calls, vd_flushes, vd_sent, lists, list_calls, list_sent, list_decoded, list_other;
     u32 chk_list, chk_list_bad, chk_vd, chk_vd_bad;
+    u32 other_why[4]; /* lists the old way, by FlEntry.why */
 } s_fst;
 #define HDR(type, n) ((u32)(type) << 24 | (n))
 #define KICK_WORDS 256u
@@ -160,6 +161,13 @@ static void run_one(u32 type, const u32* w, u32 n) {
     switch (type) {
     case GXR_LIST: {
         const void* list = (const void*)w[0];
+        if (n > 4) {
+            /* a group (gxreclgroup): 3 words a call */
+            for (u32 i = 0; i < n; i += 3) {
+                gx_call_list((const void*)w[i], w[i + 1], (const void*)w[i + 2]);
+            }
+            break;
+        }
         if (gx_rec_mode == 3) {
             if (gx_hash32(list, w[1], 0x5EC0u) != w[3]) {
                 if (s_list_changed++ < 8) {
@@ -317,7 +325,10 @@ static void translator_main(void* arg) {
 
 /* ---- Recording (game thread) ---- */
 
+static u32 s_lg_end; /* gxreclgroup: s_wr just after the open group, 0 when none is open */
+
 static void publish(void) {
+    s_lg_end = 0; /* gxreclgroup: a published group is not extended */
     if (gx_rec_mode != 2) {
         return;
     }
@@ -941,6 +952,7 @@ typedef struct {
     u32 nbytes;
     u32 pos;   /* pool word of the copy of the bytes; the calls (id | count << 8, then the words) follow */
     u32 words; /* of the calls; 0: not a list of state calls only (the old way) */
+    u32 why;   /* words 0: 1 a vertex-description call, 2 bytes after the calls (primitives, raw), 3 another call */
 } FlEntry;
 static FlEntry* s_fl;
 static u32* s_fl_pool;
@@ -999,10 +1011,12 @@ static FlEntry* fl_get(const void* list, u32 nbytes) {
     e->nbytes = nbytes;
     e->pos = s_fl_used;
     int pure = good == nbytes && nw != 0;
+    e->why = pure ? 0 : 2;
     for (u32 k = 0; pure && k < nw; k += 1 + (calls[k] >> 8)) {
         u32 id = calls[k] & 0xFF;
         if (id == REC_SetVtxDesc || id == REC_ClearVtxDesc || id == 0 || id > REC_SetTevIndirect) {
             pure = 0; /* the vertex description keeps its own copy (fuse_vd_flush): such a list takes the old way */
+            e->why = id == REC_SetVtxDesc || id == REC_ClearVtxDesc ? 1 : 3;
         }
     }
     /* the dedup slot of each call, resolved once: id | count << 8 | (slot + 1) << 16, bit 31 for the calls the
@@ -1041,6 +1055,7 @@ static int fuse_list(const void* list, u32 nbytes) {
     const FlEntry* e = fl_get(list, nbytes);
     if (e->words == 0) {
         s_fst.list_other++;
+        s_fst.other_why[e->why & 3]++;
         return 0;
     }
     s_fst.lists++;
@@ -1093,12 +1108,67 @@ static int fuse_list(const void* list, u32 nbytes) {
     return 1;
 }
 
+/* switch gxreclgroup (default 0): display-list calls that follow each other in the record go into one GXR_LIST
+ * command (3 words a call), extended while the translator has not been given it. The translator calls them in the
+ * same order as before; only the per-command header, dispatch and the publish after each list are saved. A group is
+ * published once KICK_WORDS words wait (as the state calls are) or by the next command that kicks. */
+static int s_lgroup;
+#define LG_MAX_CALLS 85u  /* 255 words */
+static u32* s_lg_hdrp;    /* the open group's header */
+static u32 s_lg_n, s_lg_lim; /* its words; the ring position it may grow to */
+static u32 s_lg_groups, s_lg_calls; /* counters (gxthreadstats) */
+
+static void rec_list_grouped(const void* list, u32 nbytes, const void* caller) {
+    if (s_vd_n != 0) {
+        fuse_vd_flush(); /* the vertex description goes before the list */
+    }
+    if (s_wr == s_lg_end && (s32)(s_lg_lim - (s_wr + 3)) >= 0) {
+        /* the open group is the last command and the translator has not been given it (a publish closes it) */
+        u32* c = s_ring + (s_wr & s_ring_mask);
+        c[0] = (u32)list;
+        c[1] = nbytes;
+        c[2] = (u32)caller;
+        s_lg_n += 3;
+        *s_lg_hdrp = HDR(GXR_LIST, s_lg_n);
+        s_wr += 3;
+        s_lg_end = s_wr;
+        s_gs.words += 3;
+        s_gs.lists++;
+        s_lists_rec++;
+        s_lg_calls++;
+        if (gx_rec_mode == 2 && s_wr - s_wr_pub >= KICK_WORDS) {
+            publish();
+        }
+        return;
+    }
+    u32* c = put(GXR_LIST, 3);
+    c[0] = (u32)list;
+    c[1] = nbytes;
+    c[2] = (u32)caller;
+    s_gs.lists++;
+    s_lists_rec++;
+    s_lg_groups++;
+    s_lg_calls++;
+    commit(3, 0);
+    /* the group may grow up to LG_MAX_CALLS, the ring's end (no wrap inside a command) and the room seen now */
+    u32 off = (s_wr - 4) & s_ring_mask, room = s_ring_words - off - 1;
+    u32 lim = s_wr - 3 + (room < LG_MAX_CALLS * 3 ? room : LG_MAX_CALLS * 3);
+    s_lg_lim = (s32)(s_room_end - lim) < 0 ? s_room_end : lim;
+    s_lg_hdrp = c - 1;
+    s_lg_n = 3;
+    s_lg_end = gx_rec_mode == 2 && s_wr_pub == s_wr ? 0 : s_wr;
+}
+
 void gx_rec_list(const void* list, u32 nbytes, const void* caller) {
     if (s_dedup && is_state_list(list, nbytes)) {
         if (s_fuse && (s_fuse_parts & 1) && fuse_list(list, nbytes)) {
             return;
         }
         dd_forget(); /* its state calls change the translator's state */
+    }
+    if (s_lgroup && gx_rec_mode != 3) {
+        rec_list_grouped(list, nbytes, caller);
+        return;
     }
     u32 n = gx_rec_mode == 3 ? 4 : 3;
     u32* c = put(GXR_LIST, n);
@@ -1345,6 +1415,7 @@ static void wait_translated(u32 upto) {
             store_sci(&s_want_done, 0);
         }
     } else if ((s32)(s_rd - upto) < 0) {
+        s_lg_end = 0; /* the group is translated now */
         gx_tls_translator = 1;
         consume(upto);
         gx_tls_translator = 0;
@@ -1650,16 +1721,24 @@ void gx_rec_frame(void) {
     gx_bbox_stats_log(f);
     if (s_fuse) {
         PLOG_I("gxrecfuse frame %lu: per frame vtxdesc %lu calls, %lu flushes, %lu recorded | state lists %lu fused "
-               "(%lu calls, %lu recorded), %lu the old way, %lu decoded | verify %lu+%lu checks, %lu+%lu mismatches "
-               "(total)",
+               "(%lu calls, %lu recorded), %lu the old way (vtxdesc %lu, more bytes %lu, other calls %lu), %lu decoded "
+               "| verify %lu+%lu checks, %lu+%lu mismatches (total)",
                (unsigned long)s_frame_no, (unsigned long)(s_fst.vd_calls / f), (unsigned long)(s_fst.vd_flushes / f),
                (unsigned long)(s_fst.vd_sent / f), (unsigned long)(s_fst.lists / f),
                (unsigned long)(s_fst.list_calls / f), (unsigned long)(s_fst.list_sent / f),
-               (unsigned long)(s_fst.list_other / f), (unsigned long)(s_fst.list_decoded / f),
+               (unsigned long)(s_fst.list_other / f), (unsigned long)(s_fst.other_why[1] / f),
+               (unsigned long)(s_fst.other_why[2] / f), (unsigned long)(s_fst.other_why[3] / f),
+               (unsigned long)(s_fst.list_decoded / f),
                (unsigned long)s_fst.chk_list, (unsigned long)s_fst.chk_vd, (unsigned long)s_fst.chk_list_bad,
                (unsigned long)s_fst.chk_vd_bad);
         s_fst.vd_calls = s_fst.vd_flushes = s_fst.vd_sent = s_fst.lists = s_fst.list_calls = s_fst.list_sent = 0;
         s_fst.list_other = s_fst.list_decoded = 0;
+        memset(s_fst.other_why, 0, sizeof(s_fst.other_why));
+    }
+    if (s_lgroup) {
+        PLOG_I("gxreclgroup frame %lu: %lu list calls in %lu commands per frame", (unsigned long)s_frame_no,
+               (unsigned long)(s_lg_calls / f), (unsigned long)(s_lg_groups / f));
+        s_lg_calls = s_lg_groups = 0;
     }
     gx_dirty_log(f);
     gx_immdirect_log(f);
@@ -1749,6 +1828,7 @@ void gx_rec_init(void) {
         s_fuse = 0;
     }
     s_fuse_parts = plat_switch_int("gxrecfuseparts", 7) & 7;
+    s_lgroup = plat_switch_int("gxreclgroup", 0) != 0;
     if (s_fuse) {
         PLOG_I("gxrecfuse=%d: state lists through the record's dedup, vertex description recorded as a difference%s",
                s_fuse, s_fuse == 2 ? " (verify)" : "");

@@ -1094,3 +1094,29 @@ The work moved in part to the game thread: the list's calls are compared there (
 Identity: `determ` shots 780-785 byte-identical in gor_01, pik_00, usu_00, battle in C1 and C3 (48 of 48); `gw_diff` 1600-frame padscript gor_01 160 records equal in C1 and C3; `gxrecfuse=2` 0 mismatches in gor_01, pik_00, battle (to frame 841) and a `map_sweep.py --area tik` (22 maps, 828 K checks) and `--area jin` (12 maps, 451 K checks), every map ok. Stereo (`stereo_ab.py`, `stereoforce=1`, C3, shots 780-781): gor_01 6 of 6 identical (EFB, left, right); pik_00 left and right 4 of 4 identical, the EFB files missing in A (780) and in both runs (781), a capture gap of the run, not compared.
 
 **Default stays 0.** Not done: console run, the other six scenes, `vsh_accept.py`.
+
+### Follow-up 2026-11-26: list groups (`gxreclgroup`), and what did not pay
+
+Switch `gxreclgroup` (default 0; `gx_rec.c`). Display-list calls that follow each other in the record go into one `GXR_LIST` command, 3 words a call, extended while the translator has not been given it: every publish (and, with `gxthread=1/3`, every consume) closes the open group, and a group stops at 85 calls, the ring's end and the room seen when it began. A list call no longer kicks a publish; the group goes out with the next `KICK_WORDS` (256) words or the next kicking command. The translator calls the lists in the same order. Off with `gxthread=3` (its list records carry a hash).
+
+Counts (gor_01): 5010 list calls in 353-362 commands a frame (pik_00 5886 in 443, battle 2565 in 172).
+
+Results, release, windows 722-841, best of 2, ms (A = port3ds `b592f907` `gxsdl=1 gxrecfuse=1`, B = this build, the same plus `gxreclgroup=1`), C3:
+
+| Scene | frame A -> B | game busy A -> B | translator A -> B | render |
+|---|---|---|---|---|
+| gor_01 | 33.4 -> 33.4 | 24.6 -> 24.5 | 14.8 -> **13.9** | 7.4 |
+| pik_00 | 33.6 -> 33.4 | 31.7 -> 31.5 | 17.0 -> **16.0** | 7.5 |
+| usu_00 | 33.5 -> 33.5 | 21.1 -> 21.0 | 14.5 -> **13.8** | 6.5 |
+| battle | 32.5 -> 32.4 | 16.1 -> 16.1 (fence 6.2) | 15.4 -> **14.9** | 3.8 |
+
+C1: unchanged within 0.4 ms (frame/busy B: gor_01 33.9/31.5, pik_00 50.2/39.6, usu_00 34.4/29.8, battle 27.2/20.9). Game thread alone (`gxnull=1`): gor_01 24.4 -> 24.3, usu_00 21.3 -> 21.4. A first version that checked the ring position on each call cost the game thread 0.5-1.0 ms (`gxnull`); closing the group in `publish` removed that.
+
+Identity: `determ` shots 780-785 byte-identical against A in gor_01, pik_00, usu_00, battle, C1 and C3 (48 of 48); `gw_diff` 1600-frame padscript gor_01 160 records equal in C1 and C3; `gxrecfuse=2 gxreclgroup=1` 0 mismatches in gor_01, pik_00, battle (to frame 841), `map_sweep.py --area tik` (22 maps ok, 820 K checks) and `--area jin` (12 maps ok, 458 K checks). Stereo (`stereoforce=1`, C3, shots 780-781 against A): gor_01 6 of 6 identical (EFB, left, right); pik_00 5 of 5 (both runs timed out before the last file, as in the run above).
+
+Not kept (measured, reverted):
+- Change stamps per dedup slot, to skip the compares of a fused list (task: skip whole lists). A list's slots are written by other lists and calls between two calls of it (with other values, then back), so no list was ever skipped whole; comparing only the calls whose slots changed since the list's last pass skipped 46% of the compares (3161 of 5856 still compared, gor_01), but stamping the 2900 changed calls a frame cost more: `gxnull` game thread gor_01 24.4 -> 25.5, pik_00 33.9 -> 34.7. `gxrecfuse=2` found 0 wrong skips.
+- **Inlining trap**: the first stamp builds made LTO stop inlining `gx_rec_call` (and `dd_same`) into the GX setters (each setter shrank about 1 KB, `.text` 64 KB smaller): the game thread then took the generic path for 21 000 calls a frame, +5.4 ms (gor_01 C3 24.6 -> 30.0, pik_00 C3 to 3 vblanks), with `gxrecfuse=0` too. Check `GXSetVtxDesc`/`GXSetChanCtrl` sizes in the ELF after any change to `gx_rec_call`, `dd_same` or what they inline; a cold, `noinline` helper for added work keeps them inlined.
+- The "old way" lists (up to 83 a frame in tik_21, 44 in jin_05): the reason counters added to the `gxrecfuse` line show all of them as "more bytes": lists the game built with state calls that start with a primitive (no leading state calls; first byte 0x98). Fusing them needs the primitive sizes, which come from the translator's vertex state at the call; not done. Dropping a state-list address when the game rebuilds the buffer without state calls was tried: 0 such rebuilds in tik.
+
+Translator profile: `pc_sample` puts 21% of the translator's busy samples in `gx_draw_frame_begin`, which the CopyDisp timer bounds at 0.5 ms a frame; a timer per record adds about 3 us each (translator 14.8 -> 42.6 ms). Neither gives a breakdown of the remaining 13.9 ms. Counters: 243 batch opens drawing 4780 of 5010 lists, 3000 state calls applied, 369 immediate primitives a frame (gor_01).

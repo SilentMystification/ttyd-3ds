@@ -13,13 +13,15 @@
 #include <citro3d.h>
 
 typedef struct {
-    C3D_RenderTarget* efb;    /* 512x1024 RGBA8 + D24S8, rotated as the screen */
+    C3D_RenderTarget* efb;    /* 512 x target_h RGBA8 + D24S8, rotated as the screen */
     C3D_RenderTarget* screen; /* the top screen's left (mono) target */
     C3D_AttrInfo* attr;       /* the CPU-path vertex layout (PlatGpuVertex) */
     int uloc_rot0, uloc_rot1;
     u32 screen_flags;         /* the screen target's output transfer flags */
     /* EFB pixel (x, y) (the game's EFB, x right, y down) -> EFB target pixel */
     void (*efb_point)(float x, float y, float* tx, float* ty);
+    int target_h;             /* the EFB target's rows (1024, or 608 with efb608); the texture views are 1024 rows */
+    int region_h;             /* the rows shown (800, or 608) */
 } StereoInit;
 
 void stereo_init(const StereoInit* in);

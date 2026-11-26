@@ -418,6 +418,27 @@ _pit_deep("pit51", "jon_01", 51, win=False)
 _pit_deep("pit99", "jon_02", 99, win=False)
 
 
+# Bunny Teresa's table (gor_03, the cage at the back of the Pianta Parlor hall), plane game unlocked (GSWF 1232) and
+# 20 Piantas. The parlor has no floor until its front door opens, so Mario is put at the door (marioat2), walks up
+# (stick up 300 frames) and opens it with A; then he is put on the mat in front of the cage (hit:npc11, dx -70),
+# turns to her (stick up) and A talks: greeting, the game menu (first entry: the plane game), "10 Piantas?" (Yes),
+# the fee is paid. Then Teresa raises the pipe and Mario walks into it (yuu_00); the plane round is
+# parlor_plane's. KNOWN FAILURE (2026-11-26): after the fee bubble (bunny_teresa_36) the script stalls for
+# 3000+ frames (no pipe, Mario standing), so the last checks fail until that is understood.
+@scenario("parlor_teresa", "map=gor_03 story=30 party=1 piantas=20 gswf=1232 mash=10 msgkeys=sysyuu_00_00:down.a "
+          "marioat2=-200,30,40@800 marioat3=hit:npc11,0,-70,0@1450 shots=60 shotfrom=1500",
+          pad=st.pad([(900, "cu", 300), (1230, "a", 3), (1500, "cu", 8), (1540, "a", 3)]),
+          until=until_frame(2610), timeout=600,
+          doc="Bunny Teresa: talk, pick the plane game, pay 10 Piantas, the pipe, the round (stalls after the fee)")
+def _parlor_teresa(ctx):
+    seen(ctx, "bunny_teresa_00", "Teresa's greeting")
+    chose(ctx, "bunny_teresa_yesno2", 0, "(Yes) ")
+    p = values(ctx.log, "piantas")
+    ctx.check(p and p[-1][1] == 10, f"fee paid: 20 -> 10 Piantas ({[v for f, v in p]})")
+    ctx.check("gor_03 -> yuu_00" in map_changes(ctx.log), "down the pipe into the plane game (yuu_00)")
+    ctx.check("yuu_00 -> gor_03" in map_changes(ctx.log), "round played, back at the parlor (gor_03)")
+
+
 def run_scenario(build, sc):
     dest = OUT / sc["name"]
     shutil.rmtree(dest, ignore_errors=True)

@@ -19,6 +19,8 @@
 #include <string.h>
 
 #include "battle/battle.h"
+#include "driver/camdrv.h"
+#include "cam_road.h"
 #include "driver/seqdrv.h"
 #include "driver/swdrv.h"
 #include "event.h"
@@ -237,6 +239,27 @@ static void gwdump(u32 frame) {
             (unsigned long)(u32)((u64)gp->renderFieldTime >> 32), (unsigned long)(u32)gp->renderFieldTime,
             (unsigned long)(u32)((u64)gp->playTime >> 32), (unsigned long)(u32)gp->playTime,
             (unsigned long)gp->button[0], (int)gp->stickX[0], (int)gp->stickY[0], (unsigned long)h_gw);
+    {
+        CameraEntry* c = camGetPtr(CAMERA_3D);
+        if (c != NULL) {
+            tst_log("gwdump f=%lu cam=%08lx,%08lx,%08lx cat=%08lx,%08lx,%08lx cmode=%u,%u,%u,%04x cfov=%08lx cprog=%08lx,%u",
+                    (unsigned long)frame, (unsigned long)fbits(c->cameraPos.x), (unsigned long)fbits(c->cameraPos.y),
+                    (unsigned long)fbits(c->cameraPos.z), (unsigned long)fbits(c->cameraAt.x),
+                    (unsigned long)fbits(c->cameraAt.y), (unsigned long)fbits(c->cameraAt.z), (unsigned)c->mode,
+                    (unsigned)c->stateA, (unsigned)c->stateB, (unsigned)c->flags, (unsigned long)fbits(c->fovY),
+                    (unsigned long)fbits(c->progressA), (unsigned)c->curveA);
+            {
+                CamRoadWork* w = camRoadGetWorkPtr();
+                tst_log("gwdump f=%lu rd=%ld,%ld,%ld,%ld,%08lx bp=%08lx,%08lx,%08lx ba=%08lx,%08lx,%08lx np=%08lx,%08lx,%08lx",
+                        (unsigned long)frame, (long)w->next.on, (long)w->next.onCurve, (long)w->hokanOn,
+                        (long)w->state, (unsigned long)fbits(w->hokanT), (unsigned long)fbits(c->blendPos.x),
+                        (unsigned long)fbits(c->blendPos.y), (unsigned long)fbits(c->blendPos.z),
+                        (unsigned long)fbits(c->blendAt.x), (unsigned long)fbits(c->blendAt.y),
+                        (unsigned long)fbits(c->blendAt.z), (unsigned long)fbits(w->next.pos.x),
+                        (unsigned long)fbits(w->next.pos.y), (unsigned long)fbits(w->next.pos.z));
+            }
+        }
+    }
 }
 
 /* switch rngtrace=<from>,<to>: every rand() call in that game frame window, and each sequence change */

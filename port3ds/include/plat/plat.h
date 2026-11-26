@@ -47,6 +47,14 @@ uint64_t plat_paused_ticks(void);
 uint32_t plat_uptime_ms(void);
 uint64_t plat_rtc_ms_since_1900(void); /* the console's clock */
 
+/* ---- Heap use without a walk (plat/boot.c) ----
+ * arena: the heap memory malloc holds now (in use, free holes, at most 128 KiB of free top). peak_take: the
+ * highest arena since the last call, then a new period starts. note: one log line for a large allocation. */
+uint32_t plat_heap_size(void);
+uint32_t plat_heap_arena(void);
+uint32_t plat_heap_peak_take(void);
+void plat_heap_note(const char* what, unsigned long bytes);
+
 /* ---- Crash handling and exit (plat/crash.c) ----
  * Every thread the port creates installs the exception handler with
  * plat_crash_install_thread(). A crash, plat_fatal() or a watchdog timeout

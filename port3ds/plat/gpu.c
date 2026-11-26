@@ -1101,6 +1101,29 @@ uint32_t plat_gpu_tex_create(uint32_t width, uint32_t height, uint32_t fmt, cons
     return h;
 }
 
+/* plat_gpu_tex_create in two steps, for a caller that writes level 0 itself: the texture's memory (*size bytes;
+ * its contents undefined, as after plat_gpu_tex_create past `bytes`), then plat_gpu_tex_create_end once written. */
+uint32_t plat_gpu_tex_create_begin(uint32_t width, uint32_t height, uint32_t fmt, void** data, uint32_t* size) {
+    GMARK("tex_create");
+    if (width < 8 || height < 8 || width > 1024 || height > 1024) {
+        return 0;
+    }
+    u32 h = tex_alloc_slot();
+    if (h == 0) {
+        return 0;
+    }
+    TexSlot* t = &s_tex[h];
+    if (!C3D_TexInit(&t->tex, (u16)width, (u16)height, (GPU_TEXCOLOR)fmt)) {
+        t->live = 0;
+        return 0;
+    }
+    *data = t->tex.data;
+    *size = t->tex.size;
+    return h;
+}
+
+void plat_gpu_tex_create_end(uint32_t handle) { C3D_TexFlush(&s_tex[handle].tex); }
+
 uint32_t plat_gpu_tex_max_levels(uint32_t width, uint32_t height) {
     if (width < 8 || height < 8 || width > 1024 || height > 1024) {
         return 0;

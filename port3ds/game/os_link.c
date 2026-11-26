@@ -14,6 +14,7 @@
 #include <malloc.h>
 #include <string.h>
 
+#include "plat/lz.h"
 #include "plat/memstable.h"
 #include "plat/plat.h"
 #include "port3ds/os_internal.h"
@@ -21,23 +22,50 @@
 
 #define PORT_REL_ID_BASE 0x7D10000u /* module ids made by the port */
 
+/* Each REL's data as it was at boot, packed (plat/lz.h: the 4.0 MB of US data in about 1.5 MB of heap; 44% of the
+ * bytes are zero). OSLink unpacks it over the REL's data: the same bytes as a plain copy. */
 static u8** s_snapshots;
+static u32* s_snap_bytes; /* packed size of each */
 static OSModuleInfo* s_linked;
 
 void port_rel_snapshot_all(void) {
     s_snapshots = calloc((size_t)port_rel_count, sizeof(u8*));
-    u32 total = 0;
+    s_snap_bytes = calloc((size_t)port_rel_count, sizeof(u32));
+    u32 most = 0;
+    for (int i = 0; i < port_rel_count; i++) {
+        u32 size = (u32)(port_rel_table[i].data_end - port_rel_table[i].data_start);
+        most = size > most ? size : most;
+    }
+    /* packed into one scratch, unpacked again into another and compared (a codec fault stops here, not at a link),
+     * then kept at its packed size */
+    u8* pack = malloc(plat_lz_bound(most));
+    u8* check = malloc(most ? most : 1);
+    if (s_snapshots == NULL || s_snap_bytes == NULL || pack == NULL || check == NULL) {
+        plat_fatal("RELs: no memory for the data snapshots");
+    }
+    u32 total = 0, packed = 0;
+    u64 t0 = plat_ticks();
     for (int i = 0; i < port_rel_count; i++) {
         const PortRelStatic* r = &port_rel_table[i];
         u32 size = (u32)(r->data_end - r->data_start);
-        s_snapshots[i] = malloc(size ? size : 1);
-        if (s_snapshots[i] == NULL) {
-            plat_fatal("REL %s: no memory for its %lu-byte snapshot", r->name, (unsigned long)size);
+        u32 n = plat_lz_pack(r->data_start, size, pack);
+        if (!plat_lz_unpack(pack, n, check, size) || memcmp(check, r->data_start, size) != 0) {
+            plat_fatal("REL %s: its %lu-byte data snapshot does not unpack to its data", r->name, (unsigned long)size);
         }
-        memcpy(s_snapshots[i], r->data_start, size);
+        s_snapshots[i] = malloc(n);
+        if (s_snapshots[i] == NULL) {
+            plat_fatal("REL %s: no memory for its %lu-byte snapshot", r->name, (unsigned long)n);
+        }
+        memcpy(s_snapshots[i], pack, n);
+        s_snap_bytes[i] = n;
         total += size;
+        packed += n;
     }
-    PLOG_I("RELs: %d static, %lu bytes of data snapshots", port_rel_count, (unsigned long)total);
+    free(check);
+    free(pack);
+    PLOG_I("RELs: %d static, %lu bytes of data snapshots in %lu bytes (packed and checked in %lu ms)", port_rel_count,
+           (unsigned long)total, (unsigned long)packed,
+           (unsigned long)((plat_ticks() - t0) / (PLAT_TICKS_PER_SEC / 1000u)));
 }
 
 int port_rel_index(const char* area) {
@@ -75,7 +103,9 @@ BOOL OSLink(OSModuleInfo* newModule, void* bss) {
     if (r == NULL) {
         plat_fatal("OSLink: module id %08lx is not a static REL", (unsigned long)newModule->id);
     }
-    memcpy(r->data_start, s_snapshots[i], (size_t)(r->data_end - r->data_start));
+    if (!plat_lz_unpack(s_snapshots[i], s_snap_bytes[i], r->data_start, (u32)(r->data_end - r->data_start))) {
+        plat_fatal("OSLink: REL %s: its data snapshot does not unpack", r->name);
+    }
     plat_memstable_fill(r->data_start, (u32)(r->data_end - r->data_start)); /* the REL file's data again */
     memset(r->bss_start, 0, (size_t)(r->bss_end - r->bss_start));
     OSModuleHeader* h = (OSModuleHeader*)newModule;

@@ -15,6 +15,7 @@ static inline void* gx_big_alloc(const char* what, unsigned long bytes) {
         plat_fatal("out of memory for %s (%lu bytes)", what, bytes);
     }
     memset(p, 0, bytes);
+    plat_heap_note(what, bytes);
     return p;
 }
 

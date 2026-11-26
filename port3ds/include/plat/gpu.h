@@ -58,6 +58,10 @@ enum {
 
 /* Returns a handle, or 0 when out of texture memory. `pixels` is copied. */
 uint32_t plat_gpu_tex_create(uint32_t width, uint32_t height, uint32_t fmt, const void* pixels, uint32_t bytes);
+/* The same in two steps, for a caller that writes level 0 into the texture's memory itself (no staging copy):
+ * begin gives the memory (*size bytes), end makes the written bytes visible to the GPU. */
+uint32_t plat_gpu_tex_create_begin(uint32_t width, uint32_t height, uint32_t fmt, void** data, uint32_t* size);
+void plat_gpu_tex_create_end(uint32_t handle);
 /* As plat_gpu_tex_create, with a mip chain: `pixels` is level 0 (`bytes`), `mip_pixels` the levels
  * 1..levels in order (`mip_bytes`), every level Morton tiled in the same format, each half the size of the
  * one before (a level is at least 8x8). `levels` is the number of levels after level 0. */

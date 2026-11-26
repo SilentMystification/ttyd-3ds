@@ -65,6 +65,34 @@ void plat_memory_log(const char* when) {
            (unsigned long)(mi.uordblks >> 10), (unsigned long)(__ctru_heap_size >> 10), (unsigned long)(mi.arena >> 10),
            (unsigned long)(lin_free >> 10), (unsigned long)(__ctru_linear_heap_size >> 10), (unsigned long)us);
 }
+/* The heap's extent without a walk: newlib's malloc takes all of its memory with sbrk and gives the top back
+ * once more than the trim threshold (128 KiB) is free there, so the arena (`sbrked_mem`, the mallinfo arena)
+ * is the memory in use plus free holes plus at most 128 KiB, and newlib keeps its high-water mark
+ * (`max_sbrked_mem`, raised in malloc_extend_top; a statistic only). heap size - peak arena is the least room
+ * an allocation had at any moment (holes not counted: a lower bound of the free margin). */
+extern struct mallinfo __malloc_current_mallinfo;
+extern unsigned long __malloc_max_sbrked_mem;
+void __malloc_lock(struct _reent*);
+void __malloc_unlock(struct _reent*);
+
+uint32_t plat_heap_size(void) { return __ctru_heap_size; }
+uint32_t plat_heap_arena(void) { return (uint32_t)__atomic_load_n(&__malloc_current_mallinfo.arena, __ATOMIC_RELAXED); }
+
+/* The peak arena since the last call, then starts a new period at the arena now. */
+uint32_t plat_heap_peak_take(void) {
+    __malloc_lock(_REENT);
+    uint32_t peak = (uint32_t)__malloc_max_sbrked_mem;
+    __malloc_max_sbrked_mem = __malloc_current_mallinfo.arena;
+    __malloc_unlock(_REENT);
+    return peak;
+}
+
+/* One log line per large port-side allocation (the GX tables, conversion buffers), with the arena after it. */
+void plat_heap_note(const char* what, unsigned long bytes) {
+    PLOG_I("heap: %s %lu KiB (arena %lu KiB of %lu)", what, bytes >> 10, (unsigned long)(plat_heap_arena() >> 10),
+           (unsigned long)(__ctru_heap_size >> 10));
+}
+
 uint64_t plat_rtc_ms_since_1900(void) { return osGetTime(); }
 int plat_started_by_netload(void) { return s_netload; }
 const char* plat_build_string(void) { return PORT3DS_BUILD_STRING; }
@@ -283,8 +311,11 @@ void plat_user_error(const char* fmt, ...) {
 }
 
 extern char __end__[];
-#define REQUIRED_HEAP (64u << 20) /* measured peak about 49 MB (field and battle) */
-#define REQUIRED_LINEAR (24u << 20) /* measured peak about 15 MB */
+/* Measured 2026-11-27 (Azahar, release, pik_00/gor_01/usu_00/battle to frame 841, docs/PORT_3DS_GX_PERF.md "Heap
+ * margin"): heap peak arena 57.5-59.3 MB with the default switches, 64.6-66.8 MB with C1, 67.8-71.7 MB with C3;
+ * linear memory in use at most 22-26.6 MB (default), 28.2 MB (C3, pik_00). libctru gives the linear heap 32 MB. */
+#define REQUIRED_HEAP (64u << 20)
+#define REQUIRED_LINEAR (28u << 20)
 
 int main(int argc, char** argv) {
     s_boot_tick = svcGetSystemTick();

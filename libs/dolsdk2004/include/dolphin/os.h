@@ -80,9 +80,17 @@ u8 __gUnknown800030E3 AT_ADDRESS(OS_BASE_CACHED | 0x30E3);
 #define OS_CORE_CLOCK  __OSCoreClock
 #define OS_TIMER_CLOCK (OS_BUS_CLOCK/4)
 
+#ifdef TARGET_PORT
+// Ports: 64-bit divides by these constants as multiplies (the ARM11 has no divide).
+#include "port_divconst.h"
+#define OSTicksToSeconds(ticks)      PORT_DIV_C((ticks), (OS_TIMER_CLOCK))
+#define OSTicksToMilliseconds(ticks) PORT_DIV_C((ticks), (OS_TIMER_CLOCK/1000))
+#define OSTicksToMicroseconds(ticks) PORT_DIV_C((ticks) * 8, (OS_TIMER_CLOCK/125000))
+#else
 #define OSTicksToSeconds(ticks)      ((ticks)   / (OS_TIMER_CLOCK))
 #define OSTicksToMilliseconds(ticks) ((ticks)   / (OS_TIMER_CLOCK/1000))
 #define OSTicksToMicroseconds(ticks) ((ticks) * 8 / (OS_TIMER_CLOCK/125000))
+#endif
 #define OSSecondsToTicks(sec)        ((sec) * (OS_TIMER_CLOCK))
 #define OSMillisecondsToTicks(msec)  ((msec) * (OS_TIMER_CLOCK / 1000))
 #define OSNanosecondsToTicks(nsec)   (((nsec) * (OS_TIMER_CLOCK / 125000)) / 8000)

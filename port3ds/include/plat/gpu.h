@@ -69,6 +69,21 @@ uint32_t plat_gpu_tex_create_mip(uint32_t width, uint32_t height, uint32_t fmt, 
                                  const void* mip_pixels, uint32_t mip_bytes, uint32_t levels);
 /* The most levels after level 0 a texture of this size can have (0 when a side is 8). */
 uint32_t plat_gpu_tex_max_levels(uint32_t width, uint32_t height);
+/* Texture tiling by the GPU transfer engine (switch texdt; see plat/gpu.c). The caller writes the texels linear
+ * (top row first, no padding, the texture's own format: RGBA8, RGB565, RGBA5551 or RGBA4; sides powers of two,
+ * at least 8, no mip chain) into a staging block, flushes it on the writing thread, and hands it over; the
+ * transfer runs on the GPU before the next frame list and the game thread never waits for it.
+ *   plat_gpu_xfer_mode: 0 off, 1 transfer, 2 verify (the caller tiles on the CPU too; the results are compared)
+ *   plat_gpu_stage_alloc: NULL when none is free (tile on the CPU); `reserve_half`: only if half the arena stays free
+ *   plat_gpu_tex_create_xfer: the texture, or 0 (block freed in both cases; tile on the CPU) */
+int plat_gpu_xfer_mode(void);
+uint32_t plat_gpu_xfer_min_texels(void);
+void* plat_gpu_stage_alloc(uint32_t bytes, int reserve_half);
+void plat_gpu_stage_free(void* block);
+void plat_gpu_stage_flush(void* block, uint32_t bytes);
+uint32_t plat_gpu_tex_create_xfer(uint32_t width, uint32_t height, uint32_t fmt, void* stage, uint32_t bytes);
+/* Mode 2: `handle` is CPU tiled (create_begin/end); `stage` holds the same texels linear and is taken over. */
+void plat_gpu_tex_xfer_verify(uint32_t handle, void* stage, uint32_t bytes);
 /* An empty texture a copy will fill (render-to-texture). */
 uint32_t plat_gpu_tex_create_target(uint32_t width, uint32_t height, uint32_t fmt);
 /* Freed once the render thread no longer uses it. */

@@ -28,6 +28,11 @@ Rosalina (see the notes in the testing doc), so use --pid if it fails.
 --build [NAME] picks the ELF from build/elfs/ (newest, or the one whose
 name contains NAME) instead of --elf.
 
+Size-less symbols (svc stubs, _fini) cover only up to the next function symbol and at most
+SIZELESS_MAX bytes; farther addresses print as ?address. A sample inside libc memcpy/memset/memcmp
+and friends reports the caller as "(unknown: libc LR)", because those routines use LR as a scratch
+register.
+
 Caller information is the LR at the sample. It is the real caller only while
 the function has not yet pushed LR or called something (leaf code), so
 "callers" are an approximation; treat a caller list as a hint.
@@ -57,6 +62,10 @@ from crash_report import find_addr2line  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 SLOW = 0.200  # seconds; one stop-read-continue slower than this triggers a back-off
+SIZELESS_MAX = 0x100  # bytes a size-0 symbol may cover (svc stubs are 8-16 bytes, __aeabi_* a few hundred at most)
+# libc routines that use LR as a scratch register: the LR of a sample inside them is not the caller
+LR_SCRATCH_RE = re.compile(r"^(memcpy|memmove|memset|memcmp|bcopy|__aeabi_mem(cpy|move|set|clr)\d*|strlen|strcmp|strncmp|strcpy|strncpy|memchr)$")
+UNKNOWN_CALLER = "(unknown: libc LR)"
 IDLE_RE = r"^svc(Sleep|Wait|Arbitrate|ReplyAndReceive|Reply)|^__?svc|^syncs?_wait"
 
 
@@ -135,8 +144,15 @@ class Symbols:
             i = bisect.bisect_right(self.addrs, a) - 1
             if i >= 0:
                 s = self.funcs[i]
-                # size-less symbols (assembly stubs) cover up to the next symbol
-                hit = s.name if (s.size == 0 or a < (s.addr & ~1) + s.size) else f"?{a:08x}"
+                lo = s.addr & ~1
+                if s.size:
+                    end = lo + s.size
+                else:
+                    # size-less symbols (assembly stubs, _fini) cover up to the next function symbol, at most
+                    # SIZELESS_MAX bytes; past that the address belongs to no known function
+                    nxt = self.addrs[i + 1] if i + 1 < len(self.addrs) else lo
+                    end = min(nxt, lo + SIZELESS_MAX) if nxt > lo else lo
+                hit = s.name if a < end else f"?{a:08x}"
             else:
                 hit = f"?{a:08x}"
             self.cache[a] = hit
@@ -263,7 +279,8 @@ def analyse(samples, syms, top, idle_re, names):
         pcs = collections.defaultdict(collections.Counter)
         busy = 0
         for pc, lr in obs:
-            f, c = syms.name(pc), syms.name(lr)
+            f = syms.name(pc)
+            c = UNKNOWN_CALLER if LR_SCRATCH_RE.match(f) else syms.name(lr)
             if idle.search(f):
                 pass
             else:

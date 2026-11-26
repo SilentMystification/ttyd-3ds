@@ -56,6 +56,11 @@ void plat_devupdate_stop(void);
 void plat_devupdate_frame(void);     /* game thread, each frame: pauses there during an update */
 PlatRecoveryHook plat_devupdate_recovery_hook(void); /* for the crash handler; NULL when off */
 
+/* gpuprobe_mode.c: dev tool inside the game CIA (switch gpuprobe; development builds only) */
+int plat_gpuprobe_requested(void);   /* dev build and the switch is given */
+int plat_gpuprobe_mode(void);        /* 1 once the probe mode runs (no game, no game GPU) */
+void plat_gpuprobe_mode_run(void) __attribute__((noreturn));
+
 /* menu.c: returns 1 while the Select menu is open (it consumed the input). */
 int plat_menu_input(uint32_t held, uint32_t down);
 void plat_qtm_usage(uint32_t* used, uint32_t* total); /* memplace.c: QTM RAM placed and available, bytes (0, 0 when not mapped) */

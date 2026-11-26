@@ -135,7 +135,9 @@ void plat_devupdate_frame(void) {
     if (!s_pause_req) {
         return;
     }
-    plat_gpu_sync(); /* the render thread has run everything this frame recorded */
+    if (!plat_gpuprobe_mode()) {
+        plat_gpu_sync(); /* the render thread has run everything this frame recorded */
+    }
     s_paused = 1;
     PLOG_I("devupdate: game thread paused at frame %lu", (unsigned long)plat_wd_frames());
     LightEvent_Wait(&s_resume);
@@ -177,6 +179,9 @@ static void on_begin(void* user) {
         PLOG_I("devupdate: the game thread paused after %d ms (phase \"%s\", options menu %d, save busy %d)", waited,
                plat_get_phase(), plat_options_menu_is_open(), s_save_busy != NULL ? s_save_busy() : 0);
     }
+    if (plat_gpuprobe_mode()) {
+        plat_wd_hold(1); /* probe mode: no game, no audio, no GPU of the game to grey */
+    } else
     plat_pause_begin_updater(s_paused); /* the shared debug pause: watchdog held (no frames is not a hang), sound muted, top screen greyed (only with the game thread parked: the GPU is idle then) */
     plat_cpu_limit_transfer(1);
 }
@@ -225,6 +230,9 @@ static void on_resume(void* user) {
     plat_cpu_limit_transfer(0);
     s_pause_req = 0;
     LightEvent_Signal(&s_resume);
+    if (plat_gpuprobe_mode()) {
+        plat_wd_hold(0);
+    } else
     plat_pause_end(); /* un-grey, un-mute, release the watchdog, count the pause */
 }
 

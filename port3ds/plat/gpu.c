@@ -26,6 +26,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "ctrdk/gpureset.h"
 #include "gx_shbin.h"
 #include "plat/gpu.h"
 #include "plat/hud.h"
@@ -128,9 +129,16 @@ void plat_gpudump_record(u32 seq, u32 frame, const void* verts, u32 vert_bytes, 
 void plat_gpudump_hang(u32 seq, u32 done, u32 game_frame, const char* phase_line);
 int plat_gpudump_test_hang(u32 frame);
 int plat_gpudump_draw_filter(u32 frame, u32 seq, u32 idx); /* switches gpudrawcut / gpudrawskip: 0 drops the draw */
+int plat_gpudump_test_hang_from(u32 frame);
 static void gpudump_note(void);
 
 static volatile int s_fence_overdue; /* a fence wait passed its first 2 s timeout and is still waiting */
+static int gpu_reset_try(const char* why);
+/* GPU hang reset (gpu_reset_try on the game thread, gpu_reset_apply on the render thread) */
+static GpuResetLimiter s_reset_lim;
+static volatile u32 s_reset_req, s_reset_seen; /* requested, applied by the render thread */
+static u32 s_reset_count;                       /* resets so far (the counter in the log) */
+static int s_hang_recover, s_hang_times = 1, s_hang_fired; /* switches gpuhangrecover, gpuhangtimes (test aid) */
 
 static void gpu_fence_wait(u32 seq) {
     while ((s32)(__atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE) - seq) < 0) {
@@ -147,6 +155,8 @@ static void gpu_fence_wait(u32 seq) {
             /* First timeout: the command list of the record the GPU is stuck on, to sdmc:/3ds/ttyd/gpuhang/ */
             plat_gpudump_hang(seq, __atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE), s_frame_counter,
                               plat_gpu_phase_line());
+            /* Reset the GPU and let the render thread rebuild citro3d: the wait then ends (done seq moves on). */
+            gpu_reset_try("fence wait");
         }
     }
     __atomic_store_n(&s_fence_overdue, 0, __ATOMIC_RELEASE);
@@ -287,19 +297,34 @@ static volatile int s_apt_parked, s_apt_discard, s_apt_off;
 static void wait_idle(void) {
     u64 t0 = svcGetSystemTick();
     int logged = 0;
+    u64 next_reset = t0 + 5ull * SYSCLOCK_ARM11 / 2;
     while (__atomic_load_n(&s_busy, __ATOMIC_ACQUIRE)) {
-        /* Still waits for as long as it takes: a render thread in the middle of a frame cannot be
-         * abandoned. A timed wait only to say so when it takes long. */
-        if (LightEvent_WaitTimeout(&s_done, 1000000000LL) != 0 && !logged &&
-            svcGetSystemTick() - t0 > 2ull * SYSCLOCK_ARM11) {
-            logged = 1;
-            PLOG_W("gpu: the game thread has waited 2 s for the render thread (hold %u, parked %d, vblank %lu)",
-                   (unsigned)s_apt_hold, s_apt_parked, (unsigned long)plat_vblank_count());
+        /* Waits as long as the render thread works (a frame cannot be abandoned), but a render thread that does
+         * not finish in 2.5 s is waiting for a hung GPU (C3D_FrameBegin or a transfer): reset the GPU, and again
+         * every 2 s until the limit in gpu_reset_try. Not while the app is suspended or asleep. */
+        if (LightEvent_WaitTimeout(&s_done, 1000000000LL) != 0) {
+            u64 now = svcGetSystemTick();
+            if (!logged && now - t0 > 2ull * SYSCLOCK_ARM11) {
+                logged = 1;
+                PLOG_W("gpu: the game thread has waited 2 s for the render thread (hold %u, parked %d, vblank %lu): %s",
+                       (unsigned)s_apt_hold, s_apt_parked, (unsigned long)plat_vblank_count(), plat_gpu_phase_line());
+            }
+            if ((s64)(now - next_reset) >= 0 && !__atomic_load_n(&s_apt_hold, __ATOMIC_ACQUIRE) &&
+                !__atomic_load_n(&s_apt_parked, __ATOMIC_ACQUIRE)) {
+                next_reset = now + 2ull * SYSCLOCK_ARM11;
+                __atomic_store_n(&s_fence_overdue, 1, __ATOMIC_RELEASE);
+                plat_gpudump_hang(s_rseq, __atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE), s_frame_counter,
+                                  plat_gpu_phase_line());
+                gpu_reset_try("render thread stuck");
+            }
         }
     }
+    __atomic_store_n(&s_fence_overdue, 0, __ATOMIC_RELEASE);
 }
 
 static void render_record(Record* r);
+static void gpu_reset_apply(void);
+static int gpu_reset_pending(void);
 
 static void stream_flush_dirty(void);
 static void stream_take_dirty(Record* r);
@@ -2253,16 +2278,28 @@ static void render_record(Record* r) {
      * only before a frame's first record, since a segment or a mid-frame sync (plat_gpu_sync) after it would
      * wait for one more vblank each (gpusyncall=1: before every record, as before Step 1). */
     u64 tw = svcGetSystemTick();
+    gpu_reset_apply(); /* a reset the game thread asked for since the last record */
     RPHASE(1);
-    if (plat_gpudump_test_hang(r->frame)) {
-        PLOG_W("gpuhangtest: the render thread stops before C3D_FrameBegin of record %lu (game frame %lu)",
-               (unsigned long)r->seq, (unsigned long)r->frame);
+    if (s_hang_fired < s_hang_times && plat_gpudump_test_hang_from(r->frame)) {
+        s_hang_fired++;
+        PLOG_W("gpuhangtest: the render thread stops before C3D_FrameBegin of record %lu (game frame %lu)%s",
+               (unsigned long)r->seq, (unsigned long)r->frame, s_hang_recover ? ", until a GPU reset is requested" : "");
+        u32 want = __atomic_load_n(&s_reset_seen, __ATOMIC_ACQUIRE);
         for (;;) {
-            svcSleepThread(1000000000LL);
+            if (s_hang_recover && __atomic_load_n(&s_reset_req, __ATOMIC_ACQUIRE) != want) {
+                break; /* the hang the test pretends to be is over: the real path continues here */
+            }
+            svcSleepThread(s_hang_recover ? 10000000LL : 1000000000LL);
         }
+        gpu_reset_apply();
     }
     if (s_gpu_fence) {
         C3D_FrameBegin(0);
+        if (gpu_reset_pending()) {
+            /* The GPU was reset while this thread waited in C3D_FrameBegin for the queue: the frame is open,
+             * and marking the context dirty is all it needs. */
+            gpu_reset_apply();
+        }
         gpu_done_publish(r->seq - 1);
         if (s_begin_records == 0 || s_sync_all) {
             C3D_FrameSync();
@@ -2776,6 +2813,85 @@ static void apt_hook_last(APT_HookType type, void* param) {
     }
 }
 
+/* ---- GPU hang reset ----
+ * Game thread: a fence wait or a wait for the render thread timed out, so the GPU is hung (a PICA hang does not
+ * end by itself). gpu_reset_try resets the GPU core and unsticks libctru's GX queue (ctrdk gpureset), which
+ * lets the render thread's C3D_FrameBegin return, then asks the render thread to rebuild citro3d. At most 3
+ * resets within 10 s: after that the waits go on and the watchdog's crash path takes over.
+ * Render thread: gpu_reset_apply runs at the start of the next record or right after C3D_FrameBegin
+ * returns. It calls citro3d's own APT hook with APTHOOK_ONRESTORE, which marks the whole context dirty so the
+ * next frame sends program, shader, buffers, targets, textures and state again (what citro3d does after a
+ * suspend, when the GPU lost its state). Not C3D_Fini and C3D_Init: Fini destroys all render targets and Init
+ * keeps stale pointers undirtied. The record in hand is replayed whole, so nothing but the frame the GPU hung
+ * on is lost. Per-record caches need nothing: the game thread starts every
+ * record with a full state and the render thread applies a full state at its first command. */
+static int gpu_reset_pending(void) { return __atomic_load_n(&s_reset_req, __ATOMIC_ACQUIRE) != s_reset_seen; }
+
+static int gpu_reset_try(const char* why) {
+    if (!s_threaded || __atomic_load_n(&s_apt_hold, __ATOMIC_ACQUIRE)) {
+        return 0;
+    }
+    /* A process that was suspended (Rosalina menu) wakes with its timeouts expired: wait a little and see
+     * whether anything moves before touching the GPU. */
+    u32 done0 = __atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE), rseq0 = s_rseq, ph0 = s_rphase;
+    svcSleepThread(100000000LL);
+    if (__atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE) != done0 || s_rseq != rseq0 || s_rphase != ph0) {
+        return 0;
+    }
+    static int given_up; /* once given up, for good: the watchdog's crash path is the way out */
+    if (given_up || !gpureset_allow(&s_reset_lim, 3, 10000)) {
+        if (!given_up) {
+            given_up = 1;
+            PLOG_E("gpu: the GPU hung again after %lu resets within 10 s (%s): no more resets, the watchdog takes over",
+                   (unsigned long)s_reset_count, why);
+        }
+        return 0;
+    }
+    u32 n = ++s_reset_count;
+    Result rc = gpureset_core();
+    PLOG_W("gpu: GPU hang (%s): reset #%lu done, GSPGPU_ResetGpuCore %08lX; %s", why, (unsigned long)n,
+           (unsigned long)rc, plat_gpu_phase_line());
+    __atomic_fetch_add(&s_reset_req, 1, __ATOMIC_ACQ_REL);
+    return 1;
+}
+
+/* Render thread. */
+static void gpu_reset_apply(void) {
+    u32 req = __atomic_load_n(&s_reset_req, __ATOMIC_ACQUIRE);
+    if (req == s_reset_seen) {
+        return;
+    }
+    u32 old = s_rphase;
+    RPHASE(8);
+    /* No C3D_Fini and C3D_Init: Fini destroys every render target (and frees their VRAM), and Init keeps the
+     * old bound program and buffers without marking them dirty. citro3d has its own recovery for a GPU that
+     * lost its state, the APT hook's APTHOOK_ONRESTORE branch: it marks the whole context dirty (program,
+     * shader code, buffers, targets, textures, texenv, effects, uniforms) so that the next frame sends
+     * everything again, and starts the vblank callbacks. It is called here with the same argument. The hook is
+     * found in libctru's list (the cookie that is neither of ours). The GX queue is left alone: the next
+     * C3D_FrameBegin waits for it and clears it (gpureset_core already ended it if the GPU was hung). */
+    aptHookCookie* c3d_hook = NULL;
+    for (aptHookCookie* h = s_apt_first.next; h != NULL && c3d_hook == NULL; h = h->next) {
+        if (h->callback != apt_hook_first && h->callback != apt_hook_last) {
+            c3d_hook = h;
+        }
+    }
+    for (aptHookCookie* h = s_apt_last.next; h != NULL && c3d_hook == NULL; h = h->next) {
+        if (h->callback != apt_hook_first && h->callback != apt_hook_last) {
+            c3d_hook = h;
+        }
+    }
+    if (c3d_hook == NULL) {
+        plat_fatal("gpu: citro3d's APT hook not found after a GPU reset");
+    }
+    c3d_hook->callback(APTHOOK_ONRESTORE, c3d_hook->param);
+    s_begin_records = 0; /* the next record's C3D_FrameBegin takes the vblank wait again */
+    s_begin_wait_acc = 0;
+    s_reset_seen = req;
+    RPHASE(old);
+    PLOG_I("gpu: citro3d state marked dirty after GPU reset #%lu", (unsigned long)req);
+}
+
 static volatile int s_dead;
 static void render_thread(void* arg) {
     (void)arg;
@@ -3008,6 +3124,17 @@ static void gpu_shutdown(void) {
     gfxExit();
 }
 
+static void gpu_reset_log(int level, const char* text, void* user) {
+    (void)user;
+    if (level == 0) {
+        PLOG_E("%s", text);
+    } else if (level == 1) {
+        PLOG_W("%s", text);
+    } else {
+        PLOG_I("%s", text);
+    }
+}
+
 void plat_gpu_init(void) {
     LightLock_Init(&s_tex_lock);
     LightEvent_Init(&s_submit, RESET_ONESHOT);
@@ -3017,6 +3144,9 @@ void plat_gpu_init(void) {
     aptHook(&s_apt_last, apt_hook_last, NULL);
     gfxInitDefault();
     gfxSet3D(false);
+    /* A GPU hung by an earlier run stays hung across the process: its first command list would hang this one
+     * too. Test it with a tiny list and reset it before citro3d starts. */
+    gpureset_startup(500, gpu_reset_log, NULL);
     plat_console_init();
     if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 8)) {
         plat_fatal("gpu: citro3d init failed");
@@ -3138,6 +3268,8 @@ void plat_gpu_init(void) {
     if (s_direct < 0 || s_direct > 2 || (s_direct && !direct_init())) {
         s_direct = 0;
     }
+    s_hang_recover = plat_switch_int("gpuhangrecover", 0) != 0; /* with gpuhangtest=N: the pretend hang ends at a GPU reset */
+    s_hang_times = plat_switch_int("gpuhangtimes", 1);          /* how many records pretend to hang */
     LightEvent_Init(&s_fence_ev, RESET_STICKY);
     PLOG_I("gpu: gpusyncall %d gpufence %d gxflushrender %d gxstatedelta %d gxurow %d gxsync %d", s_sync_all,
            s_gpu_fence, s_flush_on_render, s_state_delta, s_urow, !s_threaded);

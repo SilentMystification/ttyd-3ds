@@ -78,7 +78,12 @@ void plat_thread_join(PlatThread* t) {
     if (t == NULL) {
         return;
     }
-    threadJoin(t->thread, U64_MAX);
+    /* Bounded: a thread stuck behind a hung service must not hold the exit. Past 10 s the thread is left
+     * (its memory too: it may still run) and the caller goes on. */
+    if (threadJoin(t->thread, 10000000000ULL) != 0) {
+        PLOG_W("thread %s: did not end in 10 s, left running", t->name);
+        return;
+    }
     threadFree(t->thread);
     free(t);
 }

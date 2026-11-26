@@ -311,3 +311,6 @@ void plat_gpudump_hang(u32 seq, u32 done, u32 game_frame, const char* phase_line
  * C3D_FrameBegin would wait for a GPU that never finishes, the console's hang state, so the fence timeout dump, the
  * watchdog report and the recovery can be tried in Azahar. */
 int plat_gpudump_test_hang(u32 frame) { return s_test_hang >= 0 && (int)frame == s_test_hang; }
+
+/* The same from game frame N on (switch gpuhangtimes=K lets K records pretend to hang, one after the other). */
+int plat_gpudump_test_hang_from(u32 frame) { return s_test_hang >= 0 && (int)frame >= s_test_hang; }

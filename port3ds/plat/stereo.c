@@ -374,6 +374,12 @@ void stereo_warp(int eye) {
     C3D_DrawElements(GPU_TRIANGLES, (int)s_nidx, C3D_UNSIGNED_SHORT, s_idx);
 }
 
+void stereo_relink(void) {
+    if (s_ready && s_right != NULL) {
+        C3D_RenderTargetSetOutput(s_right, GFX_TOP, GFX_RIGHT, s_in.screen_flags);
+    }
+}
+
 C3D_RenderTarget* stereo_eye_target(int eye) { return eye == 0 ? s_in.screen : s_right; }
 
 void stereo_frame_done(int stereo, u32 render_us, u32 gpu_us, u32 tail_cmds, u32 tail_zwrites) {

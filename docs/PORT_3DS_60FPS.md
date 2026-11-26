@@ -436,6 +436,28 @@ Of gor_01's 212 uploads in the 120 frames, 164 came from the worker (dev build).
 
 **Not done / open.** CI textures (animdrv's models; needs the TLUT in the key), a prefetch for textures larger than 640x512, and a smarter queue order (boot TPLs queue about 700 textures that are never drawn for a long time: the worker decodes them and they age out, harmless but wasted; a hint from the loader of which TPL is the map's would avoid it). The default stays 0 until the owner decides; no console test was run.
 
+## Map-load hitch in the display-list cache (`dlspread`, batch eviction fix; 2026-11-26)
+
+Azahar, release build, `gxstats=1`, game-thread busy in ms (ratios only), 120 frames from the first frame with more than 100 builds (frame 616 in all three scenes).
+
+**Cause found by measurement.** In gor_01 the burst repeated: 9433 entries built in frame 616 (the budget of 8 MB full), then every 3-4 frames 6000-7800 entries evicted and built again (frames 620, 623, 627, 631, 635, 639, 643: about 1 s each), 66747 builds in 120 frames for a working set of 9433. With `gxbatch=0` there was no repeat. `gxbatch` draws its members without stamping `last_frame`, and `evictable()` (not used in the last 2 frames) read the stale stamp; a batch killed by one eviction then left all its members "old", and each build in the same frame evicted the next list the frame needed (an LRU over a cyclic set). Fix: `evictable()` also refuses a member of a recently used batch, and `bat_kill` stamps the members with the batch's last use. No picture change by construction (cache contents only).
+
+**Cost of one build** (dev build, gor_01 frame 616, 9433 entries, 345 ms in `cache` of 1150 ms busy): `gx_vsh_stream_build` 39%, copies into the blob 22%, `plat_memstable_trust` 20%, `malloc` 18%. The rest of the first frame is the plain draw of 10433 uncached lists (decode 134 ms, state 365 ms, xform/emit), which a prebuild would not remove; the lists need the GX vertex state of the moment of the call (descriptor, VAT, array bases, matrix indices), which is not in the map data, so a prebuild on core 2 was not tried.
+
+**`dlspread=N`** (default 0 = off): at most N new entries are built per frame; the other lists of that frame draw through the plain decode (what a miss draws anyway, so the picture is the same) and build in a later frame. `gxstats` cache line: `deferred`.
+
+| Scene | before: sum of 120 busy / worst | fix only (default) | fix + `dlspread=1500` | steady busy (90 frames from +150) |
+|---|---|---|---|---|
+| gor_01 | 19004 / 1074 ms, 66747 builds | 11177 / 1047 ms, 9760 builds | 11707 / 778 ms | 71.3 / 71.1 / 71.0 |
+| pik_00 | 13554 / 901 ms, 21586 builds | 13862-13890 / 1121-1129 ms | 14824 / 642 ms | 87.6 / 87.7-88.0 / 87.7 |
+| battle (gon_02, btlauto) | 8702 / 605 ms, 15580 builds | 8710 / 604 ms | 9039 / 408 ms | 38.4 / 38.9 / 38.6 |
+
+gor_01: the fix removes 41% of the sum and six of the seven 1 s frames. pik_00 and the battle had no thrash; pik_00 shows a second burst at frame 626 (a different list set from frame 623, the old 8 MB of entries cannot go for 2 frames, then 8645 builds in one frame): the fix moves it from partly spread to one frame (worst 901 to 1129 ms), `dlspread` cuts it to 642 ms. `dlspread` costs 3-6% of the sum (more frames draw uncached) and takes the worst frame down by 25-40%; with 1500 the ramp is 852, 393, 348, 312, 271, 229, 161 ms in gor_01 (dev build). The remaining worst frame is the plain draw and the first 1500 builds; not spread further.
+
+**Identity** (dev build, `determ`, shots saved at the same frames, byte for byte, base = port3ds before the change; fix default and fix + `dlspread=1500`): gor_01 31/31 and 31/31 (frames 598-658 step 2), pik_00 31/31 and 31/31, battle (gon_02, btlauto=perfect, frames 660-720) 31/31 and 31/31, map-change run (`sweep=60`, gor_01, gor_02, gor_00, frames 598-800 step 7) 29/29 and 29/29. `gxcache=2` with `dlspread=1500`, gor_01 to frame 800: 300420 verified, 0 mismatched. `gw_diff` (1600-frame padscript, base against `dlspread=1500`): 160 records equal, 32 fields.
+
+**Not done.** Prebuild (see above); a smaller per-build cost (the vsh stream build and `malloc` are the two largest parts); a time budget instead of a count; a default for `dlspread` (owner decision, no console test run).
+
 ## texfast (gx_tex.c lookup cache, switch `texfast=0/1/2`, default 0)
 
 A 256-slot direct-mapped cache in front of the copy-slot scan (64 entries) and the 16-probe hash table in `handle_for_impl`. Key: image, w, h, format, is_ci, TLUT data and format. Value: the s_cache or s_copies slot. A hit is used only if the slot still holds that key, the copy registry is unchanged (`s_copy_gen`, bumped when a copy target is registered for a new address or evicted), and the entry needs no hash this frame (checked this frame, or trusted by the current memstable generation with texverify off). Otherwise the full lookup runs and refills the slot. `texfast=2` runs both and counts mismatches (log `texfast:` every 300 frames).

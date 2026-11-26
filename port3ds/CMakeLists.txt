@@ -329,6 +329,16 @@ if(TTYD_GX_O3)
     set_source_files_properties(${_gx_sources} TARGET_DIRECTORY ttyd_port_game PROPERTIES COMPILE_OPTIONS "-O3")
 endif()
 
+#   TTYD_HOT_O3: -O3 on the game-logic translation units the gxnull profile ranks highest (collision, animation,
+#                map driver), flags only (docs/PORT_3DS_60FPS.md, "Game logic floor").
+option(TTYD_HOT_O3 "-O3 on hitdrv, animdrv, mapdrv, mario_hit" ON)
+if(TTYD_HOT_O3)
+    set_source_files_properties(
+        "${TTYD_REPO_DIR}/src/driver/hitdrv.c" "${TTYD_REPO_DIR}/src/driver/animdrv.c"
+        "${TTYD_REPO_DIR}/src/driver/mapdrv.c" "${TTYD_REPO_DIR}/src/mario/mario_hit.c"
+        TARGET_DIRECTORY ttyd_dol PROPERTIES COMPILE_OPTIONS "-O3")
+endif()
+
 add_executable(ttyd
     $<TARGET_OBJECTS:ttyd_dol>
     $<TARGET_OBJECTS:ttyd_musyx>

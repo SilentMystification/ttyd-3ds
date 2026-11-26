@@ -813,13 +813,20 @@ static struct {
     u32 why; /* why the decal was on the CPU (GXV_R_*; 0: eligible, its group still counting) */
 } s_trig_callers[8]; /* the code that began the immediate decals that triggered (GXBegin's caller) */
 
-static u32 hash_words(const u32* w, u32 n) {
-    u32 h = 0x811C9DC5u;
+/* The group key's hash, over the state's three parts in place (no key is built for a lookup). Only the probe
+ * order depends on it: a group is found by comparing its whole key. */
+static inline u32 hash_part(u32 h, const void* p, u32 n) {
+    const u8* b = p;
     for (u32 i = 0; i < n; i++) {
-        h = (h ^ w[i]) * 0x01000193u;
-        h ^= h >> 13;
+        u32 w;
+        __builtin_memcpy(&w, b + i * 4u, 4);
+        h = (h + w) * 0x9E3779B1u;
     }
     return h;
+}
+
+static inline int key_is_state(const u32* key, const f32* mtx) {
+    return gx_mem_equal(key, mtx, 48) && gx_mem_equal(key + 12, gx.proj, 28) && gx_mem_equal(key + 19, gx.vp, 24);
 }
 
 static u32 find(u32 i) {
@@ -861,15 +868,11 @@ static Group* group_for(u32 pnmtx) {
     s_last_xfv = gx_xf_version;
     s_last_pn = pnmtx;
     /* the last group's key against the state in place, without building the key first */
-    if (s_last_g != NULL && gx_mem_equal(s_last_g->key, gx.pos_mtx[pnmtx % GX_POS_MTX_COUNT], 48) &&
-        gx_mem_equal(s_last_g->key + 12, gx.proj, 28) && gx_mem_equal(s_last_g->key + 19, gx.vp, 24)) {
+    const f32* mtx = &gx.pos_mtx[pnmtx % GX_POS_MTX_COUNT][0][0];
+    if (s_last_g != NULL && key_is_state(s_last_g->key, mtx)) {
         return s_last_g;
     }
-    u32 key[KEY_WORDS];
-    memcpy(key, gx.pos_mtx[pnmtx % GX_POS_MTX_COUNT], 48);
-    memcpy(key + 12, gx.proj, 28);
-    memcpy(key + 19, gx.vp, 24);
-    u32 h = hash_words(key, KEY_WORDS);
+    u32 h = hash_part(hash_part(hash_part(0x811C9DC5u, mtx, 12), gx.proj, 7), gx.vp, 6);
     for (u32 p = 0; p < GROUPS; p++) {
         Group* g = &s_grp[(h + p) & (GROUPS - 1)];
         if (!g->used) {
@@ -879,7 +882,9 @@ static Group* group_for(u32 pnmtx) {
             memset(g, 0, sizeof(*g));
             g->used = 1;
             g->hash = h;
-            memcpy(g->key, key, sizeof(key));
+            memcpy(g->key, mtx, 48);
+            memcpy(g->key + 12, gx.proj, 28);
+            memcpy(g->key + 19, gx.vp, 24);
             g->parent = (u16)(g - s_grp);
             g->elig = 1;
             int vi = vp_index(gx.vp);
@@ -891,7 +896,7 @@ static Group* group_for(u32 pnmtx) {
             s_last_g = g;
             return g;
         }
-        if (g->hash == h && gx_mem_equal(g->key, key, sizeof(key))) {
+        if (g->hash == h && key_is_state(g->key, mtx)) {
             s_last_g = g;
             return g;
         }
@@ -903,9 +908,18 @@ static Group* group_for(u32 pnmtx) {
 
 u32* gx_vsh_rec_hint; /* the caller's remembered record index for the next rec_for (a cache entry's), or NULL */
 
+/* Immediate draws (the caller as the list, nbytes ~0) have no cache entry to remember their record in: this table
+ * does, by caller. A hint is only taken when its record is the caller's (checked below), so the result is the
+ * probe's: a record is never in the table twice. */
+#define IMM_HINTS 512
+static u32 s_imm_hint[IMM_HINTS];
+
 static u32 rec_for(const void* list, u32 nbytes) {
     u32* hint = gx_vsh_rec_hint;
     gx_vsh_rec_hint = NULL;
+    if (hint == NULL && nbytes == 0xFFFFFFFFu) {
+        hint = &s_imm_hint[((u32)(uintptr_t)list >> 2) * 2654435761u >> 23];
+    }
     if (hint != NULL && *hint != 0 && s_rec[*hint - 1].list == list && s_rec[*hint - 1].nbytes == nbytes) {
         s_rec[*hint - 1].last_frame = gx_perf_frame_no();
         return *hint;

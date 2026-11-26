@@ -293,7 +293,11 @@ static void publish(void) {
         return;
     }
     store_sc(&s_wr_pub, s_wr);
-    if (load_sci(&s_sleeping)) {
+    /* One signal per sleep: the flag is taken (set back to 0) by the thread that signals, so the publishes that
+     * follow, until the translator runs and sleeps again, make no system call. Before, every publish signalled
+     * while the flag stood (up to 2500 signals a frame for 1 to 3 sleeps). The translator sets the flag, then
+     * looks at s_wr_pub again before it waits, and the event stays set until waited for: no wake-up is lost. */
+    if (load_sci(&s_sleeping) && __atomic_exchange_n(&s_sleeping, 0, __ATOMIC_SEQ_CST)) {
         s_gs_signals++;
         plat_event_signal(s_ev_work);
     }

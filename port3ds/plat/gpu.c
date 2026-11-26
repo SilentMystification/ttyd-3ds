@@ -47,7 +47,11 @@
 #define STREAM_PENDING 4096       /* stream frees waiting for the frames in flight */
 
 enum { CMD_STATE_DELTA = 0x20, CMD_STATE = 1, CMD_FOG, CMD_DRAW, CMD_CLEAR, CMD_COPY, CMD_FRAME_END, CMD_SEGMENT_END, CMD_VSH_CONST, CMD_VSH_DRAW,
-       CMD_VSH_LIGHT, CMD_VSH_DRAWP };
+       CMD_VSH_LIGHT, CMD_VSH_DRAWP,
+       /* gxonehop (the one-hop section below): PICA words the recording thread wrote, and the few steps only the
+        * render thread can take (citro3d calls) */
+       CMD_OH_WORDS = 0x30, CMD_OH_FLUSH, CMD_OH_UNIF, CMD_OH_CAPTURE, CMD_OH_MARK };
+#define CMD_DRAW_DROP 0x80000000u /* gxonehop: CMD_DRAW count bit, the gpudrawcut/gpudrawskip filter dropped the draw */
 
 /* CMD_VSH_DRAW body */
 typedef struct {
@@ -85,6 +89,15 @@ typedef struct {
     u32 ndirty;
     u32 seq; /* submit number (gpufence) */
     u32 frame; /* game frame (s_frame_counter) at submit, for the gpudump files */
+    /* gxonehop */
+    u32* ow;                   /* the record's PICA words (CMD_OH_WORDS and CMD_OH_MARK point into it) */
+    u32 now;                   /* words used */
+    u8* side;                  /* gxonehop=2: the one-hop commands, compared with the gxdirect replay, not replayed */
+    u32 side_used;
+    s32 oh_split;              /* byte offset in data of the last stereo mark (gxonehop=1), -1: none */
+    u32 oh_tail_draws, oh_tail_z; /* draws after that mark, and those of them writing depth (stereostats) */
+    void* caps[256];           /* the CMD_OH_CAPTURE bodies the render thread fills (imported at reuse) */
+    u32 ncaps;
 } Record;
 
 /* GPU fence for the records (switch gpufence, default 1). The game thread refills a record's vertex and index
@@ -266,11 +279,41 @@ static void rot_uniforms(void) {
 
 static void flush_segment(void);
 
+/* Switch gxonehop (stage 5, PORT_3DS_GX_PERF.md; the one-hop section below): 0 off; 1 the recording thread writes
+ * the shader path's PICA words itself (the render thread copies them); 2 as gxdirect=1, and the words of mode 1 are
+ * built too and compared with the replay's. */
+static int s_onehop;
+static void oh_close(void);       /* the open run of words becomes a CMD_OH_WORDS */
+static void oh_event(void);       /* something the record would hold came: no draw merges across it */
+/* a CPU-path draw the replay skips (no state in the record, under 3 vertices), one it draws through citro3d, a
+ * clear, a copy */
+enum { OHC_DRAW0, OHC_DRAW, OHC_CLEAR, OHC_COPY };
+static void oh_c3d_cmd(int what); /* before the command: stereo mark, gxonehop=1 the state as a CMD_STATE */
+static void oh_after_c3d(int what);
+static int oh_cpu_draw_keep(void); /* gxonehop=1: the gpudrawcut/gpudrawskip filter for a CPU-path draw */
+static void oh_need_room(u32 bytes, u32 words);
+static void oh_fog(const float* lut129);
+static void oh_const(const PlatGpuVshConst* c);
+static void oh_light(const PlatGpuVshLight* l);
+static void oh_draw(const void* stream, u32 layout, u32 scales, u32 cull, const u16* idx, u32 count, int drawp,
+                    int merged);
+static void oh_record_start(void);
+static void oh_record_end(int present);
+static void oh_import(Record* r);
+static void oh_log(void);
+static int oh_init(void);
+static int s_oh_state_pending; /* the state changed since the words last sent it (mirrors the replay's) */
+static u32 s_oh_idx_end;        /* index arena end of the last mergeable shader draw (gxonehop=1) */
+
 static void* rec_put(u16 type, u32 size) {
     Record* r = &s_rec[s_cur];
     u32 need = (u32)sizeof(CmdHead) + ((size + 3u) & ~3u);
+    if (s_onehop == 1 && type != CMD_OH_WORDS) {
+        oh_close(); /* the words so far go before this command */
+        r = &s_rec[s_cur];
+    }
     /* keep room for the end marker; a full record is drawn as a segment */
-    if (type != CMD_SEGMENT_END && type != CMD_FRAME_END && r->used + need + 64 > RECORD_BYTES) {
+    if (type != CMD_SEGMENT_END && type != CMD_FRAME_END && type != CMD_OH_WORDS && r->used + need + 64 > RECORD_BYTES) {
         flush_segment();
         r = &s_rec[s_cur];
     }
@@ -349,6 +392,9 @@ static void submit(int present) {
     if (s_gpu_fence && s_rec[s_cur].seq != 0) {
         gpu_fence_wait(s_rec[s_cur].seq); /* the record refilled next is finished on the GPU */
     }
+    if (s_onehop) {
+        oh_import(&s_rec[s_cur]); /* the render thread is done with it: its captured words go into the tables */
+    }
     s_rec[s_cur].used = 0;
     s_rec[s_cur].nverts = 0;
     s_rec[s_cur].nidx = 0;
@@ -361,6 +407,9 @@ static void submit(int present) {
     s_last_state_valid = 0;
     s_last_fog_hash = 0;
     s_last_fog_id = 0;
+    if (s_onehop) {
+        oh_record_start();
+    }
 }
 
 /* The record is full mid-frame: hand it to the render thread as a segment
@@ -375,6 +424,9 @@ static void end_segment(void) {
     u32 keep_vid = s_last_vconst_id;
     int have_v = s_last_vconst_valid;
     u32 keep_lid = s_last_vlight_id;
+    if (s_onehop) {
+        oh_record_end(0);
+    }
     rec_put(CMD_SEGMENT_END, 0);
     submit(0);
     if (keep_lid != 0) {
@@ -405,6 +457,13 @@ PlatGpuVertex* plat_gpu_alloc_vertices(uint32_t count) {
         flush_segment();
         r = &s_rec[s_cur];
     }
+    if (s_onehop) {
+        oh_need_room(0, 0); /* and for what gxonehop puts before the draw (a state, a stereo mark) */
+        r = &s_rec[s_cur];
+        if (r->nverts + count > ARENA_VERTICES) {
+            return NULL; /* cannot happen: a segment flush leaves an empty arena */
+        }
+    }
     PlatGpuVertex* v = r->verts + r->nverts;
     r->nverts += count;
     s_last_alloc = v;
@@ -429,11 +488,20 @@ void plat_gpu_set_state(const PlatGpuState* state) {
         u32 id = state->fog_lut_id;
         u32 h = id != 0 ? 0 : fog_hash(state);
         if (id != 0 ? id != s_last_fog_id : h != s_last_fog_hash) {
-            float* lut = rec_put(CMD_FOG, sizeof(state->fog_lut) + 8);
-            if (lut != NULL) {
-                memcpy(lut, state->fog_lut, sizeof(state->fog_lut));
+            if (s_onehop == 1) {
+                oh_fog(state->fog_lut);
                 s_last_fog_hash = h;
                 s_last_fog_id = id;
+            } else {
+                float* lut = rec_put(CMD_FOG, sizeof(state->fog_lut) + 8);
+                if (lut != NULL) {
+                    memcpy(lut, state->fog_lut, sizeof(state->fog_lut));
+                    s_last_fog_hash = h;
+                    s_last_fog_id = id;
+                    if (s_onehop) {
+                        oh_fog(state->fog_lut);
+                    }
+                }
             }
         }
     }
@@ -444,6 +512,18 @@ void plat_gpu_set_state(const PlatGpuState* state) {
                (const u8*)state + offsetof(PlatGpuState, scissor_x0),
                sizeof(PlatGpuState) - offsetof(PlatGpuState, scissor_x0)) == 0) {
         return;
+    }
+    if (s_onehop == 1) {
+        /* the words send it at the next shader draw; a clear, copy or CPU draw gets it as a CMD_STATE */
+        oh_event();
+        s_last_state = *state;
+        s_last_state_valid = 1;
+        s_oh_state_pending = 1;
+        s_stats_frame.state_changes++;
+        return;
+    }
+    if (s_onehop) {
+        s_oh_state_pending = 1; /* gxonehop=2: the replay's CMD_STATE or delta below */
     }
     if (s_last_state_valid && s_state_delta) {
         /* the words that changed since the last state of this record (gxstatedelta): most states differ from
@@ -503,11 +583,20 @@ void plat_gpu_set_state_dirty(const PlatGpuState* state, uint32_t regions) {
         u32 id = state->fog_lut_id;
         u32 h = id != 0 ? 0 : fog_hash(state);
         if (id != 0 ? id != s_last_fog_id : h != s_last_fog_hash) {
-            float* lut = rec_put(CMD_FOG, sizeof(state->fog_lut) + 8);
-            if (lut != NULL) {
-                memcpy(lut, state->fog_lut, sizeof(state->fog_lut));
+            if (s_onehop == 1) {
+                oh_fog(state->fog_lut);
                 s_last_fog_hash = h;
                 s_last_fog_id = id;
+            } else {
+                float* lut = rec_put(CMD_FOG, sizeof(state->fog_lut) + 8);
+                if (lut != NULL) {
+                    memcpy(lut, state->fog_lut, sizeof(state->fog_lut));
+                    s_last_fog_hash = h;
+                    s_last_fog_id = id;
+                    if (s_onehop) {
+                        oh_fog(state->fog_lut);
+                    }
+                }
             }
         }
     }
@@ -530,6 +619,17 @@ void plat_gpu_set_state_dirty(const PlatGpuState* state, uint32_t regions) {
                offsetof(PlatGpuState, scissor_x0) - offsetof(PlatGpuState, fog_lut_id));
     }
     if (n == 0) {
+        return;
+    }
+    if (s_onehop) {
+        s_oh_state_pending = 1;
+    }
+    if (s_onehop == 1) {
+        oh_event();
+        for (u32 k = 0; k < n; k++) {
+            a[idx[k]] = b[idx[k]];
+        }
+        s_stats_frame.state_changes++;
         return;
     }
     if (n * 2 + 1 < NW / 2) {
@@ -574,11 +674,17 @@ void plat_gpu_draw(const PlatGpuVertex* vertices, uint32_t count) {
     }
     u32 first = (u32)(vertices - r->verts);
     s_stats_frame.calls++;
-    if (s_merge && s_last_draw != NULL && s_last_draw[0] + s_last_draw[1] == first && s_last_draw[1] % 3 == 0) {
+    if (s_merge && s_last_draw != NULL && s_last_draw[0] + (s_last_draw[1] & ~CMD_DRAW_DROP) == first &&
+        (s_last_draw[1] & ~CMD_DRAW_DROP) % 3 == 0) {
         /* same state, no command since, contiguous triangles: one draw */
         s_last_draw[1] += count;
         s_stats_frame.vertices += count;
         return;
+    }
+    /* the replay takes the citro3d path for it when the record has a state */
+    int what = s_last_state_valid && count >= 3 ? OHC_DRAW : OHC_DRAW0;
+    if (s_onehop) {
+        oh_c3d_cmd(what); /* the stereo class of this draw; gxonehop=1: the state as a CMD_STATE */
     }
     u32* d = rec_put(CMD_DRAW, 8);
     if (d != NULL) {
@@ -587,6 +693,13 @@ void plat_gpu_draw(const PlatGpuVertex* vertices, uint32_t count) {
         s_last_draw = d;
         s_stats_frame.draws++;
         s_stats_frame.vertices += count;
+        if (s_onehop) {
+            oh_after_c3d(what);
+            if (s_onehop == 1 && what == OHC_DRAW && !oh_cpu_draw_keep()) {
+                d[1] |= CMD_DRAW_DROP;
+            }
+            s_last_draw = d; /* oh_after_c3d forgets it with the shader draw */
+        }
     }
 }
 
@@ -681,6 +794,17 @@ void plat_gpu_vsh_const(const PlatGpuVshConst* c, uint32_t id) {
     if (s_last_vconst_valid && (id != 0 ? id == s_last_vconst_id : memcmp(&s_last_vconst, c, sizeof(*c)) == 0)) {
         return;
     }
+    if (s_onehop == 1) {
+        s_last_vconst = *c;
+        s_last_vconst_id = id;
+        s_last_vconst_valid = 1;
+        s_stats_frame.vsh_consts++;
+        oh_const(c);
+        return;
+    }
+    if (s_onehop) {
+        oh_const(c);
+    }
     PlatGpuVshConst* d = rec_put(CMD_VSH_CONST, sizeof(*c));
     if (d != NULL) {
         *d = *c;
@@ -695,6 +819,15 @@ void plat_gpu_vsh_const(const PlatGpuVshConst* c, uint32_t id) {
 void plat_gpu_vsh_light(const PlatGpuVshLight* l, uint32_t id) {
     if (id != 0 && id == s_last_vlight_id) {
         return;
+    }
+    if (s_onehop == 1) {
+        s_last_vlight = *l;
+        s_last_vlight_id = id;
+        oh_light(l);
+        return;
+    }
+    if (s_onehop) {
+        oh_light(l);
     }
     PlatGpuVshLight* d = rec_put(CMD_VSH_LIGHT, sizeof(*l));
     if (d != NULL) {
@@ -715,6 +848,10 @@ void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uin
         flush_segment();
         r = &s_rec[s_cur];
     }
+    if (s_onehop) {
+        oh_need_room(0, 0);
+        r = &s_rec[s_cur];
+    }
     if (!s_last_vconst_valid) {
         return; /* no uniform block in this record (cannot happen: end_segment puts it back) */
     }
@@ -723,11 +860,28 @@ void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uin
     r->nidx += nidx;
     s_stats_frame.vsh_calls++;
     s_stats_frame.vsh_indices += nidx;
+    if (s_onehop == 1) {
+        /* the merge test of the record below, on what the words hold */
+        VshDraw* l = s_last_vdraw;
+        int merged = s_merge && l != NULL && l->stream == stream && l->layout == layout && l->scales == scales &&
+                     l->cull == cull && s_oh_idx_end == first;
+        if (!merged) {
+            s_stats_frame.vsh_draws++;
+        }
+        oh_draw(stream, layout, scales, cull, r->idx + first, nidx, 0, merged);
+        return;
+    }
     VshDraw* l = s_last_vdraw;
     if (s_merge && l != NULL && l->stream == stream && l->layout == layout && l->scales == scales && l->cull == cull &&
         l->first + l->count == first) {
         l->count += nidx; /* same uniforms, stream and scales, nothing recorded since: one draw */
+        if (s_onehop) {
+            oh_draw(stream, layout, scales, cull, r->idx + first, nidx, 0, 1);
+        }
         return;
+    }
+    if (s_onehop) {
+        oh_draw(stream, layout, scales, cull, r->idx + first, nidx, 0, 0);
     }
     VshDraw* d = rec_put(CMD_VSH_DRAW, sizeof(VshDraw));
     if (d != NULL) {
@@ -753,11 +907,21 @@ void plat_gpu_vsh_drawp(const void* stream, uint32_t layout, uint32_t scales, ui
     if (r->used + sizeof(CmdHead) + sizeof(VshDrawP) + 64 > RECORD_BYTES) {
         flush_segment();
     }
+    if (s_onehop) {
+        oh_need_room(0, 0);
+    }
     if (!s_last_vconst_valid) {
         return; /* no uniform block in this record (cannot happen: end_segment puts it back) */
     }
     s_stats_frame.vsh_calls += calls;
     s_stats_frame.vsh_indices += nidx;
+    if (s_onehop) {
+        oh_draw(stream, layout, scales, cull, idx, nidx, 1, 0);
+        if (s_onehop == 1) {
+            s_stats_frame.vsh_draws++;
+            return;
+        }
+    }
     VshDrawP* d = rec_put(CMD_VSH_DRAWP, sizeof(VshDrawP));
     if (d != NULL) {
         *d = (VshDrawP){stream, layout, scales, cull, idx, nidx};
@@ -767,6 +931,10 @@ void plat_gpu_vsh_drawp(const void* stream, uint32_t layout, uint32_t scales, ui
 
 void plat_gpu_clear(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint32_t rgba, uint32_t depth24, int clear_color,
                     int clear_depth) {
+    if (s_onehop) {
+        oh_need_room(16, 0);
+        oh_c3d_cmd(OHC_CLEAR);
+    }
     u32* d = rec_put(CMD_CLEAR, 16);
     if (d != NULL) {
         d[0] = (u32)x | (u32)y << 16;
@@ -774,11 +942,18 @@ void plat_gpu_clear(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint32_t rgb
         d[2] = rgba;
         d[3] = depth24 | (u32)(clear_color ? 1u : 0u) << 24 | (u32)(clear_depth ? 1u : 0u) << 25;
     }
+    if (s_onehop) {
+        oh_after_c3d(OHC_CLEAR);
+    }
 }
 
 void plat_gpu_copy_tex(uint16_t x, uint16_t y, uint16_t w, uint16_t h, int half, uint32_t handle, uint32_t dst_w,
                        uint32_t dst_h) {
     GMARK("copy_tex");
+    if (s_onehop) {
+        oh_need_room(20, 0);
+        oh_c3d_cmd(OHC_COPY);
+    }
     u32* d = rec_put(CMD_COPY, 20);
     if (d != NULL) {
         d[0] = (u32)x | (u32)y << 16;
@@ -786,6 +961,9 @@ void plat_gpu_copy_tex(uint16_t x, uint16_t y, uint16_t w, uint16_t h, int half,
         d[2] = (u32)half;
         d[3] = handle;
         d[4] = dst_w | dst_h << 16;
+    }
+    if (s_onehop) {
+        oh_after_c3d(OHC_COPY);
     }
 }
 
@@ -799,6 +977,10 @@ void plat_gpu_frame_end(uint16_t efb_w, uint16_t efb_h) {
     s_presents++;
     (void)efb_w;
     (void)efb_h;
+    if (s_onehop) {
+        oh_need_room(0, 0);
+        oh_record_end(1);
+    }
     rec_put(CMD_FRAME_END, 0);
     s_stats_frame.record_bytes = s_rec[s_cur].used;
     submit(1);
@@ -817,6 +999,9 @@ void plat_gpu_frame_end(uint16_t efb_w, uint16_t efb_h) {
     memset(&s_stats_frame, 0, sizeof(s_stats_frame));
     s_frame_counter++;
     stream_reap(0);
+    if (s_onehop) {
+        oh_log();
+    }
 }
 
 void plat_gpu_sync(void) {
@@ -1506,36 +1691,62 @@ static void rot_rows(float r0[4], float r1[4]) {
 /* The shader-path uniforms as last set in this record's replay (bit patterns): a value equal to the one in
  * force is not set again, so citro3d uploads only the rows that changed. Only vsh_apply_* write these rows;
  * the cache is cleared at the start of every record. */
-static u32 s_vunif[96][4];
+typedef struct {
+    u32 unif[96][4]; /* as last set (bit patterns, x y z w) */
+    u32 val[96][4];  /* gxdirect, gxonehop: the values in citro3d's order (w, z, y, x: C3D_FVec) */
+    u32 pend[3];     /* gxdirect, gxonehop: the rows not yet written to the GPU */
+    u32 valid[3];    /* gxonehop: the rows set since the record's start (a stereo mark writes them again) */
+    int direct;      /* rows go to pend (else C3D_FVUnifSet) */
+} VUnif;
+static VUnif s_vr; /* the render thread's */
+static VUnif s_vg; /* gxonehop: the recording thread's */
 static int s_urow = 1; /* switch gxurow (default 1); 0 sets every uniform row every time (hardware bisect) */
-static void vunif_reset(void) { memset(s_vunif, 0xFF, sizeof(s_vunif)); }
-/* gxdirect: the rows' values in citro3d's order (w, z, y, x: C3D_FVec), and the rows not yet written to the GPU */
-static u32 s_vval[96][4];
-static u32 s_vpend[3];
+static void vunif_reset_u(VUnif* u) {
+    memset(u->unif, 0xFF, sizeof(u->unif));
+    u->valid[0] = u->valid[1] = u->valid[2] = 0;
+}
+static void vunif_reset(void) { vunif_reset_u(&s_vr); }
+#define s_vpend (s_vr.pend)
+#define s_vval (s_vr.val)
 static int s_c3d_unif = 1; /* gxdirect: citro3d may hold dirty uniforms or fixed attributes its flags do not show */
-static inline void vunif(int id, float x, float y, float z, float w) {
+static inline void vunif_u(VUnif* u, int id, float x, float y, float z, float w) {
     if (id < 0 || id >= 96) {
         return;
     }
     float v[4] = {x, y, z, w};
-    if (s_urow && memcmp(s_vunif[id], v, 16) == 0) {
+    if (s_urow && memcmp(u->unif[id], v, 16) == 0) {
         return;
     }
-    memcpy(s_vunif[id], v, 16);
-    if (s_direct) {
+    memcpy(u->unif[id], v, 16);
+    if (u->direct) {
         float p[4] = {w, z, y, x};
-        memcpy(s_vval[id], p, 16);
-        s_vpend[id >> 5] |= 1u << (id & 31);
+        memcpy(u->val[id], p, 16);
+        u->pend[id >> 5] |= 1u << (id & 31);
+        u->valid[id >> 5] |= 1u << (id & 31);
         return;
     }
     C3D_FVUnifSet(GPU_VERTEX_SHADER, id, x, y, z, w);
 }
+#define vunif(id, x, y, z, w) vunif_u(u, id, x, y, z, w)
 
 /* Uniforms of a CMD_VSH_CONST. The clip rows come unrotated; the rotation
  * rows hold only 0 and +-1, so composing them on the CPU is exact (a row is
  * picked and maybe negated). A second eye pass would compose its clip-space
  * offset here too, from the same record. */
+static void vsh_const_rows(VUnif* u, const PlatGpuVshConst* c);
 static void vsh_apply_const(const PlatGpuVshConst* c) {
+    vsh_const_rows(&s_vr, c);
+    if (s_uloc_lit >= 0) {
+        bool lit = (c->flags & PLAT_VSH_LIT) != 0;
+        /* gxdirect: only a change dirties citro3d (a dirty uniform costs a C3Di_UpdateContext before the next draw) */
+        if (!s_direct || ((C3D_BoolUnifs[GPU_VERTEX_SHADER] >> (s_uloc_lit - 0x68) & 1) != 0) != lit) {
+            C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_lit, lit);
+            s_c3d_unif = 1;
+        }
+    }
+}
+
+static void vsh_const_rows(VUnif* u, const PlatGpuVshConst* c) {
     float r[2][4];
     rot_rows(r[0], r[1]);
     for (int k = 0; k < 2; k++) {
@@ -1561,20 +1772,23 @@ static void vsh_apply_const(const PlatGpuVshConst* c) {
     }
     vunif(s_uloc_clrmix, c->clrmix[0], c->clrmix[1], c->clrmix[2], c->clrmix[3]);
     vunif(s_uloc_matclr, c->matclr[0], c->matclr[1], c->matclr[2], c->matclr[3]);
-    if (s_uloc_lit >= 0) {
-        bool lit = (c->flags & PLAT_VSH_LIT) != 0;
-        /* gxdirect: only a change dirties citro3d (a dirty uniform costs a C3Di_UpdateContext before the next draw) */
-        if (!s_direct || ((C3D_BoolUnifs[GPU_VERTEX_SHADER] >> (s_uloc_lit - 0x68) & 1) != 0) != lit) {
-            C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_lit, lit);
-            s_c3d_unif = 1;
-        }
-    }
 }
 
+/* The light block's rows; returns the light count's int uniform x (n - 1, 0 with none). */
+static int vsh_light_rows(VUnif* u, const PlatGpuVshLight* l);
 static void vsh_apply_light(const PlatGpuVshLight* l) {
     if (s_uloc_lit < 0) {
         return;
     }
+    int x = vsh_light_rows(&s_vr, l);
+    u32 iv = IVec_Pack(x, 0, 1, 0);
+    if (!s_direct || C3D_IVUnif[GPU_VERTEX_SHADER][s_uloc_lcount - 0x60] != iv) {
+        C3D_IVUnifSet(GPU_VERTEX_SHADER, s_uloc_lcount, x, 0, 1, 0);
+        s_c3d_unif = 1;
+    }
+}
+
+static int vsh_light_rows(VUnif* u, const PlatGpuVshLight* l) {
     for (int i = 0; i < 3; i++) {
         vunif(s_uloc_eyerow + i, l->eye[i][0], l->eye[i][1], l->eye[i][2], l->eye[i][3]);
         vunif(s_uloc_nrmrow + i, l->nrm[i][0], l->nrm[i][1], l->nrm[i][2], l->nrm[i][3]);
@@ -1592,11 +1806,7 @@ static void vsh_apply_light(const PlatGpuVshLight* l) {
         vunif(s_uloc_lkk + i, l->light[i].k[0], l->light[i].k[1], l->light[i].k[2], 0);
     }
     /* the loop runs count + 1 times; with no light it runs once over light 0, which the front end zeroes */
-    u32 iv = IVec_Pack(n ? (int)n - 1 : 0, 0, 1, 0);
-    if (!s_direct || C3D_IVUnif[GPU_VERTEX_SHADER][s_uloc_lcount - 0x60] != iv) {
-        C3D_IVUnifSet(GPU_VERTEX_SHADER, s_uloc_lcount, n ? (int)n - 1 : 0, 0, 1, 0);
-        s_c3d_unif = 1;
-    }
+    return n ? (int)n - 1 : 0;
 }
 
 static float pow2_neg(u32 k) {
@@ -1607,17 +1817,19 @@ static float pow2_neg(u32 k) {
     return f;
 }
 
-static void vsh_apply_scales(u32 scales) {
+static void vsh_scales_rows(VUnif* u, u32 scales) {
     float s = pow2_neg(scales & 0xFF);
     vunif(s_uloc_vscale, s, s, s, 1.0f);
-    for (int u = 0; u < 3; u++) {
-        u32 b = scales >> (8 + 8 * u) & 0xFF;
+    for (int k = 0; k < 3; k++) {
+        u32 b = scales >> (8 + 8 * k) & 0xFF;
         u32 slot = b & 3;
         float w = pow2_neg(b >> 2);
-        vunif(s_uloc_texsel + u, slot == 0 ? w : 0.0f, slot == 1 ? w : 0.0f,
+        vunif(s_uloc_texsel + k, slot == 0 ? w : 0.0f, slot == 1 ? w : 0.0f,
                       slot == 2 ? w : 0.0f, 0.0f);
     }
 }
+static void vsh_apply_scales(u32 scales) { vsh_scales_rows(&s_vr, scales); }
+#undef vunif
 
 /* Vertex loaders for a stream layout: position v0, colour v1, slots v2-v4;
  * registers the stream lacks are fixed attributes (0). */
@@ -1894,7 +2106,25 @@ static void dtab_put(DTab* t, u32* e, const u32* key, u32 h, const u32* w, u32 n
 
 /* Words into citro3d's command buffer where GPUCMD_Add would put them. GPUCMD_Add keeps the offset even, and on a
  * full buffer it stops in svcBreak: so does this. */
+/* gxonehop=2: the words the gxdirect replay writes itself in this record (G), compared with the one-hop words */
+static u32* s_ohv_g;
+static u32 s_ohv_gn, s_ohv_gcap;
+static int s_ohv_on; /* 1 collecting, 2 overflowed (no compare), 0 off */
+static void ohv_g(const u32* w, u32 n) {
+    if (s_ohv_on != 1) {
+        return;
+    }
+    if (s_ohv_gn + n > s_ohv_gcap) {
+        s_ohv_on = 2;
+        return;
+    }
+    memcpy(s_ohv_g + s_ohv_gn, w, n * 4);
+    s_ohv_gn += n;
+}
+#define OHV_FROM(off0) ohv_g(gpuCmdBuf + (off0), gpuCmdBufOffset - (off0))
+
 static void cmd_put(const u32* w, u32 n) {
+    ohv_g(w, n);
     if ((gpuCmdBufOffset & 1) || gpuCmdBufOffset + n > gpuCmdBufSize) {
         PLOG_E("gxdirect: command buffer offset %lu of %lu words, %lu more: no room", (unsigned long)gpuCmdBufOffset,
                (unsigned long)gpuCmdBufSize, (unsigned long)n);
@@ -2038,7 +2268,11 @@ static void direct_layout(const void* stream, u32 layout, C3D_AttrInfo* ai, C3D_
 }
 
 /* GPUREG_FACECULLING_CONFIG as C3Di_EffectBind writes it */
-static void direct_cull(GPU_CULLMODE m) { GPUCMD_AddWrite(GPUREG_FACECULLING_CONFIG, (u32)m & 3); }
+static void direct_cull(GPU_CULLMODE m) {
+    u32 o = gpuCmdBufOffset;
+    GPUCMD_AddWrite(GPUREG_FACECULLING_CONFIG, (u32)m & 3);
+    OHV_FROM(o);
+}
 
 /* The pending uniform rows, as C3D_UpdateUniforms writes a run of dirty rows. citro3d's copy of the rows is kept
  * equal, so an upload of its own (after C3Di_DirtyUniforms) writes the same values. */
@@ -2087,7 +2321,9 @@ static void direct_unif_flush(void) {
                 }
             }
         }
+        u32 o = gpuCmdBufOffset;
         direct_unif_run(i, j);
+        OHV_FROM(o);
         s_dst.runs++;
         i = j;
     }
@@ -2125,6 +2361,7 @@ static void direct_draw(const u16* idx, u32 count) {
     memcpy(p, s_tpl, s_tpl_n * 4);
     p[s_tpl_idx] = (pa - base) | (u32)C3D_UNSIGNED_SHORT << 31;
     p[s_tpl_cnt] = count;
+    ohv_g(p, s_tpl_n);
     gpuCmdBufOffset += s_tpl_n;
     C3DX_FLAGS |= C3DXF_DRAWUSED;
 }
@@ -2144,14 +2381,17 @@ static void fog_bind(const void* body) {
     FogLut_FromArray(&lut, data);
     C3D_FogLutBind(&lut);
     if (s_direct) {
+        u32 o = gpuCmdBufOffset;
         GPUCMD_AddWrite(GPUREG_FOG_LUT_INDEX, 0);
         GPUCMD_AddWrites(GPUREG_FOG_LUT_DATA0, lut.data, 128);
+        OHV_FROM(o);
         C3DX_FLAGS &= ~C3DXF_FOGLUT;
     }
 }
 
 #define TPL_IDX_MARK 0xA5A5A5A4u
 #define TPL_CNT_MARK 0x5A5A5A5Au
+static u32 s_oh_base; /* the attribute buffers' base address (BufInfo_Init's base_paddr; gxonehop's draw packets) */
 static int direct_init(void) {
     /* citro3d's context words: the flags (active bit; C3D_SetBufInfo sets the buffer bit) and the buffer base
      * (C3D_SetBufInfo copies the BufInfo there) */
@@ -2165,6 +2405,7 @@ static int direct_init(void) {
                (unsigned long)f0, (unsigned long)f1, (unsigned long)C3DX_BUFBASE);
         return 0;
     }
+    s_oh_base = bi.base_paddr;
     /* C3D_DrawElements' packet for triangles (citro3d 1.7.1 drawElements.c; checked against libcitro3d.a) */
     u32 *buf, size, off;
     GPUCMD_GetBuffer(&buf, &size, &off);
@@ -2202,7 +2443,8 @@ static int direct_init(void) {
     s_tpl_idx = (u32)fi;
     s_tpl_cnt = (u32)fc;
     /* largest blocks (counted from the encoders): tev 42, tex 30, pix 46, lay 76 words; a larger one is not kept */
-    static const u16 k_slots[DC_N] = {256, 512, 256, 512};
+    static const u16 k_slots0[DC_N] = {256, 512, 256, 512}, k_slots2[DC_N] = {512, 2048, 512, 1024};
+    const u16* k_slots = s_onehop == 2 ? k_slots2 : k_slots0; /* gxonehop=2 looks up the one-hop keys here */
     static const u16 k_keyw[DC_N] = {DK_TEV, DK_TEX, DK_PIX, DK_LAY};
     static const u16 k_capw[DC_N] = {44, 32, 48, 76};
     u32 bytes = 0;
@@ -2252,6 +2494,862 @@ static void direct_log(void) {
     memset(&s_dst, 0, sizeof(s_dst));
 }
 
+/* ---- gxonehop (stage 5): the recording thread writes the shader path's PICA words ----
+ *
+ * With gxonehop=1 the thread that records (the game thread: gxonehop turns gxthread off) does what the gxdirect
+ * replay does for shader-path draws, at the time of the call, into the record's word arena: the state's three class
+ * blocks and the attribute setup copied from its own tables of kept words, the uniform rows, the cull word, the
+ * draw packet, the fog LUT. Its model of what the GPU holds follows the replay's rules exactly (state sent at the
+ * next draw, a block only when its key differs from the one held, a record starts with nothing held, a clear, copy or
+ * CPU-path draw leaves nothing held). The record keeps only what the render thread must do itself:
+ *  - CMD_OH_WORDS: a run of words, copied into citro3d's command buffer;
+ *  - CMD_OH_FLUSH: before the first draw after citro3d work: the vsh switch on, citro3d's pending words out
+ *    (the replay's c3d_flush);
+ *  - CMD_OH_UNIF: the `lit` bool and the light count int uniform, which stay with citro3d;
+ *  - CMD_OH_CAPTURE: a block whose key the tables do not hold yet: the render thread runs citro3d's setters and
+ *    captures the words as gxdirect does, and the recording thread takes them into its tables when the record comes
+ *    back (a later capture of the same key in the same record copies them: `ref`);
+ *  - CMD_OH_MARK: the stereo boundary. After a scene draw or copy, before the next screen-layer draw, clear,
+ *    CPU-path draw or the record's end. The model then holds nothing (the next draw sends its full state) and the
+ *    mark carries the uniform rows, the fog LUT and the uniforms of citro3d in force, so the 2D tail after the last
+ *    mark is self-contained: in stereo the render thread splits there, and replays the tail for the second eye
+ *    with the mark's words first. In mono a mark does nothing.
+ *  - CMD_STATE (whole) before a clear, copy or CPU-path draw when the state changed: citro3d's setters need it.
+ * gxonehop=2 renders as gxdirect=1 from the full record and builds the words of mode 1 next to it (side list,
+ * marks also in the record so the replay drops what it holds there as mode 1 does); after each mono record the
+ * render thread compares them word for word with the words the replay wrote itself. */
+#define OH_SIDE_BYTES (192u << 10)
+#define OH_ROOM_BYTES 3072u /* record bytes a shader draw's commands, a CMD_STATE and a mark need at most */
+#define OH_DRAW_WORDS 1024u /* arena words of one shader draw at most (3 blocks, a layout, all rows, the packet) */
+#define OH_MARK_WORDS 640u  /* arena words of a mark at most (all rows, the fog LUT) */
+#define OH_PENDING 0xFFFFFFFFu
+#define OH_CAPW 76u
+
+typedef struct {
+    const u32* w;
+    u32 n, draws;
+} OhWords;
+typedef struct {
+    s32 lit, lcount; /* -1: unchanged */
+} OhUnif;
+typedef struct OhCap {
+    u32 cls, n; /* n: the captured words, filled by the render thread (0: not kept) */
+    const struct OhCap* ref;
+    u32 key[DK_MAX];
+    u32 res[OH_CAPW];
+    u32 dbg[3]; /* texture handles (verify log) */
+} OhCap;
+typedef struct {
+    s32 lit, lcount;
+    const u32* w;
+    u32 n;
+} OhMark;
+
+/* the recording thread's model of the GPU (mirrors the replay's s_dkey, s_gpu_valid, v_* ...) */
+static struct {
+    u32 dkey[3][DK_MAX];
+    int gpu_valid, lay_valid, vsh_mode, c3d, scissor_empty;
+    const void* v_stream;
+    u32 v_layout, v_scales, v_cull;
+    s32 lit, lcount; /* the values the last CMD_OH_UNIF set (-1: none in this record) */
+    u32 fog[128];
+    int fog_valid;
+    u32 chunk0, chunk_draws; /* the open run of words starts at chunk0 */
+    u32* packet;             /* the last draw packet, while a draw may merge into it */
+    PlatGpuState given;      /* the last CMD_STATE (gxonehop=1) */
+    int given_valid;
+    int after_scene, scene_seen;
+    u32 gdraw, seq;
+} s_om;
+static VshDraw s_oh_md; /* gxonehop=1: the last shader draw, while one may merge into it (s_last_vdraw) */
+static DTab s_otab[DC_N];
+static u32 s_oh_words; /* arena words per record */
+static struct {
+    u32 draws, merged, skipped, copied[DC_N], caps, refs, flushes, ops, marks, chunks, words, states;
+} s_ost;
+static struct {
+    u32 chunks, words, caps, refs, marks;
+    u32 checks, mismatches, unresolved, cmp_words, logged;
+} s_orst;
+
+static inline Record* oh_rec(void) { return &s_rec[s_cur]; }
+
+/* GPUCMD_Add's encoding (libctru 2.x: runs of 256 parameters at most, padded to an even length; checked against
+ * GPUCMD_Add at start-up), into a buffer of our own: the recording thread cannot use libctru's global one. */
+static u32* enc_add(u32* w, u32 header, const u32* p, u32 len) {
+    if (len == 0) {
+        len = 1;
+    }
+    while (len > 0) {
+        u32 n = len < 256 ? len : 256;
+        w[0] = p ? p[0] : 0;
+        w[1] = header | (n - 1) << 20;
+        if (n > 1) {
+            if (p) {
+                memcpy(w + 2, p + 1, (n - 1) * 4);
+            } else {
+                memset(w + 2, 0, (n - 1) * 4);
+            }
+        }
+        w += n + 1;
+        if (!(n & 1)) {
+            *w++ = 0;
+        }
+        if ((s32)header < 0) {
+            header += n;
+        }
+        len -= n;
+        if (p) {
+            p += n;
+        }
+    }
+    return w;
+}
+static inline u32* enc_write(u32* w, u32 reg, u32 v) {
+    w[0] = v;
+    w[1] = GPUCMD_HEADER(0, 0xF, reg);
+    return w + 2;
+}
+
+static void* side_put(u16 type, u32 size) {
+    Record* r = oh_rec();
+    u32 need = (u32)sizeof(CmdHead) + ((size + 3u) & ~3u);
+    if (r->side_used + need > OH_SIDE_BYTES) {
+        r->side_used = OH_SIDE_BYTES + 1; /* overflowed: this record is not compared */
+        return NULL;
+    }
+    CmdHead* h = (CmdHead*)(r->side + r->side_used);
+    h->type = type;
+    h->size = (u16)(need - sizeof(CmdHead));
+    r->side_used += need;
+    return h + 1;
+}
+
+static void* oh_put(u16 type, u32 size) {
+    if (s_onehop == 1) {
+        return rec_put(type, size); /* closes the open run first */
+    }
+    oh_close();
+    return side_put(type, size);
+}
+
+static void oh_close(void) {
+    Record* r = oh_rec();
+    if (r->now > s_om.chunk0) {
+        OhWords* c = s_onehop == 1 ? rec_put(CMD_OH_WORDS, sizeof(OhWords)) : side_put(CMD_OH_WORDS, sizeof(OhWords));
+        r = oh_rec();
+        if (c != NULL) {
+            *c = (OhWords){r->ow + s_om.chunk0, r->now - s_om.chunk0, s_om.chunk_draws};
+            s_ost.chunks++;
+        }
+    }
+    s_om.chunk0 = r->now;
+    s_om.chunk_draws = 0;
+    s_om.packet = NULL;
+}
+
+static void oh_event(void) {
+    s_last_draw = NULL;
+    if (s_onehop == 1) {
+        s_last_vdraw = NULL;
+    }
+    s_om.packet = NULL;
+}
+
+/* Room for one more shader draw (or what goes before a clear, copy or CPU-path draw) in this record: a segment
+ * now, never in the middle of a draw's words. */
+static void oh_need_room(u32 bytes, u32 words) {
+    Record* r = oh_rec();
+    if (r->used + bytes + OH_ROOM_BYTES + 64 > RECORD_BYTES || r->now + words + OH_DRAW_WORDS + OH_MARK_WORDS > s_oh_words ||
+        (s_onehop == 2 && r->side_used + OH_ROOM_BYTES > OH_SIDE_BYTES)) {
+        flush_segment();
+    }
+}
+
+static void oh_record_start(void) {
+    Record* r = oh_rec();
+    r->now = 0;
+    r->side_used = 0;
+    r->oh_split = -1;
+    r->oh_tail_draws = r->oh_tail_z = 0;
+    r->ncaps = 0;
+    memset(&s_om, 0, sizeof(s_om));
+    s_om.v_scales = 0xFFFFFFFFu;
+    s_om.c3d = 1;
+    s_om.lit = -1;
+    s_om.lcount = -1;
+    s_om.seq = s_submit_seq + 1;
+    vunif_reset_u(&s_vg);
+    s_vg.pend[0] = s_vg.pend[1] = s_vg.pend[2] = 0;
+    s_oh_state_pending = 0;
+}
+
+/* the stereo split's classes (stereo_split) */
+enum { OHS_NONE, OHS_SCENE, OHS_LAYER };
+static int oh_class(const PlatGpuState* st) {
+    if (st->color_write == 0 && !st->depth_write) {
+        return OHS_NONE;
+    }
+    return st->depth_far > STEREO_LAYER_FAR ? OHS_SCENE : OHS_LAYER;
+}
+
+/* runs of the rows in mask (3 words), as direct_unif_run writes them */
+static u32* oh_rows(u32* w, const u32* mask) {
+    u32 i = 0;
+    while (i < 96) {
+        u32 wd = mask[i >> 5] >> (i & 31);
+        if (wd == 0) {
+            i = (i | 31) + 1;
+            continue;
+        }
+        if (!(wd & 1)) {
+            i += (u32)__builtin_ctz(wd);
+            continue;
+        }
+        u32 j = i;
+        while (j < 96 && (mask[j >> 5] >> (j & 31) & 1)) {
+            j++;
+        }
+        w = enc_write(w, GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000u | i);
+        w = enc_add(w, GPUCMD_HEADER(0, 0xF, GPUREG_VSH_FLOATUNIFORM_DATA), &s_vg.val[i][0], (j - i) * 4);
+        i = j;
+    }
+    return w;
+}
+
+static void oh_mark(void) {
+    oh_close();
+    Record* r = oh_rec();
+    u32* w0 = r->ow + r->now;
+    u32* w = oh_rows(w0, s_vg.valid);
+    if (s_om.fog_valid) {
+        w = enc_write(w, GPUREG_FOG_LUT_INDEX, 0);
+        w = enc_add(w, GPUCMD_HEADER(0, 0xF, GPUREG_FOG_LUT_DATA0), s_om.fog, 128);
+    }
+    r->now = (u32)(w - r->ow);
+    s_om.chunk0 = r->now; /* the mark's words are not part of the run */
+    OhMark* m = oh_put(CMD_OH_MARK, sizeof(OhMark));
+    r = oh_rec();
+    if (m != NULL) {
+        *m = (OhMark){s_om.lit, s_om.lcount, w0, (u32)(w - w0)};
+        if (s_onehop == 1) {
+            r->oh_split = (s32)((u8*)m - sizeof(CmdHead) - r->data);
+        }
+    }
+    if (s_onehop == 2) {
+        rec_put(CMD_OH_MARK, 0); /* the replay drops what it holds there too */
+    }
+    s_om.gpu_valid = 0;
+    s_om.lay_valid = 0;
+    s_om.c3d = 1;
+    s_om.after_scene = 0;
+    r->oh_tail_draws = r->oh_tail_z = 0;
+    s_ost.marks++;
+    oh_event();
+}
+
+static void oh_stereo_after(int cls, int zwrite) {
+    Record* r = oh_rec();
+    if (cls == OHS_SCENE) {
+        s_om.after_scene = 1;
+        s_om.scene_seen = 1;
+        r->oh_tail_draws = r->oh_tail_z = 0;
+    } else if (cls == OHS_LAYER) {
+        r->oh_tail_draws++;
+        r->oh_tail_z += zwrite != 0;
+    }
+}
+
+static void oh_record_end(int present) {
+    if (present && s_om.after_scene) {
+        oh_mark();
+    }
+    oh_close();
+    if (!s_om.scene_seen) {
+        oh_rec()->oh_split = -1; /* no scene draw: the frame stays mono */
+    }
+}
+
+static void oh_c3d_cmd(int what) {
+    if (what == OHC_DRAW0 || what == OHC_DRAW) {
+        if (s_last_state_valid && oh_class(&s_last_state) != OHS_SCENE && s_om.after_scene) {
+            oh_mark();
+        }
+    } else if (what == OHC_CLEAR && s_om.after_scene) {
+        oh_mark();
+    }
+    if (s_onehop == 1 && what != OHC_DRAW0 && s_last_state_valid &&
+        (!s_om.given_valid || memcmp(&s_om.given, &s_last_state, sizeof(PlatGpuState)) != 0)) {
+        PlatGpuState* d = rec_put(CMD_STATE, sizeof(PlatGpuState));
+        if (d != NULL) {
+            *d = s_last_state;
+            s_om.given = s_last_state;
+            s_om.given_valid = 1;
+            s_ost.states++;
+        }
+    }
+}
+
+static void oh_after_c3d(int what) {
+    if (what == OHC_DRAW0 || what == OHC_DRAW) {
+        if (s_last_state_valid) {
+            oh_stereo_after(oh_class(&s_last_state), s_last_state.depth_write);
+        }
+    } else if (what == OHC_COPY) {
+        s_om.after_scene = 1;
+        oh_rec()->oh_tail_draws = oh_rec()->oh_tail_z = 0;
+    }
+    if (what != OHC_DRAW0) {
+        /* the replay's C3D_PATH and LEAVE_VSH: nothing is held, the vsh switch is off, citro3d has work pending */
+        s_om.gpu_valid = 0;
+        s_om.lay_valid = 0;
+        s_om.vsh_mode = 0;
+        s_om.c3d = 1;
+    }
+    oh_event();
+}
+
+static int scissor_rect_n(const PlatGpuState* st) {
+    float sx, sy, sw, sh;
+    efb_to_target_rect(st->scissor_x0, st->scissor_y0, (float)(st->scissor_x1 - st->scissor_x0),
+                       (float)(st->scissor_y1 - st->scissor_y0), &sx, &sy, &sw, &sh);
+    float cx0 = sx < 0 ? 0 : sx > REGION_W ? REGION_W : sx;
+    float cy0 = sy < 0 ? 0 : sy > REGION_H ? REGION_H : sy;
+    float cx1 = sx + sw < 0 ? 0 : sx + sw > REGION_W ? REGION_W : sx + sw;
+    float cy1 = sy + sh < 0 ? 0 : sy + sh > REGION_H ? REGION_H : sy + sh;
+    int x0 = (int)cx0, y0 = (int)cy0, x1 = (int)cx1, y1 = (int)cy1;
+    x1 += (float)x1 < cx1;
+    y1 += (float)y1 < cy1;
+    return x1 <= x0 || y1 <= y0;
+}
+
+static int oh_cpu_draw_keep(void) {
+    if (scissor_rect_n(&s_last_state)) {
+        return 1; /* skipped by the replay before the filter */
+    }
+    return plat_gpudump_draw_filter(s_frame_counter, s_om.seq, s_om.gdraw++);
+}
+
+static void oh_fog(const float* lut129) {
+    oh_event();
+    Record* r = oh_rec();
+    if (r->now + 132 + OH_DRAW_WORDS + OH_MARK_WORDS > s_oh_words) {
+        flush_segment();
+        r = oh_rec();
+    }
+    C3D_FogLut lut;
+    float data[256];
+    for (int i = 0; i < 128; i++) {
+        data[i] = lut129[i];
+        data[128 + i] = lut129[i + 1] - lut129[i];
+    }
+    FogLut_FromArray(&lut, data);
+    u32* w = enc_write(r->ow + r->now, GPUREG_FOG_LUT_INDEX, 0);
+    w = enc_add(w, GPUCMD_HEADER(0, 0xF, GPUREG_FOG_LUT_DATA0), lut.data, 128);
+    r->now = (u32)(w - r->ow);
+    memcpy(s_om.fog, lut.data, sizeof(s_om.fog));
+    s_om.fog_valid = 1;
+}
+
+static void oh_op(s32 lit, s32 lcount) {
+    OhUnif* o = oh_put(CMD_OH_UNIF, sizeof(OhUnif));
+    if (o != NULL) {
+        o->lit = lit;
+        o->lcount = lcount;
+    }
+    s_om.c3d = 1;
+    s_ost.ops++;
+}
+
+static void oh_const(const PlatGpuVshConst* c) {
+    oh_event();
+    vsh_const_rows(&s_vg, c);
+    if (s_uloc_lit >= 0) {
+        s32 lit = (c->flags & PLAT_VSH_LIT) != 0;
+        if (lit != s_om.lit) {
+            oh_op(lit, -1);
+            s_om.lit = lit;
+        }
+    }
+}
+
+static void oh_light(const PlatGpuVshLight* l) {
+    oh_event();
+    if (s_uloc_lit < 0) {
+        return;
+    }
+    s32 x = vsh_light_rows(&s_vg, l);
+    if (x != s_om.lcount) {
+        oh_op(-1, x);
+        s_om.lcount = x;
+    }
+}
+
+/* A pending entry: the capture body that will hold the words, and the record (seq) it is in. */
+static void oh_pend_put(DTab* t, u32* e, const u32* key, u32 h, const OhCap* b) {
+    if (e == NULL) {
+        u32 i = h & (t->slots - 1) & ~(DT_WAYS - 1u);
+        e = t->mem + (size_t)i * t->stride;
+        for (u32 k = 1; k < DT_WAYS && e[1] != 0; k++) {
+            u32* x = t->mem + (size_t)(i + k) * t->stride;
+            if (x[1] == 0 || (s32)(x[2] - e[2]) < 0) {
+                e = x;
+            }
+        }
+    }
+    e[0] = h;
+    e[1] = OH_PENDING;
+    e[2] = ++t->stamp;
+    memcpy(e + 3, key, t->keyw * 4);
+    e[3 + t->keyw] = (u32)(uintptr_t)b;
+    e[4 + t->keyw] = s_om.seq;
+}
+
+static const PlatGpuState* s_oh_dbg_st;
+static void oh_block(int c, const u32* key) {
+    DTab* t = &s_otab[c];
+    u32 h = dkey_hash(key, t->keyw);
+    u32* e = dtab_find(t, key, h);
+    Record* r = oh_rec();
+    if (e != NULL && e[1] != OH_PENDING) {
+        memcpy(r->ow + r->now, e + 3 + t->keyw, e[1] * 4);
+        r->now += e[1];
+        s_ost.copied[c]++;
+        return;
+    }
+    OhCap* b = oh_put(CMD_OH_CAPTURE, sizeof(OhCap));
+    if (b == NULL) {
+        return;
+    }
+    r = oh_rec();
+    b->cls = (u32)c;
+    b->n = 0;
+    b->ref = NULL;
+    memcpy(b->key, key, t->keyw * 4);
+    if (c == DC_TEX && s_oh_dbg_st != NULL) {
+        for (int u = 0; u < 3; u++) {
+            b->dbg[u] = s_oh_dbg_st->tex[u].handle;
+        }
+    }
+    if (e != NULL && e[4 + t->keyw] == s_om.seq) {
+        b->ref = (const OhCap*)(uintptr_t)e[3 + t->keyw]; /* captured earlier in this record */
+        s_ost.refs++;
+        return;
+    }
+    if (r->ncaps < sizeof(r->caps) / sizeof(r->caps[0])) {
+        r->caps[r->ncaps++] = b;
+        oh_pend_put(t, e, key, h, b);
+    }
+    s_ost.caps++;
+}
+
+/* The texture units' objects as tex_prepare leaves them, as copies (s_tex belongs to the render thread's setters). */
+static void oh_tex_prepare(const PlatGpuState* st, C3D_Tex out[3]) {
+    for (int u = 0; u < 3; u++) {
+        const PlatGpuTexUnit* tu = &st->tex[u];
+        if (tu->handle == 0 || tu->handle >= MAX_TEX || !s_tex[tu->handle].tex.data) {
+            out[u] = s_blank_tex;
+            continue;
+        }
+        C3D_Tex* t = &out[u];
+        *t = s_tex[tu->handle].tex;
+        C3D_TexSetFilter(t, tu->mag_linear ? GPU_LINEAR : GPU_NEAREST, tu->min_linear ? GPU_LINEAR : GPU_NEAREST);
+        C3D_TexSetFilterMipmap(t, tu->mip_linear && t->maxLevel != 0 ? GPU_LINEAR : GPU_NEAREST);
+        C3D_TexSetLodBias(t, tu->lod_bias);
+        C3D_TexSetWrap(t, (GPU_TEXTURE_WRAP_PARAM)tu->wrap_s, (GPU_TEXTURE_WRAP_PARAM)tu->wrap_t);
+    }
+}
+
+/* direct_state on the recording side */
+static int oh_state(const PlatGpuState* st) {
+    u32 k[DK_MAX];
+    int pix = 0;
+    memcpy(k, st, 26 * 4);
+    k[26] = st->fog_enable;
+    k[27] = st->fog_enable ? st->fog_color : 0;
+    if (!(s_om.gpu_valid & 1) || memcmp(k, s_om.dkey[DC_TEV], DK_TEV * 4) != 0) {
+        oh_block(DC_TEV, k);
+        memcpy(s_om.dkey[DC_TEV], k, DK_TEV * 4);
+    }
+    C3D_Tex t[3];
+    oh_tex_prepare(st, t);
+    memcpy(k, t, sizeof(t));
+    if (!(s_om.gpu_valid & 2) || memcmp(k, s_om.dkey[DC_TEX], DK_TEX * 4) != 0) {
+        s_oh_dbg_st = st;
+        oh_block(DC_TEX, k);
+        s_oh_dbg_st = NULL;
+        memcpy(s_om.dkey[DC_TEX], k, DK_TEX * 4);
+    }
+    memcpy(k, &st->alpha_test_enable, 16);
+    memcpy(k + 4, &st->scissor_x0, 32);
+    if (!(s_om.gpu_valid & 4) || memcmp(k, s_om.dkey[DC_PIX], DK_PIX * 4) != 0) {
+        oh_block(DC_PIX, k);
+        memcpy(s_om.dkey[DC_PIX], k, DK_PIX * 4);
+        pix = 1;
+        s_om.scissor_empty = scissor_rect_n(st);
+    }
+    s_om.gpu_valid = 7;
+    return pix;
+}
+
+static void oh_unif_flush(void) {
+    if ((s_vg.pend[0] | s_vg.pend[1] | s_vg.pend[2]) == 0) {
+        return;
+    }
+    Record* r = oh_rec();
+    r->now = (u32)(oh_rows(r->ow + r->now, s_vg.pend) - r->ow);
+    s_vg.pend[0] = s_vg.pend[1] = s_vg.pend[2] = 0;
+}
+
+static GPU_CULLMODE vsh_cull(u32 cull);
+static void oh_draw(const void* stream, u32 layout, u32 scales, u32 cull, const u16* idx, u32 count, int drawp, int merged) {
+    if (!s_last_state_valid || count < 3) {
+        s_ost.skipped++;
+        return; /* the replay skips a draw before the record's first state */
+    }
+    int cls = oh_class(&s_last_state);
+    if (drawp && s_ixpool_hi != NULL && ((const u8*)idx < s_ixpool_lo || (const u8*)(idx + count) > s_ixpool_hi)) {
+        if (cls != OHS_SCENE && s_om.after_scene) {
+            oh_mark();
+        }
+        oh_stereo_after(cls, s_last_state.depth_write);
+        s_ost.skipped++;
+        return; /* outside the index pool: skipped by the replay (which logs it) */
+    }
+    if (merged) {
+        if (s_om.packet != NULL) {
+            s_om.packet[s_tpl_cnt] += count;
+        }
+        s_oh_idx_end += count;
+        s_ost.merged++;
+        return;
+    }
+    if (cls != OHS_SCENE && s_om.after_scene) {
+        oh_mark();
+    }
+    Record* r;
+    if (!s_om.vsh_mode) {
+        s_om.vsh_mode = 1;
+        s_om.c3d = 1;
+        s_om.v_stream = NULL;
+    }
+    if (s_om.c3d) {
+        oh_put(CMD_OH_FLUSH, 0);
+        s_om.c3d = 0;
+        s_ost.flushes++;
+    }
+    if (s_oh_state_pending || s_om.gpu_valid != 7) {
+        if (oh_state(&s_last_state)) {
+            s_om.v_cull = 0;
+        }
+        s_oh_state_pending = 0;
+    }
+    u32* packet = NULL;
+    if (!s_om.scissor_empty) {
+        if (!s_om.lay_valid || stream != s_om.v_stream || layout != s_om.v_layout) {
+            u32 k[DK_LAY] = {(u32)(uintptr_t)stream, layout};
+            oh_block(DC_LAY, k);
+            s_om.lay_valid = 1;
+            s_om.v_stream = stream;
+            s_om.v_layout = layout;
+        }
+        if (scales != s_om.v_scales) {
+            vsh_scales_rows(&s_vg, scales);
+            s_om.v_scales = scales;
+        }
+        r = oh_rec();
+        if (cull != s_om.v_cull) {
+            r->now = (u32)(enc_write(r->ow + r->now, GPUREG_FACECULLING_CONFIG, (u32)vsh_cull(cull) & 3) - r->ow);
+            s_om.v_cull = cull;
+        }
+        oh_unif_flush();
+        u32 pa = osConvertVirtToPhys(idx);
+        if (pa >= s_oh_base && (s_onehop != 1 || plat_gpudump_draw_filter(s_frame_counter, s_om.seq, s_om.gdraw++))) {
+            packet = r->ow + r->now;
+            memcpy(packet, s_tpl, s_tpl_n * 4);
+            packet[s_tpl_idx] = (pa - s_oh_base) | (u32)C3D_UNSIGNED_SHORT << 31;
+            packet[s_tpl_cnt] = count;
+            r->now += s_tpl_n;
+            s_om.chunk_draws++;
+            s_ost.draws++;
+        }
+    }
+    oh_stereo_after(cls, s_last_state.depth_write);
+    s_om.packet = packet;
+    if (s_onehop == 1) {
+        r = oh_rec();
+        if (drawp) {
+            s_last_vdraw = NULL;
+        } else {
+            s_oh_md = (VshDraw){stream, layout, scales, cull, 0, 0};
+            s_last_vdraw = &s_oh_md;
+            s_oh_idx_end = (u32)(idx - r->idx) + count;
+        }
+    }
+}
+
+/* Render thread: citro3d's `lit` and light count as the replay sets them (a change dirties citro3d). */
+static void oh_apply_unif(s32 lit, s32 lcount) {
+    if (lit >= 0 && s_uloc_lit >= 0 && ((C3D_BoolUnifs[GPU_VERTEX_SHADER] >> (s_uloc_lit - 0x68) & 1) != 0) != (lit != 0)) {
+        C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_lit, lit != 0);
+        s_c3d_unif = 1;
+    }
+    if (lcount >= 0 && s_uloc_lit >= 0 && C3D_IVUnif[GPU_VERTEX_SHADER][s_uloc_lcount - 0x60] != IVec_Pack(lcount, 0, 1, 0)) {
+        C3D_IVUnifSet(GPU_VERTEX_SHADER, s_uloc_lcount, lcount, 0, 1, 0);
+        s_c3d_unif = 1;
+    }
+}
+
+static C3D_AttrInfo s_oh_vai;
+static C3D_BufInfo s_oh_vbi;
+static C3D_Tex s_oh_ctex[3]; /* the objects a texture capture binds (citro3d keeps the pointers) */
+
+/* Render thread: a CMD_OH_CAPTURE, as direct_block's capture. */
+static void oh_capture(OhCap* b) {
+    const OhCap* src = b->ref;
+    if (src != NULL && src->n > 0) {
+        cmd_put(src->res, src->n);
+        s_orst.refs++;
+        return;
+    }
+    RPHASE(8);
+    c3d_flush();
+    PlatGpuState st;
+    memset(&st, 0, sizeof(st));
+    switch (b->cls) {
+    case DC_TEV:
+        memcpy(&st, b->key, 26 * 4);
+        st.fog_enable = (u8)b->key[26];
+        st.fog_color = b->key[27];
+        apply_tev(&st, 1);
+        break;
+    case DC_TEX: {
+        memcpy(s_oh_ctex, b->key, sizeof(s_oh_ctex));
+        C3D_Tex* p[3] = {&s_oh_ctex[0], &s_oh_ctex[1], &s_oh_ctex[2]};
+        tex_bind3(p);
+        break;
+    }
+    case DC_PIX:
+        memcpy(&st.alpha_test_enable, b->key, 16);
+        memcpy(&st.scissor_x0, b->key + 4, 32);
+        apply_pix(&st, 1);
+        break;
+    default:
+        vsh_apply_layout((const void*)(uintptr_t)b->key[0], b->key[1], &s_oh_vai, &s_oh_vbi);
+        break;
+    }
+    u32 n = c3d_capture(s_cap, sizeof(s_cap) / 4);
+    s_c3d_unif = 0;
+    cmd_put(s_cap, n);
+    if (src == NULL && n <= OH_CAPW && n <= s_otab[b->cls].capw) {
+        memcpy(b->res, s_cap, n * 4);
+        b->n = n;
+    }
+    s_orst.caps++;
+    RPHASE(3);
+}
+
+/* Recording thread, when a record comes back: its captured words into the tables. */
+static void oh_import(Record* r) {
+    for (u32 i = 0; i < r->ncaps; i++) {
+        OhCap* b = r->caps[i];
+        DTab* t = &s_otab[b->cls];
+        u32 h = dkey_hash(b->key, t->keyw);
+        u32* e = dtab_find(t, b->key, h);
+        if (b->n > 0 && b->n <= t->capw) {
+            dtab_put(t, e, b->key, h, b->res, b->n);
+        } else if (e != NULL && e[1] == OH_PENDING && e[3 + t->keyw] == (u32)(uintptr_t)b) {
+            e[1] = 0; /* not kept (too large, or the record was dropped): captured again when next needed */
+        }
+    }
+    r->ncaps = 0;
+}
+
+/* gxonehop=2, render thread after a mono record: the one-hop words (side list; a capture's words from the replay's
+ * own table, also handed back to the recording thread) against the words the replay wrote itself. */
+static void ohv_compare(Record* r) {
+    if (s_ohv_on != 1 || r->side_used > OH_SIDE_BYTES) {
+        s_orst.unresolved++;
+        return;
+    }
+    u32 pos = 0, ncmd = 0;
+    int bad = 0;
+    for (u8* p = r->side; p < r->side + r->side_used && !bad;) {
+        CmdHead* h = (CmdHead*)p;
+        u8* body = p + sizeof(CmdHead);
+        p = body + h->size;
+        ncmd++;
+        const u32* w;
+        u32 n;
+        if (h->type == CMD_OH_WORDS) {
+            w = ((const OhWords*)body)->w;
+            n = ((const OhWords*)body)->n;
+        } else if (h->type == CMD_OH_CAPTURE) {
+            OhCap* b = (OhCap*)body;
+            DTab* t = &s_dtab[b->cls];
+            u32* e = dtab_find(t, b->key, dkey_hash(b->key, t->keyw));
+            if (e == NULL) {
+                s_orst.unresolved++;
+                if (s_orst.logged++ < 8) {
+                    PLOG_W("gxonehop verify: record %lu, side command %lu: a %s block the replay's table does not hold "
+                           "(key %08lx %08lx %08lx %08lx): not compared",
+                           (unsigned long)r->seq, (unsigned long)ncmd, k_dc_name[b->cls], (unsigned long)b->key[0],
+                           (unsigned long)b->key[1], (unsigned long)b->key[2], (unsigned long)b->key[3]);
+                    if (b->cls == DC_TEX) {
+                        for (int u = 0; u < 3; u++) {
+                            u32 hh = b->dbg[u] < MAX_TEX ? b->dbg[u] : 0;
+                            PLOG_W("gxonehop verify:   unit %d handle %lu: key data %08lx, now %08lx live %d pending %d target %d",
+                                   u, (unsigned long)b->dbg[u], (unsigned long)b->key[6 * u],
+                                   (unsigned long)(uintptr_t)s_tex[hh].tex.data, s_tex[hh].live, s_tex[hh].pending_free,
+                                   s_tex[hh].is_target);
+                        }
+                        for (u32 s = 0; s < t->slots; s++) {
+                            const u32* x = t->mem + (size_t)s * t->stride + 3;
+                            if (x[-2] != 0 && (x[0] == b->key[0] || x[6] == b->key[0] || x[12] == b->key[0])) {
+                                PLOG_W("gxonehop verify:   replay entry %lu: %08lx %08lx %08lx %08lx %08lx %08lx | %08lx | "
+                                       "%08lx; key %08lx %08lx %08lx %08lx %08lx %08lx",
+                                       (unsigned long)s, (unsigned long)x[0], (unsigned long)x[1], (unsigned long)x[2],
+                                       (unsigned long)x[3], (unsigned long)x[4], (unsigned long)x[5], (unsigned long)x[6],
+                                       (unsigned long)x[12], (unsigned long)b->key[0], (unsigned long)b->key[1],
+                                       (unsigned long)b->key[2], (unsigned long)b->key[3], (unsigned long)b->key[4],
+                                       (unsigned long)b->key[5]);
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+            w = e + 3 + t->keyw;
+            n = e[1];
+            if (b->ref == NULL && n <= OH_CAPW) {
+                memcpy(b->res, w, n * 4);
+                b->n = n;
+            }
+        } else {
+            continue;
+        }
+        u32 k = 0;
+        if (pos + n > s_ohv_gn) {
+            bad = 1;
+        } else {
+            while (k < n && w[k] == s_ohv_g[pos + k]) {
+                k++;
+            }
+            bad = k < n;
+        }
+        if (bad && s_orst.logged++ < 8) {
+            PLOG_W("gxonehop verify: record %lu, side command %lu (%s, %lu words) differs at word %lu of %lu: one-hop "
+                   "%08lx, replay %08lx",
+                   (unsigned long)r->seq, (unsigned long)ncmd, h->type == CMD_OH_WORDS ? "words" : "capture",
+                   (unsigned long)n, (unsigned long)(pos + k), (unsigned long)s_ohv_gn,
+                   (unsigned long)(k < n ? w[k] : 0), (unsigned long)(pos + k < s_ohv_gn ? s_ohv_g[pos + k] : 0));
+        }
+        pos += n;
+    }
+    if (!bad && pos != s_ohv_gn) {
+        bad = 1;
+        if (s_orst.logged++ < 8) {
+            PLOG_W("gxonehop verify: record %lu: one-hop %lu words, replay %lu", (unsigned long)r->seq,
+                   (unsigned long)pos, (unsigned long)s_ohv_gn);
+        }
+    }
+    s_orst.checks++;
+    s_orst.mismatches += bad;
+    s_orst.cmp_words += pos;
+}
+
+static int oh_init(void) {
+    /* the encoder against libctru's GPUCMD_Add (this thread owns citro3d's buffer until the render thread starts) */
+    static u32 a[1100], b[1100], v[600];
+    for (u32 i = 0; i < 600; i++) {
+        v[i] = 0x9E3779B9u * (i + 1);
+    }
+    u32 *buf, size, off;
+    GPUCMD_GetBuffer(&buf, &size, &off);
+    for (u32 len = 0; len <= 520; len++) {
+        for (int inc = 0; inc < 2; inc++) {
+            u32 hdr = GPUCMD_HEADER(inc, 0xF, GPUREG_VSH_FLOATUNIFORM_DATA);
+            GPUCMD_SetBuffer(a, 1100, 0);
+            GPUCMD_Add(hdr, v, len);
+            u32 n1 = gpuCmdBufOffset;
+            u32 n2 = (u32)(enc_add(b, hdr, v, len) - b);
+            if (n1 != n2 || memcmp(a, b, n1 * 4) != 0) {
+                GPUCMD_SetBuffer(buf, size, off);
+                PLOG_W("gxonehop: the command encoder differs from GPUCMD_Add (%lu parameters: %lu words, libctru %lu): off",
+                       (unsigned long)len, (unsigned long)n2, (unsigned long)n1);
+                return 0;
+            }
+        }
+    }
+    GPUCMD_SetBuffer(buf, size, off);
+    /* larger than gxdirect's: with 512 texture slots a few keys of gor_01 were evicted within every frame */
+    static const u16 k_slots[DC_N] = {512, 2048, 512, 1024};
+    static const u16 k_keyw[DC_N] = {DK_TEV, DK_TEX, DK_PIX, DK_LAY};
+    static const u16 k_capw[DC_N] = {44, 32, 48, 76};
+    for (int c = 0; c < DC_N; c++) {
+        DTab* t = &s_otab[c];
+        t->slots = k_slots[c];
+        t->keyw = k_keyw[c];
+        t->capw = k_capw[c];
+        t->stride = 3 + t->keyw + t->capw;
+        t->mem = calloc((size_t)t->slots * t->stride, 4);
+        if (t->mem == NULL) {
+            PLOG_W("gxonehop: no memory for the tables: off");
+            return 0;
+        }
+    }
+    u32 kb = (u32)plat_switch_int("gxonehopkb", 512);
+    if (kb < 64 || kb > 4096) {
+        kb = 512;
+    }
+    s_oh_words = kb * 256u;
+    for (int i = 0; i < 2; i++) {
+        s_rec[i].ow = memalign(16, s_oh_words * 4);
+        s_rec[i].side = s_onehop == 2 ? malloc(OH_SIDE_BYTES) : NULL;
+        if (s_rec[i].ow == NULL || (s_onehop == 2 && s_rec[i].side == NULL)) {
+            PLOG_W("gxonehop: no memory for two %lu KB word arenas: off", (unsigned long)kb);
+            return 0;
+        }
+    }
+    if (s_onehop == 2) {
+        s_ohv_gcap = s_oh_words;
+        s_ohv_g = malloc(s_ohv_gcap * 4);
+        if (s_ohv_g == NULL) {
+            PLOG_W("gxonehop=2: no memory for the compare buffer: off");
+            return 0;
+        }
+    }
+    PLOG_I("gxonehop=%d: the recording thread writes the shader path's words (2 x %lu KB arenas)%s", s_onehop,
+           (unsigned long)kb, s_onehop == 2 ? ", compared with the gxdirect replay's" : "");
+    return 1;
+}
+
+static void oh_log(void) {
+    static u32 n;
+    if (!s_onehop || s_dlog_every == 0 || ++n < s_dlog_every) {
+        return;
+    }
+    u32 f = n;
+    n = 0;
+    PLOG_I("gxonehop frame %lu: per frame %lu draws (%lu merged, %lu skipped), kept tev %lu tex %lu pix %lu lay %lu, "
+           "captures %lu refs %lu, flushes %lu, unif ops %lu, marks %lu, states %lu, runs %lu",
+           (unsigned long)s_frame_counter, (unsigned long)(s_ost.draws / f), (unsigned long)(s_ost.merged / f),
+           (unsigned long)(s_ost.skipped / f), (unsigned long)(s_ost.copied[0] / f), (unsigned long)(s_ost.copied[1] / f),
+           (unsigned long)(s_ost.copied[2] / f), (unsigned long)(s_ost.copied[3] / f), (unsigned long)(s_ost.caps / f),
+           (unsigned long)(s_ost.refs / f), (unsigned long)(s_ost.flushes / f), (unsigned long)(s_ost.ops / f),
+           (unsigned long)(s_ost.marks / f), (unsigned long)(s_ost.states / f), (unsigned long)(s_ost.chunks / f));
+    PLOG_I("gxonehop frame %lu, in %lu frames: render runs %lu words %lu captures %lu refs %lu marks used %lu; verify "
+           "records %lu mismatches %lu not compared %lu words %lu",
+           (unsigned long)s_frame_counter, (unsigned long)f, (unsigned long)s_orst.chunks, (unsigned long)s_orst.words,
+           (unsigned long)s_orst.caps, (unsigned long)s_orst.refs, (unsigned long)s_orst.marks,
+           (unsigned long)s_orst.checks, (unsigned long)s_orst.mismatches, (unsigned long)s_orst.unresolved,
+           (unsigned long)s_orst.cmp_words);
+    memset(&s_ost, 0, sizeof(s_ost));
+    u32 logged = s_orst.logged;
+    memset(&s_orst, 0, sizeof(s_orst)); /* the render thread's counters: racy, for the log only */
+    s_orst.logged = logged;
+}
+
 static Record* s_render_rec; /* the record render_record replays (render thread), for gpudump_note */
 static void gpudump_note(void) {
     Record* r = s_render_rec;
@@ -2271,8 +3369,20 @@ static void render_record(Record* r) {
     reap_targets();
     /* stereo (stereo.h): 0 mono, else the 2D tail's start; the 3D part is replayed once */
     u32 tail_cmds = 0, tail_zwrites = 0;
-    u8* split = r->present && stereo_wanted() ? stereo_split(r, &tail_cmds, &tail_zwrites) : NULL;
+    u8* split = NULL;
+    if (r->present && stereo_wanted()) {
+        if (s_onehop == 1) {
+            /* the last stereo mark (gxonehop): the tail after it is self-contained */
+            split = r->oh_split >= 0 ? r->data + r->oh_split : NULL;
+            tail_cmds = r->oh_tail_draws;
+            tail_zwrites = r->oh_tail_z;
+        } else {
+            split = stereo_split(r, &tail_cmds, &tail_zwrites);
+        }
+    }
     int stereo = split != NULL && stereo_begin();
+    s_ohv_on = s_onehop == 2 && !stereo; /* gxonehop=2: compare mono records */
+    s_ohv_gn = 0;
     /* C3D_FrameBegin waits until the GPU has finished the work queued so far (the previous record): the fence
      * for the memory of that record (gpufence). Then the vblank wait C3D_FRAME_SYNCDRAW would have made first:
      * only before a frame's first record, since a segment or a mid-frame sync (plat_gpu_sync) after it would
@@ -2461,10 +3571,11 @@ eye_again:
             break;
         case CMD_DRAW: {
             const u32* d = (const u32*)body;
+            u32 dn = d[1] & ~CMD_DRAW_DROP;
             if (cur_state == NULL) {
                 n_skip++;
             }
-            if (cur_state != NULL && d[1] >= 3) {
+            if (cur_state != NULL && dn >= 3) {
                 LEAVE_VSH();
                 if (restore || s_state_pending) {
                     apply_state(cur_state);
@@ -2475,8 +3586,9 @@ eye_again:
                     scissor_skip_log();
                     break;
                 }
-                if (plat_gpudump_draw_filter(r->frame, r->seq, gdraw++)) {
-                    C3D_DrawArrays(GPU_TRIANGLES, (int)d[0], (int)(d[1] - d[1] % 3));
+                /* gxonehop=1: the recording thread asked the filter (one count with the shader draws) */
+                if (s_onehop == 1 ? !(d[1] & CMD_DRAW_DROP) : plat_gpudump_draw_filter(r->frame, r->seq, gdraw++)) {
+                    C3D_DrawArrays(GPU_TRIANGLES, (int)d[0], (int)(dn - dn % 3));
                 }
                 n_draw++;
                 after_last_draw = 0;
@@ -2597,6 +3709,49 @@ eye_again:
             after_last_draw = 0;
             break;
         }
+        case CMD_OH_WORDS: {
+            const OhWords* c = (const OhWords*)body;
+            RPHASE(9);
+            cmd_put(c->w, c->n);
+            if (c->draws) {
+                C3DX_FLAGS |= C3DXF_DRAWUSED;
+                n_draw += c->draws;
+                after_last_draw = 0;
+            }
+            s_shadow_stale = 1;
+            s_orst.chunks++;
+            s_orst.words += c->n;
+            RPHASE(3);
+            break;
+        }
+        case CMD_OH_FLUSH:
+            if (!vsh_mode) {
+                vsh_mode = 1;
+                C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_vsh, true);
+                s_c3d_unif = 1;
+            }
+            c3d_flush();
+            break;
+        case CMD_OH_UNIF:
+            oh_apply_unif(((const OhUnif*)body)->lit, ((const OhUnif*)body)->lcount);
+            break;
+        case CMD_OH_CAPTURE:
+            oh_capture((OhCap*)body);
+            s_shadow_stale = 1;
+            break;
+        case CMD_OH_MARK:
+            if (s_onehop == 2) {
+                s_gpu_valid = 0; /* as the one-hop words drop what they hold here */
+                s_lay_valid = 0;
+            } else if (stereo && (u8*)h == tail) {
+                /* the split: what the tail needs that its own words do not send */
+                const OhMark* m = (const OhMark*)body;
+                oh_apply_unif(m->lit, m->lcount);
+                cmd_put(m->w, m->n);
+                s_shadow_stale = 1;
+                s_orst.marks++;
+            }
+            break;
         case CMD_CLEAR: {
             const u32* d = (const u32*)body;
             LEAVE_VSH();
@@ -2672,6 +3827,12 @@ eye_again:
 #undef STEREO_SPLIT
 #undef LEAVE_VSH
 #undef C3D_PATH
+    if (s_onehop == 2) {
+        if (s_ohv_on) {
+            ohv_compare(r);
+        }
+        s_ohv_on = 0;
+    }
     RPHASE(7);
     gpudump_note();
     C3D_FrameEnd(0);
@@ -3265,8 +4426,24 @@ void plat_gpu_init(void) {
     s_sync_all = plat_switch_int("gpusyncall", 0) != 0;
     s_gpu_fence = plat_switch_int("gpufence", 1) != 0;
     s_direct = plat_switch_int("gxdirect", 0);
+    s_onehop = plat_switch_int("gxonehop", 0);
+    if (s_onehop < 0 || s_onehop > 2) {
+        s_onehop = 0;
+    }
+    if (s_onehop) {
+        s_direct = 1; /* gxonehop implies gxdirect=1 (its verify mode is gxonehop=2) */
+    }
     if (s_direct < 0 || s_direct > 2 || (s_direct && !direct_init())) {
         s_direct = 0;
+    }
+    if (s_onehop && (!s_direct || !oh_init())) {
+        s_onehop = 0;
+    }
+    s_vr.direct = s_direct != 0;
+    s_vg.direct = 1;
+    vunif_reset_u(&s_vg);
+    if (s_onehop) {
+        oh_record_start(); /* the first record */
     }
     s_hang_recover = plat_switch_int("gpuhangrecover", 0) != 0; /* with gpuhangtest=N: the pretend hang ends at a GPU reset */
     s_hang_times = plat_switch_int("gpuhangtimes", 1);          /* how many records pretend to hang */

@@ -80,6 +80,13 @@ set(TTYD_C_FLAGS
     # disc's files (NPC tribes in setup files, messages) must match.
     -fexec-charset=CP932
 )
+# -fno-math-errno -fno-trapping-math: values do not change. sqrtf and friends
+# become the VFP instruction with no errno fallback call, and FP divides can
+# move out of loops. OFF until the identity gates (determ_ab.py) pass.
+option(TTYD_FAST_MATH_FLAGS "-fno-math-errno -fno-trapping-math on game code" OFF)
+if(TTYD_FAST_MATH_FLAGS)
+    list(APPEND TTYD_C_FLAGS -fno-math-errno -fno-trapping-math)
+endif()
 if(NOT TTYD_WARNINGS)
     list(APPEND TTYD_C_FLAGS -w)
 endif()

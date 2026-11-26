@@ -87,6 +87,7 @@ void plat_options_save(void);
 #define PLAT_OPT_KEY_QUALITY "quality"
 #define PLAT_OPT_KEY_LANGUAGE "language"
 #define PLAT_OPT_KEY_TEXFILTER "texfilter"
+#define PLAT_OPT_KEY_RETAIL "retail" /* developer Select menu: retail mode (1) for the next launch; unset = off */
 
 /* 1 when the player wants stereoscopic 3D (default 1; the 3D slider still
  * decides the depth). */

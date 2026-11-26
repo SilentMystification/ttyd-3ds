@@ -40,7 +40,7 @@ def content(img):
     return 1.0 - counts.max() / keys.size, len(vals)
 
 
-def run(scene, config, args, tag):
+def run(scene, config, args, tag, build):
     dest = OUT / scene / tag
     if dest.exists():
         shutil.rmtree(dest)
@@ -53,9 +53,9 @@ def run(scene, config, args, tag):
     # the SD writes of the last shots finish after their log lines: shoot 4 more and wait for the last of them
     last = args.first + args.count + 3
     sw = f"{SCENES[scene]} determ shots=1 shotfrom={args.first} shotmax={args.count + 4} {config}".strip()
-    cmd = [sys.executable, str(ROOT / "tools/port3ds/run_azahar.py"), "--build", str(args.build), "--log",
+    cmd = [sys.executable, str(ROOT / "tools/port3ds/run_azahar.py"), "--build", str(build), "--log",
            "3ds/ttyd/latest.log", "--switches", sw, "--until", f"shot shots/{last:05d}.ppm: this record",
-           "--long", str(args.long), "--stall", "120", "--last", str(dest / "azahar")]
+           "--long", str(args.long), "--stall", str(args.stall), "--last", str(dest / "azahar")]
     r = subprocess.run(cmd, capture_output=True, text=True)
     n = 0
     if shots.exists():
@@ -74,6 +74,10 @@ def run(scene, config, args, tag):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--build", type=Path, default=ROOT / "build/3ds/game/ttyd.cia")
+    ap.add_argument("--build-b", type=Path, default=None,
+                    help="B's build (default --build): compare two builds, e.g. a TTYD_RETAIL build against the base")
+    ap.add_argument("--stall", type=float, default=120,
+                    help="run_azahar.py --stall (0 for retail mode: no log lines before the shots)")
     ap.add_argument("--a", required=True, help="switches of configuration A (may be empty)")
     ap.add_argument("--b", required=True, help="switches of configuration B")
     ap.add_argument("--scenes", default="gor_01,battle")
@@ -85,8 +89,8 @@ def main():
     print(f"A: '{args.a}'\nB: '{args.b}'\nshots {args.first}..{args.first + args.count - 1}")
     bad = 0
     for scene in args.scenes.split(","):
-        da, na = run(scene, args.a, args, "a")
-        db, nb = run(scene, args.b, args, "b")
+        da, na = run(scene, args.a, args, "a", args.build)
+        db, nb = run(scene, args.b, args, "b", args.build_b or args.build)
         same = 0
         frames = sorted({p.name for p in da.glob("*.ppm")} | {p.name for p in db.glob("*.ppm")})
         for name in frames:

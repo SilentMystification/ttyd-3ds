@@ -51,9 +51,10 @@
 #include "plat/plat.h"
 
 #define SEG_VERTS 16384
+#define ISEG_UNITS 49152 /* indices in an index segment (a multiple of 3); stride 2 marks one */
 #define MAX_SEGS 64
 #define SEG_RUNS 128
-#define PENDING_MAX 2048
+#define PENDING_MAX 4096
 #define GROUPS 2048        /* per frame, power of two */
 #define RECS 16384         /* list records, power of two */
 #define REC_PROBE 8
@@ -67,6 +68,7 @@ static u32 s_k = 30;
 static u32 s_check_at;  /* switch gxvsh_check=N: log every group of game frame N */
 static int s_s16 = 1;   /* switch gxvshs16 (default 1): s16 attributes where exact; 0 floats only */
 static u32 s_seg_budget; /* switch gxvshkb: linear memory for the segments */
+static u32 s_iseg_budget; /* switch gxvshib: linear memory for the index segments (a stream beyond it keeps heap indices) */
 static int s_decal_rule = 1; /* switch gxvshdecal (default 1): decal links; 0 only for measuring the path itself */
 
 /* ---- Pool segments ---- */
@@ -84,7 +86,7 @@ typedef struct {
 } Seg;
 
 static Seg s_seg[MAX_SEGS];
-static u32 s_nseg, s_seg_bytes;
+static u32 s_nseg, s_seg_bytes, s_iseg_bytes;
 static struct {
     u16 seg;
     u32 start, len, frame;
@@ -138,8 +140,12 @@ static void pending_reap(void) {
     s_npending = k;
 }
 
-/* n vertices of `stride` bytes: segment and first vertex, or -1. */
+/* n vertices of `stride` bytes (stride 2: n u16 indices of an index segment): segment and first unit, or -1. */
 static int seg_alloc(u32 stride, u32 n, u32* first) {
+    u32 cap = stride == 2 ? ISEG_UNITS : SEG_VERTS;
+    if (n > cap) {
+        return -1;
+    }
     pending_reap();
     for (u32 s = 0; s < s_nseg; s++) {
         Seg* sg = &s_seg[s];
@@ -158,26 +164,33 @@ static int seg_alloc(u32 stride, u32 n, u32* first) {
                 return (int)s;
             }
         }
-        if (sg->bump + n <= SEG_VERTS) {
+        if (sg->bump + n <= cap) {
             *first = sg->bump;
             sg->bump += n;
             return (int)s;
         }
     }
-    u32 bytes = SEG_VERTS * stride;
-    if (s_nseg == MAX_SEGS || s_seg_bytes + bytes > s_seg_budget) {
+    u32 bytes = cap * stride;
+    if (s_nseg == MAX_SEGS || (stride == 2 ? s_iseg_bytes + bytes > s_iseg_budget : s_seg_bytes + bytes > s_seg_budget)) {
         return -1;
     }
     u8* base = plat_gpu_stream_alloc(bytes);
     if (base == NULL) {
         return -1;
     }
+    if (stride == 2) {
+        plat_gpu_set_index_pool(base, bytes); /* DRAWP indices may come from here */
+    }
     Seg* sg = &s_seg[s_nseg];
     memset(sg, 0, sizeof(*sg));
     sg->base = base;
     sg->stride = stride;
     sg->bump = n;
-    s_seg_bytes += bytes;
+    if (stride == 2) {
+        s_iseg_bytes += bytes;
+    } else {
+        s_seg_bytes += bytes;
+    }
     *first = 0;
     return (int)s_nseg++;
 }
@@ -206,6 +219,7 @@ void gx_vsh_init(void) {
     s_check_at = (u32)plat_switch_int("gxvsh_check", 0);
     s_s16 = plat_switch_int("gxvshs16", 1) != 0;
     s_seg_budget = (u32)plat_switch_int("gxvshkb", 6144) * 1024u;
+    s_iseg_budget = (u32)plat_switch_int("gxvshib", 1536) * 1024u;
     s_decal_rule = plat_switch_int("gxvshdecal", 1) != 0;
     PLOG_I("gxvsh: %s, hysteresis %lu frames, s16 %d, decal links %d, segments up to %lu KB%s", gx_vsh_on ? "on" : "off",
            (unsigned long)s_k, s_s16, s_decal_rule, (unsigned long)(s_seg_budget / 1024),
@@ -424,9 +438,14 @@ GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, 
     u32 stride = plat_vsh_layout_n(posk >= 0, nslots, s16mask, nrm, off);
     u32 layout = plat_vsh_layout_word_n(posk >= 0, nslots, s16mask, nrm);
     u32 nidx = ntri * 3;
-    u32 sbytes = sizeof(GxVshStream) + nidx * sizeof(u16);
-    GxVshStream* s = malloc(sbytes);
+    u32 sbytes = GXV_STREAM_BYTES + nidx * sizeof(u16); /* the cache budget counts the indices wherever they live */
+    u32 ifirst = 0;
+    int iseg = seg_alloc(2, nidx, &ifirst); /* the triangle list in linear memory, drawn in place; -1: heap copy */
+    GxVshStream* s = malloc(sizeof(GxVshStream) + (iseg < 0 ? nidx * sizeof(u16) : 0));
     if (s == NULL) {
+        if (iseg >= 0) {
+            seg_release(&s_seg[iseg], ifirst, nidx);
+        }
         *reason = GXV_R_POOL;
         s_st.build_fail++;
         s_st.build_reason[6]++;
@@ -435,6 +454,9 @@ GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, 
     u32 first;
     int seg = seg_alloc(stride, nv, &first);
     if (seg < 0) {
+        if (iseg >= 0) {
+            seg_release(&s_seg[iseg], ifirst, nidx);
+        }
         free(s);
         *reason = GXV_R_POOL;
         s_st.build_fail++;
@@ -451,6 +473,9 @@ GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, 
         s->slot_k[i] = (u8)(i < nslots && sk[i] >= 0 ? sk[i] : 0);
     }
     s->nidx = nidx;
+    s->lidx = iseg >= 0 ? (const u16*)s_seg[iseg].base + ifirst : NULL;
+    s->iseg = iseg >= 0 ? (u32)iseg : 0;
+    s->ifirst = ifirst;
     s->bytes = sbytes + nv * stride;
     /* vertices */
     u8* out = s_seg[seg].base + first * stride;
@@ -488,9 +513,13 @@ GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, 
     }
     plat_gpu_stream_commit(out, nv * stride);
     /* indices, in gx_draw_vertices' triangle order */
-    u16* ix = s->idx;
+    u16* ix0 = s->lidx != NULL ? (u16*)(uintptr_t)s->lidx : s->idx;
+    u16* ix = ix0;
     for (u32 i = 0; i < nd; i++) {
         ix = emit_tris(d[i].prim, first + d[i].first, d[i].count, ix);
+    }
+    if (s->lidx != NULL) {
+        plat_gpu_stream_commit(ix0, nidx * sizeof(u16));
     }
     s_st.built++;
     s_st.built_verts += nv;
@@ -522,6 +551,13 @@ static u32 s_imm_stride, s_imm_layout;
 static int32_t s_imm_off[6];
 static u16 s_imm_idx[IMM_MAX_VERTS * 3 * 2];
 static GxVshImm s_imm_out;
+static u32 tri_count(u8 prim, u32 n);
+/* Where an immediate draw's triangle indices go: the record's index arena when it has room (the draw then does not
+ * copy them), else the staging array. */
+static u16* imm_idx_dst(u8 prim, u32 n) {
+    u16* d = plat_gpu_vsh_idx_reserve(tri_count(prim, n) * 3);
+    return d != NULL ? d : s_imm_idx;
+}
 
 /* Why an immediate draw of `prim`, n vertices, cannot use a stream (0: it can). */
 u32 gx_vsh_imm_reasons(u8 prim, u32 n) {
@@ -630,12 +666,13 @@ const GxVshImm* gx_vsh_imm_done(u8 prim, u32 n, const u8 attr_slot[8]) {
     plat_gpu_stream_commit(c->base + first * s_imm_stride, n * s_imm_stride);
     c->used += n;
     c->last_frame = plat_gpu_present_count();
-    u16* end = emit_tris(prim, first, n, s_imm_idx);
+    u16* dst = imm_idx_dst(prim, n);
+    u16* end = emit_tris(prim, first, n, dst);
     memcpy(s_imm_out.attr_slot, attr_slot, sizeof(s_imm_out.attr_slot));
     s_imm_out.base = c->base;
     s_imm_out.layout = s_imm_layout;
-    s_imm_out.idx = s_imm_idx;
-    s_imm_out.nidx = (u32)(end - s_imm_idx);
+    s_imm_out.idx = dst;
+    s_imm_out.nidx = (u32)(end - dst);
     s_st.imm_vsh++;
     s_st.imm_verts_vsh += n;
     return &s_imm_out;
@@ -712,12 +749,13 @@ void gx_vsh_gimm_translated(u32 chunk) {
 /* Translator: a draw the game thread wrote to its chunks, n vertices from `first` of the chunk at `base`. */
 const GxVshImm* gx_vsh_imm_at(u8 prim, const void* base, u32 first, u32 n, const u8 attr_slot[8]) {
     plat_gpu_stream_commit((const u8*)base + first * s_imm_stride, n * s_imm_stride);
-    u16* end = emit_tris(prim, first, n, s_imm_idx);
+    u16* dst = imm_idx_dst(prim, n);
+    u16* end = emit_tris(prim, first, n, dst);
     memcpy(s_imm_out.attr_slot, attr_slot, sizeof(s_imm_out.attr_slot));
     s_imm_out.base = base;
     s_imm_out.layout = s_imm_layout;
-    s_imm_out.idx = s_imm_idx;
-    s_imm_out.nidx = (u32)(end - s_imm_idx);
+    s_imm_out.idx = dst;
+    s_imm_out.nidx = (u32)(end - dst);
     s_st.imm_vsh++;
     s_st.imm_verts_vsh += n;
     return &s_imm_out;
@@ -727,7 +765,7 @@ void gx_vsh_stream_free(GxVshStream* s) {
     if (s == NULL) {
         return;
     }
-    if (s_npending == PENDING_MAX) {
+    if (s_npending + 2 > PENDING_MAX) {
         plat_gpu_sync(); /* nothing in flight reads any of them now */
         u32 now = plat_gpu_present_count();
         for (u32 i = 0; i < s_npending; i++) {
@@ -740,6 +778,13 @@ void gx_vsh_stream_free(GxVshStream* s) {
     s_pending[s_npending].len = s->nverts;
     s_pending[s_npending].frame = plat_gpu_present_count() + 3; /* the record being written and the one rendering */
     s_npending++;
+    if (s->lidx != NULL) { /* its indices are drawn from where they are: the same hold */
+        s_pending[s_npending].seg = (u16)s->iseg;
+        s_pending[s_npending].start = s->ifirst;
+        s_pending[s_npending].len = s->nidx;
+        s_pending[s_npending].frame = s_pending[s_npending - 1].frame;
+        s_npending++;
+    }
     free(s);
 }
 

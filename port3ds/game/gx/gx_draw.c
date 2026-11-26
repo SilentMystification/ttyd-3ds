@@ -2298,7 +2298,11 @@ int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nb
         plat_gpu_vsh_light(&s_vsh_light, s_vsh_light_id);
     }
     plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
-    plat_gpu_vsh_draw(gx_vsh_stream_base(s), s->layout, scales, vsh_cull(), s->idx, s->nidx);
+    if (s->lidx != NULL) {
+        plat_gpu_vsh_drawl(gx_vsh_stream_base(s), s->layout, scales, vsh_cull(), s->lidx, s->nidx); /* drawn in place */
+    } else {
+        plat_gpu_vsh_draw(gx_vsh_stream_base(s), s->layout, scales, vsh_cull(), s->idx, s->nidx);
+    }
     gx_vsh_last = (GxVshLast){(u8)(!gx_bbox_active && !s_bref_on && !s_dump),
                               {s_vsh_unit_attr[0], s_vsh_unit_attr[1], s_vsh_unit_attr[2]},
                               gx_vsh_stream_base(s), s->layout, scales, vsh_cull()};

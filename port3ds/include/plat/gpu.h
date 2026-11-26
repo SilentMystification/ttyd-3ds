@@ -289,8 +289,16 @@ void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uin
  * stands for (the counters only). */
 void plat_gpu_vsh_drawp(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, const uint16_t* idx,
                         uint32_t nidx, uint32_t calls);
-/* The index pool the DRAWP indices come from (gxbatch); a draw outside it is skipped at replay. NULL: unchecked. */
+/* Registers a linear index range the DRAWP indices may come from (gxbatch's pool, a stream index segment); a draw
+ * outside every range is skipped at replay. No range registered: unchecked. */
 void plat_gpu_set_index_pool(const void* base, uint32_t bytes);
+/* A cached stream's indices drawn in place (no copy), like plat_gpu_vsh_drawp, and a draw whose indices follow the
+ * previous draw's in memory (same stream, layout, scales, cull, nothing recorded between) merges into it. */
+void plat_gpu_vsh_drawl(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, const uint16_t* idx,
+                        uint32_t nidx);
+/* Room for `max` indices at the end of the current record's index arena, or NULL. An immediate draw writes its
+ * indices there and passes the pointer to plat_gpu_vsh_draw, which then does not copy them. */
+uint16_t* plat_gpu_vsh_idx_reserve(uint32_t max);
 
 typedef struct {
     uint32_t draws, vertices, state_changes;

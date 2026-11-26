@@ -23,6 +23,8 @@
 #include <3ds/3dslink.h>
 
 #include "plat_internal.h"
+#include "ctrdk/crash.h"
+#include "ctrdk/supervisor.h"
 
 extern u32 __ctru_heap_size, __ctru_linear_heap_size;
 #include "port3ds_build.h"
@@ -185,6 +187,12 @@ int plat_frame_poll(void) {
     }
     s_last_poll = nowt;
     plat_wd_progress();
+    if (plat_is_dev_build()) {
+        /* ctr-devkit supervisor (docs/CTR_DEVKIT_PLAN.md "Supervisor"): stores two words; a client
+         * thread sends them once per second. A held watchdog (load, menu) is reported as loading. */
+        static u32 s_sv_frame;
+        ctrdk_supervisor_heartbeat(++s_sv_frame, crash_wd_held() ? CTRDK_SV_HB_LOADING : 0);
+    }
     plat_devupdate_frame();
     s_last_poll = svcGetSystemTick(); /* an update pause (or a menu) inside the frame hook is not a hang: no gap warning */
     return aptMainLoop() ? 1 : 0;
@@ -312,6 +320,11 @@ int main(int argc, char** argv) {
     PLOG_I("TTYD 3DS v%s build %s, switches \"%s\"", PORT3DS_VERSION, PORT3DS_BUILD_STRING, plat_switches_text());
     PLOG_I("boot: argc %d argv[0] \"%s\" 3dslink_host 0x%08lx netload %d", argc,
            (argc > 0 && argv[0] != NULL) ? argv[0] : "(null)", (unsigned long)__3dslink_host.s_addr, s_netload);
+    if (plat_is_dev_build()) {
+        /* Before the GPU, audio and the disc: a build that hangs later still brings the supervisor up
+         * (nothing happens when it is not installed). */
+        PLOG_I("boot: supervisor ensure: %08lx", (unsigned long)ctrdk_supervisor_ensure());
+    }
 
     plat_cpu_limit_init();
     /* After the core-1 limit: the SD worker is a thread on core 1 (include/plat/sdio.h). */

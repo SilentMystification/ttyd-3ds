@@ -306,7 +306,7 @@ static inline GxState* gx_g(void) { return gx_rec_on() ? &gx_game : &gx; }
 void gx_rec_init(void);
 void gx_rec_call(u32 id, const u32* w, u32 n);
 extern int gx_dl_has_ops;
-void gx_rec_state_list(const void* list); /* a list the game built holds state calls */
+void gx_rec_state_list(const void* list, u32 nbytes); /* a list the game built holds state calls */
 /* Switch gxstatecache (default 1; PORT_3DS_GX_PERF.md, "Core-2 round 2", stage 2):
  *   1: a state call whose words equal the last ones applied for the same piece of state returns before it
  *      touches anything (no version change, so no rebuild), and compiled TEV setups are kept and reused;

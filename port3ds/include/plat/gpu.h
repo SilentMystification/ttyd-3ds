@@ -351,8 +351,13 @@ typedef struct {
 void plat_gpu_stats(PlatGpuStats* out);
 uint32_t plat_gpu_present_count(void); /* frames presented so far (the shot number) */
 
-/* The next presented frame's EFB to `path` (a PPM file, relative to sdmc:/3ds/ttyd/); ignored while one is pending. */
+/* The EFB of the next frame submitted for presentation after this call, on the recording thread, to `path` (a PPM
+ * file, relative to sdmc:/3ds/ttyd/); ignored while one is pending. */
 void plat_gpu_shot(const char* path);
+/* A layer that records GPU calls for another thread to submit (a deferred GX translator) puts the request in its
+ * record, so the shot follows the same frame as without it: the hook returns 1 when it took the request; the
+ * submitting thread later calls plat_gpu_shot again (the hook returns 0 there). NULL removes it. */
+void plat_gpu_set_shot_hook(int (*hook)(const char* path));
 
 #ifdef __cplusplus
 }

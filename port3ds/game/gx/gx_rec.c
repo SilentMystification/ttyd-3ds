@@ -44,6 +44,7 @@
  * the memory reports the game thread made after recording it.
  *
  * Game-agnostic: no TTYD knowledge. */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -130,6 +131,107 @@ static const char* const k_read_name[GXV_READ_COUNT] = {"list", "array", "tex", 
 static const char* const k_kind_name[4] = {"?", "fill", "write", "release"};
 static const char* const k_getter_name[GXG_COUNT] = {"vtxdesc", "vat", "proj", "viewport", "scissor", "cull", "copysrc"};
 
+/* ---- Phase timers (switch gxphase=N, gx_internal.h) ----
+ * The counters are the translator's (one writer); the game thread logs them as differences from the last log
+ * (32-bit, so no torn reads; tick sums wrap after 16 s, far above a log interval). */
+int gx_ph_on;
+static u32 gx_ph_sp;
+static struct {
+    u32 t, seg, n, samp;
+} s_ph[GPH_COUNT], s_ph_prev[GPH_COUNT];
+static u32 s_ph_outer[2], s_ph_outer_prev[2]; /* outer calls, outer calls timed */
+static u8 s_ph_stk[16];
+static u32 s_ph_t0, s_ph_cd = 1;
+static const char* const k_ph_name[GPH_COUNT] = {"cal", "list", "set", "prim", "primd", "raw", "other",
+                                                 "batopen", "batclose", "slow", "form", "state"};
+
+__attribute__((noinline, cold)) int gx_ph_enter_slow(int ph, int outer) {
+    s_ph[ph].n++;
+    u32 sp = gx_ph_sp;
+    if (sp == 0) {
+        if (!outer) {
+            return 0;
+        }
+        s_ph_outer[0]++;
+        if (--s_ph_cd != 0) {
+            return 0;
+        }
+        s_ph_cd = (u32)gx_ph_on;
+        s_ph_outer[1]++;
+        /* the outer call's clock starts, then an empty nested phase: its segments are the cost of one segment where
+         * the measured ones are taken (taken off every phase at the log) */
+        s_ph_stk[0] = (u8)ph;
+        gx_ph_sp = 1;
+        s_ph[ph].samp++;
+        s_ph_t0 = (u32)plat_ticks();
+        if (gx_ph_enter_slow(GPH_CAL, 0)) {
+            gx_ph_pop();
+        }
+        return 1;
+    }
+    if (sp >= 16) {
+        return 0;
+    }
+    u32 t = (u32)plat_ticks();
+    u32 o = s_ph_stk[sp - 1];
+    s_ph[o].t += t - s_ph_t0;
+    s_ph[o].seg++;
+    s_ph_stk[sp] = (u8)ph;
+    gx_ph_sp = sp + 1;
+    s_ph[ph].samp++;
+    s_ph_t0 = t;
+    return 1;
+}
+
+__attribute__((noinline, cold)) void gx_ph_pop(void) {
+    u32 t = (u32)plat_ticks();
+    u32 sp = --gx_ph_sp;
+    u32 ph = s_ph_stk[sp];
+    s_ph[ph].t += t - s_ph_t0;
+    s_ph[ph].seg++;
+    s_ph_t0 = t;
+}
+
+/* Game thread, at a log: the phases per frame, less the cost of a segment (the empty nested phase's), scaled by the
+ * outer calls per timed outer call. */
+static __attribute__((noinline, cold)) void gx_ph_log(u32 frame_no, u32 f) {
+    const u32 tpu = PLAT_TICKS_PER_SEC / 1000000u;
+    u32 cal_t = s_ph[GPH_CAL].t - s_ph_prev[GPH_CAL].t, cal_seg = s_ph[GPH_CAL].seg - s_ph_prev[GPH_CAL].seg;
+    u32 c16 = cal_seg ? (u32)((u64)cal_t * 16u / cal_seg) : 0; /* the cost of one segment, in 1/16 ticks */
+    u32 on = s_ph_outer[0] - s_ph_outer_prev[0], os = s_ph_outer[1] - s_ph_outer_prev[1];
+    char buf[3][200];
+    int len[3] = {0}, k = 0;
+    u64 sum_us = 0;
+    u32 segs = 0;
+    for (int p = GPH_CAL + 1; p < GPH_COUNT; p++) {
+        u32 dn = s_ph[p].n - s_ph_prev[p].n, ds = s_ph[p].samp - s_ph_prev[p].samp;
+        u32 dt = s_ph[p].t - s_ph_prev[p].t, dg = s_ph[p].seg - s_ph_prev[p].seg;
+        u64 net16 = (u64)dt * 16u > (u64)dg * c16 ? (u64)dt * 16u - (u64)dg * c16 : 0;
+        u32 us = os ? (u32)(net16 * on / os / 16u / tpu / f) : 0;
+        sum_us += us;
+        segs += dg;
+        if (dn != 0 && k < 3) {
+            len[k] += snprintf(buf[k] + len[k], sizeof(buf[k]) - len[k], " %s %lu/%lu/%lu", k_ph_name[p],
+                               (unsigned long)(dn / f), (unsigned long)(ds / f), (unsigned long)us);
+            if (len[k] > 150) {
+                k++;
+            }
+        }
+    }
+    PLOG_I("gxphase frame %lu translator: segment %lu.%02lu us, %lu segments, outer %lu timed of %lu per frame, est. "
+           "sum %lu us", (unsigned long)frame_no, (unsigned long)(c16 / 16u / tpu),
+           (unsigned long)(c16 * 100u / 16u / tpu % 100u), (unsigned long)(segs / f), (unsigned long)(os / f),
+           (unsigned long)(on / f), (unsigned long)sum_us);
+    for (int i = 0; i <= k && i < 3; i++) {
+        if (len[i] != 0) {
+            PLOG_I("gxphase   (calls/timed/us per frame):%s", buf[i]);
+        }
+    }
+    s_ph_outer_prev[0] = s_ph_outer[0];
+    s_ph_outer_prev[1] = s_ph_outer[1];
+    memcpy(s_ph_prev, s_ph, sizeof(s_ph));
+}
+
 static inline u32 load_sc(const u32* p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
 static inline void store_sc(u32* p, u32 v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }
 static inline int load_sci(const int* p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
@@ -157,7 +259,7 @@ static void check_textures(void) {
     }
 }
 
-static void run_one(u32 type, const u32* w, u32 n) {
+static inline __attribute__((always_inline)) void run_one(u32 type, const u32* w, u32 n) {
     switch (type) {
     case GXR_LIST: {
         const void* list = (const void*)w[0];
@@ -273,10 +375,44 @@ static void run_one(u32 type, const u32* w, u32 n) {
 /* Translates the ring up to word `upto` (the caller has gx_tls_translator set). */
 static int s_null; /* switch gxnull=1 (measuring only): the record is dropped, nothing is translated or drawn */
 
+/* consume with the phase timers (gxphase): a list call of a group counts as one outer call */
+static __attribute__((noinline, cold)) void consume_ph(u32 upto) {
+    u32 pub = s_rd;
+    while (s_rd != upto) {
+        const u32* c = s_ring + (s_rd & s_ring_mask);
+        u32 type = c[0] >> 24, n = c[0] & 0xFFFFFFu;
+        if (type == GXR_LIST && n > 4) {
+            s_cur = s_rd;
+            for (u32 i = 0; i < n; i += 3) {
+                int p = gx_ph_enter(GPH_T_LIST);
+                gx_call_list((const void*)c[1 + i], c[2 + i], (const void*)c[3 + i]);
+                gx_ph_leave(p);
+            }
+        } else if (type != GXR_WRAP) {
+            s_cur = s_rd;
+            int ph = type == GXR_LIST ? GPH_T_LIST : type == GXR_PRIM ? GPH_T_PRIM : type == GXR_PRIMD ? GPH_T_PRIMD
+                     : type == GXR_RAW ? GPH_T_RAW : type < REC_COUNT && type != REC_CopyDisp ? GPH_T_SET : GPH_T_OTHER;
+            int p = gx_ph_enter(ph);
+            run_one(type, c + 1, n);
+            gx_ph_leave(p);
+        }
+        s_rd += n + 1;
+        if (gx_rec_mode == 2 && s_rd - pub >= 4096) {
+            store_sc(&s_rd_pub, s_rd);
+            pub = s_rd;
+        }
+    }
+    store_sc(&s_rd_pub, s_rd);
+}
+
 static void consume(u32 upto) {
     if (s_null) {
         s_rd = upto;
         store_sc(&s_rd_pub, s_rd);
+        return;
+    }
+    if (__builtin_expect(gx_ph_on, 0)) {
+        consume_ph(upto);
         return;
     }
     u32 pub = s_rd;
@@ -1035,6 +1171,28 @@ static FlEntry* fl_get(const void* list, u32 nbytes) {
     return e;
 }
 
+/* fuse_list: a call that compares its own way (bit 31), has no slot, or whose slot differs. Notes it in the table as
+ * dd_same does and records it; 1 when recorded. */
+static __attribute__((noinline)) u32 fuse_call_slow(u32 hd, const u32* c, u32 gen) {
+    u32 id = hd & 0xFF, n = hd >> 8 & 0xFF, sl = hd >> 16 & 0xFFF;
+    if (hd >> 31) {
+        if (dd_same(s_dd, gen, id, c, n)) {
+            return 0;
+        }
+    } else if (sl != 0) {
+        /* the loop found the slot different */
+        DdSlot* d = &s_dd[sl - 1];
+        d->gen = gen;
+        d->id = (u8)id;
+        d->n = (u8)n;
+        for (u32 i = 0; i < n; i++) {
+            d->w[i] = c[i];
+        }
+    }
+    rec_words(id, c, n); /* not into the shadow (see above) */
+    return 1;
+}
+
 /* A state list's calls through the dedup table: 1 when done, 0 when the list takes the old way. */
 static int fuse_list(const void* list, u32 nbytes) {
     if (nbytes == 0 || nbytes > 0x4000) {
@@ -1062,36 +1220,40 @@ static int fuse_list(const void* list, u32 nbytes) {
     const u32* c = s_fl_pool + e->pos + ((e->nbytes + 3) >> 2);
     const u32* ce = c + e->words;
     const u32 gen = s_dd_gen;
+    const DdSlot* const dd = s_dd;
     u32 calls = 0, sent = 0;
+    /* dd_same's compare with the slot known; a call that compares its own way, has no slot or changed goes to
+     * fuse_call_slow (5519 of 5856 calls a frame in gor_01 are unchanged), so the loop keeps its values in registers */
     while (c < ce) {
         u32 hd = *c++;
-        u32 id = hd & 0xFF, n = hd >> 8 & 0xFF, sl = hd >> 16 & 0xFFF;
-        int same;
-        if (hd >> 31) {
-            same = dd_same(s_dd, gen, id, c, n);
-        } else if (sl != 0) {
-            /* dd_same's compare and note, with the slot known */
-            DdSlot* d = &s_dd[sl - 1];
-            u32 diff = (d->gen ^ gen) | ((u32)d->id ^ id) | ((u32)d->n ^ n);
-            for (u32 i = 0; i < n; i++) {
-                diff |= d->w[i] ^ c[i];
-            }
-            if (diff != 0) {
-                d->gen = gen;
-                d->id = (u8)id;
-                d->n = (u8)n;
-                for (u32 i = 0; i < n; i++) {
-                    d->w[i] = c[i];
-                }
-            }
-            same = diff == 0;
-        } else {
-            same = 0;
-        }
+        u32 n = hd >> 8 & 0xFF, sl = hd >> 16 & 0xFFF;
         calls++;
-        if (!same) {
-            rec_words(id, c, n); /* not into the shadow (see above) */
-            sent++;
+        if (__builtin_expect((s32)hd < 0 || sl == 0, 0)) {
+            sent += fuse_call_slow(hd, c, gen);
+            c += n;
+            continue;
+        }
+        const DdSlot* d = &dd[sl - 1];
+        u32 diff = (d->gen ^ gen) | ((u32)d->id ^ (hd & 0xFF)) | ((u32)d->n ^ n);
+        const u32* dw = d->w;
+        switch (n) { /* n <= DD_WORDS for a call with a slot */
+        default:
+            for (u32 i = 8; i < n; i++) {
+                diff |= dw[i] ^ c[i];
+            }
+            /* fallthrough */
+        case 8: diff |= dw[7] ^ c[7]; /* fallthrough */
+        case 7: diff |= dw[6] ^ c[6]; /* fallthrough */
+        case 6: diff |= dw[5] ^ c[5]; /* fallthrough */
+        case 5: diff |= dw[4] ^ c[4]; /* fallthrough */
+        case 4: diff |= dw[3] ^ c[3]; /* fallthrough */
+        case 3: diff |= dw[2] ^ c[2]; /* fallthrough */
+        case 2: diff |= dw[1] ^ c[1]; /* fallthrough */
+        case 1: diff |= dw[0] ^ c[0]; /* fallthrough */
+        case 0: break;
+        }
+        if (__builtin_expect(diff != 0, 0)) {
+            sent += fuse_call_slow(hd, c, gen);
         }
         c += n;
     }
@@ -1740,6 +1902,9 @@ void gx_rec_frame(void) {
                (unsigned long)(s_lg_calls / f), (unsigned long)(s_lg_groups / f));
         s_lg_calls = s_lg_groups = 0;
     }
+    if (gx_ph_on) {
+        gx_ph_log(s_frame_no, f);
+    }
     gx_dirty_log(f);
     gx_immdirect_log(f);
     if (gx_rec_mode == 3) {
@@ -1829,6 +1994,11 @@ void gx_rec_init(void) {
     }
     s_fuse_parts = plat_switch_int("gxrecfuseparts", 7) & 7;
     s_lgroup = plat_switch_int("gxreclgroup", 0) != 0;
+    gx_ph_on = plat_switch_int("gxphase", 0);
+    if (gx_ph_on < 0) {
+        gx_ph_on = 0;
+    }
+    s_ph_cd = 1;
     if (s_fuse) {
         PLOG_I("gxrecfuse=%d: state lists through the record's dedup, vertex description recorded as a difference%s",
                s_fuse, s_fuse == 2 ? " (verify)" : "");

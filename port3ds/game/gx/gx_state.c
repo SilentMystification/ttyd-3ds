@@ -9,6 +9,7 @@
  */
 #include <string.h>
 
+#include "gx_bigmem.h"
 #include "gx_internal.h"
 #include "port_addr.h"
 #include "plat/plat.h"
@@ -1165,6 +1166,180 @@ void gx_dl_replay_port_op(const u8** pp, const u8* end) {
     }
     *pp = p;
     gx_apply_call(id, w);
+}
+
+/* ---- Pre-decoded state calls of display lists (switch gxsdl, default 0) ----
+ * A material or state list is the same bytes called again and again. The leading run of NOPs and port opcodes of
+ * a list is decoded once into plain call words (id | count << 8, then the words) and kept with a copy of the
+ * bytes it came from; each call of the list compares the bytes (the list's own memory may have changed) and then
+ * applies the kept calls through gx_apply_call, as gx_dl_replay_port_op would have. What follows the prefix is
+ * left to the caller's byte decoder. A list with no such prefix keeps a four-byte signature so the next call
+ * does not scan again. A mismatch decodes the list afresh. Same calls, same order, same words: no picture change. */
+int gx_opt_sdl;
+#define SDL_SLOTS 4096
+#define SDL_POOL_WORDS (512 * 1024)
+typedef struct {
+    const u8* list;
+    u32 nbytes;
+    u32 pbytes; /* bytes of the decoded prefix (0: none; sig holds the first four bytes) */
+    u32 sig;
+    u32 pos;    /* pool word of the copy of the prefix bytes; the calls follow it */
+    u32 words;  /* pool words of the calls */
+} SdlEntry;
+static SdlEntry* s_sdl;
+static u32* s_sdl_pool;
+static u32 s_sdl_used;
+static u32 s_sdl_hit, s_sdl_miss, s_sdl_stale, s_sdl_reset, s_sdl_lookups;
+
+static inline int sdl_is_port(u32 op) { return op >= GXDL_OP_PORT && op != GXDL_OP_RAW_PRIM; }
+
+/* Decodes the prefix into `out` (cap words); returns the prefix bytes, *nw gets the words written. */
+static u32 sdl_scan(const u8* list, u32 nbytes, u32* out, u32 cap, u32* nw) {
+    const u8* p = list;
+    const u8* end = list + nbytes;
+    u32 k = 0, good = 0;
+    while (p < end) {
+        u32 op = *p;
+        if (op == 0x00 || op == 0x48 || op == 0x44) {
+            p++;
+            good = (u32)(p - list);
+            continue;
+        }
+        if (!sdl_is_port(op) || end - p < 3) {
+            break;
+        }
+        u32 id = p[1], n = p[2];
+        if (n > 32 || k + 1 + n > cap) {
+            break;
+        }
+        const u8* q = p + 3;
+        u32 base = k;
+        out[k++] = id | n << 8;
+        int ok = 1;
+        for (u32 i = 0; i < n && ok; i++) {
+            u32 v = 0;
+            for (u32 shift = 0;; shift += 7) {
+                if (q >= end || shift > 28) {
+                    ok = 0;
+                    break;
+                }
+                u8 b = *q++;
+                v |= (u32)(b & 0x7F) << shift;
+                if (!(b & 0x80)) {
+                    break;
+                }
+            }
+            out[k++] = v;
+        }
+        if (!ok) {
+            k = base;
+            break;
+        }
+        p = q;
+        good = (u32)(p - list);
+        /* NOPs after the last call stay in `good` only up to here: trailing ones are counted at the next turn */
+    }
+    *nw = k;
+    return good;
+}
+
+static u32 sdl_sig(const u8* list, u32 nbytes) {
+    u32 s = 0;
+    for (u32 i = 0; i < 4 && i < nbytes; i++) {
+        s = s << 8 | list[i];
+    }
+    return s;
+}
+
+/* Applies the state calls at the start of the list; returns the bytes they covered (the caller runs the rest). */
+u32 gx_sdl_run(const u8* list, u32 nbytes) {
+    if (nbytes < 4) {
+        return 0;
+    }
+    if (s_sdl == NULL) {
+        s_sdl = gx_big_alloc("gxsdl entries", sizeof(SdlEntry) * SDL_SLOTS);
+        s_sdl_pool = gx_big_alloc("gxsdl calls", sizeof(u32) * SDL_POOL_WORDS);
+    }
+    if ((++s_sdl_lookups & 0x3FFFF) == 0) {
+        PLOG_I("gxsdl: %lu lookups: %lu hit, %lu decoded, %lu stale, %lu resets", (unsigned long)s_sdl_lookups,
+               (unsigned long)s_sdl_hit, (unsigned long)s_sdl_miss, (unsigned long)s_sdl_stale,
+               (unsigned long)s_sdl_reset);
+    }
+    u32 h = ((u32)(uintptr_t)list >> 5 ^ nbytes * 0x9E3779B1u) * 2654435761u >> 20;
+    SdlEntry* e = NULL;
+    SdlEntry* freeslot = NULL;
+    for (u32 i = 0; i < 4; i++) {
+        SdlEntry* c = &s_sdl[(h + i) & (SDL_SLOTS - 1)];
+        if (c->list == list && c->nbytes == nbytes) {
+            e = c;
+            break;
+        }
+        if (c->list == NULL && freeslot == NULL) {
+            freeslot = c;
+        }
+    }
+    if (e != NULL) {
+        int same;
+        if (e->pbytes == 0) {
+            same = e->sig == sdl_sig(list, nbytes);
+        } else {
+            same = memcmp(list, s_sdl_pool + e->pos, e->pbytes) == 0;
+        }
+        if (same) {
+            s_sdl_hit++;
+            if (e->pbytes == 0) {
+                return 0;
+            }
+            const u32* c = s_sdl_pool + e->pos + ((e->pbytes + 3) >> 2);
+            const u32* ce = c + e->words;
+            while (c < ce) {
+                u32 hd = *c++;
+                gx_apply_call(hd & 0xFF, c);
+                c += hd >> 8;
+            }
+            return e->pbytes;
+        }
+        s_sdl_stale++;
+    } else {
+        s_sdl_miss++;
+        e = freeslot != NULL ? freeslot : &s_sdl[h & (SDL_SLOTS - 1)];
+    }
+    /* decode (again): the copy of the bytes, then the calls */
+    if (s_sdl_used + (nbytes >> 2) + 8 + 1024 > SDL_POOL_WORDS) {
+        memset(s_sdl, 0, sizeof(SdlEntry) * SDL_SLOTS);
+        s_sdl_used = 0;
+        s_sdl_reset++;
+        e = &s_sdl[h & (SDL_SLOTS - 1)];
+    }
+    /* the calls are scanned into the pool after room for the copy, whose size is not known yet: scan first */
+    u32 room = SDL_POOL_WORDS - s_sdl_used;
+    u32* scratch = s_sdl_pool + s_sdl_used + ((nbytes + 3) >> 2); /* the copy of the whole list would fit before */
+    u32 cap = room - ((nbytes + 3) >> 2);
+    u32 nw = 0;
+    u32 pbytes = sdl_scan(list, nbytes, scratch, cap, &nw);
+    e->list = list;
+    e->nbytes = nbytes;
+    e->sig = sdl_sig(list, nbytes);
+    if (nw == 0) {
+        e->pbytes = 0; /* nothing to apply here (no port opcode in the prefix): run it all as before */
+        e->pos = e->words = 0;
+        return 0;
+    }
+    u32 cw = (pbytes + 3) >> 2;
+    memmove(s_sdl_pool + s_sdl_used + cw, scratch, nw * sizeof(u32));
+    memcpy(s_sdl_pool + s_sdl_used, list, pbytes);
+    e->pbytes = pbytes;
+    e->pos = s_sdl_used;
+    e->words = nw;
+    s_sdl_used += cw + nw;
+    const u32* c = s_sdl_pool + e->pos + cw;
+    const u32* ce = c + nw;
+    while (c < ce) {
+        u32 hd = *c++;
+        gx_apply_call(hd & 0xFF, c);
+        c += hd >> 8;
+    }
+    return pbytes;
 }
 
 void gx_apply_call(u32 id, const u32* w) {

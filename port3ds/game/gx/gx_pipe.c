@@ -1252,6 +1252,13 @@ void gx_call_list(const void* list, u32 nbytes, const void* caller) {
     if (gx_dlcache_enabled() && gx_dlcache_call(&gx, list, nbytes)) {
         s_list_kind = 1; /* drawn from the cache: only lists of primitives are cached */
     } else {
+        if (gx_opt_sdl) {
+            u32 done = gx_sdl_run((const u8*)list, nbytes);
+            if (done != 0) {
+                s_list_kind |= 2;
+                r.p += done;
+            }
+        }
         run_commands(&r, 1);
         gx_dlc_cap_finish(&gx, s_list_kind);
     }

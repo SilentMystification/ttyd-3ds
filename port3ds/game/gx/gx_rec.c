@@ -1235,6 +1235,7 @@ void gx_rec_frame(void) {
 
 void gx_rec_init(void) {
     t_game = 1;
+    gx_opt_sdl = plat_switch_int("gxsdl", 0) != 0;
     if (s_dda == NULL) {
         int sc = plat_switch_int("gxstatecache", 1);
         s_dda = sc >= 1 && sc <= 2 ? calloc(DD_SLOTS, sizeof(DdSlot)) : NULL;

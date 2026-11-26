@@ -725,6 +725,56 @@ Build `ff42ccc` (the new defaults), release, `gxthread=0`, `gxdirty=0` against `
 
 No scene is slower. With the four scenes above, `gxdirty=1` is now measured in all ten scenes. **Not run:** `vsh_accept.py`, the `gxcache=2` sweep with `gxdirty=1`, `gxthread=2` with `gxdirty`. Default stays 0 (owner's decision).
 
+## Stage 3, `gxdirect`: the render thread writes PICA registers itself (2026-11-26)
+
+Switch `gxdirect` (default 0; 2 is a verify mode). File: `port3ds/plat/gpu.c` only (render thread). It applies to shader-path draws (`CMD_VSH_DRAW`, `CMD_VSH_DRAWP`); CPU-path draws, clears, copies, the stereo warp and the present stay on citro3d.
+
+- **Draw.** The register words of `C3D_DrawElements(GPU_TRIANGLES, n, C3D_UNSIGNED_SHORT, idx)` after its `C3Di_UpdateContext`: a 30-word packet built once at start-up with libctru's `GPUCMD_*` (the encoder citro3d uses), copied per draw with the index offset and count patched. Checked against the disassembly of the installed `libcitro3d.a` (citro3d 1.7.1): same registers, values and order.
+- **Uniform rows.** `vunif` keeps the rows in a pending set instead of `C3D_FVUnifSet`; before each draw every run of pending rows goes out as `C3D_UpdateUniforms` writes it (`GPUREG_VSH_FLOATUNIFORM_CONFIG` = `0x80000000 | first`, then the run's data through `GPUCMD_AddWrites`), and citro3d's `C3D_FVUnif` copy is kept equal. The `lit` bool and the `lcount` int uniform go through citro3d only when they change. `C3D_UpdateUniforms` (96 rows scanned per draw) no longer runs per draw.
+- **State.** In three classes: TEV (stages, combiner buffer, fog mode and colour), texture units (the three `C3D_Tex` after the sampler setters), pixel pipeline (alpha test, blend, depth, viewport, scissor); plus the attribute setup per (stream, layout). The first time a key is seen, citro3d's own setters run and the words `C3Di_UpdateContext` emits for them are captured (command buffer pointed at a scratch array) and kept with the key (4-way tables, 406 KB of heap); after that the kept words are copied. A class goes out only when its key differs from the one the GPU holds. A `CMD_STATE` or delta is sent at the next draw, not at once. Cull is one `GPUREG_FACECULLING_CONFIG` write. Copied, never `GPUREG_CMDBUF_JUMP`.
+- **Determinism of the kept words.** With the switch on, the setters give a fixed value to registers the state leaves unused (fog colour 0 with fog off; the blend factors under a logic op; logic op COPY under blending; with an empty scissor, scissor off with corners 0), so equal keys give equal words. These registers have no effect on the image.
+- **citro3d's shadow.** After kept words, citro3d's copy of the state lags behind the GPU. Before any citro3d-path work (`C3D_PATH` in `render_record`: a CPU-path draw, a clear, a copy, the stereo split and warp, the present) the state in force goes through citro3d's setters again and every class is marked not held by the GPU. When citro3d emits a group on its own before a direct draw (`c3d_flush`), the classes are marked the same way. At each record start everything is marked not held (also covers an APT restore).
+- **Fog LUT.** With the switch on, `CMD_FOG` writes the LUT at once (`GPUREG_FOG_LUT_INDEX` 0, then the 128 words citro3d would write) and takes it off citro3d's pending list.
+- **Scissor guard (c883edf).** An empty scissor skips the draw on the direct path too; the flag is recomputed whenever the pixel block goes out (kept words do not run `apply_pix`).
+- **citro3d internals used:** `__C3D_Context` word 8 (flags) and word 16 (`bufInfo.base_paddr`), checked at start-up (`C3D_SetBufInfo` must set bit 3 and the base; else `gxdirect` turns itself off with a warning), and `C3Di_UpdateContext` (a global symbol of `libcitro3d.a`). A citro3d update must be checked again.
+- **Counters:** with `gxthreadstats=N`, two `gxdirect frame N:` lines (blocks copied and captured per class, citro3d flushes, uniform runs; verify checks and mismatches, uncached blocks, states with a viewport under one pixel, largest block per class). Render phases 8 (capture) and 9 (direct draw) in the hang report.
+
+Results (Azahar, build `982e6eee` = port3ds `c883edf` + this change, release, default switches against `gxdirect=1`):
+
+| Check | Result |
+|---|---|
+| `gxdirect=2`, gor_01 (story 30), frames 1 to 840 (dev build) | 0 `gxdirect verify` warnings (every block, uniform run and draw packet built through citro3d as well and compared byte for byte; about 113 000 checks per 60 frames in the map) |
+| `gxdirect=2`, effects battle, frames 1 to 960 (dev build) | 50 000 checks per 60 frames in the battle, **0 mismatches** |
+| `determ` (`determ_ab.py`), gor_01, hei_01, aaa_00 shots 780 to 785; effects battle 900 to 905 | **6 of 6 byte-identical in each** (24 of 24; 89 to 98% of pixels off the commonest colour) |
+| `gw_diff.py`, 1600-frame padscript (`map=gor_01 story=30 determ gwdump=10` and the A2 padscript) | `gw_diff: A 160 records, B 160 records` / `gw_diff: 160 records equal (f 10..1600, fields compared: 23)` |
+
+Same-build A/B, `tools/port3ds/gx_perf_ab.py`, windows ending at frames 722 to 841, one run per cell:
+
+| Scene | frame A -> B (ms) | core-0 busy A -> B (ms) | render A -> B (ms) |
+|---|---|---|---|
+| gor_01 | 50.5 -> 50.5 | 45.7 -> 45.7 | 16.4 -> **7.9** (-52%) |
+| effects battle | 39.3 -> 38.4 | 27.3 -> 27.2 | 7.2 -> **3.8** (-47%) |
+| hei_01 | 33.4 -> 33.4 | 20.9 -> 20.9 | 6.2 -> **3.4** (-45%) |
+| aaa_00 | 33.4 -> 33.4 | 22.5 -> 22.5 | 8.3 -> **4.2** (-49%) |
+
+- Render work halves in every scene (the plan's estimate for gor_01 was 14 -> about 7). Frame and core-0 times do not change: in this layout (`gxthread=0`) the render thread is on core 2 and was not the wall. It becomes the budget the stage-5 hop has to fit.
+- In gor_01 per frame (verify run): about 570 direct draws, 43 TEV, 342 texture, 170 pixel and 117 layout blocks sent, about 650 uniform runs, 1 citro3d flush. No block was uncached; no state had a viewport under one pixel.
+- A run before the rebase onto c883edf (build `0c4e72e3`) gave the same: identity 24 of 24, render 15.6 -> 7.8 (gor_01), 7.2 -> 3.8, 6.2 -> 3.4, 8.3 -> 4.2.
+
+**Console-test items** (Azahar accepts these; hardware is not proven):
+
+1. The direct path writes the same registers in the same order as citro3d for the draw and the uniform runs, but the state goes out in a different order and amount than with citro3d: only the changed classes, at the draw, and cull as a single `GPUREG_FACECULLING_CONFIG` write instead of the whole effect group. Any register-order dependence on the PICA would show here first.
+2. Command-buffer alignment and padding: kept blocks are copied at an even word offset; every block is a run of whole libctru commands (padded to even length by `GPUCMD_Add`). A full buffer stops in `svcBreak` as libctru does.
+3. `GPUREG_RESTART_PRIMITIVE` (0x25F), `GPUREG_PRIMITIVE_CONFIG` (0x25E) and the draw-mode registers `GPUREG_GEOSTAGE_CONFIG` (0x229), `GPUREG_GEOSTAGE_CONFIG2` (0x253), `GPUREG_START_DRAW_FUNC0` (0x245): same words as `C3D_DrawElements`, but the draws now follow each other with fewer other writes between them.
+4. Fixed attributes (`GPUREG_FIXEDATTRIB_INDEX` and data) of a layout block are sent only when the layout changes, not at each layout switch through citro3d.
+5. The fog LUT is written when `CMD_FOG` arrives, also while fog is off.
+6. The texture cache clear (`GPUREG_TEXUNIT_CONFIG` bit 16) goes out only with a texture block, i.e. when the bound textures or their sampler fields change, after a copy or clear, and at each record start; citro3d sent it at every state change. Textures written by the GPU mid-record (EFB copies) always go through the citro3d path first, which marks the blocks invalid.
+7. The empty-scissor state with `gxdirect=1` writes scissor mode off with corners 0 (draws under it are skipped).
+
+Console command (owner-gated; not run): install the release CIA and set `gxdirect=1` in `debug3ds.txt`, then compare `gxthreadstats=60` render times and look for hangs in gor_01 and a battle.
+
+**Not done:** `vsh_accept.py`, the other six scenes of the ten, the `gxcache=2` sweep with `gxdirect=1`, `gxthread=2` with `gxdirect`, any console run. Default stays 0.
+
 ## Risks of the cache
 
 - **Hash collisions.** A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.

@@ -20,7 +20,9 @@
  */
 #include <citro3d.h>
 #include <malloc.h>
+#include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -106,6 +108,9 @@ static u32 s_frame_counter;
 static volatile int s_busy;
 static volatile u32 s_rphase, s_rseq;
 static const char* volatile s_gmark = "none";
+/* render phases: 0 idle, 1 C3D_FrameBegin, 2 replay, 3 replay after a copy or a gxdirect step, 4 reap_targets,
+ * 5 C3D_RenderTargetDelete, 6 copy, 7 C3D_FrameEnd, 8 gxdirect capture (citro3d setters into the scratch buffer),
+ * 9 gxdirect shader draw */
 #define RPHASE(n) (s_rphase = (n))
 #define GMARK(name) (s_gmark = (name))
 
@@ -1035,6 +1040,7 @@ uint32_t plat_gpu_tex_read(uint32_t handle, void* rgba8, uint32_t width, uint32_
 
 static int s_scissor_empty;   /* the last apply_state set an empty scissor: draws are skipped */
 static int s_scissor_gx[4];   /* that scissor, x0 y0 x1 y1 */
+static int scissor_rect(const PlatGpuState* st, int out[4]);
 static void scissor_skip_log(void) {
     static u32 s_logged;
     if (s_logged++ == 0) {
@@ -1043,7 +1049,16 @@ static void scissor_skip_log(void) {
     }
 }
 
-static void apply_state(const PlatGpuState* st) {
+/* Switch gxdirect (stage 3, PORT_3DS_GX_PERF.md): 0 off; 1 the replay writes the shader path's PICA words itself
+ * (gxdirect section below); 2 as 1, and every word is also built through citro3d and compared. With it on, the
+ * setters below make words that depend only on the state (`det`): a register the state leaves unused (the fog colour
+ * with fog off, the blend factors under a logic op, the logic op under blending) gets a fixed value instead of the
+ * value set last. */
+static int s_direct;
+
+/* apply_state in three classes. The order of citro3d's setters does not change what C3Di_UpdateContext emits: it
+ * writes the dirty groups in its own fixed order. */
+static void apply_tev(const PlatGpuState* st, int det) {
     for (int i = 0; i < 6; i++) {
         C3D_TexEnv* env = C3D_GetTexEnv(i);
         C3D_TexEnvInit(env);
@@ -1063,10 +1078,19 @@ static void apply_state(const PlatGpuState* st) {
     C3D_TexEnvBufUpdate(C3D_RGB, st->buffer_input_rgb & 0xF);
     C3D_TexEnvBufUpdate(C3D_Alpha, st->buffer_input_alpha & 0xF);
     C3D_TexEnvBufColor(st->buffer_color);
+    /* the fog mode and colour are in the texture-environment buffer group (GPUREG_TEXENV_UPDATE_BUFFER) */
+    C3D_FogGasMode(st->fog_enable ? GPU_FOG : GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
+    if (st->fog_enable || det) {
+        C3D_FogColor(st->fog_enable ? st->fog_color : 0);
+    }
+}
+
+/* The texture objects' sampler fields (inline setters, no citro3d state) and the object each unit binds. */
+static void tex_prepare(const PlatGpuState* st, C3D_Tex* t_out[3]) {
     for (int u = 0; u < 3; u++) {
         const PlatGpuTexUnit* tu = &st->tex[u];
         if (tu->handle == 0 || tu->handle >= MAX_TEX || !s_tex[tu->handle].tex.data) {
-            C3D_TexBind(u, &s_blank_tex);
+            t_out[u] = &s_blank_tex;
             continue;
         }
         C3D_Tex* t = &s_tex[tu->handle].tex;
@@ -1074,9 +1098,26 @@ static void apply_state(const PlatGpuState* st) {
         C3D_TexSetFilterMipmap(t, tu->mip_linear && t->maxLevel != 0 ? GPU_LINEAR : GPU_NEAREST);
         C3D_TexSetLodBias(t, tu->lod_bias);
         C3D_TexSetWrap(t, (GPU_TEXTURE_WRAP_PARAM)tu->wrap_s, (GPU_TEXTURE_WRAP_PARAM)tu->wrap_t);
-        C3D_TexBind(u, t);
+        t_out[u] = t;
     }
+}
+
+static void tex_bind3(C3D_Tex* const t[3]) {
+    for (int u = 0; u < 3; u++) {
+        C3D_TexBind(u, t[u]);
+    }
+}
+
+static void apply_pix(const PlatGpuState* st, int det) {
     C3D_AlphaTest(st->alpha_test_enable, (GPU_TESTFUNC)st->alpha_test_func, st->alpha_test_ref);
+    if (det) {
+        /* both the blend and the logic-op fields get a value; the second call below picks the mode */
+        if (st->blend_mode == 2) {
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+        } else {
+            C3D_ColorLogicOp(GPU_LOGICOP_COPY);
+        }
+    }
     if (st->blend_mode == 1) {
         C3D_AlphaBlend((GPU_BLENDEQUATION)st->blend_eq_rgb, (GPU_BLENDEQUATION)st->blend_eq_alpha,
                        (GPU_BLENDFACTOR)st->blend_src_rgb, (GPU_BLENDFACTOR)st->blend_dst_rgb,
@@ -1093,10 +1134,6 @@ static void apply_state(const PlatGpuState* st) {
     /* window depth = far + (z/w) * (far - near), z/w in [-1, 0] as on GX */
     float zrange = st->depth_far - st->depth_near;
     C3D_DepthMap(true, zrange, st->depth_far); /* PICA: depth = scale * z/w + offset */
-    C3D_FogGasMode(st->fog_enable ? GPU_FOG : GPU_NO_FOG, GPU_PLAIN_DENSITY, false);
-    if (st->fog_enable) {
-        C3D_FogColor(st->fog_color);
-    }
     float tx, ty, tw, th;
     efb_to_target_rect(st->viewport_x, st->viewport_y, st->viewport_w, st->viewport_h, &tx, &ty, &tw, &th);
     if (tx < 0) tx = 0;
@@ -1104,6 +1141,20 @@ static void apply_state(const PlatGpuState* st) {
     if (tw >= 1 && th >= 1) {
         C3D_SetViewport((u32)tx, (u32)ty, (u32)tw, (u32)th);
     }
+    int sc[4];
+    s_scissor_empty = scissor_rect(st, sc);
+    if (!s_scissor_empty) {
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)sc[0], (u32)sc[1], (u32)sc[2], (u32)sc[3]);
+    } else if (det) {
+        /* draws are skipped; the scissor words still get fixed values (C3D_SetViewport above left the mode off and
+         * the corners as set last). Mode off, corners 0. */
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0, 1, 1);
+        C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    }
+}
+
+/* The state's scissor in target pixels (x0 y0 x1 y1, end exclusive), clamped to the target region; 1 when empty. */
+static int scissor_rect(const PlatGpuState* st, int out[4]) {
     float sx, sy, sw, sh;
     efb_to_target_rect(st->scissor_x0, st->scissor_y0, (float)(st->scissor_x1 - st->scissor_x0),
                        (float)(st->scissor_y1 - st->scissor_y0), &sx, &sy, &sw, &sh);
@@ -1119,10 +1170,20 @@ static void apply_state(const PlatGpuState* st) {
     s_scissor_gx[1] = y0;
     s_scissor_gx[2] = x1;
     s_scissor_gx[3] = y1;
-    s_scissor_empty = x1 <= x0 || y1 <= y0;
-    if (!s_scissor_empty) {
-        C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)x0, (u32)y0, (u32)x1, (u32)y1);
-    }
+    out[0] = x0;
+    out[1] = y0;
+    out[2] = x1;
+    out[3] = y1;
+    return x1 <= x0 || y1 <= y0;
+}
+
+static void apply_state(const PlatGpuState* st) {
+    int det = s_direct != 0;
+    C3D_Tex* t[3];
+    apply_tev(st, det);
+    tex_prepare(st, t);
+    tex_bind3(t);
+    apply_pix(st, det);
 }
 
 static void draw_rect_quad(Record* r, u16 x, u16 y, u16 w, u16 h, u32 rgba, u32 depth24, int color, int depth) {
@@ -1422,6 +1483,10 @@ static void rot_rows(float r0[4], float r1[4]) {
 static u32 s_vunif[96][4];
 static int s_urow = 1; /* switch gxurow (default 1); 0 sets every uniform row every time (hardware bisect) */
 static void vunif_reset(void) { memset(s_vunif, 0xFF, sizeof(s_vunif)); }
+/* gxdirect: the rows' values in citro3d's order (w, z, y, x: C3D_FVec), and the rows not yet written to the GPU */
+static u32 s_vval[96][4];
+static u32 s_vpend[3];
+static int s_c3d_unif = 1; /* gxdirect: citro3d may hold dirty uniforms or fixed attributes its flags do not show */
 static inline void vunif(int id, float x, float y, float z, float w) {
     if (id < 0 || id >= 96) {
         return;
@@ -1431,6 +1496,12 @@ static inline void vunif(int id, float x, float y, float z, float w) {
         return;
     }
     memcpy(s_vunif[id], v, 16);
+    if (s_direct) {
+        float p[4] = {w, z, y, x};
+        memcpy(s_vval[id], p, 16);
+        s_vpend[id >> 5] |= 1u << (id & 31);
+        return;
+    }
     C3D_FVUnifSet(GPU_VERTEX_SHADER, id, x, y, z, w);
 }
 
@@ -1465,7 +1536,12 @@ static void vsh_apply_const(const PlatGpuVshConst* c) {
     vunif(s_uloc_clrmix, c->clrmix[0], c->clrmix[1], c->clrmix[2], c->clrmix[3]);
     vunif(s_uloc_matclr, c->matclr[0], c->matclr[1], c->matclr[2], c->matclr[3]);
     if (s_uloc_lit >= 0) {
-        C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_lit, (c->flags & PLAT_VSH_LIT) != 0);
+        bool lit = (c->flags & PLAT_VSH_LIT) != 0;
+        /* gxdirect: only a change dirties citro3d (a dirty uniform costs a C3Di_UpdateContext before the next draw) */
+        if (!s_direct || ((C3D_BoolUnifs[GPU_VERTEX_SHADER] >> (s_uloc_lit - 0x68) & 1) != 0) != lit) {
+            C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_lit, lit);
+            s_c3d_unif = 1;
+        }
     }
 }
 
@@ -1490,7 +1566,11 @@ static void vsh_apply_light(const PlatGpuVshLight* l) {
         vunif(s_uloc_lkk + i, l->light[i].k[0], l->light[i].k[1], l->light[i].k[2], 0);
     }
     /* the loop runs count + 1 times; with no light it runs once over light 0, which the front end zeroes */
-    C3D_IVUnifSet(GPU_VERTEX_SHADER, s_uloc_lcount, n ? (int)n - 1 : 0, 0, 1, 0);
+    u32 iv = IVec_Pack(n ? (int)n - 1 : 0, 0, 1, 0);
+    if (!s_direct || C3D_IVUnif[GPU_VERTEX_SHADER][s_uloc_lcount - 0x60] != iv) {
+        C3D_IVUnifSet(GPU_VERTEX_SHADER, s_uloc_lcount, n ? (int)n - 1 : 0, 0, 1, 0);
+        s_c3d_unif = 1;
+    }
 }
 
 static float pow2_neg(u32 k) {
@@ -1561,6 +1641,7 @@ static void vsh_apply_layout(const void* stream, u32 layout, C3D_AttrInfo* ai, C
             C3D_FixedAttribSet(fixed[i], 0, 0, fixed_reg[i] == 5 ? 1.0f : 0.0f, 0);
         }
     }
+    s_c3d_unif = 1; /* fixed attributes */
 }
 
 /* GX cull mode -> PICA. GX's front face is counter-clockwise in its clip
@@ -1672,10 +1753,469 @@ static u8* stereo_split(const Record* r, u32* tail_cmds, u32* tail_zwrites) {
     return scene ? split : NULL;
 }
 
+/* ---- gxdirect (stage 3): the replay writes the shader path's PICA words itself ----
+ *
+ * Every word is one citro3d or libctru would write, made by their own encoders:
+ *  - a draw: C3D_DrawElements' packet for u16 triangles (citro3d 1.7.1 drawElements.c), built once at start-up with
+ *    libctru's GPUCMD_* and patched with the index offset and count;
+ *  - uniform rows: what C3D_UpdateUniforms writes for a run of dirty rows (GPUREG_VSH_FLOATUNIFORM_CONFIG, then the
+ *    run's data through GPUCMD_AddWrites, which splits runs over 256 words as for citro3d);
+ *  - the PICA state in three classes (TEV with fog mode and colour; the texture units; the pixel pipeline with
+ *    viewport and scissor) and the attribute setup per (stream, layout): the first time a key is seen, citro3d's
+ *    setters run and the words its C3Di_UpdateContext emits for them are captured (the command buffer pointed at a
+ *    scratch array), kept with the key, and copied into the command buffer; after that the kept words are copied.
+ *    The key is everything the setters read (the texture units' key is the C3D_Tex objects after the sampler
+ *    setters), so equal keys give equal words (with the `det` setters, apply_tev/apply_pix).
+ * citro3d's own copy of the state then lags behind the GPU. Before the replay goes back to citro3d (a CPU-path draw,
+ * a clear, a copy, the stereo warp, the present: C3D_PATH in render_record), the state in force goes through its
+ * setters again and every class is marked as not held by the GPU. When C3Di_UpdateContext emits a group on its own,
+ * the classes are marked the same way. Blocks are copied: no GPUREG_CMDBUF_JUMP.
+ * citro3d internals used: __C3D_Context's flags (word 8) and bufInfo.base_paddr (word 16), checked at start-up, and
+ * C3Di_UpdateContext (a global symbol of libcitro3d.a). */
+extern u32 __C3D_Context[];
+void C3Di_UpdateContext(void);
+#define C3DX_FLAGS (__C3D_Context[8])
+#define C3DX_BUFBASE (__C3D_Context[16])
+#define C3DXF_ACTIVE 0x1u
+#define C3DXF_DRAWUSED 0x2u
+#define C3DXF_ATTRBUF 0xCu
+#define C3DXF_FOGLUT 0x20000u
+/* effect, viewport, scissor, texture-environment buffer, texture status, units, stages */
+#define C3DXF_CLASS (0x10u | 0x40u | 0x80u | 0x200u | 0x4000u | 0x3800000u | 0xFC000000u)
+
+enum { DC_TEV, DC_TEX, DC_PIX, DC_LAY, DC_N };
+#define DK_TEV 28 /* key words: stages .. buffer_color (26), fog enable, fog colour */
+#define DK_TEX 18 /* 3 C3D_Tex */
+#define DK_PIX 12 /* alpha_test_enable .. color_write (4), scissor_x0 .. depth_far (8) */
+#define DK_LAY 2  /* stream, layout */
+#define DK_MAX 28
+_Static_assert(sizeof(C3D_Tex) == 24, "C3D_Tex is 6 words");
+_Static_assert(offsetof(PlatGpuState, tex) == 26 * 4, "TEV key region");
+_Static_assert(offsetof(PlatGpuState, cull) - offsetof(PlatGpuState, alpha_test_enable) == 16, "pixel key region");
+_Static_assert(sizeof(PlatGpuState) - offsetof(PlatGpuState, scissor_x0) == 32, "scissor key region");
+
+/* A table of kept words: 4-way sets, entry = [hash, words (0: empty), stamp, key..., words...] */
+#define DT_WAYS 4
+typedef struct {
+    u32 slots, keyw, capw, stride, stamp;
+    u32* mem;
+} DTab;
+static DTab s_dtab[DC_N];
+static const char* const k_dc_name[DC_N] = {"tev", "tex", "pix", "lay"};
+static u32 s_dkey[3][DK_MAX]; /* the keys of the class blocks the GPU holds */
+static int s_gpu_valid;        /* bit c: s_dkey[c] is what the GPU holds */
+static int s_lay_valid;        /* the GPU holds the attribute setup of v_stream / v_layout */
+static int s_shadow_stale;     /* kept words went to the GPU since citro3d's setters last saw the state in force */
+static int s_state_pending;    /* a CMD_STATE or delta not sent yet (gxdirect sends the state at the next draw) */
+static u32 s_cap[512];         /* capture scratch */
+static u32 s_cap2[512];        /* gxdirect=2: the second build */
+static u32 s_tpl[32], s_tpl_n, s_tpl_idx, s_tpl_cnt; /* the draw packet */
+static struct {
+    u32 draws, copied[DC_N], captured[DC_N], uncached, flushes, runs, degenerate;
+    u32 checks, mismatches;
+    u32 maxw[DC_N];
+} s_dst;
+static u32 s_dlog_every, s_dlog_n;
+
+static u32 dkey_hash(const u32* k, u32 n) {
+    u32 h = 2166136261u;
+    for (u32 i = 0; i < n; i++) {
+        h = (h ^ k[i]) * 16777619u;
+    }
+    /* FNV's low bits depend only on the inputs' low bits (aligned pointers, sizes in the upper half): mix the high
+     * bits down before the set index takes the low ones */
+    h ^= h >> 16;
+    h *= 0x85EBCA6Bu;
+    h ^= h >> 13;
+    h *= 0xC2B2AE35u;
+    h ^= h >> 16;
+    return h;
+}
+
+static u32* dtab_find(DTab* t, const u32* key, u32 h) {
+    u32 i = h & (t->slots - 1) & ~(DT_WAYS - 1u);
+    for (u32 k = 0; k < DT_WAYS; k++) {
+        u32* e = t->mem + (size_t)(i + k) * t->stride;
+        if (e[1] != 0 && e[0] == h && memcmp(e + 3, key, t->keyw * 4) == 0) {
+            e[2] = ++t->stamp;
+            return e;
+        }
+    }
+    return NULL;
+}
+
+static void dtab_put(DTab* t, u32* e, const u32* key, u32 h, const u32* w, u32 n) {
+    if (n == 0 || n > t->capw) {
+        s_dst.uncached++;
+        return;
+    }
+    if (e == NULL) { /* an empty way, else the least recently used */
+        u32 i = h & (t->slots - 1) & ~(DT_WAYS - 1u);
+        e = t->mem + (size_t)i * t->stride;
+        for (u32 k = 1; k < DT_WAYS && e[1] != 0; k++) {
+            u32* x = t->mem + (size_t)(i + k) * t->stride;
+            if (x[1] == 0 || (s32)(x[2] - e[2]) < 0) {
+                e = x;
+            }
+        }
+    }
+    e[0] = h;
+    e[1] = n;
+    e[2] = ++t->stamp;
+    memcpy(e + 3, key, t->keyw * 4);
+    memcpy(e + 3 + t->keyw, w, n * 4);
+}
+
+/* Words into citro3d's command buffer where GPUCMD_Add would put them. GPUCMD_Add keeps the offset even, and on a
+ * full buffer it stops in svcBreak: so does this. */
+static void cmd_put(const u32* w, u32 n) {
+    if ((gpuCmdBufOffset & 1) || gpuCmdBufOffset + n > gpuCmdBufSize) {
+        PLOG_E("gxdirect: command buffer offset %lu of %lu words, %lu more: no room", (unsigned long)gpuCmdBufOffset,
+               (unsigned long)gpuCmdBufSize, (unsigned long)n);
+        svcBreak(USERBREAK_PANIC);
+    }
+    memcpy(gpuCmdBuf + gpuCmdBufOffset, w, n * 4);
+    gpuCmdBufOffset += n;
+}
+
+/* citro3d's pending work goes out now, before kept words it would otherwise overwrite later. */
+static void c3d_flush(void) {
+    u32 f = C3DX_FLAGS;
+    if (!s_c3d_unif && (f & ~(C3DXF_ACTIVE | C3DXF_DRAWUSED)) == 0) {
+        return;
+    }
+    if (f & C3DXF_CLASS) {
+        s_gpu_valid = 0;
+    }
+    if (f & C3DXF_ATTRBUF) {
+        s_lay_valid = 0;
+    }
+    C3Di_UpdateContext();
+    s_c3d_unif = 0;
+    s_dst.flushes++;
+}
+
+/* The words C3Di_UpdateContext emits for what the setters since the last flush dirtied. A fog LUT bound while fog
+ * is off stays pending in citro3d; it is kept out of the capture (with gxdirect, fog_bind sends LUTs itself). */
+static u32 c3d_capture(u32* out, u32 cap) {
+    u32 *buf, size, off;
+    u32 keep = C3DX_FLAGS & C3DXF_FOGLUT;
+    C3DX_FLAGS &= ~C3DXF_FOGLUT;
+    GPUCMD_GetBuffer(&buf, &size, &off);
+    GPUCMD_SetBuffer(out, cap, 0);
+    C3Di_UpdateContext();
+    u32 n = gpuCmdBufOffset;
+    GPUCMD_SetBuffer(buf, size, off);
+    C3DX_FLAGS |= keep;
+    return n;
+}
+
+/* One block: the kept words when the key is known, else citro3d's setters (`apply`) and a capture.
+ * gxdirect=2 captures every time and compares with the kept words. */
+static void direct_block(int c, const u32* key, void (*apply)(const void*), const void* arg) {
+    DTab* t = &s_dtab[c];
+    u32 h = dkey_hash(key, t->keyw);
+    u32* e = dtab_find(t, key, h);
+    if (e != NULL && s_direct == 1) {
+        cmd_put(e + 3 + t->keyw, e[1]);
+        s_dst.copied[c]++;
+        return;
+    }
+    RPHASE(8);
+    c3d_flush(); /* nothing is pending here (the draw flushed first); kept for safety */
+    apply(arg);
+    u32 n = c3d_capture(s_cap, sizeof(s_cap) / 4);
+    s_c3d_unif = 0; /* the capture took everything citro3d had pending */
+    if (n > s_dst.maxw[c]) {
+        s_dst.maxw[c] = n;
+    }
+    if (e != NULL) {
+        s_dst.checks++;
+        if (e[1] != n || memcmp(e + 3 + t->keyw, s_cap, n * 4) != 0) {
+            if (s_dst.mismatches++ < 8) {
+                PLOG_W("gxdirect verify: %s block differs from citro3d's words (kept %lu words, now %lu)", k_dc_name[c],
+                       (unsigned long)e[1], (unsigned long)n);
+            }
+        }
+    }
+    dtab_put(t, e, key, h, s_cap, n);
+    cmd_put(s_cap, n);
+    s_dst.captured[c]++;
+    RPHASE(3);
+}
+
+static void apply_tev_cb(const void* a) { apply_tev((const PlatGpuState*)a, 1); }
+static void apply_tex_cb(const void* a) { tex_bind3((C3D_Tex* const*)a); }
+static void apply_pix_cb(const void* a) { apply_pix((const PlatGpuState*)a, 1); }
+
+/* The state's three classes, each sent when the GPU does not hold its key. Returns 1 when the pixel block went out
+ * (it sets the cull mode to none). */
+static int direct_state(const PlatGpuState* st) {
+    u32 k[DK_MAX];
+    int pix = 0;
+    memcpy(k, st, 26 * 4);
+    k[26] = st->fog_enable;
+    k[27] = st->fog_enable ? st->fog_color : 0;
+    if (!(s_gpu_valid & 1) || memcmp(k, s_dkey[DC_TEV], DK_TEV * 4) != 0) {
+        direct_block(DC_TEV, k, apply_tev_cb, st);
+        memcpy(s_dkey[DC_TEV], k, DK_TEV * 4);
+    }
+    /* textures: the sampler setters first, then the objects are the key */
+    C3D_Tex* t[3];
+    tex_prepare(st, t);
+    for (int u = 0; u < 3; u++) {
+        memcpy(k + 6 * u, t[u], sizeof(C3D_Tex));
+    }
+    if (!(s_gpu_valid & 2) || memcmp(k, s_dkey[DC_TEX], DK_TEX * 4) != 0) {
+        direct_block(DC_TEX, k, apply_tex_cb, t);
+        memcpy(s_dkey[DC_TEX], k, DK_TEX * 4);
+    }
+    memcpy(k, &st->alpha_test_enable, 16);
+    memcpy(k + 4, &st->scissor_x0, 32);
+    if (!(s_gpu_valid & 4) || memcmp(k, s_dkey[DC_PIX], DK_PIX * 4) != 0) {
+        /* a viewport under one pixel is not set (apply_pix): the GPU keeps the last one, which the key does not name */
+        float tx, ty, tw, th;
+        efb_to_target_rect(st->viewport_x, st->viewport_y, st->viewport_w, st->viewport_h, &tx, &ty, &tw, &th);
+        if (!(tw >= 1 && th >= 1)) {
+            s_dst.degenerate++;
+        }
+        direct_block(DC_PIX, k, apply_pix_cb, st);
+        memcpy(s_dkey[DC_PIX], k, DK_PIX * 4);
+        pix = 1;
+        /* kept words do not run apply_pix: the empty-scissor flag of this key (scissor guard, c883edf) */
+        int sc[4];
+        s_scissor_empty = scissor_rect(st, sc);
+    }
+    s_gpu_valid = 7;
+    s_shadow_stale = 1;
+    return pix;
+}
+
+static void vsh_apply_layout(const void* stream, u32 layout, C3D_AttrInfo* ai, C3D_BufInfo* vbi);
+typedef struct {
+    const void* stream;
+    u32 layout;
+    C3D_AttrInfo* ai;
+    C3D_BufInfo* vbi;
+} LayArg;
+static void apply_lay_cb(const void* a) {
+    const LayArg* l = (const LayArg*)a;
+    vsh_apply_layout(l->stream, l->layout, l->ai, l->vbi);
+}
+
+static void direct_layout(const void* stream, u32 layout, C3D_AttrInfo* ai, C3D_BufInfo* vbi) {
+    u32 k[DK_LAY] = {(u32)(uintptr_t)stream, layout};
+    LayArg a = {stream, layout, ai, vbi};
+    direct_block(DC_LAY, k, apply_lay_cb, &a);
+    s_lay_valid = 1;
+    s_shadow_stale = 1;
+}
+
+/* GPUREG_FACECULLING_CONFIG as C3Di_EffectBind writes it */
+static void direct_cull(GPU_CULLMODE m) { GPUCMD_AddWrite(GPUREG_FACECULLING_CONFIG, (u32)m & 3); }
+
+/* The pending uniform rows, as C3D_UpdateUniforms writes a run of dirty rows. citro3d's copy of the rows is kept
+ * equal, so an upload of its own (after C3Di_DirtyUniforms) writes the same values. */
+static void direct_unif_run(u32 i, u32 j) {
+    GPUCMD_AddWrite(GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000u | i);
+    GPUCMD_AddWrites(GPUREG_VSH_FLOATUNIFORM_DATA, &s_vval[i][0], (j - i) * 4);
+}
+
+static void direct_unif_flush(void) {
+    if ((s_vpend[0] | s_vpend[1] | s_vpend[2]) == 0) {
+        return;
+    }
+    u32 i = 0;
+    while (i < 96) {
+        u32 wd = s_vpend[i >> 5] >> (i & 31);
+        if (wd == 0) {
+            i = (i | 31) + 1;
+            continue;
+        }
+        if (!(wd & 1)) {
+            i += (u32)__builtin_ctz(wd);
+            continue;
+        }
+        u32 j = i;
+        while (j < 96 && (s_vpend[j >> 5] >> (j & 31) & 1)) {
+            j++;
+        }
+        memcpy(&C3D_FVUnif[GPU_VERTEX_SHADER][i], s_vval[i], (j - i) * 16);
+        if (s_direct == 2) {
+            /* the same rows through citro3d (nothing else is dirty: the draw flushed citro3d first) */
+            u32 *buf, size, off;
+            GPUCMD_GetBuffer(&buf, &size, &off);
+            GPUCMD_SetBuffer(s_cap, sizeof(s_cap) / 4, 0);
+            direct_unif_run(i, j);
+            u32 n1 = gpuCmdBufOffset;
+            GPUCMD_SetBuffer(s_cap2, sizeof(s_cap2) / 4, 0);
+            memset(&C3D_FVUnifDirty[GPU_VERTEX_SHADER][i], 1, j - i);
+            C3D_UpdateUniforms(GPU_VERTEX_SHADER);
+            u32 n2 = gpuCmdBufOffset;
+            GPUCMD_SetBuffer(buf, size, off);
+            s_dst.checks++;
+            if (n1 != n2 || memcmp(s_cap, s_cap2, n1 * 4) != 0) {
+                if (s_dst.mismatches++ < 8) {
+                    PLOG_W("gxdirect verify: uniform rows %lu..%lu: %lu words, citro3d %lu", (unsigned long)i,
+                           (unsigned long)j - 1, (unsigned long)n1, (unsigned long)n2);
+                }
+            }
+        }
+        direct_unif_run(i, j);
+        s_dst.runs++;
+        i = j;
+    }
+    s_vpend[0] = s_vpend[1] = s_vpend[2] = 0;
+}
+
+/* C3D_DrawElements(GPU_TRIANGLES, count, C3D_UNSIGNED_SHORT, idx) after its C3Di_UpdateContext */
+static void direct_draw(const u16* idx, u32 count) {
+    u32 pa = osConvertVirtToPhys(idx);
+    u32 base = C3DX_BUFBASE;
+    if (pa < base) {
+        return; /* as C3D_DrawElements */
+    }
+    s_dst.draws++;
+    if (s_direct == 2) {
+        u32 off0 = gpuCmdBufOffset;
+        C3D_DrawElements(GPU_TRIANGLES, (int)count, C3D_UNSIGNED_SHORT, idx);
+        memcpy(s_cap, s_tpl, s_tpl_n * 4);
+        s_cap[s_tpl_idx] = (pa - base) | (u32)C3D_UNSIGNED_SHORT << 31;
+        s_cap[s_tpl_cnt] = count;
+        s_dst.checks++;
+        if (gpuCmdBufOffset - off0 != s_tpl_n || memcmp(gpuCmdBuf + off0, s_cap, s_tpl_n * 4) != 0) {
+            if (s_dst.mismatches++ < 8) {
+                PLOG_W("gxdirect verify: draw packet differs from C3D_DrawElements' (%lu words, citro3d %lu)",
+                       (unsigned long)s_tpl_n, (unsigned long)(gpuCmdBufOffset - off0));
+            }
+        }
+        return;
+    }
+    if ((gpuCmdBufOffset & 1) || gpuCmdBufOffset + s_tpl_n > gpuCmdBufSize) {
+        C3D_DrawElements(GPU_TRIANGLES, (int)count, C3D_UNSIGNED_SHORT, idx); /* libctru reports the full buffer */
+        return;
+    }
+    u32* p = gpuCmdBuf + gpuCmdBufOffset;
+    memcpy(p, s_tpl, s_tpl_n * 4);
+    p[s_tpl_idx] = (pa - base) | (u32)C3D_UNSIGNED_SHORT << 31;
+    p[s_tpl_cnt] = count;
+    gpuCmdBufOffset += s_tpl_n;
+    C3DX_FLAGS |= C3DXF_DRAWUSED;
+}
+
+/* The fog LUT: citro3d writes it only once fog is on (C3Di_UpdateContext); with gxdirect it goes out at once with
+ * the same words (index 0, then the 128 entries) and is taken off citro3d's pending list. */
 static void fog_bind(const void* body) {
     static C3D_FogLut lut;
     FogLut_FromArray(&lut, (const float*)body);
     C3D_FogLutBind(&lut);
+    if (s_direct) {
+        GPUCMD_AddWrite(GPUREG_FOG_LUT_INDEX, 0);
+        GPUCMD_AddWrites(GPUREG_FOG_LUT_DATA0, lut.data, 128);
+        C3DX_FLAGS &= ~C3DXF_FOGLUT;
+    }
+}
+
+#define TPL_IDX_MARK 0xA5A5A5A4u
+#define TPL_CNT_MARK 0x5A5A5A5Au
+static int direct_init(void) {
+    /* citro3d's context words: the flags (active bit; C3D_SetBufInfo sets the buffer bit) and the buffer base
+     * (C3D_SetBufInfo copies the BufInfo there) */
+    u32 f0 = C3DX_FLAGS;
+    C3D_BufInfo bi;
+    BufInfo_Init(&bi);
+    C3D_SetBufInfo(&bi);
+    u32 f1 = C3DX_FLAGS;
+    if (!(f0 & C3DXF_ACTIVE) || !(f1 & 0x8u) || bi.base_paddr == 0 || C3DX_BUFBASE != bi.base_paddr) {
+        PLOG_W("gxdirect: citro3d's context is not laid out as expected (flags %08lx -> %08lx, base %08lx): off",
+               (unsigned long)f0, (unsigned long)f1, (unsigned long)C3DX_BUFBASE);
+        return 0;
+    }
+    /* C3D_DrawElements' packet for triangles (citro3d 1.7.1 drawElements.c; checked against libcitro3d.a) */
+    u32 *buf, size, off;
+    GPUCMD_GetBuffer(&buf, &size, &off);
+    GPUCMD_SetBuffer(s_tpl, sizeof(s_tpl) / 4, 0);
+    GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 2, GPU_GEOMETRY_PRIM);
+    GPUCMD_AddWrite(GPUREG_RESTART_PRIMITIVE, 1);
+    GPUCMD_AddWrite(GPUREG_INDEXBUFFER_CONFIG, TPL_IDX_MARK);
+    GPUCMD_AddWrite(GPUREG_NUMVERTICES, TPL_CNT_MARK);
+    GPUCMD_AddWrite(GPUREG_VERTEX_OFFSET, 0);
+    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG, 2, 0x100);
+    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG2, 2, 0x100);
+    GPUCMD_AddMaskedWrite(GPUREG_START_DRAW_FUNC0, 1, 0);
+    GPUCMD_AddWrite(GPUREG_DRAWELEMENTS, 1);
+    GPUCMD_AddMaskedWrite(GPUREG_START_DRAW_FUNC0, 1, 1);
+    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG, 2, 0);
+    GPUCMD_AddMaskedWrite(GPUREG_GEOSTAGE_CONFIG2, 2, 0);
+    GPUCMD_AddWrite(GPUREG_VTX_FUNC, 1);
+    GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
+    GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
+    s_tpl_n = gpuCmdBufOffset;
+    GPUCMD_SetBuffer(buf, size, off);
+    int fi = -1, fc = -1;
+    for (u32 i = 0; i < s_tpl_n; i += 2) { /* one parameter per command: [parameter, header] pairs */
+        if (s_tpl[i] == TPL_IDX_MARK) {
+            fi = (int)i;
+        }
+        if (s_tpl[i] == TPL_CNT_MARK) {
+            fc = (int)i;
+        }
+    }
+    if (s_tpl_n != 30 || fi < 0 || fc < 0) {
+        PLOG_W("gxdirect: unexpected draw packet (%lu words): off", (unsigned long)s_tpl_n);
+        return 0;
+    }
+    s_tpl_idx = (u32)fi;
+    s_tpl_cnt = (u32)fc;
+    /* largest blocks (counted from the encoders): tev 42, tex 30, pix 46, lay 76 words; a larger one is not kept */
+    static const u16 k_slots[DC_N] = {256, 512, 256, 512};
+    static const u16 k_keyw[DC_N] = {DK_TEV, DK_TEX, DK_PIX, DK_LAY};
+    static const u16 k_capw[DC_N] = {44, 32, 48, 76};
+    u32 bytes = 0;
+    for (int c = 0; c < DC_N; c++) {
+        DTab* t = &s_dtab[c];
+        t->slots = k_slots[c];
+        t->keyw = k_keyw[c];
+        t->capw = k_capw[c];
+        t->stride = 3 + t->keyw + t->capw;
+        t->mem = calloc((size_t)t->slots * t->stride, 4);
+        bytes += t->slots * t->stride * 4;
+        if (t->mem == NULL) {
+            PLOG_W("gxdirect: no memory for the kept words (%lu KB): off", (unsigned long)(bytes >> 10));
+            for (int d = 0; d < c; d++) {
+                free(s_dtab[d].mem);
+                s_dtab[d].mem = NULL;
+            }
+            return 0;
+        }
+    }
+    s_dlog_every = (u32)plat_switch_int("gxthreadstats", plat_switch_int("gxstats", 0));
+    PLOG_I("gxdirect=%d: draw packet %lu words, kept words %lu KB", s_direct, (unsigned long)s_tpl_n,
+           (unsigned long)(bytes >> 10));
+    return 1;
+}
+
+static void direct_log(void) {
+    if (!s_direct || s_dlog_every == 0 || ++s_dlog_n < s_dlog_every) {
+        return;
+    }
+    u32 n = s_dlog_n;
+    s_dlog_n = 0;
+    /* two lines: the log holds about 250 characters per line */
+    PLOG_I("gxdirect frame %lu: per frame %lu draws, kept tev %lu tex %lu pix %lu lay %lu, captured %lu %lu %lu %lu, "
+           "c3d flushes %lu, unif runs %lu",
+           (unsigned long)s_frame_counter, (unsigned long)(s_dst.draws / n), (unsigned long)(s_dst.copied[0] / n),
+           (unsigned long)(s_dst.copied[1] / n), (unsigned long)(s_dst.copied[2] / n),
+           (unsigned long)(s_dst.copied[3] / n), (unsigned long)(s_dst.captured[0] / n),
+           (unsigned long)(s_dst.captured[1] / n), (unsigned long)(s_dst.captured[2] / n),
+           (unsigned long)(s_dst.captured[3] / n), (unsigned long)(s_dst.flushes / n), (unsigned long)(s_dst.runs / n));
+    PLOG_I("gxdirect frame %lu, in %lu frames: verify checks %lu mismatches %lu, uncached %lu, degenerate viewport %lu, "
+           "largest %lu %lu %lu %lu words",
+           (unsigned long)s_frame_counter, (unsigned long)n, (unsigned long)s_dst.checks,
+           (unsigned long)s_dst.mismatches, (unsigned long)s_dst.uncached, (unsigned long)s_dst.degenerate,
+           (unsigned long)s_dst.maxw[0], (unsigned long)s_dst.maxw[1], (unsigned long)s_dst.maxw[2],
+           (unsigned long)s_dst.maxw[3]);
+    memset(&s_dst, 0, sizeof(s_dst));
 }
 
 static Record* s_render_rec; /* the record render_record replays (render thread), for gpudump_note */
@@ -1757,8 +2297,34 @@ static void render_record(Record* r) {
     const void* v_stream = NULL;
     u32 v_layout = 0, v_scales = 0xFFFFFFFFu, v_cull = 0;
     C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_vsh, false);
+    if (s_direct) {
+        s_gpu_valid = 0;
+        s_lay_valid = 0;
+        s_c3d_unif = 1;
+        s_state_pending = 0;
+        s_shadow_stale = 0;
+        s_vpend[0] = s_vpend[1] = s_vpend[2] = 0; /* vunif_reset above: the record sets its rows again */
+    }
+    /* gxdirect: back to citro3d's setters (a CPU-path draw, a clear, a copy, the stereo warp, the present). The state
+     * in force goes through them again when kept words or a pending state went past them. */
+#define C3D_PATH()                                                          \
+    do {                                                                    \
+        if (s_direct) {                                                     \
+            if (cur_state != NULL && (s_shadow_stale || s_state_pending)) { \
+                apply_state(cur_state);                                     \
+                s_state_pending = 0;                                        \
+                restore = 0;                                                \
+                v_cull = 0;                                                 \
+            }                                                               \
+            s_shadow_stale = 0;                                             \
+            s_gpu_valid = 0;                                                \
+            s_lay_valid = 0;                                                \
+            s_c3d_unif = 1;                                                 \
+        }                                                                   \
+    } while (0)
 #define LEAVE_VSH()                                                \
     do {                                                           \
+        C3D_PATH();                                                \
         if (vsh_mode) {                                            \
             vsh_mode = 0;                                          \
             C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_vsh, false); \
@@ -1822,6 +2388,10 @@ eye_again:
             for (u32 i = 0; i < d[0]; i++) {
                 w[d[1 + 2 * i]] = d[2 + 2 * i];
             }
+            if (s_direct) {
+                s_state_pending = 1; /* sent at the next draw */
+                break;
+            }
             apply_state(cur_state); /* cull none */
             restore = 0;
             v_cull = 0;
@@ -1830,6 +2400,10 @@ eye_again:
         case CMD_STATE:
             s_rstate = *(const PlatGpuState*)body;
             cur_state = &s_rstate;
+            if (s_direct) {
+                s_state_pending = 1;
+                break;
+            }
             apply_state(cur_state); /* cull none */
             restore = 0;
             v_cull = 0;
@@ -1845,9 +2419,10 @@ eye_again:
             }
             if (cur_state != NULL && d[1] >= 3) {
                 LEAVE_VSH();
-                if (restore) {
+                if (restore || s_state_pending) {
                     apply_state(cur_state);
                     restore = 0;
+                    s_state_pending = 0;
                 }
                 if (s_scissor_empty) {
                     scissor_skip_log();
@@ -1897,6 +2472,47 @@ eye_again:
                 }
                 d_idx = r->idx + d->first;
                 d_count = d->count;
+            }
+            if (s_direct) {
+                RPHASE(9);
+                if (!vsh_mode) {
+                    vsh_mode = 1;
+                    C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_vsh, true);
+                    s_c3d_unif = 1;
+                    v_stream = NULL;
+                }
+                c3d_flush(); /* citro3d's pending words first: the words below must not be overwritten by them */
+                if (restore || s_state_pending || s_gpu_valid != 7) {
+                    if (direct_state(cur_state)) {
+                        v_cull = 0;
+                    }
+                    restore = 0;
+                    s_state_pending = 0;
+                }
+                if (s_scissor_empty) {
+                    scissor_skip_log();
+                    RPHASE(3);
+                    break;
+                }
+                if (!s_lay_valid || d->stream != v_stream || d->layout != v_layout) {
+                    direct_layout(d->stream, d->layout, &vai, &vbi);
+                    v_stream = d->stream;
+                    v_layout = d->layout;
+                }
+                if (d->scales != v_scales) {
+                    vsh_apply_scales(d->scales);
+                    v_scales = d->scales;
+                }
+                if (d->cull != v_cull) {
+                    direct_cull(vsh_cull(d->cull));
+                    v_cull = d->cull;
+                }
+                direct_unif_flush();
+                direct_draw(d_idx, d_count);
+                n_draw++;
+                after_last_draw = 0;
+                RPHASE(3);
+                break;
             }
             if (restore) {
                 apply_state(cur_state); /* also sets cull none */
@@ -1978,6 +2594,12 @@ eye_again:
             }
             cur_state = split_state;
             restore = 1;
+            if (s_direct) {
+                s_state_pending = cur_state != NULL; /* citro3d's setters saw the record's last state, not this one */
+                s_gpu_valid = 0;
+                s_lay_valid = 0;
+                s_c3d_unif = 1;
+            }
             v_stream = NULL;
             v_scales = 0xFFFFFFFFu;
             v_cull = 0;
@@ -1998,10 +2620,14 @@ eye_again:
     }
 #undef STEREO_SPLIT
 #undef LEAVE_VSH
+#undef C3D_PATH
     RPHASE(7);
     gpudump_note();
     C3D_FrameEnd(0);
     RPHASE(0);
+    if (r->present) {
+        direct_log();
+    }
     s_stats.render_us = (u32)((svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000000u));
     s_stats.gpu_us = (u32)(C3D_GetDrawingTime() * 1000.0f);
     if (r->present) {
@@ -2494,6 +3120,10 @@ void plat_gpu_init(void) {
     s_urow = plat_switch_int("gxurow", 1) != 0;
     s_sync_all = plat_switch_int("gpusyncall", 0) != 0;
     s_gpu_fence = plat_switch_int("gpufence", 1) != 0;
+    s_direct = plat_switch_int("gxdirect", 0);
+    if (s_direct < 0 || s_direct > 2 || (s_direct && !direct_init())) {
+        s_direct = 0;
+    }
     LightEvent_Init(&s_fence_ev, RESET_STICKY);
     PLOG_I("gpu: gpusyncall %d gpufence %d gxflushrender %d gxstatedelta %d gxurow %d gxsync %d", s_sync_all,
            s_gpu_fence, s_flush_on_render, s_state_delta, s_urow, !s_threaded);

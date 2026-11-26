@@ -132,111 +132,103 @@ static const char* const k_kind_name[4] = {"?", "fill", "write", "release"};
 static const char* const k_getter_name[GXG_COUNT] = {"vtxdesc", "vat", "proj", "viewport", "scissor", "cull", "copysrc"};
 
 /* ---- Phase timers (switch gxphase=N, gx_internal.h) ----
- * Each phase's counters are written by one thread only (its role's); the log reads them on the game thread as
- * differences from the last log (32-bit, so no torn reads; tick sums wrap after 16 s, far above a log interval). */
+ * The counters are the translator's (one writer); the game thread logs them as differences from the last log
+ * (32-bit, so no torn reads; tick sums wrap after 16 s, far above a log interval). */
 int gx_ph_on;
-static u32 gx_ph_sp[2];
+static u32 gx_ph_sp;
 static struct {
     u32 t, seg, n, samp;
 } s_ph[GPH_COUNT], s_ph_prev[GPH_COUNT];
-static u32 s_ph_outer[2][2], s_ph_outer_prev[2][2]; /* [role]: outer calls, outer calls timed */
-static u8 s_ph_stk[2][16];
-static u32 s_ph_t0[2], s_ph_cd[2] = {1, 1};
-static const char* const k_ph_name[GPH_COUNT] = {
-    "cal", "set", "dedup", "vtxdesc", "vdflush", "calldl", "reclist", "isstate", "fuse", "gxend",
-    "prim", "snapcopy", "primd", "immconv", "raw",
-    "list", "set", "prim", "primd", "raw", "other", "batopen", "batclose", "slow", "form", "state", "cal"};
+static u32 s_ph_outer[2], s_ph_outer_prev[2]; /* outer calls, outer calls timed */
+static u8 s_ph_stk[16];
+static u32 s_ph_t0, s_ph_cd = 1;
+static const char* const k_ph_name[GPH_COUNT] = {"cal", "list", "set", "prim", "primd", "raw", "other",
+                                                 "batopen", "batclose", "slow", "form", "state"};
 
-__attribute__((noinline, cold)) int gx_ph_enter_slow(int role, int ph, int outer) {
+__attribute__((noinline, cold)) int gx_ph_enter_slow(int ph, int outer) {
     s_ph[ph].n++;
-    u32 sp = gx_ph_sp[role];
+    u32 sp = gx_ph_sp;
     if (sp == 0) {
         if (!outer) {
             return 0;
         }
-        s_ph_outer[role][0]++;
-        if (--s_ph_cd[role] != 0) {
+        s_ph_outer[0]++;
+        if (--s_ph_cd != 0) {
             return 0;
         }
-        s_ph_cd[role] = (u32)gx_ph_on;
-        s_ph_outer[role][1]++;
-        /* the outer call's clock starts, then an empty nested phase: its segments are the cost of one segment, in
-         * the place and state the measured ones are taken (taken off every phase at the log) */
-        u32 t = (u32)plat_ticks();
-        s_ph_stk[role][0] = (u8)ph;
-        gx_ph_sp[role] = 1;
+        s_ph_cd = (u32)gx_ph_on;
+        s_ph_outer[1]++;
+        /* the outer call's clock starts, then an empty nested phase: its segments are the cost of one segment where
+         * the measured ones are taken (taken off every phase at the log) */
+        s_ph_stk[0] = (u8)ph;
+        gx_ph_sp = 1;
         s_ph[ph].samp++;
-        s_ph_t0[role] = t;
-        if (gx_ph_enter_slow(role, role == 0 ? GPH_CAL : GPH_TCAL, 0)) {
-            gx_ph_pop(role);
+        s_ph_t0 = (u32)plat_ticks();
+        if (gx_ph_enter_slow(GPH_CAL, 0)) {
+            gx_ph_pop();
         }
         return 1;
-    } else if (sp >= 16) {
+    }
+    if (sp >= 16) {
         return 0;
     }
     u32 t = (u32)plat_ticks();
-    if (sp != 0) {
-        u32 o = s_ph_stk[role][sp - 1];
-        s_ph[o].t += t - s_ph_t0[role];
-        s_ph[o].seg++;
-    }
-    s_ph_stk[role][sp] = (u8)ph;
-    gx_ph_sp[role] = sp + 1;
+    u32 o = s_ph_stk[sp - 1];
+    s_ph[o].t += t - s_ph_t0;
+    s_ph[o].seg++;
+    s_ph_stk[sp] = (u8)ph;
+    gx_ph_sp = sp + 1;
     s_ph[ph].samp++;
-    s_ph_t0[role] = t;
+    s_ph_t0 = t;
     return 1;
 }
 
-__attribute__((noinline, cold)) void gx_ph_pop(int role) {
+__attribute__((noinline, cold)) void gx_ph_pop(void) {
     u32 t = (u32)plat_ticks();
-    u32 sp = --gx_ph_sp[role];
-    u32 ph = s_ph_stk[role][sp];
-    s_ph[ph].t += t - s_ph_t0[role];
+    u32 sp = --gx_ph_sp;
+    u32 ph = s_ph_stk[sp];
+    s_ph[ph].t += t - s_ph_t0;
     s_ph[ph].seg++;
-    s_ph_t0[role] = t;
+    s_ph_t0 = t;
 }
 
-/* Game thread, at a log: the phases per frame, less the cost of a segment (the empty nested phase's). */
+/* Game thread, at a log: the phases per frame, less the cost of a segment (the empty nested phase's), scaled by the
+ * outer calls per timed outer call. */
 static __attribute__((noinline, cold)) void gx_ph_log(u32 frame_no, u32 f) {
     const u32 tpu = PLAT_TICKS_PER_SEC / 1000000u;
-    for (int role = 0; role < 2; role++) {
-        int cal = role == 0 ? GPH_CAL : GPH_TCAL;
-        u32 cal_t = s_ph[cal].t - s_ph_prev[cal].t, cal_seg = s_ph[cal].seg - s_ph_prev[cal].seg;
-        /* the cost of one segment, in 1/16 ticks */
-        u32 c16 = cal_seg ? (u32)((u64)cal_t * 16u / cal_seg) : 0;
-        u32 on = s_ph_outer[role][0] - s_ph_outer_prev[role][0], os = s_ph_outer[role][1] - s_ph_outer_prev[role][1];
-        char buf[5][200];
-        int len[5] = {0}, k = 0;
-        u64 sum_us = 0;
-        u32 segs = 0;
-        for (int p = role == 0 ? GPH_G_SET : GPH_T_LIST; p < (role == 0 ? GPH_T_LIST : GPH_TCAL); p++) {
-            u32 dn = s_ph[p].n - s_ph_prev[p].n, ds = s_ph[p].samp - s_ph_prev[p].samp;
-            u32 dt = s_ph[p].t - s_ph_prev[p].t, dg = s_ph[p].seg - s_ph_prev[p].seg;
-            u64 net16 = (u64)dt * 16u > (u64)dg * c16 ? (u64)dt * 16u - (u64)dg * c16 : 0;
-            /* scaled by the role's outer calls per timed outer call */
-            u32 us = os ? (u32)(net16 * on / os / 16u / tpu / f) : 0;
-            sum_us += us;
-            segs += dg;
-            if (dn != 0 && k < 5) {
-                len[k] += snprintf(buf[k] + len[k], sizeof(buf[k]) - len[k], " %s %lu/%lu/%lu", k_ph_name[p],
-                                   (unsigned long)(dn / f), (unsigned long)(ds / f), (unsigned long)us);
-                if (len[k] > 150) {
-                    k++;
-                }
+    u32 cal_t = s_ph[GPH_CAL].t - s_ph_prev[GPH_CAL].t, cal_seg = s_ph[GPH_CAL].seg - s_ph_prev[GPH_CAL].seg;
+    u32 c16 = cal_seg ? (u32)((u64)cal_t * 16u / cal_seg) : 0; /* the cost of one segment, in 1/16 ticks */
+    u32 on = s_ph_outer[0] - s_ph_outer_prev[0], os = s_ph_outer[1] - s_ph_outer_prev[1];
+    char buf[3][200];
+    int len[3] = {0}, k = 0;
+    u64 sum_us = 0;
+    u32 segs = 0;
+    for (int p = GPH_CAL + 1; p < GPH_COUNT; p++) {
+        u32 dn = s_ph[p].n - s_ph_prev[p].n, ds = s_ph[p].samp - s_ph_prev[p].samp;
+        u32 dt = s_ph[p].t - s_ph_prev[p].t, dg = s_ph[p].seg - s_ph_prev[p].seg;
+        u64 net16 = (u64)dt * 16u > (u64)dg * c16 ? (u64)dt * 16u - (u64)dg * c16 : 0;
+        u32 us = os ? (u32)(net16 * on / os / 16u / tpu / f) : 0;
+        sum_us += us;
+        segs += dg;
+        if (dn != 0 && k < 3) {
+            len[k] += snprintf(buf[k] + len[k], sizeof(buf[k]) - len[k], " %s %lu/%lu/%lu", k_ph_name[p],
+                               (unsigned long)(dn / f), (unsigned long)(ds / f), (unsigned long)us);
+            if (len[k] > 150) {
+                k++;
             }
         }
-        PLOG_I("gxphase frame %lu %s: segment %lu.%02lu us, %lu segments, outer %lu timed of %lu per frame, est. sum %lu "
-               "us", (unsigned long)frame_no, role == 0 ? "game" : "translator", (unsigned long)(c16 / 16u / tpu),
-               (unsigned long)(c16 * 100u / 16u / tpu % 100u), (unsigned long)(segs / f), (unsigned long)(os / f),
-               (unsigned long)(on / f), (unsigned long)sum_us);
-        for (int i = 0; i <= k && i < 5; i++) {
-            if (len[i] != 0) {
-                PLOG_I("gxphase   %s (calls/timed/us per frame):%s", role == 0 ? "game" : "translator", buf[i]);
-            }
-        }
-        s_ph_outer_prev[role][0] = s_ph_outer[role][0];
-        s_ph_outer_prev[role][1] = s_ph_outer[role][1];
     }
+    PLOG_I("gxphase frame %lu translator: segment %lu.%02lu us, %lu segments, outer %lu timed of %lu per frame, est. "
+           "sum %lu us", (unsigned long)frame_no, (unsigned long)(c16 / 16u / tpu),
+           (unsigned long)(c16 * 100u / 16u / tpu % 100u), (unsigned long)(segs / f), (unsigned long)(os / f),
+           (unsigned long)(on / f), (unsigned long)sum_us);
+    for (int i = 0; i <= k && i < 3; i++) {
+        if (len[i] != 0) {
+            PLOG_I("gxphase   (calls/timed/us per frame):%s", buf[i]);
+        }
+    }
+    s_ph_outer_prev[0] = s_ph_outer[0];
+    s_ph_outer_prev[1] = s_ph_outer[1];
     memcpy(s_ph_prev, s_ph, sizeof(s_ph));
 }
 
@@ -392,17 +384,17 @@ static __attribute__((noinline, cold)) void consume_ph(u32 upto) {
         if (type == GXR_LIST && n > 4) {
             s_cur = s_rd;
             for (u32 i = 0; i < n; i += 3) {
-                int p = gx_ph_enter(1, GPH_T_LIST);
+                int p = gx_ph_enter(GPH_T_LIST);
                 gx_call_list((const void*)c[1 + i], c[2 + i], (const void*)c[3 + i]);
-                gx_ph_leave(1, p);
+                gx_ph_leave(p);
             }
         } else if (type != GXR_WRAP) {
             s_cur = s_rd;
             int ph = type == GXR_LIST ? GPH_T_LIST : type == GXR_PRIM ? GPH_T_PRIM : type == GXR_PRIMD ? GPH_T_PRIMD
                      : type == GXR_RAW ? GPH_T_RAW : type < REC_COUNT && type != REC_CopyDisp ? GPH_T_SET : GPH_T_OTHER;
-            int p = gx_ph_enter(1, ph);
+            int p = gx_ph_enter(ph);
             run_one(type, c + 1, n);
-            gx_ph_leave(1, p);
+            gx_ph_leave(p);
         }
         s_rd += n + 1;
         if (gx_rec_mode == 2 && s_rd - pub >= 4096) {
@@ -993,14 +985,7 @@ static void vd_send(const u8* t) {
     memcpy(s_vd_em, t, GX_VA_MAX_ATTR);
 }
 
-static void fuse_vd_flush_body(void);
 static void fuse_vd_flush(void) {
-    int p = gx_ph_nested(0, GPH_G_VDF);
-    fuse_vd_flush_body();
-    gx_ph_leave(0, p);
-}
-
-static void fuse_vd_flush_body(void) {
     u32 n = s_vd_n;
     s_vd_n = 0; /* before any put: put flushes while it is not 0 */
     s_fst.vd_flushes++;
@@ -1052,23 +1037,7 @@ check:
     }
 }
 
-static inline __attribute__((always_inline)) void rec_call_body(u32 id, const u32* w, u32 n, int ph);
-static __attribute__((noinline, cold)) void rec_call_ph(u32 id, const u32* w, u32 n) {
-    int vd = s_fuse && (s_fuse_parts & 2) && (id == REC_SetVtxDesc || id == REC_ClearVtxDesc);
-    int p = gx_ph_enter(0, vd ? GPH_G_VD : GPH_G_SET);
-    rec_call_body(id, w, n, 1);
-    gx_ph_leave(0, p);
-}
-
-inline __attribute__((always_inline)) void gx_rec_call(u32 id, const u32* w, u32 n) {
-    if (__builtin_expect(gx_ph_on, 0)) {
-        rec_call_ph(id, w, n);
-        return;
-    }
-    rec_call_body(id, w, n, 0);
-}
-
-static inline __attribute__((always_inline)) void rec_call_body(u32 id, const u32* w, u32 n, int ph) {
+void gx_rec_call(u32 id, const u32* w, u32 n) {
     if (s_fuse && (s_fuse_parts & 2) && (id == REC_SetVtxDesc || id == REC_ClearVtxDesc)) {
         u32 attr = id == REC_ClearVtxDesc ? 0xFF : (w[0] < 0xFF ? w[0] : 0xFE);
         u32 type = id == REC_ClearVtxDesc ? 0 : w[1];
@@ -1093,10 +1062,7 @@ static inline __attribute__((always_inline)) void rec_call_body(u32 id, const u3
     }
     if (s_dedup) {
         s_dd_calls++;
-        int p = ph ? gx_ph_nested(0, GPH_G_DD) : 0;
-        int same = dd_same(s_dd, s_dd_gen, id, w, n);
-        gx_ph_leave(0, p);
-        if (same) {
+        if (dd_same(s_dd, s_dd_gen, id, w, n)) {
             s_dd_skipped++;
             return; /* the translator's state holds it already */
         }
@@ -1329,32 +1295,9 @@ static void rec_list_grouped(const void* list, u32 nbytes, const void* caller) {
     s_lg_end = gx_rec_mode == 2 && s_wr_pub == s_wr ? 0 : s_wr;
 }
 
-static inline __attribute__((always_inline)) void rec_list_body(const void* list, u32 nbytes, const void* caller,
-                                                                 int ph);
-static __attribute__((noinline, cold)) void rec_list_ph(const void* list, u32 nbytes, const void* caller) {
-    int p = gx_ph_nested(0, GPH_G_LIST);
-    rec_list_body(list, nbytes, caller, 1);
-    gx_ph_leave(0, p);
-}
-
 void gx_rec_list(const void* list, u32 nbytes, const void* caller) {
-    if (__builtin_expect(gx_ph_on, 0)) {
-        rec_list_ph(list, nbytes, caller);
-        return;
-    }
-    rec_list_body(list, nbytes, caller, 0);
-}
-
-static inline __attribute__((always_inline)) void rec_list_body(const void* list, u32 nbytes, const void* caller,
-                                                                 int ph) {
-    int p = ph ? gx_ph_nested(0, GPH_G_ISSL) : 0;
-    int sl = s_dedup && is_state_list(list, nbytes);
-    gx_ph_leave(0, p);
-    if (sl) {
-        p = ph ? gx_ph_nested(0, GPH_G_FUSE) : 0;
-        int fused = s_fuse && (s_fuse_parts & 1) && fuse_list(list, nbytes);
-        gx_ph_leave(0, p);
-        if (fused) {
+    if (s_dedup && is_state_list(list, nbytes)) {
+        if (s_fuse && (s_fuse_parts & 1) && fuse_list(list, nbytes)) {
             return;
         }
         dd_forget(); /* its state calls change the translator's state */
@@ -1493,25 +1436,7 @@ static int snap_ranges(const GxState* g, u32 fmt, u32 nverts, const PPCWGPipe* s
 #define SNAP_MAX_BYTES (64u << 10) /* per attribute; larger spans are read live (counted) */
 static u32 s_snap_bytes, s_snap_live;
 
-static inline __attribute__((always_inline)) void rec_prim_body(u8 primfmt, u16 nverts, const void* caller,
-                                                                 const PPCWGPipe* slots, u32 nslots, int ph);
-static __attribute__((noinline, cold)) void rec_prim_ph(u8 primfmt, u16 nverts, const void* caller,
-                                                        const PPCWGPipe* slots, u32 nslots) {
-    int p = gx_ph_nested(0, GPH_G_PRIM);
-    rec_prim_body(primfmt, nverts, caller, slots, nslots, 1);
-    gx_ph_leave(0, p);
-}
-
 void gx_rec_prim(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* slots, u32 nslots) {
-    if (__builtin_expect(gx_ph_on, 0)) {
-        rec_prim_ph(primfmt, nverts, caller, slots, nslots);
-        return;
-    }
-    rec_prim_body(primfmt, nverts, caller, slots, nslots, 0);
-}
-
-static inline __attribute__((always_inline)) void rec_prim_body(u8 primfmt, u16 nverts, const void* caller,
-                                                                 const PPCWGPipe* slots, u32 nslots, int ph) {
     SnapRange r[GX_VA_MAX_ATTR];
     u32 fmt = primfmt & 7;
     int ok = snap_ranges(&gx_game, fmt, nverts, slots, nslots, r);
@@ -1543,7 +1468,6 @@ static inline __attribute__((always_inline)) void rec_prim_body(u8 primfmt, u16 
         c[6 + i] = slots[i].u32; /* the readers take u8/u16/u32/f32 writes from the low bytes */
     }
     u32* q = c + 6 + nslots;
-    int p = ph && nsnap ? gx_ph_nested(0, GPH_G_SNAP) : 0;
     for (int a = GX_VA_POS; nsnap && a <= GX_VA_TEX7; a++) {
         if (r[a].elem == 0 || gx_game.array_base[a] == NULL) {
             continue;
@@ -1559,32 +1483,13 @@ static inline __attribute__((always_inline)) void rec_prim_body(u8 primfmt, u16 
         q += 5 + (bytes + 3) / 4;
         s_snap_bytes += bytes;
     }
-    gx_ph_leave(0, p);
     s_gs.prims++;
     commit(n, 1);
 }
 
 /* gximmdirect: the game thread writes the primitive's vertices into its chunks now, in the ring's PICA layout,
  * reading indexed attributes from their arrays at once, so no snapshot is taken. 0: record it the old way. */
-static inline __attribute__((always_inline)) int rec_prim_direct_body(u8 primfmt, u16 nverts, const void* caller,
-                                                                       const PPCWGPipe* slots, int ph);
-static __attribute__((noinline, cold)) int rec_prim_direct_ph(u8 primfmt, u16 nverts, const void* caller,
-                                                              const PPCWGPipe* slots) {
-    int p = gx_ph_nested(0, GPH_G_PRIMD);
-    int r = rec_prim_direct_body(primfmt, nverts, caller, slots, 1);
-    gx_ph_leave(0, p);
-    return r;
-}
-
 int gx_rec_prim_direct(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* slots) {
-    if (__builtin_expect(gx_ph_on, 0)) {
-        return rec_prim_direct_ph(primfmt, nverts, caller, slots);
-    }
-    return rec_prim_direct_body(primfmt, nverts, caller, slots, 0);
-}
-
-static inline __attribute__((always_inline)) int rec_prim_direct_body(u8 primfmt, u16 nverts, const void* caller,
-                                                                       const PPCWGPipe* slots, int ph) {
     u32 fmt = primfmt & 7;
     if (s_null || !gx_imm_rec_ok(&gx_game, (u8)(primfmt & 0xF8), nverts)) {
         gx_imm_rec_count(0);
@@ -1598,9 +1503,7 @@ static inline __attribute__((always_inline)) int rec_prim_direct_body(u8 primfmt
         return 0;
     }
     u8 attr_slot[8];
-    int p = ph ? gx_ph_nested(0, GPH_G_IMMCONV) : 0;
     gx_imm_convert(&gx_game, (u8)fmt, slots, nverts, dst, attr_slot);
-    gx_ph_leave(0, p);
     if (gx_opt_immdirect == 2) {
         gx_imm_verify(&gx_game, (u8)fmt, slots, nverts, dst, attr_slot);
     }
@@ -1625,13 +1528,11 @@ void gx_rec_raw(const PPCWGPipe* slots, u32 nslots) {
     if (nslots == 0) {
         return;
     }
-    int p = gx_ph_enter(0, GPH_G_RAW);
     u32* c = put(GXR_RAW, nslots);
     for (u32 i = 0; i < nslots; i++) {
         c[i] = slots[i].u32;
     }
     commit(nslots, 1);
-    gx_ph_leave(0, p);
 }
 
 /* ---- Fences ---- */
@@ -2071,7 +1972,7 @@ void gx_rec_init(void) {
     if (gx_ph_on < 0) {
         gx_ph_on = 0;
     }
-    s_ph_cd[0] = s_ph_cd[1] = 1;
+    s_ph_cd = 1;
     if (s_fuse) {
         PLOG_I("gxrecfuse=%d: state lists through the record's dedup, vertex description recorded as a difference%s",
                s_fuse, s_fuse == 2 ? " (verify)" : "");

@@ -996,14 +996,7 @@ static void draw_from_reader(Reader* r, u8 prim, u8 fmt, u32 n) {
     }
 }
 
-static inline __attribute__((always_inline)) void gx_end_body(void);
 void GXEnd(void) {
-    int p = gx_ph_enter(0, GPH_G_END);
-    gx_end_body();
-    gx_ph_leave(0, p);
-}
-
-static inline __attribute__((always_inline)) void gx_end_body(void) {
     if (!s_in_begin) {
         plat_fatal("GXEnd without GXBegin");
     }
@@ -1227,26 +1220,19 @@ void gx_pipe_reset(void) {
     run_pending_raw();
 }
 
-static inline __attribute__((always_inline)) void call_display_list(void* list, u32 nbytes, const void* ra);
 void GXCallDisplayList(void* list, u32 nbytes) {
-    int p = gx_ph_enter(0, GPH_G_CALLDL);
-    call_display_list(list, nbytes, __builtin_return_address(0));
-    gx_ph_leave(0, p);
-}
-
-static inline __attribute__((always_inline)) void call_display_list(void* list, u32 nbytes, const void* ra) {
     if (gx_prim_is_open()) {
-        gx_end_open_primitive(ra);
+        gx_end_open_primitive(__builtin_return_address(0));
     }
     run_pending_raw();
     if (gx_dl_recording()) {
         plat_fatal("GXCallDisplayList inside a display list being recorded");
     }
     if (gx_rec_on()) {
-        gx_rec_list(list, nbytes, ra);
+        gx_rec_list(list, nbytes, __builtin_return_address(0));
         return;
     }
-    gx_call_list(list, nbytes, ra);
+    gx_call_list(list, nbytes, __builtin_return_address(0));
     if (gx_rec_direct) {
         gx_rec_direct_list();
     }

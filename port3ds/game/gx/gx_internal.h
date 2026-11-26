@@ -334,31 +334,27 @@ void gx_rec_list(const void* list, u32 nbytes, const void* caller);
 void gx_rec_prim(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* slots, u32 nslots);
 void gx_rec_raw(const PPCWGPipe* slots, u32 nslots);
 int gx_rec_prim_direct(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* slots); /* gximmdirect */
-/* Switch gxphase=N (measuring, default 0; logs with gxthreadstats): time and calls per phase of the recording path
- * (role 0, the game thread) and of the translator (role 1, inside consume). Each role times one outer call in N
- * (a setter's recording, a list call, a primitive, a recorded command) and, inside a timed one, every nested phase;
- * time is exclusive (a nested phase stops its outer's clock). A tick pair's own cost is measured at each log and
- * taken off. Off: one load and branch where a hook is. */
+/* Switch gxphase=N (measuring, default 0; logs with gxthreadstats; meant for gxthread=2 gxpipeline=1): time and
+ * calls per phase of the translator (inside consume). One outer call in N is timed (a list call of a group, a state
+ * call, a primitive, any other command) and, inside it, every nested phase (batch open and close, the per-list slow
+ * path, batch forming, the state build); time is exclusive (a nested phase stops its outer's clock). The cost of a
+ * segment (an empty nested phase at the start of each timed call) is taken off. Off: one load and branch per hook.
+ * The game thread's record path has no timers: a hook in gx_rec_call cost 0.3 ms and the timed path is not the
+ * setters' inlined one (PORT_3DS_GX_PERF.md, "Where the record path's time goes"). */
 enum {
-    GPH_CAL,
-    GPH_G_SET, GPH_G_DD, GPH_G_VD, GPH_G_VDF, GPH_G_CALLDL, GPH_G_LIST, GPH_G_ISSL, GPH_G_FUSE, GPH_G_END,
-    GPH_G_PRIM, GPH_G_SNAP, GPH_G_PRIMD, GPH_G_IMMCONV, GPH_G_RAW,
-    GPH_T_LIST, GPH_T_SET, GPH_T_PRIM, GPH_T_PRIMD, GPH_T_RAW, GPH_T_OTHER, GPH_T_BOPEN, GPH_T_BCLOSE, GPH_T_SLOW,
-    GPH_T_FORM, GPH_T_STATE, GPH_TCAL,
-    GPH_COUNT
+    GPH_CAL, GPH_T_LIST, GPH_T_SET, GPH_T_PRIM, GPH_T_PRIMD, GPH_T_RAW, GPH_T_OTHER, GPH_T_BOPEN, GPH_T_BCLOSE,
+    GPH_T_SLOW, GPH_T_FORM, GPH_T_STATE, GPH_COUNT
 };
 extern int gx_ph_on;
-int gx_ph_enter_slow(int role, int ph, int outer);
-void gx_ph_pop(int role);
-/* An outer phase: counted on every call, timed on one in N (or always when its role is timing an outer one). */
-static inline int gx_ph_enter(int role, int ph) { return __builtin_expect(gx_ph_on, 0) ? gx_ph_enter_slow(role, ph, 1) : 0; }
-/* A nested phase: counted on every call, timed only inside a timed outer one of its role. */
-static inline int gx_ph_nested(int role, int ph) {
-    return __builtin_expect(gx_ph_on, 0) ? gx_ph_enter_slow(role, ph, 0) : 0;
-}
-static inline void gx_ph_leave(int role, int pushed) {
+int gx_ph_enter_slow(int ph, int outer);
+void gx_ph_pop(void);
+/* An outer phase: counted on every call, timed on one in N (or always inside a timed outer one). */
+static inline int gx_ph_enter(int ph) { return __builtin_expect(gx_ph_on, 0) ? gx_ph_enter_slow(ph, 1) : 0; }
+/* A nested phase: counted on every call, timed only inside a timed outer one. */
+static inline int gx_ph_nested(int ph) { return __builtin_expect(gx_ph_on, 0) ? gx_ph_enter_slow(ph, 0) : 0; }
+static inline void gx_ph_leave(int pushed) {
     if (__builtin_expect(pushed, 0)) {
-        gx_ph_pop(role);
+        gx_ph_pop();
     }
 }
 void gx_rec_frame(void); /* game thread, GXCopyDisp: per-frame counters */

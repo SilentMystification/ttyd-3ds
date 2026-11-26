@@ -1654,9 +1654,9 @@ static u32 s_vsh_dirty = GXD_ALL; /* gxdirty: the classes the uniform block has 
 
 static inline __attribute__((always_inline)) void ensure_state_body(void);
 static void ensure_state(void) {
-    int p_ = gx_ph_nested(1, GPH_T_STATE);
+    int p_ = gx_ph_nested(GPH_T_STATE);
     ensure_state_body();
-    gx_ph_leave(1, p_);
+    gx_ph_leave(p_);
 }
 
 static inline __attribute__((always_inline)) void ensure_state_body(void) {

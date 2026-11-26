@@ -77,6 +77,7 @@ fi
 # a quarter of a full build; azahar runs and 3dsx tests do not need the CIA. The option is a cached CMake
 # variable, so the default passes ON explicitly. A CIA from an earlier build is removed so no tool runs it stale.
 if [ "$nocia" = 1 ]; then set -- -DTTYD_CIA=OFF "$@"; else set -- -DTTYD_CIA=ON "$@"; fi
+if [ "${TTYD_CIA_DETERMINISTIC:-0}" = 1 ]; then set -- -DTTYD_CIA_DETERMINISTIC=ON "$@"; else set -- -DTTYD_CIA_DETERMINISTIC=OFF "$@"; fi
 if [ "$nocia" = 1 ] && [ -f "$repo/$out/ttyd.cia" ]; then
     rm -f "$repo/$out/ttyd.cia"
     echo "build.sh: --no-cia: removed stale $out/ttyd.cia"

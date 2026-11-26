@@ -13,6 +13,7 @@
 # The CIA uses port3ds/rsf/ttyd.rsf.
 
 option(TTYD_CIA "Build the CIA (makerom compresses the code: ~70-100 s); OFF builds the 3dsx only" ON)
+option(TTYD_CIA_DETERMINISTIC "Rewrite the CIA's random ticket/TMD fields for byte-identical builds (console install untested)" OFF)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_program(MAKEROM makerom)
 find_program(BANNERTOOL bannertool)
@@ -90,6 +91,12 @@ function(ttyd_add_cia target)
         VERBATIM
         COMMENT "Building banner for ${target}")
 
+    # makerom randomises the ticket title key, ticket ID and TMD content ID: pin them (reproducible CIA) when enabled.
+    set(determinize)
+    if(TTYD_CIA_DETERMINISTIC)
+        set(determinize COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/cia_deterministic.py" "${out_dir}/${target}.cia")
+    endif()
+
     add_custom_command(
         OUTPUT "${out_dir}/${target}.cia"
         COMMAND "${MAKEROM}" -f cia -o "${out_dir}/${target}.cia" -target t -exefslogo
@@ -98,7 +105,9 @@ function(ttyd_add_cia target)
                 -icon "${art}/icon.smdh" -banner "${art}/banner.bnr"
                 "-DAPP_TITLE=${ARG_TITLE}" "-DAPP_PRODUCT_CODE=${ARG_PRODUCT_CODE}"
                 "-DAPP_UNIQUE_ID=${ARG_UNIQUE_ID}"
+        ${determinize}
         DEPENDS ${target} "${rsf}" "${art}/icon.smdh" "${art}/banner.bnr"
+                "${TTYD_REPO_DIR}/tools/port3ds/cia_deterministic.py"
         VERBATIM
         COMMENT "Building ${target}.cia")
 

@@ -6,6 +6,8 @@
 #endif
 #include "port_disc_data.h"
 #include "port_addr.h"
+#include "port3ds/gamepar.h"
+extern s32 entry_n; // dispdrv.c: dispEntry calls so far this frame (gamecnt, mapdispjob)
 #endif
 #include "driver/mapdrv.h"
 #include "driver/animdrv.h"
@@ -1111,6 +1113,9 @@ static void _mapLoad(MapWork* wp, BOOL group, const char* map) {
 #if VERSION >= VERSION_JP
     disableMapDraw = FALSE;
 #endif
+#ifdef TARGET_PORT
+    portNameIdxChanged();
+#endif
 }
 
 /**
@@ -1177,6 +1182,9 @@ void mapUnLoad(void) {
     }
     arcDelete(1);
     memset(wp, 0, sizeof(MapWork));
+#ifdef TARGET_PORT
+    portNameIdxChanged();
+#endif
 }
 
 #if VERSION <= VERSION_DEMO_JP
@@ -1388,6 +1396,9 @@ void bmapUnLoad(void) {
         arcEntry(1, wp->entries->arcData, wp->entries->arcSize);
     }
 #endif
+#ifdef TARGET_PORT
+    portNameIdxChanged();
+#endif
 }
 #if VERSION >= VERSION_JP
 #pragma opt_common_subs reset
@@ -1516,6 +1527,9 @@ void bmapLoad(const char* map, const char* map2) {
         _mapLoad(wp, 1, map2);
         wp->entries[0].count = 2;
     }
+#ifdef TARGET_PORT
+    portNameIdxChanged();
+#endif
 }
 
 /**
@@ -2410,6 +2424,9 @@ void mapDisp(void) {
         return;
     }
 #endif
+#ifdef TARGET_PORT
+    s32 port_n0 = entry_n;
+#endif
     entry = wp->entries;
     for (i = 0; i < wp->entries[0].count; entry++, i++) {
         if (entry->rootMapObj != NULL) {
@@ -2533,6 +2550,15 @@ void mapDisp(void) {
             }
         }
     }
+#ifdef TARGET_PORT
+    if (port_gamecnt_on()) {
+        u32 walked = 0;
+        for (i = 0; i < wp->entries[0].count; i++) {
+            walked += wp->entries[i].numJoints;
+        }
+        port_cnt_mapdisp(walked, (u32)(entry_n - port_n0));
+    }
+#endif
 }
 
 /**
@@ -3979,6 +4005,11 @@ MapObject* mapGetMapObj(const char* name) { // 1:1
     if (!name) {
         return 0;
     }
+#ifdef TARGET_PORT
+    if (port_nameidx_on()) { // mapnameidx (or gamecnt's probe counts): port3ds/game/nameidx.c
+        return portMapGetMapObj(wp, name, __builtin_return_address(0));
+    }
+#endif
     for (i = 0; i < wp->entries[0].count; i++) {
         entry = &wp->entries[i];
         object = entry->objects;

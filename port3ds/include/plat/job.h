@@ -77,6 +77,11 @@ typedef struct {
 } PlatJobStats;
 void plat_job_stats(PlatJobStats* out);
 
+/* Round trip of an empty job to worker w (0: the ring worker), from submit until the worker has run it,
+ * without stealing: *ticks. Returns 1, 0 when the worker did not run it within 5 ms (the caller then ran
+ * it), -1 when there is no such worker. For the jobprobe switch. */
+int plat_job_probe(int worker, uint64_t* ticks);
+
 #ifdef __cplusplus
 }
 #endif

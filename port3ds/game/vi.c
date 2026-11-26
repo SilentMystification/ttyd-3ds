@@ -36,6 +36,7 @@
 #include "plat/sdio.h"
 #include "plat/sweep.h"
 #include "plat/thread.h"
+#include "port3ds/gamepar.h"
 #include "port3ds/loadprof.h"
 #include "port3ds/os_internal.h"
 #include "test_mode.h"
@@ -524,6 +525,7 @@ static void frame_hooks(void) {
         port_lp_frame(s_frames, seq, ready, gp != NULL ? gp->currentMapName : NULL,
                       s_frame_start ? plat_ticks() - s_frame_start - (plat_paused_ticks() - s_pause_base) : 0);
     }
+    port_gamepar_frame(s_frames); /* gamecnt, mapnameidx, mapdispjob lines */
     fastboot_frame(s_sweep_state > 1 || s_warp_switch_done);
     /* log output only; mallinfo walks the whole heap (452 us in Azahar, gor_01), a hitch on the game thread: not in release builds */
     if (s_frames % 1800 == 0 && plat_is_dev_build()) {

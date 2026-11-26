@@ -282,6 +282,28 @@ void plat_job_parallel_for(PlatJobRangeFn fn, void* arg, uint32_t count, uint32_
     plat_job_join_all(jobs + 1, used - 1);
 }
 
+static void probe_noop(void* unused) { (void)unused; }
+
+int plat_job_probe(int worker, uint64_t* ticks) {
+    if (worker != 0 || !plat_job_enabled()) {
+        return -1;
+    }
+    uint64_t t0 = svcGetSystemTick();
+    PlatJob j = plat_job_submit(probe_noop, NULL);
+    if (j == DONE_HANDLE) {
+        return 0;
+    }
+    Slot* sl = slot_of(j);
+    const uint64_t limit = PLAT_TICKS_PER_SEC / 200u; /* 5 ms */
+    while (load_acq(&sl->state) != S_DONE && svcGetSystemTick() - t0 < limit) {
+    }
+    uint64_t t1 = svcGetSystemTick();
+    int ok = load_acq(&sl->state) == S_DONE;
+    plat_job_join(j);
+    *ticks = t1 - t0;
+    return ok;
+}
+
 void plat_job_stats(PlatJobStats* out) {
     memset(out, 0, sizeof(*out)); /* the padding too: maybe_log compares with memcmp */
     out->queued = __atomic_load_n(&s_stats.queued, __ATOMIC_RELAXED);

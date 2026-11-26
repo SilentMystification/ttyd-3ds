@@ -79,6 +79,21 @@ Gates for every step: `determ_ab.py` (10 scenes, 6 of 6), `gw_diff.py` (1600 fra
 6. **Stereo:** per-eye tail lists with per-eye rows on the CPU (byte-identical; planner default). A shader shear would be cheaper but not identical (open owner question).
 7. **Chunk/stream builds as core-2 jobs at map load** (frame draws uncached meanwhile, the `dlspread` rule), targeting the ~345 ms first-frame build cost in gor_01.
 
+## 4b. QTM (2 MiB extra RAM, separate bus) budget
+
+The redesign removes the `gx record` (QTM 1 MiB) and the `gx ring` (heap 4 MiB) and takes back the empty `gx state`/`audio state` reservations. QTM then holds the streams written every frame and read once, so they stop sharing the FCRAM bus with textures, vertex streams, scanout and the game heaps. Every row is a `plat/memplace.c` placement with a fallback tier; defaults stay on today's tiers until console numbers exist.
+
+| # | Placement | KiB | Writer / reader | Per frame (est.) | Depends on (unmeasured) | Fallback |
+|---|---|---|---|---|---|---|
+| 1 | Frame list, 2 x 128 KiB | 256 | core 0 / command processor | 60-100 KB | PICA command fetch from QTM | linear FCRAM |
+| 2 | Immediate vertex ring, 3 frames x 256 KiB | 768 | core 0 / vertex loader | 73-234 KB | PICA vertex fetch from QTM | linear FCRAM (overflow to linear chunks) |
+| 3 | PSO class blocks and layout blocks | 256 | core 0/2 at build / command processor | 50-150 KB read | as row 1 | linear FCRAM, or VRAM if `cb_vram` passes |
+| 4 | Hot ListObj index (~128 KiB) + class intern tables (~64 KiB) | 192 | core 0 | cache-resident | QTM latency on an L2 miss, cacheability | heap |
+| 5 | Event ring core 0 to core 2 (option B only; else static batch chunks ~220 KB) | 256 | core 0 / core 2 | ~20 KB | CPU bandwidth and coherence on QTM | heap |
+| 6 | Log slots (unchanged) | 320 | all / core 1 | cold | none | - |
+
+Priority when room is short: rows 1-2, then 3, then batch chunks, then 4. Console facts first: probes `cb_qtm`, `vb_qtm`, `ib_qtm` (each GPU unit fetches separately; also check `GSPGPU_FlushDataCache` on QTM ranges and the physical address encoding 0x1F000000>>3), calib QTM latency/bandwidth and cache attributes, and the QTM benchmark's `contend` test. Azahar decides nothing here (its TextureCopy to/from QTM fails). Step 0 adds these probes; step 3 registers rows 1-3 as placements on linear FCRAM by default.
+
 ## 5. Obsolete when done
 
 - `gx_rec.c` entirely (ring, translator thread, fences, array snapshots, gx_game/gx split, `dd_slot`/`dd_same`, `gx_rec_fast`, `GXR_PRIMD`, fused-list table, `consume`) and switches `gxthread`, `gxpipeline`, `gxthreadsplit*`, `gxthreaddedup`, `gxrecfuse*`, `gxreclgroup`, `gxphase`, `gxsdl`. Frees about 4 MB of heap (the ring), which also ends pik_00's heap-margin problem.

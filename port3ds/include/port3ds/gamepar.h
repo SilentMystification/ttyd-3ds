@@ -56,4 +56,7 @@ struct LightEntry* portLightNameToPtr(struct LightWork* wp, const char* name, vo
 void portNameIdxChanged(void);
 void port_nameidx_frame(u32 frame);
 
+/* ---- Step 3: mapDisp in phases (src/driver/mapdrv.c) ---- */
+void portMapDispJobFrame(u32 frame); /* [MAPDISPJOB] totals every 120 frames */
+
 #endif

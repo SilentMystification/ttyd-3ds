@@ -154,6 +154,7 @@ static void probe_jobs(void) {
 
 void port_gamepar_frame(u32 frame) {
     port_nameidx_frame(frame);
+    portMapDispJobFrame(frame);
     if (!port_gamecnt_on()) {
         return;
     }

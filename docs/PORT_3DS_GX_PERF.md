@@ -1445,3 +1445,55 @@ Identity (B against port3ds `156cf717`): `determ` shots 780-785 byte-identical i
 Stereo (`stereoforce=1`, C3, gor_01 780-782, against `156cf717`): 9 of 9 identical (EFB, left, right).
 
 Not done: the translator task (pik_00 15.5 ms). Phases now (C3, `gxphase=1`, frame 841, calls / us per frame): primitives `GXR_PRIMD` 1 154 / 6 375, batch open 358 / 2 620, state build 1 606 / 2 616, list calls 5 885 / 1 519, slow path 102 / 982, state calls 2 843 / 799, batch close 358 / 295, other 603. Batch open and the primitives share `ensure_state`, `vsh_state`, the route and the uniforms (section "Translator, immediate primitives and batch open" above); no cut was tried in this round.
+
+## `texdt`: texture tiling by the transfer engine (plan step 3b, 2026-11-27)
+
+Status: code and build only. No emulator run and no console run yet; "ready for measurement". Default `texdt=0`: the build is as before.
+
+### What it does
+
+The CPU decodes a GX texture to RGBA8 as before and picks the PICA format as before. If the format is RGBA8, RGB565, RGBA5551 or RGBA4 (the engine's formats; RGB8 is never picked), the texture needs no resampling (sides already powers of two, at least 8) and no mip chain, and it has at least `texdtmin` texels, then:
+
+1. the CPU converts the RGBA8 rows into the target format in a **linear staging block** (one sequential pass, no Morton scatter), and flushes it on the writing thread;
+2. `plat_gpu_tex_create_xfer` makes the texture (`C3D_TexInit`, no copy) and queues a job;
+3. the render thread, right after `C3D_FrameBegin` of its next record, issues each job as `GX_DisplayTransfer` (`FLIP_VERT(1) | OUT_TILED(1)`, in and out format equal, no scaling, `RAW_COPY(0)`). The GX queue runs entries in order, so the transfer finishes before that record's command list; every record that samples the texture is submitted after the texture was made. The game thread never waits for the GPU.
+
+Everything else is tiled by the CPU as before: other formats (LA8, L8, L4, LA4, ETC), resampled textures (non power of two), mip chains (`texfilter=mip`), textures under `texdtmin` texels (default 2048), and any texture that finds no free staging block. There is no waiting fallback: an allocation failure or a full job table tiles on the CPU at once.
+
+### Staging buffer and memory
+
+- One arena in linear memory, `texdtarena` KB (default 512, range 256..1024), 16 KB granules, first-fit blocks. A texture takes at most half the arena (256 KB: 256x256 RGBA8, 512x256 RGB565). The arena is allocated once, only when `texdt` is on. Linear free is about 4.5 MB in the worst config: 512 KB is 11 %; `texdtarena=256` allows only 128 KB blocks.
+- A block is busy from the write until the record that carried its transfer is done on the GPU (`s_gpu_done_seq`, the `gpufence` of the records), then it is released by the render thread. The texture memory is busy for the same time (`TexSlot.dt_busy`): a texture freed before that is released only afterwards (`tex_alloc_slot`, `plat_gpu_tex_reclaim`, which also reaps after its sync).
+- Needs `gpufence=1` (the default); with `gpufence=0` `texdt` turns itself off and logs it.
+- 64 job slots. A job that the record cannot issue because the 32-entry GX queue is nearly full (the 24-entry budget that the strip copies use, `s_gx_entries`) is tiled by the CPU **on the render thread** from the same staging block (counted as "cpu on render thread").
+
+### texasync
+
+The core-2 runner decodes as before. With `texdt=1` an eligible result keeps its staging block instead of a heap-tiled copy (the runner converts and flushes on core 2; the result takes 0 heap bytes). The arena keeps half its room free for the binds' own textures (`reserve_half`): when the runner finds less room it tiles on the CPU as before. At the first bind `pre_take` hands the block to `plat_gpu_tex_create_xfer`; an unused result (aged out, stale generation) frees its block. With `texdt=2` the runner makes the CPU tiled copy as well and the bind queues the verify job.
+
+### Verify: `texdt=2`
+
+The CPU tiles as before and that texture is the one drawn. The same texels are also transferred into a second block; when the record is done both are compared with `memcmp`. Lines in the log:
+
+- `texdt: verify MISMATCH WxH fmt F flip N: B of T bytes differ, first at K (engine XX, cpu YY)` (first 24 only);
+- `texdt: made .. issued .. verify queued .. ok .. BAD ..` every 600 records, `texdt: frame ..` every 600 frames.
+
+Verify uses `texdtmin` 64 (every size from 8x8 up), so the engine's minimum size and shape limits show up as mismatches by size. Expected result: `BAD 0`. If every size is BAD, try `texdtflip=0` (the flip convention; the probe `dt_tile_*` on branch `gxone` tests both and was not run on the console yet).
+
+### Switches
+
+| Switch | Default | Meaning |
+| --- | --- | --- |
+| `texdt` | 0 | 0 CPU tiler; 1 transfer engine; 2 verify (CPU texture, engine copy compared) |
+| `texdtflip` | 1 | `GX_TRANSFER_FLIP_VERT` value; 1 puts row 0 in the last tile row (t = 0 at the last memory row) |
+| `texdtmin` | 2048 | smallest texture (texels) that uses the engine; verify uses 64 |
+| `texdtarena` | 512 | staging arena KB (256..1024) |
+
+### Measurement plan (planner)
+
+1. `texdt=2` verify, expect `BAD 0`: `gor_01`, `pik_00`, `usu_00`, a battle, `map_sweep.py --area tik`; also once with `texasync=1`.
+2. `determ_ab.py` `texdt=0` against `texdt=1` (must be byte identical).
+3. Map-load frame times (`texframe=1`: conv and create columns) `texdt=0` against `1`, with and without `texasync=1`.
+4. Console (owner-gated): `dt_tile_*` probe from `gxone` for the size and flip rules, then `texdt=2`.
+
+Known limits: after a GPU reset (`gpu_reset_apply`) a transfer that was in the lost queue is not repeated; the texture would show stale bytes until it is rebuilt (the hang path already loses the frame). The CPU still decodes everything and writes the staging copy, so the saving is the Morton scatter and the cache behaviour of the scatter, not the decode.

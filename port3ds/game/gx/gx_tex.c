@@ -690,6 +690,62 @@ int plat_probe_tile_ref(int fmt, const unsigned char* rgba, unsigned w, unsigned
 
 static u32 level_bytes(u32 fmt, u32 pw, u32 ph) { return pw * ph * fmt_bits(fmt) / 8; }
 
+/* ---- texdt (switch, default 0; plan step 3b, plat/gpu.c): the PICA formats the transfer engine tiles ----
+ * 0 off. 1: a texture in RGBA8, RGB565, RGBA5551 or RGBA4 without resampling or a mip chain, and of at least
+ * texdtmin texels, is decoded as before into RGBA8, then converted to its PICA format into a linear staging block
+ * (a sequential pass, no Morton scatter); the transfer engine tiles it into the texture memory on the GPU before
+ * the first draw. Anything else, and a texture the staging arena has no room for, is tiled by the CPU as before.
+ * 2: verify: the CPU tiles as before and the engine's result is compared byte for byte (log, must be 0 mismatches). */
+static int s_dt;
+static struct {
+    unsigned xfer, verify, nostage, async_stage;
+} s_dtc;
+
+static int dt_eligible(u32 fmt, u32 w, u32 h, u32 pw, u32 ph, u32 levels) {
+    return s_dt != 0 && levels == 0 && w == pw && h == ph && w * h >= plat_gpu_xfer_min_texels() &&
+           (fmt == PLAT_TEXFMT_RGBA8 || fmt == PLAT_TEXFMT_RGB565 || fmt == PLAT_TEXFMT_RGBA5551 ||
+            fmt == PLAT_TEXFMT_RGBA4);
+}
+
+/* RGBA8 rows -> `fmt` texels, same rows, no tiling (what tile_level stores per texel). */
+static void stage_fill(const u8* px, u32 n, u32 fmt, u8* out) {
+    switch (fmt) {
+    case PLAT_TEXFMT_RGB565:
+        for (u32 i = 0; i < n; i++, px += 4) {
+            ((u16*)out)[i] = (u16)(((px[0] >> 3) << 11) | ((px[1] >> 2) << 5) | (px[2] >> 3));
+        }
+        break;
+    case PLAT_TEXFMT_RGBA5551:
+        for (u32 i = 0; i < n; i++, px += 4) {
+            ((u16*)out)[i] = (u16)(((px[0] >> 3) << 11) | ((px[1] >> 3) << 6) | ((px[2] >> 3) << 1) | (px[3] >> 7));
+        }
+        break;
+    case PLAT_TEXFMT_RGBA4:
+        for (u32 i = 0; i < n; i++, px += 4) {
+            ((u16*)out)[i] = (u16)((px[0] / 17) << 12 | (px[1] / 17) << 8 | (px[2] / 17) << 4 | (px[3] / 17));
+        }
+        break;
+    default:
+        for (u32 i = 0; i < n; i++, px += 4) {
+            ((u32*)out)[i] = (u32)px[0] << 24 | (u32)px[1] << 16 | (u32)px[2] << 8 | px[3];
+        }
+        break;
+    }
+}
+
+/* A staging block holding the texels of `px` in `fmt` (flushed), or NULL. */
+static u8* dt_stage(const u8* px, u32 pw, u32 ph, u32 fmt, int async) {
+    u32 bytes = level_bytes(fmt, pw, ph);
+    u8* stg = plat_gpu_stage_alloc(bytes, async);
+    if (stg == NULL) {
+        s_dtc.nostage++;
+        return NULL;
+    }
+    stage_fill(px, pw * ph, fmt, stg);
+    plat_gpu_stage_flush(stg, bytes);
+    return stg;
+}
+
 /* Box filter of a 2x2 block, colour weighted by alpha (so a transparent texel's colour does not bleed in). */
 static inline void box4(const u8* a, const u8* b, const u8* c, const u8* d, u8* o) {
     u32 wa = a[3], wb = b[3], wc = c[3], wd = d[3], sw = wa + wb + wc + wd;
@@ -850,10 +906,35 @@ static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h, cons
         u64 tc = TF_T();
         void* dst = NULL;
         u32 size = 0, bytes = level_bytes(fmt, pw, ph);
+        u8* stg = NULL;
+        if (dt_eligible(fmt, w, h, pw, ph, 0)) {
+            stg = dt_stage(px, pw, ph, fmt, 0);
+            if (stg != NULL && s_dt == 1) {
+                u32 xh = plat_gpu_tex_create_xfer(pw, ph, fmt, stg, bytes); /* the block is gone either way */
+                s_tf.t_create += s_tf_on ? plat_ticks() - tc : 0;
+                if (xh != 0) {
+                    s_dtc.xfer++;
+                    return xh;
+                }
+                stg = NULL; /* no slot or memory: the CPU path below fails the same way or tiles */
+            }
+        }
         u32 hd = plat_gpu_tex_create_begin(pw, ph, fmt, &dst, &size);
         s_tf.t_create += s_tf_on ? plat_ticks() - tc : 0;
         if (hd == 0) {
+            plat_gpu_stage_free(stg);
             return 0;
+        }
+        if (stg != NULL) {
+            /* texdt=2: the CPU's texture is used; the engine's tiling of the same texels is compared with it */
+            if (size >= bytes) {
+                tile_level(px, w, h, pw, ph, fmt, dst);
+                plat_gpu_tex_create_end(hd);
+                plat_gpu_tex_xfer_verify(hd, stg, bytes);
+                s_dtc.verify++;
+                return hd;
+            }
+            plat_gpu_stage_free(stg);
         }
         if (size >= bytes) {
             tile_level(px, w, h, pw, ph, fmt, dst);
@@ -1023,6 +1104,7 @@ typedef struct {
     u8 fmt, ok;
     u32 gx_bytes, gen, frame, est_bytes;
     u8* out;
+    u8* stg; /* texdt: the texels linear in a staging block (out is NULL with texdt=1) */
     u32 out_bytes, pfmt, hash;
     u16 pw, ph;
 } PreTex;
@@ -1045,9 +1127,21 @@ static void pre_decode(PreTex* p, u8* rgba) {
     u32 fmt = pick_format(rgba, p->w, p->h);
     u32 pw = pow2(p->w), ph = pow2(p->h);
     u32 bytes = level_bytes(fmt, pw, ph);
-    u8* out = malloc(bytes);
-    if (out != NULL) {
-        tile_level(rgba, p->w, p->h, pw, ph, fmt, out);
+    /* texdt: the linear form goes into a staging block (flushed here, on this core); the transfer engine tiles it at
+     * the bind. The arena keeps half its room for the binds' own textures. */
+    u8* stg = dt_eligible(fmt, p->w, p->h, pw, ph, 0) ? dt_stage(rgba, pw, ph, fmt, 1) : NULL;
+    u8* out = stg != NULL && s_dt == 1 ? NULL : malloc(bytes);
+    if (out == NULL && stg != NULL && s_dt != 1) {
+        plat_gpu_stage_free(stg); /* verify needs the CPU texture too */
+        stg = NULL;
+    }
+    if (out != NULL || stg != NULL) {
+        if (out != NULL) {
+            tile_level(rgba, p->w, p->h, pw, ph, fmt, out);
+        }
+        s_dtc.async_stage += stg != NULL;
+        p->stg = stg;
+        stg = NULL;
         p->hash = hash_bytes_raw(p->image, p->gx_bytes);
         p->out = out;
         p->out_bytes = bytes;
@@ -1104,6 +1198,7 @@ static void pre_kick(void) {
 static void pre_free(PreTex* p) {
     __atomic_sub_fetch(&s_pre_bytes, p->est_bytes, __ATOMIC_RELAXED);
     free(p->out);
+    plat_gpu_stage_free(p->stg);
     memset(p, 0, sizeof(*p)); /* state FREE */
 }
 
@@ -1231,7 +1326,19 @@ static int pre_take(const GxTexObj* t, u32* handle, u16* tw, u16* th, u32* bytes
         PLOG_W("texverify: texasync result stale: image %p %ux%u fmt %u frame %u", t->image, t->width, t->height,
                t->format, (unsigned)s_frame);
     } else {
-        u32 h = plat_gpu_tex_create(p->pw, p->ph, p->pfmt, p->out, p->out_bytes);
+        u32 h;
+        if (p->stg != NULL && s_dt == 1) {
+            h = plat_gpu_tex_create_xfer(p->pw, p->ph, p->pfmt, p->stg, p->out_bytes); /* takes the block */
+            p->stg = NULL;
+            s_dtc.xfer += h != 0;
+        } else {
+            h = plat_gpu_tex_create(p->pw, p->ph, p->pfmt, p->out, p->out_bytes);
+            if (h != 0 && p->stg != NULL) {
+                plat_gpu_tex_xfer_verify(h, p->stg, p->out_bytes);
+                p->stg = NULL;
+                s_dtc.verify++;
+            }
+        }
         if (h != 0) {
             *handle = h;
             *tw = p->pw;
@@ -1770,6 +1877,10 @@ void gx_tex_frame_end(void) {
         PLOG_I("texfast: mode %d frame %u: lookups %u fast-hits %u mismatches %u", s_fast_mode, (unsigned)s_frame,
                s_fast_total, s_fast_hits, s_fast_mism);
     }
+    if (s_dt && s_frame % 600 == 0) {
+        PLOG_I("texdt: frame %u: transfers %u, verify %u, async staged %u, no staging block (CPU tiled) %u", (unsigned)s_frame,
+               s_dtc.xfer, s_dtc.verify, s_dtc.async_stage, s_dtc.nostage);
+    }
     pre_frame_end();
     s_frame++;
     for (int i = 0; i < CACHE_SIZE; i++) {
@@ -1866,6 +1977,7 @@ void gx_tex_init(void) {
 #endif
     s_fast_mode = plat_switch_int("texfast", 0);
     s_async = plat_switch_int("texasync", 0) != 0 && s_trust_on;
+    s_dt = plat_gpu_xfer_mode();
     mode_init();
     s_x = calloc(CACHE_SIZE, sizeof(CacheExtra));
     if (s_x == NULL) {

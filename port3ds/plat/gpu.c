@@ -193,6 +193,7 @@ typedef struct {
     u8 is_target;
     u8 pending_free;
     u8 via_scratch; /* a copy target in linear memory, filled through the VRAM scratch target */
+    u8 dt_busy;     /* texdt: transfer jobs (queued, in flight or being verified) that use this memory: not freed meanwhile */
     u32 free_after_frame;
     C3D_RenderTarget* target;
 } TexSlot;
@@ -1145,7 +1146,8 @@ static u32 tex_alloc_slot(void) {
         TexSlot* t = &s_tex[i];
         /* a slot with a render target is released by the render thread
          * (reap_targets): citro3d deletes targets only outside a frame */
-        if (t->pending_free && t->target == NULL && s_frame_counter >= t->free_after_frame) {
+        if (t->pending_free && t->target == NULL && s_frame_counter >= t->free_after_frame &&
+            __atomic_load_n(&t->dt_busy, __ATOMIC_ACQUIRE) == 0) {
             C3D_TexDelete(&t->tex);
             memset(t, 0, sizeof(*t));
         }
@@ -1264,6 +1266,336 @@ uint32_t plat_gpu_tex_create_mip(uint32_t width, uint32_t height, uint32_t fmt, 
     return h;
 }
 
+/* ---- texdt (switch, default 0): texture tiling by the GPU transfer engine (plan step 3b) ----
+ * The caller decodes a texture into a linear staging block (a small linear-memory arena, 16 KB granules) in the
+ * texture's own format (RGBA8, RGB565, RGBA5551, RGBA4; top row first, no padding). plat_gpu_tex_create_xfer makes
+ * the texture and queues a job; the render thread issues it right after C3D_FrameBegin of its next record as a
+ * GX_DisplayTransfer (linear to 8x8 Morton tiles, FLIP_VERT so that row 0 lands in the last tile row, as the CPU
+ * tiler's t = 0 convention). The GX queue runs entries in order, so the transfer is done before that record's
+ * command list, and every record that samples the texture is submitted after its creation. Nothing on the game
+ * thread waits for the GPU: a job that finds no free staging block is not made (the caller tiles on the CPU).
+ * The staging block and the texture's memory are busy until the record that carried the transfer is done on the
+ * GPU (s_gpu_done_seq, the gpufence); a texture freed meanwhile is released only afterwards (TexSlot.dt_busy).
+ * texdt=2 verifies: the texture is tiled by the caller on the CPU as before, the same input is also transferred
+ * into a second block, and when the transfer is done both are compared byte for byte (mismatches are logged and
+ * counted; the picture is the CPU's). A job the record cannot issue (the 32-entry GX queue is nearly full, budget
+ * s_gx_entries) is tiled on the render thread by the CPU from the same staging block.
+ * Switches: texdt (0/1/2), texdtflip (default 1: FLIP_VERT), texdtarena (staging arena KB, default 512, 256..1024),
+ * texdtmin (smallest texture in texels that uses it, default 2048; texdt=2 tests from 64). Needs gpufence=1. */
+#define DT_GRAN (16u * 1024u)
+#define DT_JOBS 64
+typedef struct {
+    u8 state; /* 0 free, 1 queued, 2 issued */
+    u8 verify;
+    u8 fmt;
+    u32 handle, w, h, bytes, seq;
+    u8 *stage, *vbuf;
+} DtJob;
+static int s_dt_on, s_dt_inited, s_dt_flip = 1;
+static u32 s_dt_min = 2048;
+static u8* s_dt_arena;
+static u32 s_dt_ngran;
+static u64 s_dt_map;      /* bit per granule: in use */
+static u8 s_dt_len[64];   /* granules of the block that starts at each index */
+static LightLock s_dt_lock;
+static DtJob s_dtj[DT_JOBS];
+static struct {
+    unsigned made, issued, cpu_render, cpu_nojob, vqueued, vok, vbad, vskip, nostage, hw_peak;
+    u32 records;
+} s_dts;
+
+static int dt_gx_fmt(u32 fmt) {
+    switch (fmt) {
+    case PLAT_TEXFMT_RGBA8: return GX_TRANSFER_FMT_RGBA8;
+    case PLAT_TEXFMT_RGB565: return GX_TRANSFER_FMT_RGB565;
+    case PLAT_TEXFMT_RGBA5551: return GX_TRANSFER_FMT_RGB5A1;
+    case PLAT_TEXFMT_RGBA4: return GX_TRANSFER_FMT_RGBA4;
+    default: return -1;
+    }
+}
+
+int plat_gpu_xfer_mode(void) {
+    if (!s_dt_inited) {
+        s_dt_inited = 1;
+        int m = plat_switch_int("texdt", 0);
+        if (m < 0 || m > 2) {
+            m = 0;
+        }
+        if (m != 0 && plat_switch_int("gpufence", 1) == 0) {
+            PLOG_W("texdt: off (needs gpufence=1)");
+            m = 0;
+        }
+        if (m != 0) {
+            u32 kb = (u32)plat_switch_int("texdtarena", 512);
+            kb = kb < 256 ? 256 : kb > 1024 ? 1024 : kb & ~15u;
+            s_dt_arena = linearMemAlign(kb * 1024u, 128);
+            if (s_dt_arena == NULL) {
+                PLOG_W("texdt: off (no %u KB of linear memory for the staging arena)", (unsigned)kb);
+                m = 0;
+            } else {
+                s_dt_ngran = kb * 1024u / DT_GRAN;
+                s_dt_flip = plat_switch_int("texdtflip", 1) != 0;
+                s_dt_min = (u32)plat_switch_int("texdtmin", 2048);
+                if (m == 2 && s_dt_min > 64) {
+                    s_dt_min = 64;
+                }
+                LightLock_Init(&s_dt_lock);
+                PLOG_I("texdt: mode %d, staging arena %u KB, flip %d, from %u texels", m, (unsigned)kb, s_dt_flip,
+                       (unsigned)s_dt_min);
+            }
+        }
+        s_dt_on = m;
+    }
+    return s_dt_on;
+}
+
+uint32_t plat_gpu_xfer_min_texels(void) { return s_dt_min; }
+
+/* A linear staging block of `bytes` (at most half the arena), 16 KB aligned, or NULL. `reserve_half`: only if at
+ * least half the arena stays free (the core-2 decoder, which holds blocks until the bind). Any thread. */
+void* plat_gpu_stage_alloc(uint32_t bytes, int reserve_half) {
+    if (!s_dt_on || bytes == 0 || bytes > s_dt_ngran * DT_GRAN / 2) {
+        return NULL;
+    }
+    u32 n = (bytes + DT_GRAN - 1) / DT_GRAN, ng = s_dt_ngran;
+    u64 want = (n >= 64 ? ~0ull : ((1ull << n) - 1));
+    void* res = NULL;
+    LightLock_Lock(&s_dt_lock);
+    u32 used = (u32)__builtin_popcountll(s_dt_map);
+    if (!reserve_half || used + n <= ng / 2) {
+        for (u32 i = 0; i + n <= ng; i++) {
+            if ((s_dt_map & (want << i)) == 0) {
+                s_dt_map |= want << i;
+                s_dt_len[i] = (u8)n;
+                res = s_dt_arena + (size_t)i * DT_GRAN;
+                if (used + n > s_dts.hw_peak) {
+                    s_dts.hw_peak = used + n;
+                }
+                break;
+            }
+        }
+    }
+    if (res == NULL) {
+        s_dts.nostage++;
+    }
+    LightLock_Unlock(&s_dt_lock);
+    return res;
+}
+
+static void dt_stage_free_locked(void* p) {
+    u32 i = (u32)((u8*)p - s_dt_arena) / DT_GRAN, n = s_dt_len[i];
+    s_dt_map &= ~((n >= 64 ? ~0ull : ((1ull << n) - 1)) << i);
+    s_dt_len[i] = 0;
+}
+
+void plat_gpu_stage_free(void* p) {
+    if (p == NULL) {
+        return;
+    }
+    LightLock_Lock(&s_dt_lock);
+    dt_stage_free_locked(p);
+    LightLock_Unlock(&s_dt_lock);
+}
+
+/* The writer's cache lines go to memory (call on the thread that wrote the block: the cores' L1 caches are not
+ * cleaned by another core's maintenance). */
+void plat_gpu_stage_flush(void* p, uint32_t bytes) { GSPGPU_FlushDataCache(p, bytes); }
+
+static u32 dt_morton(u32 x, u32 y) {
+    return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3);
+}
+
+/* what the transfer engine makes, by the CPU: linear rows (row 0 first) into 8x8 Morton tiles */
+static void dt_cpu_tile(const u8* lin, u32 w, u32 h, u32 bpp, u8* out) {
+    u32 tw = w >> 3;
+    for (u32 y = 0; y < h; y++) {
+        u32 my = s_dt_flip ? h - 1 - y : y;
+        const u8* row = lin + (size_t)y * w * bpp;
+        for (u32 x = 0; x < w; x++) {
+            u32 idx = ((my >> 3) * tw + (x >> 3)) * 64 + dt_morton(x & 7, my & 7);
+            if (bpp == 4) {
+                ((u32*)out)[idx] = ((const u32*)row)[x];
+            } else {
+                ((u16*)out)[idx] = ((const u16*)row)[x];
+            }
+        }
+    }
+}
+
+static void dt_job_done(DtJob* j) {
+    TexSlot* t = &s_tex[j->handle];
+    dt_stage_free_locked(j->stage);
+    if (j->vbuf != NULL) {
+        dt_stage_free_locked(j->vbuf);
+    }
+    __atomic_sub_fetch(&t->dt_busy, 1, __ATOMIC_RELEASE);
+    memset(j, 0, sizeof(*j));
+}
+
+/* Locked: a free job slot, or NULL. */
+static DtJob* dt_job_new(void) {
+    for (u32 i = 0; i < DT_JOBS; i++) {
+        if (s_dtj[i].state == 0) {
+            return &s_dtj[i];
+        }
+    }
+    return NULL;
+}
+
+static void dt_job_fill(DtJob* j, u32 handle, u32 w, u32 h, u32 fmt, u32 bytes, u8* stage, u8* vbuf) {
+    j->state = 1;
+    j->verify = vbuf != NULL;
+    j->fmt = (u8)fmt;
+    j->handle = handle;
+    j->w = w;
+    j->h = h;
+    j->bytes = bytes;
+    j->stage = stage;
+    j->vbuf = vbuf;
+    __atomic_add_fetch(&s_tex[handle].dt_busy, 1, __ATOMIC_RELEASE);
+}
+
+/* The texture `stage` is the linear form of. Takes the block over (freed on failure too). 0: not made, the caller
+ * tiles on the CPU. */
+uint32_t plat_gpu_tex_create_xfer(uint32_t width, uint32_t height, uint32_t fmt, void* stage, uint32_t bytes) {
+    GMARK("tex_create_xfer");
+    if (!s_dt_on || dt_gx_fmt(fmt) < 0 || width < 8 || height < 8 || width > 1024 || height > 1024) {
+        plat_gpu_stage_free(stage);
+        return 0;
+    }
+    u32 h = tex_alloc_slot();
+    if (h == 0) {
+        plat_gpu_stage_free(stage);
+        return 0;
+    }
+    TexSlot* t = &s_tex[h];
+    if (!C3D_TexInit(&t->tex, (u16)width, (u16)height, (GPU_TEXCOLOR)fmt) || t->tex.size != bytes) {
+        if (t->tex.data != NULL) {
+            C3D_TexDelete(&t->tex);
+        }
+        memset(t, 0, sizeof(*t));
+        plat_gpu_stage_free(stage);
+        return 0;
+    }
+    GSPGPU_InvalidateDataCache(t->tex.data, t->tex.size); /* no stale line of the memory's earlier use is written back over the transfer */
+    LightLock_Lock(&s_dt_lock);
+    DtJob* j = dt_job_new();
+    if (j != NULL) {
+        dt_job_fill(j, h, width, height, fmt, bytes, stage, NULL);
+        s_dts.made++;
+    }
+    LightLock_Unlock(&s_dt_lock);
+    if (j == NULL) {
+        /* no job slot: tile here from the block (CPU, no wait) */
+        dt_cpu_tile(stage, width, height, bytes / (width * height), t->tex.data);
+        C3D_TexFlush(&t->tex);
+        plat_gpu_stage_free(stage);
+        s_dts.cpu_nojob++;
+    }
+    return h;
+}
+
+/* texdt=2: `handle` was tiled by the CPU (create_begin/end); `stage` is the same texels linear. The transfer into a
+ * second block is compared with the texture's memory when it is done. Takes the block over. */
+void plat_gpu_tex_xfer_verify(uint32_t handle, void* stage, uint32_t bytes) {
+    TexSlot* t = &s_tex[handle];
+    u8* vbuf = plat_gpu_stage_alloc(bytes, 0);
+    LightLock_Lock(&s_dt_lock);
+    DtJob* j = vbuf != NULL ? dt_job_new() : NULL;
+    if (j != NULL) {
+        GSPGPU_InvalidateDataCache(vbuf, bytes);
+        dt_job_fill(j, handle, t->tex.width, t->tex.height, (u32)t->tex.fmt, bytes, stage, vbuf);
+        s_dts.vqueued++;
+    } else {
+        s_dts.vskip++;
+        dt_stage_free_locked(stage);
+        if (vbuf != NULL) {
+            dt_stage_free_locked(vbuf);
+        }
+    }
+    LightLock_Unlock(&s_dt_lock);
+}
+
+/* Render thread, after C3D_FrameBegin of record `seq`: the queued jobs become transfers in this frame's GX queue. */
+static void dt_issue(u32 seq) {
+    if (!s_dt_on) {
+        return;
+    }
+    s_dts.records++;
+    LightLock_Lock(&s_dt_lock);
+    for (u32 i = 0; i < DT_JOBS; i++) {
+        DtJob* j = &s_dtj[i];
+        if (j->state != 1) {
+            continue;
+        }
+        TexSlot* t = &s_tex[j->handle];
+        if (s_gx_entries + 1 > 24) {
+            if (!j->verify) {
+                dt_cpu_tile(j->stage, j->w, j->h, j->bytes / (j->w * j->h), t->tex.data);
+                GSPGPU_FlushDataCache(t->tex.data, j->bytes);
+                s_dts.cpu_render++;
+            } else {
+                s_dts.vskip++;
+            }
+            dt_job_done(j);
+            continue;
+        }
+        u32* dst = (u32*)(j->verify ? j->vbuf : (u8*)t->tex.data);
+        int gf = dt_gx_fmt(j->fmt);
+        GX_DisplayTransfer((u32*)j->stage, GX_BUFFER_DIM(j->w, j->h), dst, GX_BUFFER_DIM(j->w, j->h),
+                           GX_TRANSFER_FLIP_VERT(s_dt_flip) | GX_TRANSFER_OUT_TILED(1) | GX_TRANSFER_RAW_COPY(0) |
+                               GX_TRANSFER_IN_FORMAT(gf) | GX_TRANSFER_OUT_FORMAT(gf) |
+                               GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO));
+        s_gx_entries++;
+        j->seq = seq;
+        j->state = 2;
+        s_dts.issued++;
+    }
+    LightLock_Unlock(&s_dt_lock);
+}
+
+/* The jobs whose record is done on the GPU: verify compares, the blocks and the texture are released. */
+static void dt_reap(void) {
+    if (!s_dt_on) {
+        return;
+    }
+    u32 done = __atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE);
+    LightLock_Lock(&s_dt_lock);
+    for (u32 i = 0; i < DT_JOBS; i++) {
+        DtJob* j = &s_dtj[i];
+        if (j->state != 2 || (s32)(done - j->seq) < 0) {
+            continue;
+        }
+        if (j->verify) {
+            TexSlot* t = &s_tex[j->handle];
+            GSPGPU_InvalidateDataCache(j->vbuf, j->bytes);
+            if (memcmp(j->vbuf, t->tex.data, j->bytes) == 0) {
+                s_dts.vok++;
+            } else {
+                u32 bad = 0, first = 0;
+                for (u32 k = 0; k < j->bytes; k++) {
+                    if (j->vbuf[k] != ((u8*)t->tex.data)[k] && bad++ == 0) {
+                        first = k;
+                    }
+                }
+                if (s_dts.vbad++ < 24) {
+                    PLOG_W("texdt: verify MISMATCH %ux%u fmt %u flip %d: %u of %u bytes differ, first at %u (engine %02X, cpu %02X)",
+                           (unsigned)j->w, (unsigned)j->h, (unsigned)j->fmt, s_dt_flip, (unsigned)bad, (unsigned)j->bytes,
+                           (unsigned)first, (unsigned)j->vbuf[first], (unsigned)((u8*)t->tex.data)[first]);
+                }
+            }
+        }
+        dt_job_done(j);
+    }
+    LightLock_Unlock(&s_dt_lock);
+    if (s_dts.records != 0 && s_dts.records % 600 == 0) {
+        PLOG_I("texdt: made %u, issued %u, cpu on render thread %u (GX queue full), cpu no job slot %u, no staging block %u, "
+               "arena peak %u of %u granules; verify queued %u ok %u BAD %u skipped %u",
+               s_dts.made, s_dts.issued, s_dts.cpu_render, s_dts.cpu_nojob, s_dts.nostage, s_dts.hw_peak, (unsigned)s_dt_ngran,
+               s_dts.vqueued, s_dts.vok, s_dts.vbad, s_dts.vskip);
+    }
+}
+
 /* VRAM budget helpers (copy targets): the largest block vramAlloc can still give. */
 static u32 vram_largest_kb(void) {
     for (u32 kb = 3072; kb >= 64; kb -= 64) {
@@ -1333,11 +1665,12 @@ void plat_gpu_tex_free(uint32_t handle) {
 void plat_gpu_tex_reclaim(void) {
     GMARK("tex_reclaim");
     plat_gpu_sync();
+    dt_reap(); /* texdt: the transfers of the records that sync waited for are done */
     LightLock_Lock(&s_tex_lock);
     for (u32 i = 1; i < MAX_TEX; i++) {
         TexSlot* t = &s_tex[i];
         /* copy targets are released by the render thread (reap_targets) */
-        if (t->pending_free && t->target == NULL) {
+        if (t->pending_free && t->target == NULL && __atomic_load_n(&t->dt_busy, __ATOMIC_ACQUIRE) == 0) {
             C3D_TexDelete(&t->tex);
             memset(t, 0, sizeof(*t));
         }
@@ -4090,6 +4423,7 @@ static void render_record(Record* r) {
             gpu_reset_apply();
         }
         gpu_done_publish(r->seq - 1);
+        dt_reap();
         if (s_begin_records == 0 || s_sync_all) {
             C3D_FrameSync();
         }
@@ -4109,6 +4443,7 @@ static void render_record(Record* r) {
     } else {
         split = NULL;
     }
+    dt_issue(r->seq); /* texdt: the transfers that tile the textures made since the last record, before this record's lists */
     C3D_FrameDrawOn(s_efb);
     C3D_BindProgram(&s_prog);
     C3D_SetAttrInfo(&s_attr);

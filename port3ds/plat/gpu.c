@@ -1124,6 +1124,8 @@ static void tex_prepare(const PlatGpuState* st, C3D_Tex* t_out[3]) {
         C3D_TexSetFilterMipmap(t, tu->mip_linear && t->maxLevel != 0 ? GPU_LINEAR : GPU_NEAREST);
         C3D_TexSetLodBias(t, tu->lod_bias);
         C3D_TexSetWrap(t, (GPU_TEXTURE_WRAP_PARAM)tu->wrap_s, (GPU_TEXTURE_WRAP_PARAM)tu->wrap_t);
+        t->param = (t->param & ~GPU_TEXTURE_MODE(7)) |
+                   GPU_TEXTURE_MODE(u == 0 && tu->proj ? GPU_TEX_PROJECTION : GPU_TEX_2D);
         t_out[u] = t;
     }
 }

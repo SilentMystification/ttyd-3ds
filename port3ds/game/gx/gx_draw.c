@@ -26,6 +26,16 @@ int gx_unit_of_stage[GX_MAX_TEV]; /* the texture unit each TEV stage samples, -1
 static int s_unit_coord[3];  /* GX texcoord each PICA unit samples with */
 static int s_unit_map[3];
 static int s_units;
+/* Fog by a ramp texture (switch gxfogramp, default 1): the PICA fog LUT is indexed by window depth, which cannot
+ * give fog that starts at an eye depth of a few hundred under a far plane thousands of times the near plane. The
+ * ramp instead is fed the eye depth, scaled and offset (u = a * z_eye + b: the vertex shader's texture unit with a
+ * row of the position matrix, or the CPU path), interpolated across the triangle perspective-correct, and looked
+ * up per pixel in a 256-texel table of the fog function with clamped addressing; one more TEV stage lerps toward
+ * the fog colour by it. s_fog_unit is the texture unit that takes the ramp (-1: PICA fog, or no fog). */
+static int s_fog_unit = -1;
+static u32 s_fog_tex;
+static f32 s_fog_a, s_fog_b;
+int gx_opt_fogramp = 1;
 static int s_color_chan;     /* 0: COLOR0A0, 1: COLOR1A1 feeds the raster color */
 static u32 s_built_version = 0xFFFFFFFFu;
 static PlatGpuState s_state;
@@ -97,6 +107,7 @@ void gx_opts_init(void) {
     gx_pipe_alloc();
     gx_opt_statever = plat_switch_int("gxstatever", 0) != 0; /* off by default: fewer rebuilds, but no time saved (PORT_3DS_GX_PERF.md) */
     gx_opt_fogcache = plat_switch_int("gxfogcache", 1) != 0;
+    gx_opt_fogramp = plat_switch_int("gxfogramp", 1) != 0;
     gx_opt_unlit = plat_switch_int("gxunlit", 1) != 0;
     gx_vsh_imm_on = plat_switch_int("gxvshimm", 1) != 0;
     gx_opt_vshbbox = plat_switch_int("gxvshbbox", 1);
@@ -147,6 +158,7 @@ static u8 logic_op(u8 lo) {
 }
 
 static void fog_lut(f32* lut);
+static int fog_valid(void);
 
 /* switch gxfogcache: the LUT of the last fog parameters, and its id
  * (PlatGpuState.fog_lut_id: a new id only when the LUT's contents change) */
@@ -159,7 +171,7 @@ static struct {
 
 static void build_fog(PlatGpuState* st) {
     u8 type = gx.fog_type;
-    if (type == GX_FOG_NONE || gx.fog_end == gx.fog_start || gx.fog_far == gx.fog_near) {
+    if (!fog_valid() || s_fog_unit >= 0) { /* none, or done by the ramp stage */
         st->fog_enable = 0;
         return;
     }
@@ -260,6 +272,64 @@ static void fog_lut(f32* lut) {
     }
 }
 
+static int fog_valid(void) {
+    return gx.fog_type != GX_FOG_NONE && gx.fog_end != gx.fog_start && gx.fog_far != gx.fog_near;
+}
+
+/* The fog amount (0 none .. 1 all fog) of the GX fog function `fn` (fog type & 7) at x = (z_eye - start) / (end - start). */
+static f32 fog_amount(u8 fn, f32 x) {
+    x = x < 0 ? 0 : x > 1 ? 1 : x;
+    switch (fn) {
+    case 4: return 1.0f - powf(2.0f, -8.0f * x);
+    case 5: return 1.0f - powf(2.0f, -8.0f * x * x);
+    case 6: return powf(2.0f, -8.0f * (1.0f - x));
+    case 7: return powf(2.0f, -8.0f * (1.0f - x) * (1.0f - x));
+    default: return x;
+    }
+}
+
+static u32 ramp_morton(u32 x, u32 y) {
+    u32 r = 0;
+    for (u32 i = 0; i < 3; i++) {
+        r |= ((x >> i) & 1u) << (2 * i);
+        r |= ((y >> i) & 1u) << (2 * i + 1);
+    }
+    return r;
+}
+
+/* The ramp texture of a fog function: L8, 256 x 8 (every row the same), texel i = fog_amount(i / 255). Made once. */
+static u32 fog_ramp_tex(u8 fn) {
+    static u32 handle[8];
+    fn &= 7;
+    if (handle[fn] == 0) {
+        u8 tiled[256 * 8];
+        for (u32 y = 0; y < 8; y++) {
+            for (u32 x = 0; x < 256; x++) {
+                tiled[(x >> 3) * 64 + ramp_morton(x & 7, y)] = (u8)(fog_amount(fn, (f32)x / 255.0f) * 255.0f + 0.5f);
+            }
+        }
+        handle[fn] = plat_gpu_tex_create(256, 8, PLAT_TEXFMT_L8, tiled, sizeof(tiled));
+    }
+    return handle[fn];
+}
+
+/* The unit and ramp coordinate of the fog in force: with the unit's texture coordinate u = a * z_eye + b
+ * (u = 0.5 / 256 at the fog start, 255.5 / 256 at its end: the centres of the first and last texel). */
+static void fog_ramp_setup(void) {
+    s_fog_unit = -1;
+    if (!gx_opt_fogramp || s_units >= 3 || !fog_valid()) {
+        return;
+    }
+    s_fog_tex = fog_ramp_tex(gx.fog_type & 7);
+    if (s_fog_tex == 0) {
+        return;
+    }
+    f32 inv = 1.0f / (gx.fog_end - gx.fog_start);
+    s_fog_a = inv * (255.0f / 256.0f);
+    s_fog_b = -gx.fog_start * inv * (255.0f / 256.0f) + 0.5f / 256.0f;
+    s_fog_unit = s_units;
+}
+
 /* Texture units: the (texcoord, map) pairs the active TEV stages sample. */
 static void assign_units(void) {
     for (int m = 0; m < GX_MAX_TEXMAP; m++) {
@@ -306,6 +376,25 @@ static void assign_units(void) {
         s_unit_coord[s_units] = coord;
         s_units++;
     }
+    /* a projective (MTX3x4) texgen goes on unit 0, the one PICA unit with a projective lookup (shader path: q is
+     * passed on in texcoord0.w; the CPU path has divided already and passes q = 1) */
+    for (int k = 1; k < s_units && gx_opt_vshtg; k++) {
+        if (gx.texgen[s_unit_coord[0]].func != GX_TG_MTX3x4 && gx.texgen[s_unit_coord[k]].func == GX_TG_MTX3x4) {
+            int tm = s_unit_map[0], tc = s_unit_coord[0];
+            s_unit_map[0] = s_unit_map[k];
+            s_unit_coord[0] = s_unit_coord[k];
+            s_unit_map[k] = tm;
+            s_unit_coord[k] = tc;
+            for (int m = 0; m < GX_MAX_TEXMAP; m++) {
+                gx_unit_of_map[m] = gx_unit_of_map[m] == 0 ? k : gx_unit_of_map[m] == k ? 0 : gx_unit_of_map[m];
+            }
+            for (int st = 0; st < GX_MAX_TEV; st++) {
+                gx_unit_of_stage[st] = gx_unit_of_stage[st] == 0 ? k : gx_unit_of_stage[st] == k ? 0 : gx_unit_of_stage[st];
+            }
+            break;
+        }
+    }
+    fog_ramp_setup();
     s_color_chan = chan_votes[1] > chan_votes[0] ? 1 : 0;
     if (chan_votes[0] && chan_votes[1]) {
         static int warned;
@@ -320,6 +409,12 @@ static void assign_units(void) {
 static void build_tex_units(PlatGpuState* st) { /* the units (TEV order), the texture maps and TLUTs */
     for (int u = 0; u < 3; u++) {
         PlatGpuTexUnit* tu = &st->tex[u];
+        if (u == s_fog_unit) {
+            tu->handle = s_fog_tex;
+            tu->wrap_s = tu->wrap_t = 0; /* clamp to edge */
+            tu->min_linear = tu->mag_linear = 1;
+            continue;
+        }
         if (u >= s_units) {
             continue;
         }
@@ -330,6 +425,7 @@ static void build_tex_units(PlatGpuState* st) { /* the units (TEV order), the te
         static const u8 wrap[3] = {0 /*CLAMP_TO_EDGE*/, 2 /*REPEAT*/, 3 /*MIRRORED_REPEAT*/};
         tu->wrap_s = wrap[t->wrap_s % 3];
         tu->wrap_t = wrap[t->wrap_t % 3];
+        tu->proj = u == 0 && gx.texgen[s_unit_coord[0]].func == GX_TG_MTX3x4;
         gx_tex_unit_sampler(tu, t, map); /* min/mag filter, mip filter, LOD bias (the texfilter option) */
     }
 }
@@ -339,6 +435,13 @@ static void build_tev(PlatGpuState* st) { /* TEV */
         gx_tev_compile_memo(st);
     } else {
         gx_tev_compile(st);
+    }
+    if (s_fog_unit >= 0) {
+        /* the fog stage; with no stage left the PICA fog does it (build_fog) */
+        const GXColor fc = gx.fog_color;
+        if (!gx_tev_add_fog(st, s_fog_unit, (u32)fc.r | (u32)fc.g << 8 | (u32)fc.b << 16)) {
+            s_fog_unit = -1;
+        }
     }
 }
 
@@ -447,8 +550,8 @@ static void build_sci(PlatGpuState* st) { /* scissor and viewport */
 static void build_full(PlatGpuState* st) {
     memset(st, 0, sizeof(*st));
     assign_units();
-    build_tex_units(st);
     build_tev(st);
+    build_tex_units(st);
     build_chan_flags();
     build_pix(st);
     build_sci(st);
@@ -472,6 +575,9 @@ static struct {
 static void build_dirty(u32 d) {
     PlatGpuState* st = &s_state;
     u32 regions = 0;
+    if ((d & GXD_TEV) && gx.fog_type != GX_FOG_NONE) {
+        d |= GXD_PIX; /* the fog ramp takes a stage and a unit, or the PICA fog does */
+    }
     if (d & GXD_TEV) {
         assign_units();
         memset(st, 0, offsetof(PlatGpuState, tex));
@@ -506,7 +612,9 @@ static void build_dirty(u32 d) {
 
 /* gxdirty=2: the full build of the same GX state must give the kept state and flags. */
 static void verify_dirty(u32 d) {
-    int units = s_units, cchan = s_color_chan, need_both = s_need_both, need_nrm = s_need_nrm;
+    int units = s_units, cchan = s_color_chan, need_both = s_need_both, need_nrm = s_need_nrm, fogu = s_fog_unit;
+    f32 foga = s_fog_a, fogb = s_fog_b;
+    u32 fogt = s_fog_tex;
     int ucoord[3], umap[3], uom[GX_MAX_TEXMAP], uos[GX_MAX_TEV];
     u8 unlit[2] = {s_unlit[0], s_unlit[1]}, mrgb[2] = {s_mat_vtx_rgb[0], s_mat_vtx_rgb[1]};
     u8 ma[2] = {s_mat_vtx_a[0], s_mat_vtx_a[1]};
@@ -523,7 +631,7 @@ static void verify_dirty(u32 d) {
             bad |= 1u << r;
         }
     }
-    if (units != s_units || cchan != s_color_chan || memcmp(ucoord, s_unit_coord, sizeof(ucoord)) != 0 ||
+    if (units != s_units || fogu != s_fog_unit || cchan != s_color_chan || memcmp(ucoord, s_unit_coord, sizeof(ucoord)) != 0 ||
         memcmp(umap, s_unit_map, sizeof(umap)) != 0 || memcmp(uom, gx_unit_of_map, sizeof(uom)) != 0 ||
         memcmp(uos, gx_unit_of_stage, sizeof(uos)) != 0) {
         bad |= 0x10; /* units */
@@ -544,6 +652,10 @@ static void verify_dirty(u32 d) {
     }
     /* go on with the kept result (what gxdirty=1 draws) */
     s_units = units;
+    s_fog_unit = fogu;
+    s_fog_a = foga;
+    s_fog_b = fogb;
+    s_fog_tex = fogt;
     s_color_chan = cchan;
     s_need_both = need_both;
     s_need_nrm = need_nrm;
@@ -838,6 +950,9 @@ static void transform(const GxVertex* v, Out* o) {
         } else {
             tcs[u][0] = tcs[u][1] = 0;
         }
+    }
+    if (s_fog_unit >= 0) {
+        tcs[s_fog_unit][0] = s_fog_a * -p[2] + s_fog_b; /* the fog ramp's coordinate: p[2] is the eye z */
     }
 }
 
@@ -1653,6 +1768,17 @@ static int vsh_light_block(int ch, PlatGpuVshLight* L) {
     return 1;
 }
 
+/* The fog ramp's unit on the shader path: s = a * z_eye + b is a row of the position matrix applied to the position
+ * (tgsrc x = 1: the unit's source is the object position), t = 0, no divide. */
+static void vsh_fog_unit(PlatGpuVshConst* c) {
+    const f32(*m)[4] = gx.pos_mtx[gx.cur_pnmtx % GX_POS_MTX_COUNT];
+    int u = s_fog_unit;
+    for (int j = 0; j < 4; j++) {
+        c->tex[3 * u][j] = -s_fog_a * m[2][j] + (j == 3 ? s_fog_b : 0.0f);
+    }
+    c->tgsrc[u][0] = 1.0f;
+}
+
 static void vsh_prepare(void) {
     u32 why = 0;
     s_vsh_lit = 0;
@@ -1724,6 +1850,10 @@ static void vsh_prepare(void) {
             memcpy(c->tex[3 * u + 2], m + 8, 16);
             c->tgsrc[u][3] = 1.0f;
         }
+    }
+    if (s_fog_unit >= 0) {
+        c->tex[3 * s_fog_unit + 2][3] = 1.0f;
+        vsh_fog_unit(c);
     }
     /* clip rows: projection x position matrix, in 32-bit float on the CPU */
     const f32(*m)[4] = gx.pos_mtx[gx.cur_pnmtx % GX_POS_MTX_COUNT];
@@ -1835,6 +1965,11 @@ static void vsh_part_tex(PlatGpuVshConst* c, u32* why, int has_nrm) {
             memcpy(c->tex[3 * u + 2], m + 8, 16);
             c->tgsrc[u][3] = 1.0f;
         }
+    }
+    if (s_fog_unit >= 0) {
+        c->tex[3 * s_fog_unit + 2][3] = 1.0f;
+        vsh_fog_unit(c);
+        s_vw_tex_pos = 1; /* a row of the position matrix */
     }
 }
 

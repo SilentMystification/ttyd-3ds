@@ -411,6 +411,9 @@ void gx_tex_decode_rgba8(const u8* src, u32 w, u32 h, u32 fmt, const u16* tlut, 
 /* ---- gx_tev.c ---- */
 /* Fills the combiner part of `st` from the TEV state. */
 void gx_tev_compile(PlatGpuState* st);
+/* One more stage after the compiled ones: PREV lerped toward the fog colour (r | g << 8 | b << 16) by the red of
+ * the texture on `unit` (the fog ramp). Returns 0, and changes nothing, when six stages are in use already. */
+int gx_tev_add_fog(PlatGpuState* st, int unit, u32 rgb);
 /* The same through a table of compiled setups (switch gxstatecache): the key is every byte the compile reads. */
 void gx_tev_compile_memo(PlatGpuState* st);
 

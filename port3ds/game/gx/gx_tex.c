@@ -1109,7 +1109,10 @@ void gx_tex_frame_end(void) {
         }
     }
     for (int i = 0; i < (int)(sizeof(s_copies) / sizeof(s_copies[0])); i++) {
-        if (s_copy_evict && s_copies[i].handle && s_frame - s_copies[i].last_frame > EVICT_FRAMES) {
+        /* Only big copies age out: the game keeps a pointer to a small copy (extdrv's crowd sprites: one texture
+         * per animation frame, sampled again many frames later) and a freed target would sample stale memory. */
+        if (s_copy_evict && s_copies[i].handle && s_frame - s_copies[i].last_frame > EVICT_FRAMES &&
+            (u32)s_copies[i].w * s_copies[i].h > 128u * 128u) {
             plat_gpu_tex_free(s_copies[i].handle);
             s_copies[i].handle = 0;
             s_copies[i].addr = NULL;

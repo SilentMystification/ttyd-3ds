@@ -12,7 +12,10 @@
     devupdate.py files put a.tpad b.tpad [--dest sub] | get remote [-o local] | ls [dir] | rm path...
     devupdate.py log [--prev | --crash] [-o FILE]
     devupdate.py queue add manifest.json [files...] | list | clear | start | status | pull DIR
-    devupdate.py supervisor ping | status [--sv-port 5051]
+    devupdate.py supervisor ping | status | terminate | launch [SWITCHES] | push CIA [--switches ...]
+                 | files get|ls PATH [-o FILE] | log [--prev|--crash|--sv] | watch N | reboot [--hard|--dry]
+                 | exit | self-update SUPERVISOR.CIA   [--sv-port 5051]
+    devupdate.py loop manifest.json [--run NAME]      the unattended runner (supervisor first, 5050 fallback)
 
 The console runs an app with devupdate_start() (or the bootstrap 3dsx).
 --ip defaults to $N3DS_IP, --port to 5050. Development use only.
@@ -61,7 +64,10 @@ from pathlib import Path
 MAGIC = b"CDU1"
 VERSION = 1
 CMD = {"ping": 1, "push": 2, "restart": 3, "report": 4, "launch": 5, "files": 6, "queue": 7,
-       "sv_status": 0x101}  # 0x100 and up: the supervisor's own commands (libs/ctr-devkit/supervisor/)
+       # 0x100 and up: the supervisor's own commands (libs/ctr-devkit/supervisor/, include/ctrdk/supervisor.h)
+       "sv_status": 0x101, "sv_terminate": 0x102, "sv_launch": 0x103, "sv_watch": 0x104, "sv_reboot": 0x105,
+       "sv_exit": 0x106}
+SV_TITLE_ID = 0x0004013000FD8A02  # CTRDK_SV_TITLE_ID: a push of this title is the supervisor's self-update
 SV_PORT = 5051
 FLAG_RELAUNCH, FLAG_LAUNCH, FLAG_VERSION, FLAG_STAGE = 1, 2, 4, 8
 VERSION_MAX = 47  # the console keeps at most this many characters of the incoming version text
@@ -997,28 +1003,401 @@ def cmd_azahar_session(args):
     return 0
 
 
-def sv_request(args, cmd):
-    """One supervisor request (ping or status) on --sv-port; returns (last line, the other lines)."""
+def sv_args(args, timeout=None):
+    """A copy of args whose port is the supervisor's (Link, request, push and files_get use args.port)."""
+    a = argparse.Namespace(**vars(args))
+    a.port = getattr(args, "sv_port", SV_PORT)
+    if timeout is not None:
+        a.timeout = timeout
+    return a
+
+
+def sv_request(args, cmd, argtext="", timeout=None):
+    """One supervisor request on --sv-port; returns (last line, the other lines). Raises OSError."""
+    a = sv_args(args, timeout)
     got = []
-    with socket.create_connection((args.ip, args.sv_port), timeout=args.timeout) as s:
-        s.settimeout(args.timeout)
-        s.sendall(header(cmd, token=args.token))
-        last = Link(args).lines(s, lambda line, *_: got.append(line))
+    sw = argtext.encode()
+    if len(sw) > MAX_ARGS:
+        raise SystemExit("devupdate: argument too long")
+    with socket.create_connection((a.ip, a.port), timeout=a.timeout) as s:
+        s.settimeout(a.timeout)
+        s.sendall(header(cmd, args=sw, token=a.token) + sw)
+        last = Link(a).lines(s, lambda line, *_: got.append(line))
     return last, got
 
 
-def cmd_supervisor(args):
-    """The supervisor system module (libs/ctr-devkit/supervisor/): ping, status. It answers on its own
-    port (5051) whatever the game does; phase 1 has these two commands only."""
-    cmd = {"ping": "ping", "status": "sv_status"}[args.action]
+def sv_try(args, cmd, argtext="", timeout=10):
+    """sv_request that never raises: ("error no connection: ...", []) when the supervisor does not answer."""
     try:
-        last, lines = sv_request(args, cmd)
+        return sv_request(args, cmd, argtext, timeout)
+    except OSError as e:
+        return f"error no connection: {e}", []
+
+
+def sv_status(args, timeout=10):
+    """The supervisor's status as a dict (status key=value words, the heartbeat line split), or None."""
+    try:
+        last, lines = sv_request(args, "sv_status", timeout=timeout)
+    except OSError:
+        return None
+    if last != "done":
+        return None
+    st = {}
+    for line in lines:
+        if not line.startswith("status "):
+            continue
+        body = line[7:]
+        if body.startswith(("last=", "switches=")):
+            k, _, v = body.partition("=")
+            st[k] = v
+            continue
+        for word in body.split():
+            if "=" in word:
+                k, _, v = word.partition("=")
+                st.setdefault(k, v)
+    return st
+
+
+def sv_ping(args, tries=3, timeout=10):
+    """The supervisor's pong line, or None after `tries` failed attempts."""
+    for i in range(tries):
+        try:
+            last, lines = sv_request(args, "ping", timeout=timeout)
+            pong = next((l for l in lines if l.startswith("pong supervisor")), None)
+            if last == "done" and pong:
+                return pong
+        except OSError:
+            pass
+        if i + 1 < tries:
+            time.sleep(2)
+    return None
+
+
+def cmd_supervisor(args):
+    """The supervisor system module (libs/ctr-devkit/supervisor/). It answers on its own port (5051)
+    whatever the game does: hung, crashed, ended, not running."""
+    act = args.action
+    rest = args.rest or []
+    try:
+        if act in ("ping", "status", "terminate", "exit"):
+            cmd = {"ping": "ping", "status": "sv_status", "terminate": "sv_terminate", "exit": "sv_exit"}[act]
+            argtext = f"gpureset={args.gpureset}" if act == "terminate" and args.gpureset is not None else ""
+            last, lines = sv_request(args, cmd, argtext, timeout=max(args.timeout, 20))
+        elif act == "launch":
+            last, lines = sv_request(args, "sv_launch", " ".join(rest) or args.switches, timeout=max(args.timeout, 30))
+        elif act == "watch":
+            if len(rest) != 1 or not rest[0].isdigit():
+                raise SystemExit("devupdate: supervisor watch N (seconds; 0 = off)")
+            last, lines = sv_request(args, "sv_watch", rest[0])
+        elif act == "reboot":
+            word = "dry" if args.dry else "hard" if args.hard else ""
+            last, lines = sv_request(args, "sv_reboot", word)
+        elif act in ("push", "self-update"):
+            if len(rest) != 1:
+                raise SystemExit(f"devupdate: supervisor {act} <file.cia>")
+            tid = cia_title_id(Path(rest[0]).read_bytes())
+            if (act == "self-update") != (tid == SV_TITLE_ID):
+                raise SystemExit(f"devupdate: {rest[0]} has title {tid:016x}: "
+                                 + ("not the supervisor's" if act == "self-update" else "the supervisor's (use self-update)"))
+            a = sv_args(args, max(args.timeout, 60))
+            last, _ = push(a, rest[0], 0, args.switches)
+            return finish(last)
+        elif act in ("files", "log"):
+            return sv_files(args, act, rest)
+        else:
+            raise SystemExit(f"devupdate: unknown supervisor action {act}")
     except OSError as e:
         print(f"devupdate: supervisor: no answer from {args.ip}:{args.sv_port}: {e}")
         return 2
     for line in lines:
         print(f"supervisor: {line}")
     return finish(last)
+
+
+def sv_files(args, act, rest):
+    """supervisor files get|ls PATH, supervisor log: read-only, served by the supervisor ("@sv/..." is
+    its own folder, anything else the app's folder)."""
+    a = sv_args(args)
+    if act == "log":
+        remote = "@sv/supervisor.log" if args.sv else "@/crash.txt" if args.crash else "@/previous.log" if args.prev else "@/latest.log"
+        rest = ["get", remote]
+    if not rest or rest[0] not in ("get", "ls"):
+        raise SystemExit("devupdate: supervisor files get <path> [-o FILE] | ls [path]  (read-only)")
+    try:
+        if rest[0] == "ls":
+            for is_dir, size, name in sorted(files_ls(a, rest[1] if len(rest) > 1 else "")):
+                print(f"{'d' if is_dir else '-'} {size:>9} {name}")
+            return 0
+        data = files_get(a, rest[1])
+    except RuntimeError as e:
+        print(f"devupdate: supervisor: {e}")
+        return 1
+    if args.out:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        print(f"devupdate: {rest[1]} -> {out} ({len(data)} bytes)")
+    elif act == "log":
+        for line in data.decode(errors="replace").splitlines()[-200:]:
+            print(line)
+    else:
+        out = Path(Path(rest[1]).name)
+        out.write_bytes(data)
+        print(f"devupdate: {rest[1]} -> {out} ({len(data)} bytes)")
+    return 0
+
+
+# ---- loop: the unattended runner (docs/CTR_DEVKIT_PLAN.md "Supervisor", PC side) ----
+
+LOOP_DEFAULTS = {"cia": "", "switches": "", "until": "", "frames": 0, "timeout_s": 300, "watch": 0,
+                 "collect": [], "push_timeout_s": 120, "start_timeout_s": 60, "reboot_wait_s": 90, "poll_s": 5,
+                 "log_poll_s": 10, "fallback_settle_s": 15}
+
+
+class SupervisorGone(Exception):
+    pass
+
+
+def loop_log(path, text):
+    line = f"{time.strftime('%H:%M:%S')} {text}"
+    print(f"loop: {text}", flush=True)
+    with open(path, "a") as f:
+        f.write(line + "\n")
+
+
+def loop_push(args, e, log):
+    """Step 2: push through the supervisor (retry once), then through devupdate (5050, with its --stage
+    fallback). Returns (ok, how)."""
+    a = sv_args(args, e["push_timeout_s"])
+    for attempt in (1, 2):
+        try:
+            last, _ = push(a, e["cia"], 0, e["switches"])
+        except OSError as err:
+            last = f"error no connection: {err}"
+        log(f"push via supervisor (try {attempt}): {last}")
+        if last == "done":
+            return True, "supervisor"
+        time.sleep(3)
+    d = argparse.Namespace(**vars(args))
+    d.timeout = e["push_timeout_s"]
+    d.bad_crc = False
+    d.stage = False
+    try:
+        last, _ = push_with_fallback(d, e["cia"], FLAG_RELAUNCH, e["switches"])
+    except OSError as err:
+        last = f"error no connection: {err}"
+    log(f"push via devupdate {args.ip}:{args.port}: {last}")
+    return last == "done", "devupdate"
+
+
+def loop_wait_start(args, e, log):
+    """Step 3: the first heartbeat after the launch. terminate + launch once, then reboot. Returns
+    (result, status) with result "started" or "no start"."""
+    def wait(seconds):
+        end = time.monotonic() + seconds
+        st = None
+        while time.monotonic() < end:
+            st = sv_status(args)
+            if st is not None and int(st.get("since_launch", "0") or 0) > 0:
+                return True, st
+            time.sleep(min(2, e["poll_s"]))
+        return False, st
+
+    ok, st = wait(e["start_timeout_s"])
+    if ok:
+        return "started", st
+    log(f"no heartbeat {e['start_timeout_s']} s after the launch: terminate + launch")
+    try:
+        last, lines = sv_request(args, "sv_launch", e["switches"], timeout=30)
+        log(f"launch: {last} ({'; '.join(lines)})")
+    except OSError as err:
+        log(f"launch: no answer: {err}")
+    ok, st = wait(e["start_timeout_s"])
+    if ok:
+        return "started", st
+    log("still no heartbeat: reboot (NS_RebootToTitle; the game's ensure() starts the supervisor again)")
+    try:
+        last, _ = sv_request(args, "sv_reboot", "", timeout=10)
+        log(f"reboot: {last}")
+    except OSError as err:
+        log(f"reboot: {err}")
+    time.sleep(10)
+    if sv_ping(args, tries=max(1, e["reboot_wait_s"] // 12), timeout=10) is None:
+        raise SupervisorGone("no answer after the reboot")
+    ok, st = wait(e["start_timeout_s"])
+    return ("started" if ok else "no start"), st
+
+
+def loop_fetch_log(args):
+    """latest.log through the supervisor, else devupdate; b"" if neither answers."""
+    for a in (sv_args(args, 20), args):
+        try:
+            return files_get(a, "@/latest.log")
+        except (RuntimeError, OSError):
+            continue
+    return b""
+
+
+def loop_run(args, e, log):
+    """Step 4: until the pattern (latest.log), the frame count (heartbeat), the timeout, or the game's end."""
+    pat = re.compile(e["until"]) if e["until"] else None
+    end = time.monotonic() + e["timeout_s"]
+    next_log = 0.0
+    misses = 0
+    while time.monotonic() < end:
+        st = sv_status(args)
+        if st is None:
+            misses += 1
+            if misses >= 3 and sv_ping(args) is None:
+                raise SupervisorGone("status and ping stopped answering during the run")
+        else:
+            misses = 0
+            frame = int(st.get("frame", "0") or 0)
+            if e["frames"] and frame >= e["frames"]:
+                return "frames", f"frame {frame}"
+            flags = int(st.get("flags", "0") or 0)
+            if st.get("game_state") == "stopped":
+                return "ended", "the game is not running"
+            if flags & 4:
+                return "crash", "recovery flag (crash screen)"
+        if pat is not None and time.monotonic() >= next_log:
+            next_log = time.monotonic() + e["log_poll_s"]
+            text = loop_fetch_log(args).decode(errors="replace")
+            m = pat.search(text)
+            if m:
+                return "until", m.group(0)[:120]
+        time.sleep(e["poll_s"])
+    return "timeout", f"{e['timeout_s']} s"
+
+
+def loop_collect(args, e, outdir, log):
+    """Step 5: latest.log, crash.txt, gpuhang/* and the entry's collect paths, supervisor first."""
+    outdir.mkdir(parents=True, exist_ok=True)
+    got = []
+    wanted = ["latest.log", "crash.txt"] + list(e.get("collect") or [])
+    srcs = [sv_args(args, 30), args]
+    for remote in wanted:
+        for a in srcs:
+            try:
+                data = files_get(a, f"@/{remote}")
+            except (RuntimeError, OSError):
+                continue
+            dest = outdir / remote
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+            got.append(remote)
+            break
+    for a in srcs:
+        try:
+            items = files_ls(a, "@/gpuhang")
+        except (RuntimeError, OSError):
+            continue
+        for is_dir, _, name in items:
+            if is_dir:
+                continue
+            try:
+                (outdir / "gpuhang").mkdir(exist_ok=True)
+                (outdir / "gpuhang" / name).write_bytes(files_get(a, f"@/gpuhang/{name}"))
+                got.append(f"gpuhang/{name}")
+            except (RuntimeError, OSError):
+                pass
+        break
+    log(f"collected {len(got)} files: {' '.join(got) or 'none'}")
+    return got
+
+
+def cmd_loop(args):
+    """devupdate.py loop manifest.json: per entry ping, push, first heartbeat, run, collect, one row in
+    build/loop/<run>/results.tsv. Exit 0 at the end, 2 when the supervisor stops answering."""
+    doc = json.loads(Path(args.manifest).read_text())
+    if isinstance(doc, list):
+        doc = {"entries": doc}
+    base = Path(args.manifest).resolve().parent
+    defaults = {**LOOP_DEFAULTS, **doc.get("defaults", {})}
+    entries = []
+    for i, raw in enumerate(doc["entries"], 1):
+        e = {**defaults, **raw}
+        e.setdefault("name", f"entry{i}")
+        if not NAME_RE.match(str(e["name"])):
+            raise SystemExit(f"devupdate: loop entry {i}: bad name {e['name']!r}")
+        if e["cia"] and not Path(e["cia"]).is_absolute() and (base / e["cia"]).is_file():
+            e["cia"] = str(base / e["cia"])
+        if e["cia"] and not Path(e["cia"]).is_file():
+            raise SystemExit(f"devupdate: loop entry {e['name']}: no file {e['cia']}")
+        if e["until"]:
+            re.compile(e["until"])
+        entries.append(e)
+    run = args.run or time.strftime("%Y%m%d-%H%M%S")
+    root = Path(args.out) if args.out else HERE.parents[2] / "build/loop"
+    rundir = root / run
+    rundir.mkdir(parents=True, exist_ok=True)
+    logpath = rundir / "loop.log"
+    results = rundir / "results.tsv"
+    if not results.exists():
+        results.write_text("index\tname\tresult\tdetail\tpush\tstart_s\trun_s\tfiles\n")
+    print(f"devupdate: loop {len(entries)} entries -> {rundir}")
+    rows = []
+    current, last_status = None, None
+    try:
+        for i, e in enumerate(entries, 1):
+            current = f"{i} {e['name']}"
+
+            def log(text, _i=i, _n=e["name"]):
+                loop_log(logpath, f"[{_i} {_n}] {text}")
+
+            t0 = time.monotonic()
+            pong = sv_ping(args, tries=3, timeout=10)  # step 1
+            if pong is None:
+                raise SupervisorGone("no ping answer (3 tries, 10 s each)")
+            log(pong)
+            how = "none"
+            result, detail = "", ""
+            if e["cia"]:  # step 2
+                ok, how = loop_push(args, e, log)
+                if not ok:
+                    result, detail = "push failed", how
+                elif how == "devupdate":
+                    time.sleep(e["fallback_settle_s"])  # this push did not reset the supervisor's heartbeat count
+            else:
+                last, lines = sv_try(args, "sv_launch", e["switches"], 30)
+                log(f"launch: {last}")
+                how = "launch"
+                if last != "done":
+                    result, detail = "launch failed", last
+            t_start, t_run = 0.0, 0.0
+            if not result:
+                if e["watch"]:
+                    last, _ = sv_try(args, "sv_watch", str(int(e["watch"])))
+                    log(f"watch {e['watch']}: {last}")
+                res, last_status = loop_wait_start(args, e, log)  # step 3
+                t_start = time.monotonic() - t0
+                if res != "started":
+                    result, detail = res, "no heartbeat"
+                else:
+                    t1 = time.monotonic()
+                    result, detail = loop_run(args, e, log)  # step 4
+                    t_run = time.monotonic() - t1
+            if e["watch"]:
+                sv_try(args, "sv_watch", "0")
+            files =loop_collect(args, e, rundir / f"{i:02d}_{e['name']}", log)  # step 5
+            row = [str(i), e["name"], result, detail.replace("\t", " "), how, f"{t_start:.1f}", f"{t_run:.1f}",
+                   ",".join(files)]
+            with open(results, "a") as f:  # step 6
+                f.write("\t".join(row) + "\n")
+            rows.append(row)
+            log(f"result {result}: {detail}")
+            last_status = sv_status(args) or last_status
+    except SupervisorGone as err:
+        loop_log(logpath, f"STOP: the supervisor stopped answering ({err}) during entry {current}")
+        loop_log(logpath, f"last status: {json.dumps(last_status) if last_status else 'none'}")
+        print(f"devupdate: loop stopped at entry {current}: supervisor gone; report in {logpath}")
+        for r in rows:
+            print("  " + "  ".join(r[:4]))
+        return 2
+    print(f"devupdate: loop done, {len(rows)} entries ({results})")
+    for r in rows:
+        print("  " + "  ".join(r[:4]))
+    return 0
 
 
 def cmd_selftest(args):
@@ -1097,8 +1476,260 @@ def cmd_selftest(args):
     ok = d.get("malformed") == "1" and d.get("switches_hex") == area.hex()
     fails += not ok
     print(f"  {'ok  ' if ok else 'FAIL'} malformed version area kept as switch text, flagged malformed={d.get('malformed')}")
+
+    # The supervisor's requests through the same decoder: command numbers and argument text.
+    print("devupdate selftest: supervisor requests (proto.c, host build)")
+    for name, argtext in (("ping", ""), ("sv_status", ""), ("sv_terminate", "gpureset=1"), ("sv_launch", "map=gor_01 wdog=9"),
+                          ("sv_watch", "45"), ("sv_reboot", "dry"), ("sv_exit", ""), ("files", "get @sv/supervisor.log")):
+        a = argtext.encode()
+        pkt = header(name, args=a) + a
+        check(f"{name} {argtext!r}", pkt, name, 0, b"", a, 0, False)
+    pkt = request_prefix("push", 0, b"map=x", b"#9 abc", len(cia), crc_ok, SV_TITLE_ID, "") + cia
+    check("supervisor push with a version text (self-update title)", pkt, "push", FLAG_VERSION, b"#9 abc", b"map=x", crc_ok)
+
+    f2, c2 = selftest_supervisor_policy(exe.parent)
+    f3, c3 = selftest_loop()
+    fails, count = fails + f2 + f3, count + c2 + c3
     print(f"devupdate selftest: {count - fails} of {count} passed")
     return 1 if fails else 0
+
+
+def selftest_supervisor_policy(tmp):
+    """supervisor/policy.c (the console's watchdog policy and text helpers) built with gcc and run
+    through scripted cases. Returns (fails, count)."""
+    src = HERE.parent / "supervisor"
+    exe = Path(tmp) / "sv_selftest"
+    cc = subprocess.run(["gcc", "-O1", "-Wall", "-Wextra", "-Werror", "-o", str(exe), str(src / "selftest_host.c"),
+                         str(src / "policy.c")], capture_output=True, text=True)
+    print("devupdate selftest: supervisor policy (supervisor/policy.c, host build)")
+    if cc.returncode != 0:
+        print(cc.stderr)
+        print("  FAIL cannot build supervisor/selftest_host.c")
+        return 1, 1
+
+    def run(script):
+        r = subprocess.run([str(exe)], input="\n".join(script) + "\n", capture_output=True, text=True)
+        return r.stdout.splitlines()
+
+    cases = [
+        # (name, script, the expected last line)
+        ("off: no action however stale", ["init 2", "tick 1 999999"], "tick=0 relaunches=0 watch=0"),
+        ("armed, fresh heartbeats: none", ["init 2", "arm 10 0", "hb 1 0 1000", "hb 2 0 9000", "tick 1 15000"],
+         "tick=0 relaunches=0 watch=10"),
+        ("armed, frame frozen 10 s: relaunch 1", ["init 2", "arm 10 0", "hb 5 0 1000", "hb 5 0 6000", "tick 1 11000"],
+         "tick=1 relaunches=1 watch=10"),
+        ("no heartbeat at all after the launch (hung at frame 0): relaunch",
+         ["init 2", "arm 10 0", "launched 0", "tick 1 10000"], "tick=1 relaunches=1 watch=10"),
+        ("game stopped: none (the PC decides)", ["init 2", "arm 10 0", "tick 0 50000"], "tick=0 relaunches=0 watch=10"),
+        ("state unknown (emulator) counts as running", ["init 2", "arm 10 0", "tick -1 10000"],
+         "tick=1 relaunches=1 watch=10"),
+        ("paused: never hung", ["init 2", "arm 10 0", "hb 5 1 1000", "tick 1 60000", "tick 1 65000"],
+         "tick=0 relaunches=0 watch=10"),
+        ("recovery: never hung", ["init 2", "arm 10 0", "hb 5 4 1000", "tick 1 60000"], "tick=0 relaunches=0 watch=10"),
+        ("loading: 4x the limit (39 s: none)", ["init 2", "arm 10 0", "hb 5 2 0", "tick 1 39000"],
+         "tick=0 relaunches=0 watch=10"),
+        ("loading: 4x the limit (40 s: relaunch)", ["init 2", "arm 10 0", "hb 5 2 0", "tick 1 40000"],
+         "tick=1 relaunches=1 watch=10"),
+        ("two relaunches, then it gives up and disarms",
+         ["init 2", "arm 10 0", "tick 1 10000", "launched 10000", "tick 1 20000", "launched 20000", "tick 1 30000"],
+         "tick=2 relaunches=2 watch=0"),
+        ("a push gives two relaunches again",
+         ["init 2", "arm 10 0", "tick 1 10000", "launched 10000", "tick 1 20000", "pushed 20000", "tick 1 30000"],
+         "tick=1 relaunches=1 watch=10"),
+        ("max_relaunches 0: gives up at once", ["init 0", "arm 5 0", "tick 1 5000"], "tick=2 relaunches=0 watch=0"),
+        ("a resumed heartbeat after a pause restarts the timer",
+         ["init 2", "arm 10 0", "hb 5 1 1000", "tick 1 50000", "hb 5 0 50000", "tick 1 59000"], "tick=0 relaunches=0 watch=10"),
+        ("kv int", ["kv gpureset=1 x=2|gpureset|9"], "kv=1"),
+        ("kv hex and missing", ["kv a=0x10|a|0"], "kv=16"),
+        ("kv missing -> default", ["kv watch=3|gpureset|2"], "kv=2"),
+        ("kv bad value -> default", ["kv gpureset=x|gpureset|2"], "kv=2"),
+        ("kv key prefix is not a match", ["kv xgpureset=1|gpureset|2"], "kv=2"),
+        ("word", ["word reboot hard|hard"], "word=1"),
+        ("word is not a prefix", ["word hardly|hard"], "word=0"),
+        ("launch args with switches", ["largs map=gor_01 wdog=9|200"], "largs=45 ctrdk:map=gor_01 wdog=9 ctrdk_from=supervisor"),
+        ("launch args without switches", ["largs |200"], "largs=27 ctrdk:ctrdk_from=supervisor"),
+        ("launch args that do not fit", ["largs abcdef|20"], "largs=-1 "),
+        ("rel ok", ["rel gpuhang/dump_1.bin"], "rel=1"),
+        ("rel ..", ["rel ../ttyd/latest.log"], "rel=0"),
+        ("rel absolute", ["rel /3ds/x"], "rel=0"),
+        ("rel //", ["rel a//b"], "rel=0"),
+        ("rel bad character", ["rel a b"], "rel=0"),
+    ]
+    fails = 0
+    for name, script, want in cases:
+        out = run(script)
+        got = out[-1] if out else "(no output)"
+        ok = got == want
+        fails += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} {name}" + ("" if ok else f": want {want!r}, got {got!r}"))
+    return fails, len(cases)
+
+
+class MockConsole:
+    """A stand-in for the supervisor (or for devupdate on 5050) in `selftest`: the same header, the
+    same reply lines. The game is modelled as: after a push or launch, each status call is one more
+    heartbeat, 100 frames each; latest.log says "boot done" from the second status on."""
+
+    def __init__(self, kind="supervisor", push_error=None):
+        self.kind, self.push_error = kind, push_error
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(4)
+        self.sock.settimeout(0.2)
+        self.port = self.sock.getsockname()[1]
+        self.since = 0
+        self.launched = False
+        self.alive = True
+        self.calls = []
+        self.files = {"crash.txt": b"[CRASH] v1 none\n"}
+        self.thread = threading.Thread(target=self.serve, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.alive = False
+        self.thread.join(2)
+        self.sock.close()
+
+    def serve(self):
+        while self.alive:
+            try:
+                c, _ = self.sock.accept()
+            except OSError:
+                continue
+            with c:
+                c.settimeout(5)
+                try:
+                    self.handle(c)
+                except OSError:
+                    pass
+
+    def recv_n(self, c, n):
+        b = b""
+        while len(b) < n:
+            chunk = c.recv(n - len(b))
+            if not chunk:
+                raise OSError("closed")
+            b += chunk
+        return b
+
+    def handle(self, c):
+        h = self.recv_n(c, 64)
+        _m, _v, cmd, flags, size, crc, alen, tid, _t = struct.unpack("<4sHHIIIIQ32s", h)
+        area = self.recv_n(c, alen) if alen else b""
+        if flags & FLAG_VERSION and area:
+            area = area[1 + area[0]:]
+        argtext = area.decode(errors="replace")
+        self.calls.append((cmd, argtext))
+        out = []
+        if cmd == 1:
+            out = [f"pong {self.kind} version=mock state=running", "done"]
+        elif cmd == 0x101:
+            if self.launched:
+                self.since += 1
+            out = ["status game_state=running",
+                   f"status heartbeat={self.since} frame={self.since * 100} flags=0 age_ms=0 stale_ms=0 since_launch={self.since}",
+                   "done"]
+            if self.since >= 2:
+                self.files["latest.log"] = b"[I] boot\n[I] boot done map=gor_01\n"
+        elif cmd == 2:
+            data = self.recv_n(c, size)
+            if self.push_error:
+                out = [self.push_error]
+            elif zlib.crc32(data) & 0xFFFFFFFF != crc:
+                out = ["error 5 crc mismatch"]
+            else:
+                self.launched, self.since = True, 0
+                out = [f"installed {tid:016x}", "done"]
+        elif cmd in (0x102, 0x104, 0x105, 0x106):
+            out = ["ok", "done"]
+        elif cmd == 0x103:
+            self.launched, self.since = True, 0
+            out = ["launch rc=00000000", "done"]
+        elif cmd == 6:
+            op, _, path = argtext.partition(" ")
+            rel = path[2:] if path.startswith("@/") else path
+            if op == "get" and rel in self.files:
+                d = self.files[rel]
+                c.sendall(f"file {len(d)} {zlib.crc32(d) & 0xFFFFFFFF:08x}\n".encode() + d + b"\n")
+                out = ["done"]
+            elif op == "ls" and rel == "gpuhang":
+                out = ["error 21 no such folder gpuhang"]
+            else:
+                out = [f"error 21 no such file {rel}"]
+        else:
+            out = [f"error 4 unknown command {cmd}"]
+        c.sendall("".join(l + "\n" for l in out).encode())
+
+
+def selftest_loop():
+    """`loop` against mock consoles on localhost: a normal entry (push, first heartbeat, until pattern,
+    collect), an entry ended by its frame count, the fallback to devupdate when the supervisor refuses
+    the push, and the stop with exit 2 when the supervisor stops answering. Returns (fails, count)."""
+    import tempfile
+    print("devupdate selftest: loop runner against mock consoles (localhost)")
+    tmp = Path(tempfile.mkdtemp(prefix="cdu-loop-"))
+    # A fake CIA with a TMD the title-ID walk accepts: header 0x20 bytes, no cert/ticket, TMD sig 0x10004.
+    hdr = struct.pack("<IHHIIII", 0x20, 0, 0, 0, 0, 0x200, 0) + b"\0" * 8
+    tmd = struct.pack(">I", 0x10004) + b"\0" * (0x100 + 0x3C) + b"\0" * 0x4C + struct.pack(">Q", 0x000400000FD88600)
+    cia = tmp / "game.cia"
+    cia.write_bytes(hdr.ljust(64, b"\0") + tmd + b"\0" * 1024)
+    fast = {"poll_s": 0.05, "log_poll_s": 0, "start_timeout_s": 3, "timeout_s": 4, "push_timeout_s": 10,
+            "fallback_settle_s": 0, "reboot_wait_s": 12}
+    fails, count = 0, 0
+
+    def run(name, manifest, sv, du, want_code, want_results, extra=None):
+        nonlocal fails, count
+        count += 1
+        mpath = tmp / f"{name}.json"
+        mpath.write_text(json.dumps(manifest))
+        a = argparse.Namespace(manifest=str(mpath), run=name, out=str(tmp / "runs"), ip="127.0.0.1",
+                               port=du.port if du else 1, sv_port=sv.port, token="", timeout=5, version_text="")
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = cmd_loop(a)
+        rows = (tmp / "runs" / name / "results.tsv").read_text().splitlines()[1:]
+        got = [r.split("\t")[2] for r in rows]
+        ok = code == want_code and got == want_results and (extra is None or extra(tmp / "runs" / name))
+        fails += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} {name}: exit {code}, results {got}" +
+              ("" if ok else f" (want exit {want_code}, {want_results})\n{buf.getvalue()[-1500:]}"))
+
+    sv = MockConsole()
+    run("until-and-frames", {"defaults": fast, "entries": [
+        {"name": "boot", "cia": str(cia), "switches": "map=gor_01", "until": r"boot done", "collect": ["latest.log"]},
+        {"name": "frames", "switches": "map=gor_02", "frames": 300},
+    ]}, sv, None, 0, ["until", "frames"],
+        extra=lambda d: (d / "01_boot" / "latest.log").is_file() and (d / "01_boot" / "crash.txt").is_file())
+    pushes = [c for c in sv.calls if c[0] == 2]
+    count += 1
+    ok = len(pushes) == 1 and pushes[0][1] == "map=gor_01" and (0x103, "map=gor_02") in sv.calls
+    fails += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} the push carried the switches; the CIA-less entry launched with its own")
+    sv.stop()
+
+    sv = MockConsole(push_error="error 17 AM write failed: stage=am-write at=0 rc=c8a044dc")
+    du = MockConsole(kind="devupdate")
+    du.launched = False
+    # devupdate's push does not reset the supervisor mock's heartbeat: start the mock "game" as launched.
+    sv.launched = True
+    run("fallback-to-5050", {"defaults": fast, "entries": [
+        {"name": "fb", "cia": str(cia), "until": r"boot done"}]}, sv, du, 0, ["until"])
+    count += 1
+    ok = sum(1 for c in sv.calls if c[0] == 2) == 2 and sum(1 for c in du.calls if c[0] == 2) == 1
+    fails += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} supervisor push tried twice, then devupdate once")
+    sv.stop()
+    du.stop()
+
+    sv = MockConsole()
+    port = sv.port
+    sv.stop()  # nothing listens: the runner must stop at entry 1 with exit 2
+    dead = argparse.Namespace(port=port)
+    run("supervisor-gone", {"defaults": fast, "entries": [{"name": "x", "cia": str(cia)}]}, dead, None, 2, [],
+        extra=lambda d: "STOP: the supervisor stopped answering" in (d / "loop.log").read_text())
+    return fails, count
 
 
 def main():
@@ -1154,10 +1785,28 @@ def main():
     p.add_argument("--switches", default="")
     p.add_argument("--boot-wait", type=float, default=30, help="seconds to wait for the bootstrap to answer")
     p.add_argument("--no-send", action="store_true", help="the bootstrap already runs")
-    p = sub.add_parser("supervisor", help="the supervisor system module on --sv-port (5051): ping, status")
-    p.add_argument("action", choices=["ping", "status"])
-    p.add_argument("--sv-port", type=int, default=int(os.environ.get("CTRDK_SV_PORT", SV_PORT)),
+    sv_port_default = int(os.environ.get("CTRDK_SV_PORT", SV_PORT))
+    p = sub.add_parser("supervisor", help="the supervisor system module on --sv-port (5051)")
+    p.add_argument("action", choices=["ping", "status", "terminate", "launch", "push", "files", "log", "watch",
+                                      "reboot", "exit", "self-update"])
+    p.add_argument("rest", nargs="*", help="launch: switches; push/self-update: the CIA; files: get|ls PATH; watch: N")
+    p.add_argument("--switches", default="", help="push, launch: the switches for the launch")
+    p.add_argument("--gpureset", type=int, choices=[0, 1, 2], help="terminate: the GPU reset level for this call")
+    p.add_argument("--hard", action="store_true", help="reboot: APT_HardwareResetAsync only (comes back at the HOME Menu)")
+    p.add_argument("--dry", action="store_true", help="reboot: only say what it would call")
+    p.add_argument("--prev", action="store_true", help="log: previous.log")
+    p.add_argument("--crash", action="store_true", help="log: crash.txt")
+    p.add_argument("--sv", action="store_true", help="log: the supervisor's own log")
+    p.add_argument("-o", "--out", help="files get, log: write the whole file here")
+    p.add_argument("--version-text", help=argparse.SUPPRESS)
+    p.add_argument("--sv-port", type=int, default=sv_port_default,
                    help="the supervisor's TCP port (default $CTRDK_SV_PORT or 5051)")
+    p = sub.add_parser("loop", help="the unattended runner: a manifest of push/run/collect steps (supervisor first)")
+    p.add_argument("manifest", help='JSON: {"defaults": {...}, "entries": [{"name", "cia", "switches", "until", "frames", '
+                                    '"timeout_s", "watch", "collect"}]}')
+    p.add_argument("--run", help="the run's folder name under build/loop/ (default: the time)")
+    p.add_argument("--out", help="the folder for runs (default build/loop)")
+    p.add_argument("--sv-port", type=int, default=sv_port_default)
     p = sub.add_parser("azahar-session", help="one long-lived headless Azahar for the same commands (--ip 127.0.0.1)")
     p.add_argument("action", choices=["start", "stop", "status", "supervise"])
     p.add_argument("--supervise", action="store_true",
@@ -1181,7 +1830,7 @@ def main():
     try:
         return {"ping": cmd_ping, "push": cmd_push, "restart": cmd_restart, "report": cmd_report,
                 "launch": cmd_launch, "bootstrap": cmd_bootstrap, "files": cmd_files, "queue": cmd_queue,
-                "log": cmd_log, "supervisor": cmd_supervisor}[args.cmd](args)
+                "log": cmd_log, "supervisor": cmd_supervisor, "loop": cmd_loop}[args.cmd](args)
     except OSError as e:
         print(f"devupdate: no connection to {args.ip}:{args.port}: {e}")
         return 2

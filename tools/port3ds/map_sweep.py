@@ -98,6 +98,11 @@ def run(build, todo, story, frames, party, timeout, fastboot=True):
         raise
     proc = subprocess.CompletedProcess(cmd, child.returncode, out, err)
     log = (LAST / "game_log.txt").read_text(errors="replace")
+    # keep the verify/warning lines of every chunk (the game log of a chunk is overwritten by the next one)
+    keep = [l for l in log.splitlines() if re.search(r"verify|mismatch|missed|stale|warn|error|fatal|crash|sweep: \S+ (ok|timeout)", l, re.I)]
+    OUT.mkdir(parents=True, exist_ok=True)
+    with open(OUT / "verify.log", "a") as vf:
+        vf.write("\n".join(keep) + "\n")
     results, current = {}, None
     for line in log.splitlines():
         m = re.search(r"sweep: (\S+) \(story", line)

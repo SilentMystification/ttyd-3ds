@@ -1338,6 +1338,23 @@ Build the release CIA first: `TTYD_CCACHE=1 tools/port3ds/build.sh` (QTM placeme
 6. GPU hang: `run_azahar.py --build build/3ds/game/ttyd.cia --frames 840 --switches "map=gor_01 story=30 G gpuhangtest=700 gpuhangrecover=1 shots=1 shotfrom=820 shotmax=1"`: `reset #1 done`, the shot has content.
 7. Timings per thread: `gx_perf_ab.py --repeat 2 --scenes gor_01,pik_00,usu_00,battle --a "C1" --b "G"` and `--a "C3" --b "G"` (`--allow-hw-faults` if the boot fault lines of the release build appear, as in the Stage 5 runs). Report frame, core-0 busy, render; with `gxthreadstats=60` the `gxone frame` lines give blocks built/sent per frame, texture re-encodes and resets (a reset per frame or many re-encodes means a table or the texture epoch is too small/too busy).
 
+### Gate results of steps 0-2 (2026-11-27, merged on port3ds `1630266e`, Azahar)
+
+C1, C3, G, V as above. Identity runs on the dev build (`--dev --no-cia`), verify, hang and timing runs on the release build.
+
+- **Step 1 (`gxlobj`)**: `map_sweep --area tik` (22 of 22) and `--area jin` (12 of 12) ok with `gxlobj=2 gxbatch=2`, with `gxlobj=2 gxcache=2` (tik) and with `gxlobj=2` + C3 with `gxrecfuse=2` (game-thread check up to 458 752 checks, 0 mismatches, no `gxlobj verify` warning in any chunk). `determ_ab` shots 780-785 in gor_01, pik_00, usu_00, battle: "" vs `gxlobj=1`, C1 vs C1+`gxlobj=1`, C3 vs C3+`gxlobj=1`: 6 of 6 identical in every scene (72 of 72). `gw_diff` 1600 frames: C1 vs C1+`gxlobj=1` and C3 vs C3+`gxlobj=1`: 160 records equal (32 fields). `gxbatch=2` and `gxcache=2` exclude each other: they were run apart.
+- **Step 2 (`gxone`)**: V in gor_01, pik_00, usu_00, battle to frame 841: every `gxone frame` line `mismatches 0 missed 0 stale 0` (last window: 33 710, 36 077, 24 562, 13 683 checks; not compared 6, 0, 0, 2), `gxdirty` 0+0 mismatches, no verify warning; battle has one TEV table reset. V sweeps with `map_sweep` tik 22 of 22 and jin 12 of 12 ok, 58 and 41 `gxone` lines, none with a mismatch. `determ_ab`: C1 vs G and C3 vs G, 24 of 24 shots identical. `gw_diff` C1 vs G: 160 records equal. Stereo (`stereoforce=1`, gor_01, 780-782): 9 of 9 identical. `gpuhangtest=700 gpuhangrecover=1` with G: `reset #1 done`, shot 820 has content.
+- **Timing (release 3dsx, `gx_perf_ab --repeat 2`, ms per frame: frame / core-0 busy / render)**:
+
+| Scene | C1 | G (C1+gxone=1) | C3 (busy / translator / render) |
+|---|---|---|---|
+| gor_01 | 34.2 / 31.8 / 7.2 | 50.0 / 35.3 / 1.4 | 33.5 / 22.6 / 13.2 / 7.4 |
+| pik_00 | 50.2 / 38.7 / 7.5 | 50.2 / 42.6 / 1.5 | 33.4 / 27.3 / 15.5 / 7.5 |
+| usu_00 | 33.7 / 28.1 / 6.4 | 36.0 / 30.9 / 1.5 | 31.7 / 18.8 / 13.2 / 6.2 |
+| battle | 27.6 / 19.6 / 3.7 | 28.9 / 20.9 / 1.1 | 27.1 / 15.6 / 13.9 / 3.8 (fence 5.4) |
+
+  `gxone=1` moves the state work to core 0: render thread -5.0..-5.8 ms, core-0 busy +1.3..+3.9 ms, frame not better (gor_01 50.0 against 34.2: the game thread now misses the second vblank). C3 stays the faster config (core-0 busy 15.6-27.3 ms). The base build (port3ds `1630266e`, release) gives the same C1 and C3 numbers as this build (C3 busy 22.5, 27.2, 18.8, 15.6; C1 31.7, 38.7, 28.2, 19.4): the merge adds no cost with the switches off.
+
 ## Heap margin (2026-11-27)
 
 Release builds, Azahar (3dsx: heap 83 100 KiB, linear heap 32 768 KiB), runs to frame 841. C0 = no switches (the defaults); C1 and C3 as above. Base = port3ds `156cf717`.

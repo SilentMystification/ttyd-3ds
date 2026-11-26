@@ -454,6 +454,12 @@ void plat_log_crash_flush(void) {
     __atomic_store_n(&s_writer_on, 0, __ATOMIC_RELEASE);
 }
 
+void plat_log_crash_sync(void) {
+    if (s_log_fd >= 0) {
+        fsync(s_log_fd);
+    }
+}
+
 void plat_log_crash_close(void) {
     if (s_log_fd >= 0) {
         fsync(s_log_fd);
@@ -472,8 +478,7 @@ void plat_crash_line(const char* s, int n) {
         plat_log_crash_flush();
     }
     if (s_log_fd >= 0) {
-        write(s_log_fd, s, (size_t)n);
-        fsync(s_log_fd);
+        write(s_log_fd, s, (size_t)n); /* no fsync per line (tens of ms each on the card): plat_log_crash_sync */
     }
     if (s_client >= 0) {
         send(s_client, s, (size_t)n, MSG_DONTWAIT);

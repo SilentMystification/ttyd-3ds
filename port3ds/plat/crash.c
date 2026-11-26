@@ -96,6 +96,10 @@ static void hook_gpu(void* u) {
     (void)u;
     plat_crash_gpu_down();
 }
+static void hook_log_sync(void* u) {
+    (void)u;
+    plat_log_crash_sync();
+}
 static void hook_audio(void* u) {
     (void)u;
     if (s_audio_abort != NULL) {
@@ -141,6 +145,7 @@ void plat_crash_setup(void) {
     crash_setup(&cfg);
     crash_add_shutdown_hook(CRASH_STAGE_SCREEN, hook_console, NULL, 0);
     crash_add_shutdown_hook(CRASH_STAGE_SCREEN, hook_gpu, NULL, 10);
+    crash_add_shutdown_hook(CRASH_STAGE_SCREEN, hook_log_sync, NULL, 20);
     crash_add_shutdown_hook(CRASH_STAGE_REPORT_END, hook_audio, NULL, 0);
     crash_add_shutdown_hook(CRASH_STAGE_EXIT, hook_cpu, NULL, 0);
     crash_add_shutdown_hook(CRASH_STAGE_EXIT, hook_log, NULL, 10);

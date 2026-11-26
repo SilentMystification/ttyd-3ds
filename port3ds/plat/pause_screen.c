@@ -31,8 +31,9 @@ static void grey_buffer(u8* fb, u16 w, u16 h, int bpp) {
 
 /* The grey itself. The caller has made sure that the render thread and the GPU are idle. */
 static void pause_grey_idle(void) {
-    gspWaitForVBlank();
-    gspWaitForVBlank(); /* the last frame's transfer has landed and been shown */
+    /* The last frame's transfer has landed and been shown after two vblanks. A timed sleep, not
+     * gspWaitForVBlank: that wait has no limit and the GSP can be what is stuck. */
+    svcSleepThread(40000000LL);
     GSPGPU_FramebufferFormat fmt = gfxGetScreenFormat(GFX_TOP);
     int bpp = fmt == GSP_BGR8_OES ? 3 : fmt == GSP_RGBA8_OES ? 4 : 0;
     if (bpp == 0) {

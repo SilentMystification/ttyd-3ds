@@ -140,6 +140,14 @@ void crash_exit_process(void) __attribute__((noreturn));
  * aptExit() before the exit, so a chainloader set with aptSetChainloader*
  * takes effect. */
 void crash_recovery_exit(bool chainload);
+/* The last-resort guard: a thread of its own that does no I/O and takes no lock. If a checkpoint is armed and
+ * not disarmed in ms, it ends the process with svcExitProcess (so the HOME Menu or a supervisor can start
+ * the app again) instead of leaving a console with a stuck process and nobody listening. The crash path
+ * arms it itself (report, exit); an app arms it around its own waits that depend on a service or on
+ * another thread (a relaunch, an update). what is only for the debugger's log line and must stay valid
+ * (a literal). One checkpoint at a time: a later arm replaces the earlier one. */
+void crash_guard_arm(const char* what, unsigned ms);
+void crash_guard_disarm(void);
 /* Whether the report file was opened and written (for the crash screen). */
 bool crash_report_file_ok(void);
 

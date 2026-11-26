@@ -39,6 +39,8 @@ void stereo_snapshot(void);
  * 1 right). Changes the vertex buffer, combiner, rot uniforms. */
 void stereo_warp(int eye);
 C3D_RenderTarget* stereo_eye_target(int eye);
+/* After C3D_Fini and C3D_Init (a GPU reset): the right eye's target is linked to its screen again. */
+void stereo_relink(void);
 /* GX queue entries a stereo frame adds (frame splits and transfers). */
 #define STEREO_GX_ENTRIES 4
 /* After C3D_FrameEnd: cost statistics (switch stereostats). */

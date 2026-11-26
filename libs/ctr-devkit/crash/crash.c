@@ -90,6 +90,35 @@ static void log_msg(int level, const char* fmt, ...) {
 
 static void crashtest_frame(void);
 
+/* Where the crash path is, for the line that says it did not finish (the debugger and the report show it). */
+static const char* volatile s_stage = "-";
+#define STAGE(name) (s_stage = (name))
+
+/* The guard thread (see crash_guard_arm). No I/O and no locks in it: it must work when everything else hangs. */
+static volatile u32 s_guard_ms;             /* uptime at which the process ends, 0 = disarmed */
+static const char* volatile s_guard_what = "-";
+static Thread s_guard_thread;
+
+void crash_guard_arm(const char* what, unsigned ms) {
+    s_guard_what = what != NULL ? what : "?";
+    s_guard_ms = (uptime_ms() + ms) | 1u;
+}
+void crash_guard_disarm(void) { s_guard_ms = 0; }
+
+static void guard_main(void* arg) {
+    (void)arg;
+    for (;;) {
+        svcSleepThread(250000000LL);
+        u32 dl = s_guard_ms;
+        if (dl != 0 && (s32)(uptime_ms() - dl) >= 0) {
+            static const char m[] = "[CRASH] guard: a checkpoint was not reached, ending the process\n";
+            svcOutputDebugString(m, (int)sizeof(m) - 1);
+            svcOutputDebugString(s_guard_what, (int)strlen(s_guard_what));
+            svcExitProcess();
+        }
+    }
+}
+
 void crash_wd_progress(void) {
     s_wd_counter++;
     if (s_frame_thread < 0) {
@@ -190,14 +219,21 @@ static void emit_line(const char* s, int n) {
             s_report_fd = open(s_cfg.report_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
         }
         if (s_report_fd >= 0) {
+            /* No fsync per line: one sync per SD write cost tens of ms each and a long report took over the
+             * 5 s deadline (report_sync runs at the checkpoints). */
             s_report_ok = write(s_report_fd, s, (size_t)n) == n;
-            fsync(s_report_fd);
         }
     }
     if (s_report_len + (u32)n < sizeof(s_report_copy)) {
         memcpy(s_report_copy + s_report_len, s, (size_t)n);
         s_report_len += (u32)n;
         s_report_copy[s_report_len] = '\0';
+    }
+}
+
+static void report_sync(void) {
+    if (s_report_fd >= 0) {
+        fsync(s_report_fd);
     }
 }
 
@@ -225,6 +261,8 @@ static void crash_printf(const char* fmt, ...) {
 void crash_exit_process(void) {
     static volatile int s_exit_started;
     if (!__atomic_exchange_n(&s_exit_started, 1, __ATOMIC_ACQ_REL)) {
+        STAGE("exit");
+        crash_guard_arm("exit", 8000); /* the hold wait, the EXIT hooks and aptExit together */
         for (int i = 0; i < 100 && s_wd_hold; i++) {
             svcSleepThread(10000000LL); /* a running save gets up to 1 s */
         }
@@ -426,7 +464,6 @@ static const char* base_name(const char* path) {
  * GX queue, so a hung GPU cannot stop it. gfxInitDefault is a no-op while the app's gfx is up (the app's
  * GPU stack is left as it is: C3D_Fini and gfxExit wait for the GX queue and would hang on a hung GPU). */
 static void crash_screen_draw(const CrashInfo* ci, bool recovery) {
-    run_hooks(CRASH_STAGE_SCREEN);
     gfxInitDefault();
     gfxSet3D(false);
     consoleInit(GFX_TOP, &s_top_con);
@@ -468,6 +505,38 @@ static void crash_screen_draw(const CrashInfo* ci, bool recovery) {
     fflush(stdout);
     gfxFlushBuffers();
     gfxSwapBuffers(); /* no vblank wait: the system applies the swap at the next vblank */
+}
+
+/* The screen is drawn on a thread of its own and waited for at most 2.5 s: the flush and the swap are
+ * requests to the GSP service, and a GSP that is stuck behind a hung GPU must not stop the recovery service
+ * or the exit. A draw that does not finish is left behind (the process ends later anyway). */
+static const CrashInfo* s_draw_ci;
+static bool s_draw_recovery;
+static volatile int s_draw_done;
+
+static void draw_main(void* arg) {
+    (void)arg;
+    crash_install_handler();
+    crash_screen_draw(s_draw_ci, s_draw_recovery);
+    s_draw_done = 1;
+}
+
+static bool crash_screen_draw_bounded(const CrashInfo* ci, bool recovery) {
+    s_draw_ci = ci;
+    s_draw_recovery = recovery;
+    s_draw_done = 0;
+    Thread t = threadCreate(draw_main, NULL, 16 * 1024, 0x30, 1, false);
+    if (t == NULL) {
+        t = threadCreate(draw_main, NULL, 16 * 1024, 0x30, 0, false);
+    }
+    if (t == NULL) {
+        crash_screen_draw(ci, recovery);
+        return true;
+    }
+    for (int i = 0; i < 250 && !s_draw_done; i++) {
+        svcSleepThread(10000000LL);
+    }
+    return s_draw_done != 0;
 }
 
 /* Until START, the timeout (none in recovery) or crash_recovery_exit(). A fixed 16 ms sleep, not
@@ -528,6 +597,8 @@ static void crash_report(CrashInfo* ci, int thread_dump_stuck) {
     s_crash_tid = tid;
     s_crash_ms = uptime_ms() | 1u;
     s_deadline_ms = (s_crash_ms + 5000u) | 1u;
+    crash_guard_arm("crash report", 15000);
+    STAGE("report");
     s_report_len = 0;
     memset(&s_info, 0, sizeof(s_info));
     if (s_cfg.app_info != NULL) {
@@ -554,6 +625,7 @@ static void crash_report(CrashInfo* ci, int thread_dump_stuck) {
         stack_scan(stack_of(ci->sp), ci->sp);
     }
     if (thread_dump_stuck) {
+        STAGE("thread dump");
         u32 ctx[17];
         int stuck = s_frame_thread;
         if (stuck >= 0 && stuck < MAX_THREADS) {
@@ -570,18 +642,18 @@ static void crash_report(CrashInfo* ci, int thread_dump_stuck) {
             stack_scan(stack_of(ci->sp), ci->sp);
         }
     }
-    /* "drawn" is logged only after the draw and the swap returned; the 5 s deadline stays armed until then. */
+    /* One sync of the report file, then the order that keeps a listener alive: hooks (the GPU and the console
+     * let go), the recovery service (needs no screen), and only then the screen, which is drawn on a thread of
+     * its own and waited for at most 2.5 s. The 5 s deadline covers everything up to the screen; the guard
+     * thread ends the process at 15 s if even that did not do it. */
     bool apt = !thread_dump_stuck;
-    crash_printf("[CRASH] drawing the crash screen (CPU, frame buffers)");
-    crash_screen_draw(ci, s_cfg.on_recovery != NULL);
-    s_deadline_ms = 0; /* the screen is up: the watchdog stops timing the report */
-    crash_printf("[CRASH] crash screen drawn");
-    if (s_cfg.screen_dump != NULL) {
-        dump_screen(s_cfg.screen_dump, GFX_TOP, "top");
-        dump_screen(s_cfg.screen_dump, GFX_BOTTOM, "bottom");
-    }
+    STAGE("report sync");
+    report_sync();
+    STAGE("screen hooks");
+    run_hooks(CRASH_STAGE_SCREEN);
     bool recovery = false;
     if (s_cfg.on_recovery != NULL) {
+        STAGE("recovery");
         run_hooks(CRASH_STAGE_REPORT_END);
         crash_printf("[CRASH] recovery mode: the updater server stays up until a restart, push or launch");
         recovery = s_cfg.on_recovery(s_report_copy, s_cfg.user);
@@ -589,8 +661,22 @@ static void crash_report(CrashInfo* ci, int thread_dump_stuck) {
             crash_printf("[CRASH] recovery refused");
         }
     }
+    /* "drawn" is logged only after the draw and the swap returned. */
+    STAGE("screen");
+    crash_printf("[CRASH] drawing the crash screen (CPU, frame buffers)");
+    bool drawn = crash_screen_draw_bounded(ci, s_cfg.on_recovery != NULL);
+    s_deadline_ms = 0; /* the screen is up (or given up): the watchdog stops timing the report */
+    crash_guard_disarm();
+    crash_printf(drawn ? "[CRASH] crash screen drawn" : "[CRASH] crash screen did not finish in 2.5 s, going on without it");
+    report_sync();
+    if (drawn && s_cfg.screen_dump != NULL) {
+        dump_screen(s_cfg.screen_dump, GFX_TOP, "top");
+        dump_screen(s_cfg.screen_dump, GFX_BOTTOM, "bottom");
+    }
+    STAGE("waiting");
     crash_screen_wait(recovery, apt);
     crash_printf("[CRASH] exiting the process");
+    STAGE("exit hooks");
     run_hooks(CRASH_STAGE_REPORT_END);
     crash_exit_process();
 }
@@ -698,8 +784,14 @@ static void watchdog_main(void* arg) {
         if (started) {
             u32 dl = s_deadline_ms;
             if (dl && (s32)(uptime_ms() - dl) >= 0) {
-                static const char m[] = "[CRASH] watchdog: the crash handler did not finish in time, ending the process\n";
-                emit_line(m, (int)sizeof(m) - 1);
+                /* The stage first, to the debugger only (no I/O that could hang); the guard thread ends the
+                 * process 2.5 s later if this exit path hangs too. */
+                char m[96];
+                int n = snprintf(m, sizeof(m), "[CRASH] watchdog: the crash handler did not finish in time (stage %s), ending the process\n",
+                                 s_stage);
+                svcOutputDebugString(m, n);
+                crash_guard_arm("watchdog deadline", 2500);
+                emit_line(m, n);
                 crash_exit_process();
             }
             continue;
@@ -848,7 +940,14 @@ void crash_start(void) {
             s_wd_thread = threadCreate(watchdog_main, NULL, 8 * 1024, 0x3F, 0, false);
         }
     }
-    log_msg(2, "watchdog: %d s, monitor thread %s", s_cfg.watchdog_seconds, s_wd_thread ? "started" : "NOT STARTED");
+    if (s_guard_thread == NULL) {
+        s_guard_thread = threadCreate(guard_main, NULL, 4 * 1024, 0x1A, 1, false);
+        if (s_guard_thread == NULL) {
+            s_guard_thread = threadCreate(guard_main, NULL, 4 * 1024, 0x1A, 0, false);
+        }
+    }
+    log_msg(2, "watchdog: %d s, monitor thread %s, guard thread %s", s_cfg.watchdog_seconds,
+            s_wd_thread ? "started" : "NOT STARTED", s_guard_thread ? "started" : "NOT STARTED");
     if (s_test[0] != '\0') {
         log_msg(1, "crashtest=%s", s_test);
         if (strcmp(s_test, "self") == 0 || strcmp(s_test, "null") == 0 || strcmp(s_test, "undef") == 0 ||

@@ -17,6 +17,7 @@ void plat_log_start_writer(void);    /* the writer thread on core 1; before it, 
 void plat_log_stop(void);            /* normal exit: write everything, stop the writer */
 void plat_log_crash_flush(void);     /* crash path: write the queue in the calling thread */
 void plat_log_crash_close(void);     /* before svcExitProcess */
+void plat_log_crash_sync(void);      /* one fsync of latest.log (the crash lines are written without one) */
 void plat_log_console_ready(void);   /* the bottom console exists: show the lines kept until now */
 void plat_log_poll(void);            /* accept a live-log client while the writer does not run */
 unsigned plat_log_dropped(void);

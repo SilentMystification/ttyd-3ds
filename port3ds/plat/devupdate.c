@@ -138,7 +138,16 @@ void plat_devupdate_frame(void) {
     plat_gpu_sync(); /* the render thread has run everything this frame recorded */
     s_paused = 1;
     PLOG_I("devupdate: game thread paused at frame %lu", (unsigned long)plat_wd_frames());
-    LightEvent_Wait(&s_resume);
+    /* Bounded: a PC that dies in the middle of a transfer must not leave the game paused for good. The longest
+     * legitimate update (a CIA over WLAN, the install, the relaunch) is far below 4 min. */
+    int resumed = 0;
+    for (int i = 0; i < 120 && !resumed; i++) {
+        resumed = LightEvent_WaitTimeout(&s_resume, 2000000000LL) == 0;
+    }
+    if (!resumed) {
+        PLOG_W("devupdate: no resume or relaunch in 240 s: the game thread goes on");
+        s_pause_req = 0;
+    }
     s_paused = 0;
     if (s_relaunch) {
         PLOG_I("devupdate: relaunching");
@@ -253,6 +262,9 @@ static bool on_ready(void* user) {
 static void on_relaunch(void* user) {
     (void)user;
     s_relaunch = 1;
+    /* The library's own relaunch deadline (8 s) lives on the server thread; this guard does not depend on
+     * any thread or lock: if the exit has not ended the process in 15 s, the process ends. */
+    crash_guard_arm("relaunch", 15000);
     s_pause_req = 1; /* a game thread that has not paused yet stops at its next frame and leaves */
     crash_wd_hold(false);
     LightEvent_Signal(&s_resume);

@@ -683,6 +683,24 @@ int gx_imm_convert(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, u8* out
 int gx_imm_rec_ok(const GxState* g, u8 prim, u32 n);
 void gx_imm_verify(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, const u8* got, const u8 attr_slot[8]);
 void gx_imm_rec_count(int ok);
+/* ---- Switch gximmfl (GX native step 4, docs/PORT_3DS_GX_NATIVE.md; default 0; needs gxchunk, so gxthread=0) ----
+ *   1: GXEnd routes an immediate primitive with the eligibility bits its classes carry (the vertex class's plan, the
+ *      uniform block's parts), converts it into the ring chunk and writes the draw into the frame list in one pass
+ *      (plat_gpu_imm_begin/end: uniform rows, class blocks whose ids changed, the packet; the triangle indices
+ *      straight into the record's index arena). The pass-group route and its K-frame hysteresis are kept: the same
+ *      words as gximmfl=0.
+ *   2: as 1, and each draw's old-path route bits and indices are compared on the game thread, its words through the
+ *      register-file model by the back end (`gximmfl frame` lines). */
+extern int gx_opt_immfl;
+int gx_draw_imm_fl(u8 prim, u8 fmt, const PPCWGPipe* sl, u32 n); /* GXI_*; GXI_SHADER: drawn */
+void* gx_imm_plan(u8 fmt, u32* vwhy);
+void gx_imm_convert_plan(void* plan, const PPCWGPipe* sl, u32 n, u8* out, u8 attr_slot[8]);
+u32 gx_vsh_imm_vtx_reasons(const u8* vtx_desc); /* GXV_R_* of a vertex description (part of gx_vsh_imm_reasons) */
+u32 gx_vsh_imm_nidx(u8 prim, u32 n);            /* triangle indices of a primitive (0: none), no divide */
+/* gximmfl: the n vertices at gx_vsh_imm_dst are a draw (gx_vsh_imm_done without its index list): the chunk base,
+ * the first vertex and the layout */
+const void* gx_vsh_imm_commit(u32 n, u32* first, u32* layout);
+u32 gx_vsh_imm_emit(u8 prim, u32 first, u32 n, u16* ix); /* the triangle indices gx_vsh_imm_done writes; count */
 void gx_draw_prim_ring(u8 primfmt, u16 n, const void* caller, const u8* base, u32 first, const u8 attr_slot[8],
                        int has_nrm, int state_same);
 void gx_immdirect_log(u32 frames);

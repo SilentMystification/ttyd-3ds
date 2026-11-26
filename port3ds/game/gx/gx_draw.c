@@ -136,8 +136,9 @@ void gx_opts_init(void) {
             gx_opt_immdirect = 1; /* gxonehop=1 under it */
         }
     }
-    PLOG_I("gx: statever %d fogcache %d unlit %d dirty %d immdirect %d one %d", gx_opt_statever, gx_opt_fogcache,
-           gx_opt_unlit, gx_opt_dirty, gx_opt_immdirect, gx_opt_one);
+    gx_opt_immfl = gx_opt_one == 1 ? plat_gpu_immfl_active() : 0; /* gximmfl: the back end took it (gxchunk on) */
+    PLOG_I("gx: statever %d fogcache %d unlit %d dirty %d immdirect %d one %d immfl %d", gx_opt_statever,
+           gx_opt_fogcache, gx_opt_unlit, gx_opt_dirty, gx_opt_immdirect, gx_opt_one, gx_opt_immfl);
     gx_vsh_init();
 }
 
@@ -2492,6 +2493,11 @@ static void vsh_verify(void) {
     s_vsh_light_id = lid;
 }
 
+/* gximmfl=2: the game thread's checks (the old route bits, the old index list; gx_draw_imm_fl) */
+static struct {
+    u32 checks, route, idx, skipped;
+} s_ifv;
+
 void gx_dirty_log(u32 frames) {
     if (!gx_opt_dirty || frames == 0) {
         return;
@@ -2507,6 +2513,9 @@ void gx_dirty_log(u32 frames) {
     memset(s_dv.classes, 0, sizeof(s_dv.classes));
     if (gx_opt_one) {
         one_log(frames);
+    }
+    if (gx_opt_immfl == 2) {
+        plat_gpu_immfl_note(s_ifv.checks, s_ifv.route, s_ifv.idx + s_ifv.skipped); /* totals, the gximmfl line */
     }
 }
 
@@ -2607,6 +2616,96 @@ void gx_draw_imm_shader(const GxVshImm* im, u32 n) {
     plat_gpu_vsh_draw(im->base, im->layout, scales, vsh_cull(), im->idx, im->nidx);
     gx_vsh_count_shader(n, im->nidx);
     gx_stat_draws++;
+}
+
+int gx_opt_immfl;
+static u16* s_ifv_idx; /* gximmfl=2: the old path's index list (heap, 4096 x 3 x 2 indices) */
+
+/* gximmfl (GX native step 4): an immediate primitive (gxthread=0, the pipe slots sl) routed as gx_draw_imm_route
+ * routes it, with the eligibility bits of its classes: the uniform block's parts (gxdirty, rebuilt only for the dirty
+ * classes) and the vertex class's plan (gx_imm_plan; built once per vertex description and format) and the
+ * primitive's own bit. Then converted into the ring chunk and drawn into the frame list (plat_gpu_imm_begin/end: the
+ * triangle indices straight into the record's index arena). The pass-group route (gx_vsh_route, the K-frame
+ * hysteresis, decal links) is the same call as before, so the same draws take the shader path. GXI_SHADER: drawn;
+ * the other answers as gx_draw_imm_route's (the caller draws them). */
+int gx_draw_imm_fl(u8 prim, u8 fmt, const PPCWGPipe* sl, u32 n) {
+    if (n == 0) {
+        return GXI_NONE;
+    }
+    if (!gx_vsh_on || gx_vsh_noted || gx.vtx_desc[GX_VA_PNMTXIDX] != GX_NONE || gx_bbox_active || s_bref_on ||
+        s_dump) {
+        return GXI_OLD;
+    }
+    gx_batch_flush();
+    ensure_state();
+    if (empty_target()) {
+        return GXI_NONE;
+    }
+    vsh_state();
+    u32 vwhy;
+    void* plan = gx_imm_plan(fmt, &vwhy);
+    u32 nidx = n <= 4096u ? gx_vsh_imm_nidx(prim, n) : 0u;
+    u32 why = gx_vsh_imm_on ? s_vsh_reasons | vwhy | (nidx == 0 ? GXV_R_PRIM : 0u) : GXV_R_IMM;
+    if (gx_opt_immfl == 2) {
+        u32 old = gx_vsh_imm_on ? s_vsh_reasons | gx_vsh_imm_reasons(prim, n) : GXV_R_IMM;
+        s_ifv.checks++;
+        if (old != why) {
+            if (s_ifv.route++ < 8) {
+                PLOG_W("gximmfl verify: frame %lu, primitive %u of %lu vertices from %p: route bits %08lx, old %08lx",
+                       (unsigned long)gx_perf_frame_no(), prim, (unsigned long)n, gx_begin_caller, (unsigned long)why,
+                       (unsigned long)old);
+            }
+            why = old;
+        }
+    }
+    if (why == 0 && !gx_vsh_imm_room(n)) {
+        why = GXV_R_POOL;
+    }
+    if (!gx_vsh_route(gx.cur_pnmtx, why, gx_begin_caller, 0xFFFFFFFFu, n, 1)) {
+        return GXI_CPU;
+    }
+    if (gx.cull == GX_CULL_ALL) {
+        return GXI_NONE;
+    }
+    u8 attr_slot[8];
+    u8* dst = gx_vsh_imm_dst();
+    gx_imm_convert_plan(plan, sl, n, dst, attr_slot);
+    if (gx_opt_immdirect == 2) {
+        gx_imm_verify(&gx, fmt, sl, n, dst, attr_slot);
+    }
+    u32 first, layout;
+    const void* base = gx_vsh_imm_commit(n, &first, &layout);
+    u32 scales = 0;
+    for (int u = 0; u < 3; u++) {
+        u8 a = s_vsh_unit_attr[u];
+        u32 slot = a < 8 ? attr_slot[a] : 0xFF;
+        scales |= (slot < 3 ? PLAT_VSH_UNIT(slot, 0) : PLAT_VSH_UNIT(3, 0)) << (8 + 8 * u);
+    }
+    u16* ix = plat_gpu_imm_begin(&s_vsh_const, s_vsh_const_id, s_vsh_lit ? &s_vsh_light : NULL, s_vsh_light_id,
+                                 layout, nidx);
+    if (ix != NULL) {
+        gx_vsh_imm_emit(prim, first, n, ix);
+        if (gx_opt_immfl == 2 && s_ifv_idx == NULL) {
+            s_ifv_idx = malloc(4096u * 6u * sizeof(u16)); /* NULL: the index check is skipped (counted) */
+        }
+        if (gx_opt_immfl == 2 && s_ifv_idx == NULL) {
+            s_ifv.skipped++;
+        } else if (gx_opt_immfl == 2) {
+            /* the old path's list (gx_vsh_imm_done's emit into its own buffer, counted by its end) */
+            u32 on = gx_vsh_imm_emit(prim, first, n, s_ifv_idx);
+            if (on != nidx || !gx_mem_equal(s_ifv_idx, ix, nidx * 2u)) {
+                if (s_ifv.idx++ < 8) {
+                    PLOG_W("gximmfl verify: frame %lu, primitive %u of %lu vertices: %lu indices, old %lu, or they "
+                           "differ", (unsigned long)gx_perf_frame_no(), prim, (unsigned long)n, (unsigned long)nidx,
+                           (unsigned long)on);
+                }
+            }
+        }
+        plat_gpu_imm_end(base, layout, scales, vsh_cull(), nidx);
+    }
+    gx_vsh_count_shader(n, nidx);
+    gx_stat_draws++;
+    return GXI_SHADER;
 }
 
 

@@ -328,6 +328,19 @@ uint32_t plat_gpu_chunk_build(const PlatGpuChunkDraw* d, uint32_t n, uint32_t cu
  * cull mode differs): nothing was drawn, the caller draws per draw and builds again. */
 int plat_gpu_chunk_draw(uint32_t id, uint32_t cull, uint32_t ndraws, uint32_t last_nidx, uint32_t calls);
 
+/* Switch gximmfl (GX native step 4, docs/PORT_3DS_GX_NATIVE.md; needs gxchunk): an immediate draw straight into the
+ * frame list. plat_gpu_imm_begin does what plat_gpu_vsh_light (when `l` is not NULL), plat_gpu_vsh_const and the
+ * room checks of plat_gpu_vsh_draw do, and returns where the draw's `nidx` u16 indices go (in the record's index
+ * arena: the caller writes them there, nothing is copied), or NULL when plat_gpu_vsh_draw would draw nothing.
+ * plat_gpu_imm_end then draws them as plat_gpu_vsh_draw would (the same words, the same merges). nidx: a whole
+ * number of triangles, at least 3. */
+int plat_gpu_immfl_active(void); /* 0 off, 1 on, 2 verify */
+uint16_t* plat_gpu_imm_begin(const PlatGpuVshConst* c, uint32_t cid, const PlatGpuVshLight* l, uint32_t lid,
+                             uint32_t layout, uint32_t nidx);
+void plat_gpu_imm_end(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, uint32_t nidx);
+/* gximmfl=2: the front end's own checks (route and indices), for the `gximmfl frame` line. */
+void plat_gpu_immfl_note(uint32_t checks, uint32_t route_differ, uint32_t idx_differ);
+
 typedef struct {
     uint32_t draws, vertices, state_changes;
     uint32_t record_bytes;

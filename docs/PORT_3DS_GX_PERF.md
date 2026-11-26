@@ -1356,3 +1356,39 @@ Not done (measured, left): the gx ring (4 MB, C3) carries 50-55 K words (215 KiB
 Steady-state time does not change (windows 722-841, best of 2, game busy / translator ms, base -> this build): C3 gor_01 22.5/13.3 -> 22.5/13.3, pik_00 28.1/15.5 -> 28.2/15.5, usu_00 18.9/13.5 -> 18.9/13.3, battle 15.9/13.7 -> 15.7/14.1 (content changes); C1 busy gor_01 31.8 -> 31.7, pik_00 39.5 -> 39.6, usu_00 28.3 -> 28.3, battle 19.5 -> 19.6. The GX setters' sizes in the ELF are unchanged (inlining check).
 
 Identity (this build against base): `determ` shots 780-785 byte-identical in gor_01, pik_00, usu_00, battle in C0, C1 and C3 (72 of 72); `gw_diff` 1600-frame padscript gor_01: 160 records equal in C1 and C3; `gxrecfuse=2 gxreclgroup=1` (C3): `map_sweep.py --area tik` 22 of 22 maps ok, 0 mismatches of 247 K + 565 K checks, `--area jin` 12 of 12 ok, 0 of 124 K + 334 K (the sweeps load a REL at each area change, so they also run the packed snapshots); stereo (`stereoforce=1`, C3, gor_01 780-782): 9 of 9 identical (EFB, left, right).
+
+## GXEnd on the game thread: the plan lookup (2026-11-27)
+
+Ablation in C3 (local build, not committed; switch `gxphx=mask` returns early at one point, `phxvbl=2` holds every frame at 2 retraces; pik_00, windows 722-841, best of 2, game busy ms):
+
+| Left out | busy | cost |
+|---|---|---|
+| nothing | 28.5 | |
+| the whole direct record (`gx_rec_prim_direct` at entry) | 23.6 | **4.9** |
+| everything after `gx_imm_rec_ok` | 24.0 | check 0.4 |
+| the conversion (`gx_imm_convert`) | 24.4 | **4.1** |
+| the conversion's vertices (convert with n = 0) | 26.8 | vertices 1.7; **per primitive 2.4** |
+| indexed float steps / the fill / indexed colours | 27.7 / 27.8 / 28.1 | 0.8 / 0.7 / 0.4 |
+| the conversion twice | 32.7 | +4.2 |
+
+So the vertex loop is not the largest part any more: 2.4 ms of the 4.1 is per primitive (1 155 a frame, 2 us each), and most of that is the plan lookup, which compared the plan's vertex description and formats (104 bytes) with the state's, for up to four plans, at every primitive.
+
+Changes (no switch; same plans, same bytes):
+1. **`gx_imm_convert`** (`gx_pipe.c`): every write to the vertex description or formats of `gx` or `gx_game` bumps that state's `gx_vdesc_ver` (`VDESC_TOUCH`, and the two whole-state copies). A plan keeps the version at which it last matched; while the state's version is the same, the plan matches without the compare. A changed version takes the old compare (and a match sets the version).
+2. **`gx_imm_rec_ok`**: the vertex-description part of the check is kept per `gx_vdesc_ver[1]` (game thread only).
+
+Results, release, windows 722-841, best of 2 (A = the heap-margin build above, B = this build), game busy ms:
+
+| Scene | C1 busy A -> B | C3 game busy A -> B | C3 translator |
+|---|---|---|---|
+| gor_01 | 31.7 -> 31.7 | 22.5 -> 22.4 | 13.3 -> 13.3 |
+| pik_00 | 39.5 -> **38.7** | 28.2 -> **27.2** | 15.5 -> 15.5 |
+| usu_00 | 28.3 -> 28.1 | 19.0 -> 18.7 | 13.4 -> 13.4 |
+| battle | 19.5 -> 19.3 | 15.6 -> 15.7 | 13.4 -> 14.2 (content changes) |
+
+Change 1 gave all of it (pik_00 C3 28.2 -> 27.3); change 2 is within the spread (27.3 -> 27.2). The rest of the per-primitive time (about 1.4 ms in pik_00) is the step set-up, `put` and the TLS read of `gx_tls_translator`. No GX setter changed size; `gx_imm_convert` +560 bytes.
+
+Identity (B against port3ds `156cf717`): `determ` shots 780-785 byte-identical in gor_01, pik_00, usu_00, battle in C1 and C3; `gw_diff` 1600-frame padscript gor_01 equal in C1 and C3; `gximmdirect=2` to frame 841, 0 mismatches, 0 vertex-state differences, 0 skipped: C3 pik_00 265 343 checks, gor_01 91 923, battle 156 629-196 043, C1 pik_00 264 228. With the heap margin above, `gximmdirect=2` now runs pik_00 C3 to frame 841 with 11.4 MB free at the map load (it ran out of heap before).
+Stereo (`stereoforce=1`, C3, gor_01 780-782, against `156cf717`): 9 of 9 identical (EFB, left, right).
+
+Not done: the translator task (pik_00 15.5 ms). Phases now (C3, `gxphase=1`, frame 841, calls / us per frame): primitives `GXR_PRIMD` 1 154 / 6 375, batch open 358 / 2 620, state build 1 606 / 2 616, list calls 5 885 / 1 519, slow path 102 / 982, state calls 2 843 / 799, batch close 358 / 295, other 603. Batch open and the primitives share `ensure_state`, `vsh_state`, the route and the uniforms (section "Translator, immediate primitives and batch open" above); no cut was tried in this round.

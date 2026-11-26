@@ -185,25 +185,25 @@ Added 2026-11-27 for `docs/PORT_3DS_GX_NATIVE.md` step 0. Only CALL mode (step 5
 
 | Case | Group | Expected | Azahar | Danger | New 3DS | What |
 | --- | --- | --- | --- | --- | --- | --- |
-| cp_thru | thru | OK (timing) | | 1 | | command-processor time: 8 K words as single writes, bursts, 8 calls of a 1 K chunk |
-| cb_jump0 | cmdlist | ? | | 2 | | main list jumps (JUMP0) to a chunk holding state, draw and FINALIZE |
-| cb_jump1 | cmdlist | ? | | 2 | | main list jumps (JUMP1) to a chunk holding state, draw and FINALIZE |
-| cb_call1 | cmdlist | ? | | 2 | | call: channel 1 call of a draw chunk, channel 0 return, 1 call |
-| cb_call500 | cmdlist | ? | | 2 | | 500 calls of one static draw chunk, a 1x1 scissor per call: exactly 500 pixels |
-| cb_call_nest | cmdlist | ? | | 2 | | main calls A, A calls the draw chunk B (return into A's tail), A's tail jumps back to main |
-| cb_call_a8 | cmdlist | ? | | 2 | | call: chunk address 8 bytes past a 16-byte boundary |
-| cb_call_a16 | cmdlist | ? | | 2 | | call: chunk address 16 bytes past a 64-byte boundary |
-| cb_call_size8 | cmdlist | ? | | 2 | | call: chunk size 8 bytes past a multiple of 16 |
-| cb_call_size16 | cmdlist | ? | | 2 | | call: chunk size 16 bytes past a multiple of 32 |
-| cb_vram | cmdlist | ? | | 2 | | call: chunk in VRAM, written there by TextureCopy |
-| cb_irq | cmdlist | ? | | 2 | | draw in the main list, then JUMP0 to a chunk with only flush and FINALIZE: one P3D |
-| dt_tile_rgba8 | dt | ? | | 2 | | DisplayTransfer RGBA8 linear to tiled vs the CPU tiler |
-| dt_tile_rgb8 | dt | ? | | 2 | | DisplayTransfer RGB8 linear to tiled (probe's own tiler) |
-| dt_tile_rgb565 | dt | ? | | 2 | | DisplayTransfer RGB565 linear to tiled vs the CPU tiler |
-| dt_tile_rgba5551 | dt | ? | | 2 | | DisplayTransfer RGBA5551 linear to tiled vs the CPU tiler |
-| dt_tile_rgba4 | dt | ? | | 2 | | DisplayTransfer RGBA4 linear to tiled vs the CPU tiler |
-| cb_qtm | qtm | ? | | 3 | | call: chunk in QTM ((0x1F000000 + n) >> 3), CPU written, GSP flush |
-| vb_qtm | qtm | ? | | 3 | | vertex buffer in QTM |
-| ib_qtm | qtm | ? | | 3 | | u16 index buffer in QTM |
+| cp_thru | thru | OK (timing) | OK: 86 us per 8K words in all four modes (no timing evidence) | 1 | | command-processor time: 8 K words as single writes, bursts, 8 calls of a 1 K chunk |
+| cb_jump0 | cmdlist | ? | OK, 86 us (no evidence for jump semantics) | 2 | | main list jumps (JUMP0) to a chunk holding state, draw and FINALIZE |
+| cb_jump1 | cmdlist | ? | OK, 86 us (no evidence for jump semantics) | 2 | | main list jumps (JUMP1) to a chunk holding state, draw and FINALIZE |
+| cb_call1 | cmdlist | ? | OK, 86 us | 2 | | call: channel 1 call of a draw chunk, channel 0 return, 1 call |
+| cb_call500 | cmdlist | ? | OK, 500 red px, 86 us | 2 | | 500 calls of one static draw chunk, a 1x1 scissor per call: exactly 500 pixels |
+| cb_call_nest | cmdlist | ? | OK, 86 us | 2 | | main calls A, A calls the draw chunk B (return into A's tail), A's tail jumps back to main |
+| cb_call_a8 | cmdlist | ? | OK, 86 us | 2 | | call: chunk address 8 bytes past a 16-byte boundary |
+| cb_call_a16 | cmdlist | ? | OK, 86 us | 2 | | call: chunk address 16 bytes past a 64-byte boundary |
+| cb_call_size8 | cmdlist | ? | OK, 86 us | 2 | | call: chunk size 8 bytes past a multiple of 16 |
+| cb_call_size16 | cmdlist | ? | OK, 86 us | 2 | | call: chunk size 16 bytes past a multiple of 32 |
+| cb_vram | cmdlist | ? | OK, VRAM copy equal | 2 | | call: chunk in VRAM, written there by TextureCopy |
+| cb_irq | cmdlist | ? | OK: P3D after 86 us, no second P3D in 20 ms | 2 | | draw in the main list, then JUMP0 to a chunk with only flush and FINALIZE: one P3D |
+| dt_tile_rgba8 | dt | ? | OK: all 10 sizes equal with FLIP_VERT 1, none with 0 | 2 | | DisplayTransfer RGBA8 linear to tiled vs the CPU tiler |
+| dt_tile_rgb8 | dt | ? | OK: all 10 sizes equal with FLIP_VERT 1, none with 0 | 2 | | DisplayTransfer RGB8 linear to tiled (probe's own tiler) |
+| dt_tile_rgb565 | dt | ? | OK: all 10 sizes equal with FLIP_VERT 1, none with 0 | 2 | | DisplayTransfer RGB565 linear to tiled vs the CPU tiler |
+| dt_tile_rgba5551 | dt | ? | OK: all 10 sizes equal with FLIP_VERT 1, none with 0 | 2 | | DisplayTransfer RGBA5551 linear to tiled vs the CPU tiler |
+| dt_tile_rgba4 | dt | ? | OK: all 10 sizes equal with FLIP_VERT 1, none with 0 | 2 | | DisplayTransfer RGBA4 linear to tiled vs the CPU tiler |
+| cb_qtm | qtm | ? | SKIP (3dsx: no QTM; no evidence) | 3 | | call: chunk in QTM ((0x1F000000 + n) >> 3), CPU written, GSP flush |
+| vb_qtm | qtm | ? | SKIP (no evidence) | 3 | | vertex buffer in QTM |
+| ib_qtm | qtm | ? | SKIP (no evidence) | 3 | | u16 index buffer in QTM |
 
 Console run of these cases only (owner-gated): `$D restart "gpuprobe probe=cmdlist,thru,dt,qtm"` (no `probefresh`: earlier results stay in the journal), then `files get @/gpuprobe.txt` and the log lines `gpuprobe: dt ...` and `gpuprobe: cp_thru: ...`.

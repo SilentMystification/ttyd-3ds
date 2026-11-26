@@ -58,6 +58,8 @@ int plat_devupdate_enabled(void) {
     int opt = plat_opt_get(PLAT_OPT_KEY_DEVUPDATE, -1); /* -1: the player never set it */
     if (devupdate_launched() || plat_switch_has("devupdate") || opt == 1) {
         s_enabled = 1;
+    } else if (plat_retail()) {
+        s_enabled = 0; /* retail mode: only when asked for (the lines above) */
     } else {
         s_enabled = plat_is_dev_build() && !plat_switch_has("nodevupdate") && opt != 0;
     }
@@ -70,7 +72,7 @@ int plat_devupdate_wanted(void) {
     if (opt >= 0) {
         return opt;
     }
-    return plat_is_dev_build() && !plat_switch_has("nodevupdate");
+    return !plat_retail() && plat_is_dev_build() && !plat_switch_has("nodevupdate");
 }
 
 /* "192.168.1.20:5050" while the server runs and the console has an address, else "". */

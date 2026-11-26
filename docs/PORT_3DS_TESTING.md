@@ -139,7 +139,11 @@ Switches the game reads (space-separated words in `--switches`):
 | `sdstats=N` | Every N seconds, an `sdstats` line: SD operations by kind (write, append, writeat, remove, rename, mkdir, read, disc) and the core that asked, queue depth now and at most, bytes written and read, and the **direct SD calls**: from core 1, and from cores 0/2 after the game loop began (must be 0; a warning gives the first caller's address and core). See [PORT_3DS_MULTICORE.md](PORT_3DS_MULTICORE.md) |
 | `jobstats=N` | A `[JOBS]` counter line every N frames while the counters change |
 | `jobcore=C`, `jobprio=P` | Job worker core and priority (defaults 2 and 0x30, below the render thread) |
-| `jobcheck=1` | Each split conversion runs with jobs and again inline from the same bytes, and the two are compared (`[JOBCHECK]` lines) |
+| `jobcheck=1` | Each split conversion runs with jobs and again inline from the same bytes, and the two are compared (`[JOBCHECK]` lines); the workers also assert the submitter's FPSCR |
+| `jobw1=1`, `jobcore1=C`, `jobprio1=P`, `jobspin=US`, `jobtakeover=US` | Job worker 1 on core 1 (default 0x2F) for frame batches; idle spin before sleeping (30); batch takeover delay (300). See [PORT_3DS_GAMEPAR.md](PORT_3DS_GAMEPAR.md) |
+| `gamecnt=N`, `jobprobe=1` | `[GAMECNT]` counters of the game's hot loops every N frames; job wake-up round trips (PORT_3DS_GAMEPAR.md) |
+| `mapnameidx=1/2` | Hash index for mapGetMapObj, hitNameToPtr, lightNameToPtr; 2 also runs the walk and counts mismatches (`[NAMEIDX]`) |
+| `mapdispjob=1/2`, `mapdispgrain=N` | mapDisp's per-object outcomes in parallel; 2 also runs the loop and compares (`[MAPDISPJOB]`) |
 | `loadstats` | A `[LOADCONV]` line per load-time conversion, and a summary per load: per-kind time, DVD reads and wait |
 | `convhash` | Adds an FNV-1a hash of each converted file to the `loadstats` lines |
 | `arqspin` | ARQ waits poll with a yield (the old behaviour) instead of sleeping until the next ARQ callback |
@@ -359,6 +363,93 @@ After a map warp the console's GPU can hang: the log repeats `gpu: fence wait fo
 | relaunch | server thread deadline 8 s (library) | needs the server thread | plus guard 15 s from `on_relaunch` |
 | recovery relaunch/exit | `crash_recovery_exit` then `aptExit` | 4.5 s watchdog | plus guard 8 s |
 | GSP transfers in citro3d (`C3D_SyncDisplayTransfer`, `gspWaitForPPF`, shots) | no limit in libctru | none | not bounded; a hang there is a hung GPU: the watchdog and the crash path end it |
+
+## Retail mode
+
+All debugging off, for full performance and for what a player runs. Two levels:
+
+1. **Runtime (every build).** Switch `retail=1` (`retail=0` overrides the setting), or the developer Select menu (ZL+SELECT), Debug tab, row "Retail mode", stored in `options.txt` as `retail=1`. The switch wins over the setting. The menu stays reachable in retail mode (dev builds, or Options "Debug mode" on), so a dev build can always be switched back.
+   - **Turning it on in the menu:** logging stops at once (the `options: saving` line is the last one); every later switch lookup is filtered at once. What already runs (a stats switch's counters, the update server, the supervisor heartbeat, the log writer thread) stops at the next launch: the row shows `(after relaunch)`; the General tab's "Relaunch" does it.
+   - **Turning it off in the menu:** at the next launch when the launch booted in retail mode (no log file or writer exists yet); at once otherwise.
+2. **Build `TTYD_RETAIL`** (`tools/port3ds/build.sh --retail`, CMake `-DTTYD_RETAIL=ON`, default OFF; output `build/3ds/game-retail/`, ELF archived as `<build>_retail.elf`). Retail mode is always on (the menu row says `on (retail build)`), and the port's logging and timers are compiled out: `PLOG_*` become nothing (arguments type-checked, never evaluated), `plat_vlog` (OSReport, `tst_log`) returns at once, `gx_perf_on`, `gx_ph_on`, `s_tf_on` and the PMU hooks are constants 0 (the `gxstats`, `gxphase`, `texframe`, `pmu` code is gone: `.text` 51 KB smaller; the GX setters stay inlined: `GXSetVtxDesc` 4544 to 4496 bytes, `GXSetChanCtrl` 7572 to 7488). Only `ttyd_port_game` and `ttyd_port_plat` get the define: `src/` and the GameCube matching build are unchanged.
+
+What retail mode turns off, and what stays:
+
+| Off | How |
+|---|---|
+| Every debug switch (`gxstats`, `gxthreadstats`, `texstats`, `sdstats`, `pmu`, `gxphase`, verify modes `gxcache=2`/`gxdirty=2`/..., `gxdump`, `gpudump`, `gpudrawcut`, `gpuhangtest`, `gwdump`, `determ`, `padscript`, `padrec`, `shots`, `crashtest`, `heartbeat`, `framemark`, warps, tuning switches, ...) | `plat_switch_has/value/int` (`plat/switches.c`) read every switch as absent, so the caller's default applies. One rule in one place, no log line. Exceptions: `retail`, `retailkeep`, `bench`, `devupdate`, `devupdateport`, `devupdatetoken`, and the names in `retailkeep=a,b,c` (`x*` is a prefix) |
+| Log: `latest.log`, the 264 KB line queue, the writer thread (core 1), the live log socket (1 MB soc buffer), the bottom-screen log lines | `plat_log_init`/`plat_log_start_writer` (`plat/log.c`): `latest.log` is moved to `previous.log` and no new one is opened; `plat_vlog` returns at its first compare. `retailkeep=log` keeps the log (for identity checks; not in a `TTYD_RETAIL` build) |
+| Update server (thread on core 1, 512 KB soc buffer, 500 ms poll) | off unless the `devupdate` switch, the menu setting "Update server: on" or a devupdate relaunch asks for it |
+| Supervisor heartbeat (thread on core 0, 1 Hz IPC) and the boot-time ensure | only with the update server on (above) |
+| Memory log every 1800 frames (`mallinfo`, a heap walk of about 0.45 ms on the game thread) | `vi.c` |
+| HUD "full": `mallinfo` and `linearSpaceFree` every 500 ms on the game thread, the VRAM probe, the timing rows | shown as "fps" |
+
+| Stays | Why |
+|---|---|
+| Crash handler: the exception handler on every thread, `plat_fatal`, `svcBreak` wrap, `crash.txt`, the crash screen; the watchdog thread (core 1, 1 s) and the guard thread (core 1, 250 ms); stack fill at thread register (once per thread) | crash safety: a player's crash still ends in a report and a clean exit instead of a frozen console |
+| GPU fence phase markers (`s_rphase`, `s_rseq`, `s_gmark`: one store each), the hang record note per record, the fence timeout and the GPU reset recovery | crash and hang safety (`gpu_reset_try` reads them); a store each |
+| Always-on frame counters (record words, draws, the HUD's fps) | a few adds per call; they feed the fences and the fps HUD |
+| `bench=F,T` | measuring retail itself: one tick pair per game frame while asked for, one line at T |
+
+**Measuring** with the log off: `bench=F,T` (every mode and build) logs one line at frame T, `bench F-T: frame <us> busy <us> render <us> frames N vblanks V`, the mean wall time per game frame, the game thread's time outside the retrace wait, the render thread's last record time, over frames F+1..T; with the log off it is appended to `latest.log` by the SD worker. Run it with `--stall 0` (no heartbeat lines in retail mode) and keep the scene switches:
+
+```sh
+tools/port3ds/run_azahar.py --build build/3ds/game-retail/ttyd.cia --allow-hw-faults --stall 0 --long 220 \
+    --switches "map=gor_01 story=30 retailkeep=map,story,party,battle,btlauto,fastboot,gx*,tex* bench=721,841" \
+    --until "bench 721-841:"
+```
+
+The shot line (`shot ...: this record`) also goes through `plat_log_always`, so `determ_ab.py` works in retail mode with `retailkeep=...,determ,shot*` and `--stall 0`; `--build-b` compares two builds.
+
+**Results** (2026-11-27, release builds, Azahar, frames 722-841 by `bench=721,841`, best of 2 by frame time, ms per game frame: frame / game busy / render; "vb" vblanks over the 120 frames). base = `retail=0`; retail=1 = the same CIA; rbuild = the `TTYD_RETAIL` CIA. C3 = `gxdirty=1 gxdirect=1 gximmdirect=1 texfast=1 texasync=1 gxthread=2 gxpipeline=1 gxsdl=1 gxrecfuse=1 gxreclgroup=1`.
+
+| Scene | Cfg | base | retail=1 | rbuild |
+|---|---|---|---|---|
+| gor_01 | C0 | 50.45 / 45.30 / 20.50, vb 362 | 50.45 / 45.30 / 20.50, vb 362 | 50.45 / 44.95 / 20.79, vb 362 |
+| gor_01 | C3 | 33.45 / 23.00 / 16.93, vb 240 | 33.42 / 22.89 / 16.95, vb 240 | 33.44 / 23.01 / 16.84, vb 240 |
+| pik_00 | C0 | 66.88 / 55.15 / 27.64, vb 480 | 66.87 / 54.98 / 27.71, vb 480 | 66.88 / 54.50 / 28.12, vb 480 |
+| pik_00 | C3 | 33.44 / 28.74 / 11.57, vb 240 | 33.44 / 28.66 / 11.62, vb 240 | 33.44 / 28.70 / 11.56, vb 240 |
+| usu_00 | C0 | 50.32 / 39.39 / 23.52, vb 361 | 50.19 / 39.54 / 23.30, vb 360 | 50.19 / 39.13 / 23.66, vb 360 |
+| usu_00 | C3 | 33.05 / 19.47 / 18.67, vb 237 | 32.77 / 19.30 / 18.60, vb 236 | 32.64 / 19.30 / 18.85, vb 235 |
+| battle | C0 | 37.12 / 27.96 / 15.68, vb 267 | 37.41 / 27.64 / 16.09, vb 269 | 37.12 / 27.67 / 15.92, vb 267 |
+| battle | C3 | 28.95 / 21.07 / 11.65, vb 207 | 28.37 / 21.04 / 10.04, vb 203 | 28.24 / 21.20 / 10.50, vb 203 |
+
+The frames are whole vblanks (2, 3 or 4) in every cell, so frame time does not move; game busy moves by 0.0 to 0.65 ms, within the run-to-run spread (battle C3 base: 28.95 and 30.33 ms frame in its two runs). The debug paths cost no measurable game-thread time when off: what retail mode buys is the memory (log queue 264 KB, soc buffers 512 KB to 1.5 MB), the core-1/core-0 debug threads, and the 0.45 ms heap walks every 500 ms (HUD full) and 30 s (memory log), which a 120-frame mean hides. Console numbers are still to be taken.
+
+**Identity**: `determ_ab.py` shots 780-785, gor_01 and battle: `retail=0` against `retail=1 retailkeep=...,determ,shot*` 12 of 12 byte-identical; the base CIA (`retail=0`) against the `TTYD_RETAIL` CIA (`--build-b`, `--stall 0`) 12 of 12 byte-identical. `gwdump=30` under `determ` to frame 900 (gor_01), `retail=0` against `retail=1 retailkeep=log,...,gwdump*`: `gw_diff.py --logs A B --cross` 30 of 30 records equal (31 fields). Without `--cross` only the raw `gw` hash differs, from f=30: it hashes the struct with its pointers, and retail mode does not allocate the log queue and the update server's buffers, so the heap layout moves (two `retail=0` runs give equal `gw`).
+
+### Audit of the debug paths (2026-11-27)
+
+Cost when off is the check in the hot path; "on" is the cost with the switch given. Hot = per draw, per GX call or per vertex; frame = once per game frame.
+
+| Feature | Where | Off | On | Verdict, fix |
+|---|---|---|---|---|
+| `PLOG_*` / `plat_log` / OSReport / `tst_log` | `plat/log.c` `plat_vlog` | none in hot loops at steady state (gor_01 after the warp: only `hb` and stats lines); disabled level: one call and one compare | vsnprintf into a lock-free slot (CAS), no lock, no SD call on the caller's thread | sane. Retail: first compare returns; `TTYD_RETAIL`: compiled out |
+| Log writer thread | `plat/log.c`, core 1, prio 0x3F | wakes every 250 ms, fsync once a second only when lines came | drains the queue, writes, renders the console (libctru console, a framebuffer scroll per line) under the console lock | sane (game/render threads only `trylock` the console). Retail: not started, queue not allocated |
+| Before the writer / after a crash: direct writes | `direct_write` | boot only | `write`+`fsync` per line on the caller | sane for boot; never in the frame loop |
+| Live log socket | `plat/log.c` | only `livelog` or netload: 1 MB soc buffer | `send` from the writer | sane. Retail: off |
+| Switch lookups | `plat/switches.c` | every caller caches its value in a static at first use (checked: all 190 call sites; `plat_switch_int` scans the 4 KB text with `strstr` per call, so a per-frame call would cost) | | sane. Retail adds one load to the lookup itself (not to callers) |
+| `plat_is_dev_build` | `plat/boot.c` | `strstr` on the version per call, twice per frame | | fixed: cached |
+| `plat_memory_log` | `vi.c`, every 1800 frames, dev builds | `mallinfo` heap walk, 0.45 ms on the game thread | | kept in dev builds; off in retail |
+| HUD full (default) | `plat/menu.c` `plat_hud_frame` | every 500 ms on the game thread: `mallinfo` (heap walk), `linearSpaceFree`, 5 `snprintf` with floats, console text | | not sane for retail: retail shows fps only. (Dev builds unchanged: the owner's HUD) |
+| `gxstats` timers (`gx_perf_on`) | `gx_*.c`, about 30 hooks | one global load and branch | `plat_ticks` pairs per draw/list/state build | sane. `TTYD_RETAIL`: constant 0 |
+| `gxphase` (`gx_ph_on`) | `gx_internal.h` | `__builtin_expect` branch, cold call | per-call phase stack, ticks 1 in N | sane. `TTYD_RETAIL`: constant 0 |
+| `texframe` (`s_tf_on`) | `gx_tex.c` | branch per lookup/hash | ticks per hash and upload | sane. `TTYD_RETAIL`: constant 0 |
+| `gxthreadstats`, `vramstats`, `jobstats`, `stereostats`, `sdstats`, `texstats`, `texcensus`, `ndspstats`, `yieldstats`, `cardstats`, `loadprof` | various | the counters are a few adds per call or per frame; the report is gated on `s_*_every` | one log block per N frames | sane |
+| Verify modes `gxcache=2`, `gxbatch=2`, `gxrecfuse=2`, `gximmdirect=2`, `gxdirty=2`, `gxdirect=2`, `gxonehop=2`, `gxvsh_check`, `texverify`, `jobcheck`, `gxbbox_verify` | gx, `plat/gpu.c` | an int compare with 2 at the decision points | full second decode/build and compare | sane |
+| `gpudrawcut`/`gpudrawskip` filter | `plat/gpu.c` render loop, per draw | a call to `plat_gpudump_draw_filter` per draw (inlined by LTO only) | | fixed: inline test of `plat_gpudump_filter_on`, the call only with a filter set (`render_record` 136 bytes smaller) |
+| `gpudump` record note | `plat/gpudump.c`, per record | `GPUCMD_GetBuffer` and a 40-byte copy | files for one frame | kept: the hang dump needs the last list |
+| Fence phase markers `s_rphase`, `s_rseq`, `s_gmark` | `plat/gpu.c` | one volatile store each | | kept (hang diagnosis, GPU reset) |
+| `gpuhangtest`, `gpuhangrecover` | `plat/gpu.c` | one compare per record | | sane |
+| PMU spans | `plat/pmu.c`, per translator batch and per present | a call and an atomic load | counter reads | sane. `TTYD_RETAIL`: inline no-ops |
+| Translator busy ticks | `gx_rec.c` `translator_main` | one tick pair per consumed batch (gxthread=1..3) | | sane (per batch, not per call); feeds `gxthreadstats` |
+| Crash handler | `libs/ctr-devkit/crash` | guard thread 4 Hz and watchdog 1 Hz on core 1, a counter add per frame, stack fill once per thread | | kept in retail (crash safety) |
+| Devupdate server | `libs/ctr-devkit/devupdate` | dev builds: thread on core 1, 500 ms poll, 512 KB soc buffer; a flag test per frame | | sane for dev; off in retail |
+| Supervisor heartbeat | `libs/ctr-devkit/supervisor/client.c` | dev builds: a thread on core 0 (prio 0x3F), IPC once a second; two stores per frame | | sane for dev; off in retail |
+| `gwdump`, `determ`, `syslog`, `btlauto`, `npctrace`, `evtdump`, `memmap` | `port3ds/game/test_*.c`, `debug_dump.c` | each a cached flag per frame | log lines per N frames | sane |
+| `padscript`, `padrec`, `padfile`, `fastboot` | `plat/input.c`, `vi.c` | a flag per frame | | sane |
+| `shots`, `gxdumpcopy`, `shotbottom` | `plat/gpu.c`, `plat/menu.c` | a compare per frame | EFB read-back and an SD write per shot | sane |
+| `assert` | port code | none (`NDEBUG`; the port uses no `assert`) | | sane |
 
 ## Running on the New 3DS
 

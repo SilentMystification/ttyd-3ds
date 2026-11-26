@@ -24,6 +24,13 @@ enum {
     PLAT_PMU_SLOTS
 };
 
+#ifdef TTYD_RETAIL
+/* The TTYD_RETAIL build: no counters, every hook compiles out (plat/pmu.c is empty). */
+static inline int plat_pmu_on(void) { return 0; }
+static inline void plat_pmu_begin(int slot) { (void)slot; }
+static inline void plat_pmu_end(int slot) { (void)slot; }
+static inline void plat_pmu_frame(void) {}
+#else
 int plat_pmu_on(void);
 /* Brackets a span on one slot; every slot belongs to one thread. */
 void plat_pmu_begin(int slot);
@@ -31,6 +38,7 @@ void plat_pmu_end(int slot);
 /* The game thread, once per frame: closes the GAME slot's frame and logs
  * every N frames. */
 void plat_pmu_frame(void);
+#endif
 
 #ifdef __cplusplus
 }

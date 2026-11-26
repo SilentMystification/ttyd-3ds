@@ -377,6 +377,9 @@ enum {
     GPH_T_SLOW, GPH_T_FORM, GPH_T_STATE, GPH_COUNT
 };
 extern int gx_ph_on;
+#ifdef TTYD_RETAIL
+#define gx_ph_on 0 /* the TTYD_RETAIL build: the phase hooks compile out (gx_rec.c #undefs it to keep the switch's variable) */
+#endif
 int gx_ph_enter_slow(int ph, int outer);
 void gx_ph_pop(void);
 /* An outer phase: counted on every call, timed on one in N (or always inside a timed outer one). */
@@ -529,6 +532,9 @@ typedef struct {
 } GxPerf;
 extern GxPerf gx_perf;
 extern int gx_perf_on; /* -1 until the first frame reads the switch */
+#ifdef TTYD_RETAIL
+#define gx_perf_on 0 /* the TTYD_RETAIL build: every gxstats hook compiles out (gx_perf.c #undefs it) */
+#endif
 void gx_perf_dl(const void* list, u32 nbytes);
 void gx_perf_frame(void);
 u32 gx_perf_frame_no(void);

@@ -36,6 +36,7 @@
 #include "plat/sdio.h"
 #include "plat/sweep.h"
 #include "plat/thread.h"
+#include "port3ds/gamepar.h"
 #include "port3ds/loadprof.h"
 #include "port3ds/os_internal.h"
 #include "test_mode.h"
@@ -478,9 +479,27 @@ void port_card_frame(u32 frame);
 void plat_memory_log(const char* when);
 int plat_is_dev_build(void);
 
+/* The heap's low-water for the period since the last line (plat_heap_peak_take: two loads, no walk): at
+ * each map change (the period holds the map's load and its play) and, with switch heaplog=N, every N frames. */
+static void heap_log(const char* map, const char* why) {
+    u32 size = plat_heap_size(), peak = plat_heap_peak_take(), now = plat_heap_arena();
+    PLOG_I("heap %s %s: peak arena %lu KiB of %lu, at least %lu KiB free; arena now %lu KiB", why, map,
+           (unsigned long)(peak >> 10), (unsigned long)(size >> 10), (unsigned long)((size - peak) >> 10),
+           (unsigned long)(now >> 10));
+}
+
 /* One log line per map change: "map: <from> -> <to> (entrance <bero>)", "-" for the first map. */
 static void map_log_frame(void) {
     static char from[16];
+    static int heap_every = -1;
+    if (heap_every < 0) {
+        heap_every = plat_switch_int("heaplog", 0);
+    }
+    if (heap_every > 0 && s_frames % (u32)heap_every == 0) {
+        char why[24];
+        snprintf(why, sizeof why, "frame %lu, map", (unsigned long)s_frames);
+        heap_log(from[0] != '\0' ? from : "-", why);
+    }
     if (gp == NULL || gp->currentMapName[0] == '\0') {
         return;
     }
@@ -490,6 +509,7 @@ static void map_log_frame(void) {
     if (strcmp(from, to) == 0) {
         return;
     }
+    heap_log(from[0] != '\0' ? from : "-", "until map change from");
     char bero[17];
     memcpy(bero, gp->beroEnterName, sizeof(bero) - 1);
     bero[sizeof(bero) - 1] = '\0';
@@ -524,9 +544,10 @@ static void frame_hooks(void) {
         port_lp_frame(s_frames, seq, ready, gp != NULL ? gp->currentMapName : NULL,
                       s_frame_start ? plat_ticks() - s_frame_start - (plat_paused_ticks() - s_pause_base) : 0);
     }
+    port_gamepar_frame(s_frames); /* gamecnt, mapnameidx, mapdispjob lines */
     fastboot_frame(s_sweep_state > 1 || s_warp_switch_done);
     /* log output only; mallinfo walks the whole heap (452 us in Azahar, gor_01), a hitch on the game thread: not in release builds */
-    if (s_frames % 1800 == 0 && plat_is_dev_build()) {
+    if (s_frames % 1800 == 0 && !plat_retail() && plat_is_dev_build()) {
         plat_memory_log("now");
     }
     PlatHudStats st;
@@ -566,6 +587,51 @@ static void frame_hooks(void) {
     }
     if (s_heartbeat > 0 && s_frames % (u32)s_heartbeat == 0) {
         PLOG_I("hb %u", (unsigned)s_frames);
+    }
+}
+
+/* Switch bench=F,T (read in every mode and build, retail too): from game frame F to T, one tick pair per frame,
+ * then one line "bench F-T: frame <us> busy <us> render <us> frames N vblanks V" (per game frame: wall time, the
+ * game thread's time outside VIWaitForRetrace's wait, the render thread's last record), written even with the
+ * log off (plat_log_always). The measurement for retail runs, where gxthreadstats and the other counters are off. */
+static int s_bench_from = -1, s_bench_to;
+static u64 s_bench_t0, s_bench_busy, s_bench_render;
+static u32 s_bench_vb0, s_bench_n;
+
+static void bench_frame(u64 now) {
+    if (s_bench_from < 0) {
+        char v[24];
+        s_bench_from = 0;
+        if (plat_switch_value("bench", v, sizeof(v))) {
+            char* end;
+            long a = strtol(v, &end, 0);
+            long b = *end == ',' ? strtol(end + 1, NULL, 0) : 0;
+            if (a > 0 && b > a) {
+                s_bench_from = (int)a;
+                s_bench_to = (int)b;
+            }
+        }
+    }
+    if (s_bench_from == 0 || s_frames < (u32)s_bench_from || s_frames > (u32)s_bench_to) {
+        return;
+    }
+    if (s_frames == (u32)s_bench_from) {
+        s_bench_t0 = now;
+        s_bench_vb0 = plat_vblank_count();
+        return;
+    }
+    PlatGpuStats g;
+    plat_gpu_stats(&g);
+    s_bench_busy += s_frame_start ? now - s_frame_start - (plat_paused_ticks() - s_pause_base) : 0;
+    s_bench_render += g.render_us;
+    s_bench_n++;
+    if (s_frames == (u32)s_bench_to) {
+        u32 n = s_bench_n ? s_bench_n : 1;
+        u64 us = PLAT_TICKS_PER_SEC / 1000000u;
+        plat_log_always("bench %d-%d: frame %lu busy %lu render %lu frames %lu vblanks %lu", s_bench_from, s_bench_to,
+                        (unsigned long)((now - s_bench_t0) / us / n), (unsigned long)(s_bench_busy / us / n),
+                        (unsigned long)(s_bench_render / n), (unsigned long)n,
+                        (unsigned long)(plat_vblank_count() - s_bench_vb0));
     }
 }
 
@@ -655,6 +721,7 @@ static void dvd_settle(void) {
 
 void VIWaitForRetrace(void) {
     frame_hooks();
+    bench_frame(plat_ticks());
     wait_retrace();
     if (tst_determ()) {
         determ_retrace();

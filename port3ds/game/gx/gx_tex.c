@@ -62,12 +62,17 @@ typedef struct {
 static CacheExtra* s_x;
 
 /* ---- texframe=1: one log line per frame with the texture work of that frame (counts and game-thread time) ---- */
+#ifdef TTYD_RETAIL
+#define s_tf_on 0 /* the TTYD_RETAIL build: the texframe timers compile out */
+#else
 static int s_tf_on;
+#endif
 static int s_async;
 static struct {
     unsigned queued, taken, stale_gen, verify_bad, dropped, unused, wait_n, inline_n, calls, rej_clut, rej_fmt, rej_size, rej_cov, rej_dup, rej_full;
     u64 wait_ticks;
 } s_as;
+static u32 s_pre_bytes_hw; /* texasync: the most its results took at once (bytes; below) */
 static struct {
     unsigned lookups, uploads, hashes, hash_bytes, async_hit, async_miss;
     u64 t_total, t_dec, t_conv, t_create, t_hash;
@@ -78,7 +83,8 @@ static CacheEntry s_cache[CACHE_SIZE];
 static u32 s_frame = 1;
 static u32 s_uploads;
 static u8* s_rgba;      /* decode scratch (1024x1024 RGBA8) */
-static u8* s_tiled;
+static u8* s_tiled;     /* level 0 of a texture with a mip chain (1024x1024 RGBA8), with the mip scratch; a texture
+                         * without one is tiled straight into its own memory */
 
 /* ---- texfilter: the sampling mode (option "texfilter", switch texfilter=, texlodbias=) ----
  * game: GX's filters as the game sets them; linear / nearest: forced; mip: bilinear plus a mip chain
@@ -260,9 +266,10 @@ static void stat_frame_end(void) {
         }
         if (s_async) {
             PLOG_I("texasync: queued %u taken %u stale-gen %u verify-bad %u dropped %u unused %u, binds that waited %u "
-                   "(%u us), decoded at the bind %u; prefetch calls %u: clut %u fmt %u size %u dup %u full %u uncovered %u", s_as.queued, s_as.taken, s_as.stale_gen, s_as.verify_bad, s_as.dropped, s_as.unused,
+                   "(%u us), decoded at the bind %u; prefetch calls %u: clut %u fmt %u size %u dup %u full %u uncovered %u; "
+                   "results at most %u KB", s_as.queued, s_as.taken, s_as.stale_gen, s_as.verify_bad, s_as.dropped, s_as.unused,
                    s_as.wait_n, (unsigned)(s_as.wait_ticks / (PLAT_TICKS_PER_SEC / 1000000u)), s_as.inline_n, s_as.calls, s_as.rej_clut,
-                   s_as.rej_fmt, s_as.rej_size, s_as.rej_dup, s_as.rej_full, s_as.rej_cov);
+                   s_as.rej_fmt, s_as.rej_size, s_as.rej_dup, s_as.rej_full, s_as.rej_cov, (unsigned)(s_pre_bytes_hw >> 10));
         }
         s_st_hashes = s_st_bytes = s_st_lookups = s_st_checks = s_st_mism = s_st_uploads = s_st_frames = 0;
         s_st_trusted = s_st_stale = s_st_grants = 0;
@@ -734,12 +741,14 @@ static int mip_scratch(void) {
         s_mip_out = memalign(64, 1024 * 1024 * 4 / 3 + 4096);
         s_mip_a = memalign(64, 512 * 512 * 4);
         s_mip_b = memalign(64, 256 * 256 * 4);
-        if (s_mip_out == NULL || s_mip_a == NULL || s_mip_b == NULL) {
+        s_tiled = memalign(64, 1024 * 1024 * 4);
+        if (s_mip_out == NULL || s_mip_a == NULL || s_mip_b == NULL || s_tiled == NULL) {
             PLOG_W("texfilter: no memory for the mip scratch; mip levels off");
             free(s_mip_out);
             free(s_mip_a);
             free(s_mip_b);
-            s_mip_out = s_mip_a = s_mip_b = NULL;
+            free(s_tiled);
+            s_mip_out = s_mip_a = s_mip_b = s_tiled = NULL;
             return 0;
         }
     }
@@ -837,10 +846,28 @@ static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h, cons
         levels = 0;
     }
     if (levels == 0) {
-        tile_level(px, w, h, pw, ph, fmt, s_tiled);
+        /* tiled straight into the texture's memory: the bytes plat_gpu_tex_create would have copied there */
         u64 tc = TF_T();
-        u32 hd = plat_gpu_tex_create(pw, ph, fmt, s_tiled, level_bytes(fmt, pw, ph));
+        void* dst = NULL;
+        u32 size = 0, bytes = level_bytes(fmt, pw, ph);
+        u32 hd = plat_gpu_tex_create_begin(pw, ph, fmt, &dst, &size);
         s_tf.t_create += s_tf_on ? plat_ticks() - tc : 0;
+        if (hd == 0) {
+            return 0;
+        }
+        if (size >= bytes) {
+            tile_level(px, w, h, pw, ph, fmt, dst);
+        } else {
+            /* not seen (the PICA size is the tiled size); as plat_gpu_tex_create did: the first `size` bytes */
+            u8* tmp = malloc(bytes);
+            if (tmp == NULL) {
+                plat_fatal("GX: no memory to tile a %lux%lu texture", (unsigned long)pw, (unsigned long)ph);
+            }
+            tile_level(px, w, h, pw, ph, fmt, tmp);
+            memcpy(dst, tmp, size);
+            free(tmp);
+        }
+        plat_gpu_tex_create_end(hd);
         return hd;
     }
     int from_gx = gxt != NULL && gxt->mipmap;
@@ -1000,9 +1027,8 @@ typedef struct {
     u16 pw, ph;
 } PreTex;
 static PreTex* s_pre;
-static u8* s_pre_rgba[2];
-static u32 s_pre_busy[2];
-static u32 s_pre_bytes;
+static u8* s_pre_rgba; /* the runner's decode scratch; a decode at the bind uses the bind's own (s_rgba) */
+static u32 s_pre_bytes;    /* atomic: the results' heap bytes (a queued entry counts its most, a decoded one its own) */
 static u32 s_pre_active; /* a runner job is walking the queue */
 static PlatJob s_pre_runner;
 extern void svcSleepThread(long long ns);
@@ -1011,17 +1037,10 @@ static inline int pre_cas(PreTex* p, u32 from, u32 to) {
     return __atomic_compare_exchange_n(&p->state, &from, to, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
 }
 
-/* Decodes one claimed (PS_RUN) entry, on any thread: the result stays in the entry, DONE is published last. */
-static void pre_decode(PreTex* p) {
-    int k = 0;
-    for (;;) { /* at most two threads decode at a time (the worker and the game thread): one scratch is free */
-        u32 e = 0;
-        if (__atomic_compare_exchange_n(&s_pre_busy[k], &e, 1u, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-            break;
-        }
-        k ^= 1;
-    }
-    u8* rgba = s_pre_rgba[k];
+/* Decodes one claimed (PS_RUN) entry into `rgba` (PRE_MAX_PIX texels): the result stays in the entry, DONE is
+ * published last. One runner decodes at a time (pre_kick joins the last one before it submits another), with
+ * s_pre_rgba; the bind (pre_take) decodes with the scratch of the thread that binds. */
+static void pre_decode(PreTex* p, u8* rgba) {
     gx_tex_decode_rgba8(p->image, p->w, p->h, p->fmt, NULL, 0, rgba);
     u32 fmt = pick_format(rgba, p->w, p->h);
     u32 pw = pow2(p->w), ph = pow2(p->h);
@@ -1037,7 +1056,10 @@ static void pre_decode(PreTex* p) {
         p->ph = (u16)ph;
         p->ok = 1;
     }
-    __atomic_store_n(&s_pre_busy[k], 0u, __ATOMIC_RELEASE);
+    /* the entry counted its most (RGBA8); now its own bytes, or none */
+    u32 real = out != NULL ? bytes : 0;
+    __atomic_sub_fetch(&s_pre_bytes, p->est_bytes - real, __ATOMIC_RELAXED);
+    p->est_bytes = real;
     __atomic_store_n(&p->state, PS_DONE, __ATOMIC_RELEASE);
 }
 
@@ -1057,7 +1079,7 @@ static void pre_runner(void* unused) {
         for (int i = 0; i < PRE_MAX; i++) {
             PreTex* p = &s_pre[i];
             if (__atomic_load_n(&p->state, __ATOMIC_ACQUIRE) == PS_TODO && pre_cas(p, PS_TODO, PS_RUN)) {
-                pre_decode(p);
+                pre_decode(p, s_pre_rgba);
             }
         }
         __atomic_store_n(&s_pre_active, 0u, __ATOMIC_RELEASE);
@@ -1080,7 +1102,7 @@ static void pre_kick(void) {
 }
 
 static void pre_free(PreTex* p) {
-    s_pre_bytes -= p->est_bytes;
+    __atomic_sub_fetch(&s_pre_bytes, p->est_bytes, __ATOMIC_RELAXED);
     free(p->out);
     memset(p, 0, sizeof(*p)); /* state FREE */
 }
@@ -1125,8 +1147,8 @@ void GXPrefetchTexPort(const void* image, u16 w, u16 h, u32 format, int has_clut
         s_as.rej_size++;
         return;
     }
-    u32 est = pow2(w) * pow2(h) * 2;
-    while (s_pre_bytes + est > PRE_BYTES_MAX) {
+    u32 est = pow2(w) * pow2(h) * 4; /* the most a result takes (RGBA8): the cap holds for the real bytes */
+    while (__atomic_load_n(&s_pre_bytes, __ATOMIC_RELAXED) + est > PRE_BYTES_MAX) {
         /* make room: the oldest finished result that no bind has asked for in a while goes first */
         PreTex* old = NULL;
         for (int i = 0; i < PRE_MAX; i++) {
@@ -1173,7 +1195,10 @@ void GXPrefetchTexPort(const void* image, u16 w, u16 h, u32 format, int has_clut
     p->gen = g;
     p->frame = s_frame;
     p->est_bytes = est;
-    s_pre_bytes += est;
+    u32 now = __atomic_add_fetch(&s_pre_bytes, est, __ATOMIC_RELAXED);
+    if (now > s_pre_bytes_hw) {
+        s_pre_bytes_hw = now;
+    }
     s_as.queued++;
     __atomic_store_n(&p->state, PS_TODO, __ATOMIC_RELEASE);
     pre_kick();
@@ -1188,7 +1213,7 @@ static int pre_take(const GxTexObj* t, u32* handle, u16* tw, u16* th, u32* bytes
     }
     int ok = 0;
     if (pre_cas(p, PS_TODO, PS_RUN)) {
-        pre_decode(p); /* the worker has not started it: here, as the synchronous path would */
+        pre_decode(p, s_rgba); /* the worker has not started it: here, as the synchronous path would */
         s_as.inline_n++;
     } else if (__atomic_load_n(&p->state, __ATOMIC_ACQUIRE) == PS_RUN) {
         u64 t0 = plat_ticks();
@@ -1836,7 +1861,9 @@ void gx_tex_init(void) {
     }
     s_verify = plat_switch_int("texverify", 0) != 0;
     s_copy_evict = plat_switch_int("copyevict", 1) != 0;
+#ifndef TTYD_RETAIL
     s_tf_on = plat_switch_int("texframe", 0) != 0;
+#endif
     s_fast_mode = plat_switch_int("texfast", 0);
     s_async = plat_switch_int("texasync", 0) != 0 && s_trust_on;
     mode_init();
@@ -1857,18 +1884,18 @@ void gx_tex_init(void) {
                (unsigned)s_arena_hi);
     }
     s_rgba = memalign(64, 1024 * 1024 * 4);
-    s_tiled = memalign(64, 1024 * 1024 * 4);
-    if (s_rgba == NULL || s_tiled == NULL) {
+    if (s_rgba == NULL) {
         plat_fatal("GX: no memory for texture conversion buffers");
     }
     if (s_async) {
         s_pre = calloc(PRE_MAX, sizeof(PreTex));
-        s_pre_rgba[0] = memalign(64, PRE_MAX_PIX * 4);
-        s_pre_rgba[1] = memalign(64, PRE_MAX_PIX * 4);
-        if (s_pre == NULL || s_pre_rgba[0] == NULL || s_pre_rgba[1] == NULL || !plat_job_enabled()) {
+        s_pre_rgba = memalign(64, PRE_MAX_PIX * 4);
+        if (s_pre == NULL || s_pre_rgba == NULL || !plat_job_enabled()) {
             PLOG_W("texasync: off (no memory or no job worker)");
             free(s_pre);
+            free(s_pre_rgba);
             s_pre = NULL;
+            s_pre_rgba = NULL;
             s_async = 0;
         } else {
             PLOG_I("texasync: on (%u slots, %u KB result cap)", (unsigned)PRE_MAX, (unsigned)(PRE_BYTES_MAX >> 10));

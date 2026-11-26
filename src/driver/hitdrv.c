@@ -14,6 +14,7 @@
 // A u16 in a map file's packed display list: the vertex count after the primitive opcode, or a position index. The
 // lists stay in the GameCube's byte order on ports (the GX layer reads them so), so collision reads them big-endian.
 #ifdef TARGET_PORT
+#include "port3ds/gamepar.h"
 #define HIT_DL_U16(p) ((u16)(((const u8*)(p))[0] << 8 | ((const u8*)(p))[1]))
 #else
 #define HIT_DL_U16(p) (*(u16*)(p))
@@ -130,6 +131,9 @@ void hitReInit(void) {
             entry->hitNumJoints = 0;
         }
     }
+#ifdef TARGET_PORT
+    portNameIdxChanged();
+#endif
 }
 
 /** This function is cursed, managed to hit 99% - https://decomp.me/scratch/FjwSA */
@@ -259,7 +263,15 @@ HitEntry* hitEntryMOBJ(MapFileJoint* joint, Mtx mtx) {
     MapWork* wp = mapGetWork();
 
     wp->entries[0].hitNumJoints += mapGetJoints(joint);
+#ifdef TARGET_PORT
+    {
+        HitEntry* hit = hitEntrySub(joint, NULL, mtx, TRUE, 0);
+        portNameIdxChanged(); // new names in the hit list
+        return hit;
+    }
+#else
     return hitEntrySub(joint, NULL, mtx, TRUE, 0);
+#endif
 }
 
 typedef struct HitAnimJointList {
@@ -318,6 +330,11 @@ inline HitEntry* hitNameToPtrNoChk(const char* name) {
     HitEntry* hit;
     s32 i, j;
 
+#ifdef TARGET_PORT
+    if (port_nameidx_on()) { // mapnameidx (or gamecnt's probe counts): port3ds/game/nameidx.c
+        return portHitNameToPtr(wp, name, __builtin_return_address(0));
+    }
+#endif
     map = wp->entries;
     for (i = 0; i < wp->entries->count; map++, i++) {
         hit = map->hitEntries;
@@ -1084,6 +1101,11 @@ HitEntry* hitCheckVecFilter(HitCheckQuery* query, HitFilterCallback callback) { 
     HitVector* vec;
     f32 reach;
 
+#ifdef TARGET_PORT
+    if (port_gamecnt_on()) {
+        port_cnt_hitvec();
+    }
+#endif
     mapGetWork();
     closest = NULL;
     if (!PSVECSquareMag(&query->targetDir)) {
@@ -1461,6 +1483,11 @@ HitEntry* hitNameToPtr(const char* name) { // 1:1
     if (name == NULL) {
         return NULL;
     }
+#ifdef TARGET_PORT
+    if (port_nameidx_on()) { // mapnameidx (or gamecnt's probe counts): port3ds/game/nameidx.c
+        return portHitNameToPtr(wp, name, __builtin_return_address(0));
+    }
+#endif
     for (i = 0; i < wp->entries->count; i++) {
         map = &wp->entries[i];
         hit = map->hitEntries;

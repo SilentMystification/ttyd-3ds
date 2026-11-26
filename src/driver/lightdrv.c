@@ -7,6 +7,9 @@
 #include "memory.h"
 #include <string.h>
 #include "libc_decls.h"
+#ifdef TARGET_PORT
+#include "port3ds/gamepar.h"
+#endif
 
 //.sbss
 static LightWork work[2];
@@ -77,6 +80,9 @@ void lightInit(void) {
 void lightReInit(void) {
     LightWork* wp = lightGetWork();
     memset(wp->entries, 0, sizeof(LightEntry) * wp->count);
+#ifdef TARGET_PORT
+    portNameIdxChanged();
+#endif
 }
 
 /** The camera's forward axis; lightMain turns it into world space to place the paper characters' light. */
@@ -194,6 +200,9 @@ s32 lightEntry(const char* name, s32 type, Vec* position, Vec* rotation, GXColor
     if (flags & 2) {
         entry->flags |= LIGHT_CHARA;
     }
+#ifdef TARGET_PORT
+    portNameIdxChanged(); // a new name in the light table
+#endif
     return n;
 }
 
@@ -203,6 +212,11 @@ LightEntry* lightNameToPtr(const char* name) {
     LightEntry* entry = wp->entries;
     s32 i;
 
+#ifdef TARGET_PORT
+    if (port_nameidx_on()) { // mapnameidx (or gamecnt's probe counts): port3ds/game/nameidx.c
+        return portLightNameToPtr(wp, name, __builtin_return_address(0));
+    }
+#endif
     for (i = 0; i < wp->count; i++, entry++) {
         if (entry->flags & LIGHT_ENABLED && !strcmp(name, entry->name)) {
             return entry;

@@ -398,6 +398,7 @@ static void imm_layout_c(void) {
  * those bytes are the same. */
 typedef struct {
     const GxState* g; /* NULL: empty */
+    u64 ok_ver;       /* gx_vdesc_ver of g's state when the plan last matched it (0: not since it was built) */
     u8 fmt, ns, vs;
     u8 vd[GX_VA_MAX_ATTR];
     GxAttrFmt vat[GX_VA_MAX_ATTR];
@@ -594,17 +595,28 @@ int gx_imm_convert(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, u8* out
     const u32 stride = s_imm_stride_c;
     const int t_ = gx_tls_translator != 0;
     ImmPlan* pl = NULL;
-    for (u32 i = 0; i < IMM_PLANS; i++) {
+    /* every write to the vertex description or formats of gx or gx_game bumps its gx_vdesc_ver: a plan that matched
+     * the state at this version still does, without the compare of its 104 bytes (2 us a primitive in Azahar) */
+    const u64 ver = g == &gx_game ? gx_vdesc_ver[1] : g == &gx ? gx_vdesc_ver[0] : 0;
+    for (u32 i = 0; ver != 0 && i < IMM_PLANS; i++) {
+        ImmPlan* e = &s_plans[t_][i];
+        if (e->ok_ver == ver && e->g == g && e->fmt == fmt) {
+            pl = e;
+            break;
+        }
+    }
+    for (u32 i = 0; pl == NULL && i < IMM_PLANS; i++) {
         ImmPlan* e = &s_plans[t_][i];
         if (e->g == g && e->fmt == fmt && gx_mem_equal(e->vd, g->vtx_desc, sizeof(e->vd)) &&
             gx_mem_equal(e->vat, g->vat[fmt], sizeof(e->vat))) {
             pl = e;
-            break;
+            pl->ok_ver = ver;
         }
     }
     if (pl == NULL) {
         pl = &s_plans[t_][s_plan_next[t_]++ % IMM_PLANS];
         imm_plan_build(g, fmt, pl);
+        pl->ok_ver = ver;
     }
     ImmStep* st = pl->st;
     const u32 ns = pl->ns, vs = pl->vs;
@@ -760,13 +772,8 @@ int gx_imm_convert(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, u8* out
 
 /* Whether the game thread can write a recorded primitive to its chunks (gx_rec.c): what the ring holds must
  * rebuild the GxVertex read_vertex would make, for the draws the translator routes to the CPU. */
-int gx_imm_rec_ok(const GxState* g, u8 prim, u32 n) {
-    const u8* d = g->vtx_desc;
-    if (!gx_vsh_on || !gx_vsh_imm_on || n == 0 || n > VERTS_MAX || d[GX_VA_PNMTXIDX] != GX_NONE ||
-        d[GX_VA_CLR1] != GX_NONE || d[GX_VA_POS] == GX_NONE) {
-        return 0;
-    }
-    if (prim != GX_QUADS && prim != GX_TRIANGLES && prim != GX_TRIANGLESTRIP && prim != GX_TRIANGLEFAN) {
+static int imm_desc_ok(const u8* d) {
+    if (d[GX_VA_PNMTXIDX] != GX_NONE || d[GX_VA_CLR1] != GX_NONE || d[GX_VA_POS] == GX_NONE) {
         return 0;
     }
     u32 slots = 0;
@@ -777,6 +784,26 @@ int gx_imm_rec_ok(const GxState* g, u8 prim, u32 n) {
         slots += d[GX_VA_TEX0 + t] != GX_NONE;
     }
     return slots <= 3;
+}
+
+int gx_imm_rec_ok(const GxState* g, u8 prim, u32 n) {
+    if (!gx_vsh_on || !gx_vsh_imm_on || n == 0 || n > VERTS_MAX) {
+        return 0;
+    }
+    if (prim != GX_QUADS && prim != GX_TRIANGLES && prim != GX_TRIANGLESTRIP && prim != GX_TRIANGLEFAN) {
+        return 0;
+    }
+    /* the description's answer, kept while the game thread's shadow description stands still (gx_vdesc_ver[1]) */
+    static u64 s_ok_ver;
+    static int s_ok;
+    if (g != &gx_game) {
+        return imm_desc_ok(g->vtx_desc);
+    }
+    if (s_ok_ver != gx_vdesc_ver[1]) {
+        s_ok = imm_desc_ok(g->vtx_desc);
+        s_ok_ver = gx_vdesc_ver[1];
+    }
+    return s_ok;
 }
 
 /* counters (switch gximmdirect; the gxthreadstats line) */

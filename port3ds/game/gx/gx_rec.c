@@ -61,6 +61,12 @@ GxState gx_game;
 static __thread int t_game; /* the thread that called GXInit */
 
 enum { GXR_WRAP = 0xF0, GXR_LIST, GXR_PRIM, GXR_RAW, GXR_PRIMD };
+enum { GXR_FCHK_LIST = 0xE0, GXR_FCHK_VD }; /* gxrecfuse=2's checks */
+/* gxrecfuse counters (game thread; the checks' on the translator) */
+static struct {
+    u32 vd_calls, vd_flushes, vd_sent, lists, list_calls, list_sent, list_decoded, list_other;
+    u32 chk_list, chk_list_bad, chk_vd, chk_vd_bad;
+} s_fst;
 #define HDR(type, n) ((u32)(type) << 24 | (n))
 #define KICK_WORDS 256u
 
@@ -208,6 +214,29 @@ static void run_one(u32 type, const u32* w, u32 n) {
         break;
     }
     case GXR_RAW: gx_run_raw(w, n); break;
+    case GXR_FCHK_LIST: {
+        /* gxrecfuse=2: the list's calls went through the dedup table; applying the list now must change nothing */
+        static GxState s_before;
+        memcpy(&s_before, &gx, sizeof(gx));
+        u32 done = gx_sdl_run((const u8*)w[0], w[1], NULL);
+        s_before.version = gx.version;
+        s_fst.chk_list++;
+        if (done != w[1] || memcmp(&s_before, &gx, sizeof(gx)) != 0) {
+            if (s_fst.chk_list_bad++ < 8) {
+                PLOG_W("gxrecfuse verify: state list %p (%lu bytes) changes the translated state after its fused "
+                       "calls", (const void*)w[0], (unsigned long)w[1]);
+            }
+        }
+        break;
+    }
+    case GXR_FCHK_VD:
+        s_fst.chk_vd++;
+        if (memcmp(w, gx.vtx_desc, GX_VA_MAX_ATTR) != 0) {
+            if (s_fst.chk_vd_bad++ < 8) {
+                PLOG_W("gxrecfuse verify: the translated vertex description differs from the game thread's shadow");
+            }
+        }
+        break;
     case GXR_PRIMD: {
         /* gximmdirect: the vertices are in the game thread's chunks since GXEnd */
         u8 slots[8];
@@ -333,7 +362,14 @@ static u32* put_slow(u32 type, u32 n) {
     return c + 1;
 }
 
+static u32 s_vd_n; /* gxrecfuse: vertex-description calls waiting in the log (fuse_vd_flush) */
+static void fuse_vd_flush(void);
+
 static inline u32* put(u32 type, u32 n) {
+    /* state setters read no vertex description: the log waits for a draw, list, copy or sync */
+    if (__builtin_expect(s_vd_n != 0, 0) && type >= REC_CopyTex) {
+        fuse_vd_flush();
+    }
     u32 off = s_wr & s_ring_mask;
     if (__builtin_expect(off + n + 1 <= s_ring_words && (s32)(s_room_end - (s_wr + n + 1)) >= 0, 1)) {
         u32* c = s_ring + off;
@@ -474,9 +510,23 @@ static inline int dd_slot(u32 id, const u32* w) {
     }
 }
 
+static int s_vd_valid; /* gxrecfuse: s_vd_em is the translator's vertex description */
+static int s_fuse; /* switch gxrecfuse (see "Fused state" below) */
+/* gxrecfuse: the dedup table's material and ambient colours (dd_col_same) */
+static struct {
+    u32 gen[2][2]; /* [colour][0: rgb, 1: alpha]: valid at the table's generation */
+    u32 val[2];
+} s_dd_col[2]; /* [0] ambient, [1] material */
+static struct {
+    u32 gen, a, mask, attn; /* a: enable, ambient and material source, diffuse function (a byte each) */
+} s_dd_chan[4];          /* gxrecfuse: GXSetChanCtrl by channel (dd_chan_same) */
+
 static void dd_forget(void) {
+    s_vd_valid = 0;
     if (++s_dd_gen == 0) {
         memset(s_dd, 0, DD_SLOTS * sizeof(DdSlot));
+        memset(s_dd_col, 0, sizeof(s_dd_col));
+        memset(s_dd_chan, 0, sizeof(s_dd_chan));
         s_dd_gen = 1;
     }
 }
@@ -573,8 +623,72 @@ static int is_state_list(const void* list, u32 nbytes) {
     return 0;
 }
 
+/* gxrecfuse: the material and ambient colours by component, as GXSetChanMatColor and GXSetChanAmbColor write them
+ * (a COLOR0 call writes red, green and blue of colour 0, an ALPHA0 call its alpha, COLOR0A0 both), so that calls
+ * on overlapping channels compare with what the translator holds instead of forgetting each other. */
+static int dd_col_same(u32 gen, u32 id, const u32* w) {
+    u32 ch = w[0], c = w[1];
+    u32 idx, parts; /* bit 0: rgb, bit 1: alpha */
+    switch (ch) {
+    case GX_COLOR0: idx = 0, parts = 1; break;
+    case GX_COLOR1: idx = 1, parts = 1; break;
+    case GX_ALPHA0: idx = 0, parts = 2; break;
+    case GX_ALPHA1: idx = 1, parts = 2; break;
+    case GX_COLOR0A0: idx = 0, parts = 3; break;
+    case GX_COLOR1A1: idx = 1, parts = 3; break;
+    default: return 0; /* recorded */
+    }
+    __typeof__(s_dd_col[0])* t = &s_dd_col[id == REC_SetChanMatColor];
+    int same = 1;
+    if (parts & 1) {
+        same &= t->gen[idx][0] == gen && (t->val[idx] & 0xFFFFFF00u) == (c & 0xFFFFFF00u);
+        t->val[idx] = (t->val[idx] & 0xFFu) | (c & 0xFFFFFF00u);
+        t->gen[idx][0] = gen;
+    }
+    if (parts & 2) {
+        same &= t->gen[idx][1] == gen && (t->val[idx] & 0xFFu) == (c & 0xFFu);
+        t->val[idx] = (t->val[idx] & 0xFFFFFF00u) | (c & 0xFFu);
+        t->gen[idx][1] = gen;
+    }
+    return same;
+}
+
+/* gxrecfuse: GXSetChanCtrl by channel (COLOR0A0 writes COLOR0 and ALPHA0, COLOR1A1 COLOR1 and ALPHA1), the fields
+ * in the form the setter stores them */
+static int dd_chan_same(u32 gen, const u32* w) {
+    u32 first, last;
+    switch (w[0]) {
+    case GX_COLOR0A0: first = 0, last = 2; break;
+    case GX_COLOR1A1: first = 1, last = 3; break;
+    default:
+        if (w[0] > 3) {
+            return 0; /* recorded */
+        }
+        first = last = w[0];
+        break;
+    }
+    u32 a = (w[1] & 0xFF) | (w[2] & 0xFF) << 8 | (w[3] & 0xFF) << 16 | (w[5] & 0xFF) << 24, b = w[4], c6 = w[6] & 0xFF;
+    int same = 1;
+    for (u32 c = first; c <= last; c += 2) {
+        same &= s_dd_chan[c].gen == gen && s_dd_chan[c].a == a && s_dd_chan[c].mask == b && s_dd_chan[c].attn == c6;
+        s_dd_chan[c].gen = gen;
+        s_dd_chan[c].a = a;
+        s_dd_chan[c].mask = b;
+        s_dd_chan[c].attn = c6;
+    }
+    return same;
+}
+
 /* 1: table `tbl` (at generation `gen`) holds call `id` with these words; else it notes them. */
 static int dd_same(DdSlot* tbl, u32 gen, u32 id, const u32* w, u32 n) {
+    if (s_fuse && tbl == s_dd) {
+        if (n == 2 && (id == REC_SetChanAmbColor || id == REC_SetChanMatColor)) {
+            return dd_col_same(gen, id, w);
+        }
+        if (n == 7 && id == REC_SetChanCtrl) {
+            return dd_chan_same(gen, w);
+        }
+    }
     int sl = n != 0 && n <= DD_WORDS ? dd_slot(id, w) : -1;
     if (sl >= 0) {
         DdSlot* d = &tbl[sl];
@@ -642,7 +756,135 @@ void gx_dd_apply_forget(void) {
     }
 }
 
+/* ---- Fused state (switch gxrecfuse, default 0) ----
+ * Two kinds of state calls reach the translator although they change nothing there:
+ *   - the calls after a call to a state list (a display list the game built with state calls in it: mapdrv's
+ *     material lists). The dedup table forgot everything at such a call, so every call after it was recorded
+ *     again; and the list's own calls (about 24 a list) ran on the translator, most of them with the values in
+ *     force (5519 of 5855 a frame in gor_01).
+ *   - the vertex description: the game calls GXClearVtxDesc and then GXSetVtxDesc for each attribute before
+ *     each object, and the sequence mostly gives the description in force.
+ * gxrecfuse=1:
+ *   - A state list made only of NOPs and port opcodes, whose bytes equal a copy kept on the game thread (each call
+ *     compares them in full; a changed list is decoded again), is not recorded as a list call. Its calls go
+ *     through the dedup table in their order, as calls the game made itself, and only those that change the
+ *     translator's state are recorded. The game thread's shadow does not take them (it did not before either:
+ *     on the GameCube a display list does not change the SDK's copy of the registers). Any other list takes the
+ *     old way (the table forgets, a list call is recorded).
+ *   - GXClearVtxDesc and GXSetVtxDesc calls go into a log on the game thread (and into its shadow, as before).
+ *     Before the next recorded command that is not a state call (a list, primitive, raw command, copy, sync) or
+ *     fence, the log is applied to a copy of the translator's vertex description, and only the attributes that
+ *     differ are recorded, as GXSetVtxDesc calls (no setter reads the description, so the state calls recorded
+ *     in between may go first). When that copy is not known (start, after the table forgets), the log is
+ *     recorded from its last GXClearVtxDesc on, or all of it when it has none.
+ *   - GXSetChanCtrl, GXSetChanAmbColor and GXSetChanMatColor are compared in the table by channel and colour
+ *     component (dd_chan_same, dd_col_same), so calls on overlapping channels (COLOR0A0, COLOR0, ALPHA0) no longer
+ *     make each other count as changed.
+ * The translator's state after each command is the same as before, and so are the draws; fewer state version
+ * changes let more lists continue a batch (the merged draws carry the same vertices in the same order).
+ * gxrecfuse=2: as 1, plus checks on the translator: after the calls of a fused list the list itself is applied
+ * too and must change nothing in `gx`; after each vertex-description flush, `gx`'s description must equal the
+ * game thread's shadow (the `gxrecfuse frame N:` line with gxthreadstats counts checks and mismatches). */
+static u8 s_vd_em[GX_VA_MAX_ATTR];
+#define VD_LOG 64
+static u8 s_vd_log[VD_LOG][2]; /* attribute (0xFF: GXClearVtxDesc), type */
+
+static inline void rec_words(u32 id, const u32* w, u32 n) {
+    u32* c = put(id, n);
+    for (u32 i = 0; i < n; i++) {
+        c[i] = w[i];
+    }
+    commit(n, 0);
+}
+
+/* GXClearVtxDesc (attr 0xFF) and GXSetVtxDesc on a description, as vtx_desc_clear and vtx_desc_set do */
+static void vd_apply(u8* d, u32 attr, u32 type) {
+    if (attr == 0xFF) {
+        memset(d, GX_NONE, GX_VA_MAX_ATTR);
+        d[GX_VA_POS] = GX_DIRECT;
+    } else if (attr == GX_VA_NBT) {
+        d[GX_VA_NBT] = (u8)type;
+        d[GX_VA_NRM] = GX_NONE;
+    } else if (attr < GX_VA_MAX_ATTR) {
+        d[attr] = (u8)type;
+        if (attr == GX_VA_NRM) {
+            d[GX_VA_NBT] = GX_NONE;
+        }
+    }
+}
+
+static void fuse_vd_flush(void) {
+    u32 n = s_vd_n;
+    s_vd_n = 0; /* before any put: put flushes while it is not 0 */
+    s_fst.vd_flushes++;
+    u32 from = 0;
+    if (!s_vd_valid) {
+        int k = -1;
+        for (u32 i = 0; i < n; i++) {
+            if (s_vd_log[i][0] == 0xFF) {
+                k = (int)i;
+            }
+        }
+        if (k < 0) {
+            /* the translator's description is not known and nothing in the log resets it: the calls as made */
+            for (u32 i = 0; i < n; i++) {
+                const u32 w[2] = {s_vd_log[i][0], s_vd_log[i][1]};
+                rec_words(REC_SetVtxDesc, w, 2);
+                s_fst.vd_sent++;
+            }
+            goto check;
+        }
+        rec_words(REC_ClearVtxDesc, NULL, 0);
+        s_fst.vd_sent++;
+        vd_apply(s_vd_em, 0xFF, 0);
+        s_vd_valid = 1;
+        from = (u32)k + 1;
+    }
+    {
+        u8 t[GX_VA_MAX_ATTR];
+        memcpy(t, s_vd_em, sizeof(t));
+        for (u32 i = from; i < n; i++) {
+            vd_apply(t, s_vd_log[i][0], s_vd_log[i][1]);
+        }
+        for (u32 a = 0; a < GX_VA_MAX_ATTR; a++) {
+            if (a == GX_VA_NRM || a == GX_VA_NBT || t[a] == s_vd_em[a]) {
+                continue;
+            }
+            const u32 w[2] = {a, t[a]};
+            rec_words(REC_SetVtxDesc, w, 2);
+            s_fst.vd_sent++;
+        }
+        if (t[GX_VA_NRM] != s_vd_em[GX_VA_NRM] || t[GX_VA_NBT] != s_vd_em[GX_VA_NBT]) {
+            /* the setter clears the other one of the pair; at most one of them is set */
+            const u32 w[2] = {t[GX_VA_NBT] != GX_NONE ? (u32)GX_VA_NBT : (u32)GX_VA_NRM,
+                              t[GX_VA_NBT] != GX_NONE ? t[GX_VA_NBT] : t[GX_VA_NRM]};
+            rec_words(REC_SetVtxDesc, w, 2);
+            s_fst.vd_sent++;
+        }
+        memcpy(s_vd_em, t, sizeof(t));
+    }
+check:
+    if (s_fuse == 2) {
+        u32 nw = (GX_VA_MAX_ATTR + 3) / 4;
+        u32* c = put(GXR_FCHK_VD, nw);
+        memset(c, 0, nw * 4);
+        memcpy(c, gx_game.vtx_desc, GX_VA_MAX_ATTR);
+        commit(nw, 0);
+    }
+}
+
 void gx_rec_call(u32 id, const u32* w, u32 n) {
+    if (s_fuse && (id == REC_SetVtxDesc || id == REC_ClearVtxDesc)) {
+        if (s_vd_n == VD_LOG) {
+            fuse_vd_flush();
+        }
+        s_vd_log[s_vd_n][0] = id == REC_ClearVtxDesc ? 0xFF : (u8)(w[0] < 0xFF ? w[0] : 0xFE);
+        s_vd_log[s_vd_n][1] = id == REC_ClearVtxDesc ? 0 : (u8)w[1];
+        s_vd_n++;
+        s_fst.vd_calls++;
+        gx_shadow_call(id, w);
+        return;
+    }
     if (s_dedup) {
         s_dd_calls++;
         if (dd_same(s_dd, s_dd_gen, id, w, n)) {
@@ -663,8 +905,120 @@ void gx_rec_call(u32 id, const u32* w, u32 n) {
     }
 }
 
+/* gxrecfuse: decoded state lists, keyed by address and size, with a copy of their bytes (game thread) */
+#define FL_SLOTS 2048
+#define FL_POOL_WORDS (256 * 1024)
+typedef struct {
+    const void* list;
+    u32 nbytes;
+    u32 pos;   /* pool word of the copy of the bytes; the calls (id | count << 8, then the words) follow */
+    u32 words; /* of the calls; 0: not a list of state calls only (the old way) */
+} FlEntry;
+static FlEntry* s_fl;
+static u32* s_fl_pool;
+static u32 s_fl_used;
+
+/* The entry for this list with its bytes as they are now, or NULL. */
+static FlEntry* fl_get(const void* list, u32 nbytes) {
+    u32 h = ((u32)(uintptr_t)list >> 5 ^ nbytes * 0x9E3779B1u) * 2654435761u >> 21;
+    FlEntry* e = NULL;
+    FlEntry* freeslot = NULL;
+    for (u32 i = 0; i < 4; i++) {
+        FlEntry* c = &s_fl[(h + i) & (FL_SLOTS - 1)];
+        if (c->list == list && c->nbytes == nbytes) {
+            e = c;
+            break;
+        }
+        if (c->list == NULL && freeslot == NULL) {
+            freeslot = c;
+        }
+    }
+    if (e != NULL && memcmp(list, s_fl_pool + e->pos, nbytes) == 0) {
+        return e;
+    }
+    if (e == NULL) {
+        e = freeslot != NULL ? freeslot : &s_fl[h & (FL_SLOTS - 1)];
+    }
+    s_fst.list_decoded++;
+    /* the copy, then the calls: a port opcode takes at least 4 bytes (3 and a word) for its 1 + n words, so the
+     * calls need at most as many words as the list has bytes */
+    u32 cw = (nbytes + 3) >> 2;
+    if (s_fl_used + cw + nbytes + 64 > FL_POOL_WORDS) {
+        memset(s_fl, 0, sizeof(FlEntry) * FL_SLOTS);
+        s_fl_used = 0;
+        e = &s_fl[h & (FL_SLOTS - 1)];
+    }
+    u32* calls = s_fl_pool + s_fl_used + cw;
+    u32 nw = 0;
+    u32 good = gx_sdl_scan((const u8*)list, nbytes, calls, nbytes + 64, &nw);
+    memcpy(s_fl_pool + s_fl_used, list, nbytes);
+    e->list = list;
+    e->nbytes = nbytes;
+    e->pos = s_fl_used;
+    int pure = good == nbytes && nw != 0;
+    for (u32 k = 0; pure && k < nw; k += 1 + (calls[k] >> 8)) {
+        u32 id = calls[k] & 0xFF;
+        if (id == REC_SetVtxDesc || id == REC_ClearVtxDesc || id == 0 || id > REC_SetTevIndirect) {
+            pure = 0; /* the vertex description keeps its own copy (fuse_vd_flush): such a list takes the old way */
+        }
+    }
+    e->words = pure ? nw : 0;
+    s_fl_used += cw + (pure ? nw : 0);
+    return e;
+}
+
+/* A state list's calls through the dedup table: 1 when done, 0 when the list takes the old way. */
+static int fuse_list(const void* list, u32 nbytes) {
+    if (nbytes == 0 || nbytes > 0x4000) {
+        return 0;
+    }
+    if (s_fl == NULL) {
+        s_fl = calloc(FL_SLOTS, sizeof(FlEntry));
+        s_fl_pool = malloc(sizeof(u32) * FL_POOL_WORDS);
+        if (s_fl == NULL || s_fl_pool == NULL) {
+            free(s_fl);
+            free(s_fl_pool);
+            s_fl = NULL;
+            s_fl_pool = NULL;
+            s_fuse = 0;
+            return 0;
+        }
+    }
+    const FlEntry* e = fl_get(list, nbytes);
+    if (e->words == 0) {
+        s_fst.list_other++;
+        return 0;
+    }
+    s_fst.lists++;
+    const u32* c = s_fl_pool + e->pos + ((e->nbytes + 3) >> 2);
+    const u32* ce = c + e->words;
+    while (c < ce) {
+        u32 hd = *c++;
+        u32 id = hd & 0xFF, n = hd >> 8;
+        s_fst.list_calls++;
+        s_dd_calls++;
+        if (dd_same(s_dd, s_dd_gen, id, c, n)) {
+            s_dd_skipped++;
+        } else {
+            rec_words(id, c, n); /* not into the shadow (see above) */
+            s_fst.list_sent++;
+        }
+        c += n;
+    }
+    if (s_fuse == 2) {
+        u32* w = put(GXR_FCHK_LIST, 2);
+        w[0] = (u32)list;
+        w[1] = nbytes;
+        commit(2, 0);
+    }
+    return 1;
+}
+
 void gx_rec_list(const void* list, u32 nbytes, const void* caller) {
     if (s_dedup && is_state_list(list, nbytes)) {
+        if (s_fuse && fuse_list(list, nbytes)) {
+            return;
+        }
         dd_forget(); /* its state calls change the translator's state */
     }
     u32 n = gx_rec_mode == 3 ? 4 : 3;
@@ -936,6 +1290,9 @@ static u32 s_pipe_waits; /* frame-end fences that had to wait for the frame befo
 void gx_rec_fence(int why) {
     if (!gx_rec_on()) {
         return;
+    }
+    if (s_vd_n != 0 && why != GXF_FULL) {
+        fuse_vd_flush(); /* the translation the fence waits for includes the logged vertex description */
     }
     u64 t0 = plat_ticks();
     if (why == GXF_SYNC && s_pipeline && s_after_copydisp) {
@@ -1212,6 +1569,19 @@ void gx_rec_frame(void) {
         gx_tev_memo_log(f);
     }
     gx_bbox_stats_log(f);
+    if (s_fuse) {
+        PLOG_I("gxrecfuse frame %lu: per frame vtxdesc %lu calls, %lu flushes, %lu recorded | state lists %lu fused "
+               "(%lu calls, %lu recorded), %lu the old way, %lu decoded | verify %lu+%lu checks, %lu+%lu mismatches "
+               "(total)",
+               (unsigned long)s_frame_no, (unsigned long)(s_fst.vd_calls / f), (unsigned long)(s_fst.vd_flushes / f),
+               (unsigned long)(s_fst.vd_sent / f), (unsigned long)(s_fst.lists / f),
+               (unsigned long)(s_fst.list_calls / f), (unsigned long)(s_fst.list_sent / f),
+               (unsigned long)(s_fst.list_other / f), (unsigned long)(s_fst.list_decoded / f),
+               (unsigned long)s_fst.chk_list, (unsigned long)s_fst.chk_vd, (unsigned long)s_fst.chk_list_bad,
+               (unsigned long)s_fst.chk_vd_bad);
+        s_fst.vd_calls = s_fst.vd_flushes = s_fst.vd_sent = s_fst.lists = s_fst.list_calls = s_fst.list_sent = 0;
+        s_fst.list_other = s_fst.list_decoded = 0;
+    }
     gx_dirty_log(f);
     gx_immdirect_log(f);
     if (gx_rec_mode == 3) {
@@ -1294,6 +1664,14 @@ void gx_rec_init(void) {
     s_state_content = calloc(SC_SLOTS, sizeof(*s_state_content));
     if (s_dd == NULL || s_state_lists == NULL || s_state_content == NULL) {
         s_dedup = 0;
+    }
+    s_fuse = s_dedup ? plat_switch_int("gxrecfuse", 0) : 0;
+    if (s_fuse < 0 || s_fuse > 2) {
+        s_fuse = 0;
+    }
+    if (s_fuse) {
+        PLOG_I("gxrecfuse=%d: state lists through the record's dedup, vertex description recorded as a difference%s",
+               s_fuse, s_fuse == 2 ? " (verify)" : "");
     }
     s_ring_words = words;
     s_ring_mask = words - 1;

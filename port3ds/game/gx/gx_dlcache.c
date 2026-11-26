@@ -110,6 +110,7 @@ static int s_trust;         /* switch gxtrust (default 1): skip the hashes of en
 static u32 s_scribble_at;   /* switch gxscribble=N: at frame N, change a byte of a trusted array without telling the registry */
 static const DlcEntry* s_scribbled;
 static u32 s_budget;
+static u32 s_spread; /* switch dlspread=N (default 0: off): at most N new entries are built per frame; the other lists draw uncached that frame */
 static u32 s_used_bytes, s_live;
 
 /* capture of the list being decoded */
@@ -130,6 +131,7 @@ static u32 s_cap_epoch;         /* the registry's epoch when the decode began */
 /* counters (per frame, summed into the gxstats line) */
 static struct {
     u32 calls, hits, built, changed, variant, nocache, dynamic_calls, too_big, sparse, evicted, alloc_fail;
+    u32 deferred; /* dlspread: builds left for a later frame */
     u32 relinks; /* lru_skip_batched: entries moved back to the front */
     u32 hit_verts;
     u32 verified, mismatched, full;
@@ -187,6 +189,7 @@ static void init(void) {
     s_budget = (u32)plat_switch_int("gxcachekb", 8192) * 1024u;
     s_trust = plat_switch_int("gxtrust", 1) != 0;
     s_scribble_at = (u32)plat_switch_int("gxscribble", 0);
+    s_spread = (u32)plat_switch_int("dlspread", 0);
     for (int i = 0; i < DLC_ENTRIES; i++) {
         s_e[i].next = (u16)(i + 2 <= DLC_ENTRIES ? i + 2 : 0);
     }
@@ -254,7 +257,10 @@ static void entry_drop(DlcEntry* e) {
  * frame or the last: when a frame draws more lists than fit, the ones that do
  * not fit stay uncached rather than every list pushing out the next (an LRU
  * over a cyclic working set larger than itself never hits). */
-static int evictable(const DlcEntry* e) { return e != NULL && gx_perf_frame_no() - e->last_frame > 1; }
+static int evictable(const DlcEntry* e) {
+    /* a batch draws its members without stamping them: a member of a recently used batch is in use */
+    return e != NULL && gx_perf_frame_no() - e->last_frame > 1 && !(e->bat && gx_batch_recent(e->bat));
+}
 
 /* gxbatch: a batch's draws do not move its members in the LRU list or stamp them, so the tail can be an entry
  * a batch still draws. Such entries go back to the front (they are in use); what is left at the tail is the
@@ -585,6 +591,10 @@ static int call_slow(const GxState* st, const void* list, u32 nbytes) {
     } else if (variants > 0) {
         s_st.variant++;
     }
+    if (s_spread != 0 && s_st.built >= s_spread) {
+        s_st.deferred++;
+        goto decode_plain; /* this frame's build budget is used: the plain decode draws the same picture */
+    }
     /* decode it, capturing the vertices */
     s_cap_epoch = plat_memstable_epoch();
     gx_dlc_capturing = 1;
@@ -908,6 +918,16 @@ static void bat_kill(Batch* b) {
         s_ix_lost += plen;
         if (s_ix_lost_logged++ == 0) {
             PLOG_W("gxbatch: index pool pending frees full: a range is given up until the pool empties");
+        }
+    }
+    /* the members were in use up to the batch's last use, which the batch's draws did not stamp on them */
+    {
+        const BatMember* km = b_members(b);
+        for (u32 i = 0; i < b->n; i++) {
+            DlcEntry* me_e = &s_e[km[i].eidx];
+            if (me_e->gen == km[i].egen && me_e->last_frame < b->last_frame) {
+                me_e->last_frame = b->last_frame;
+            }
         }
     }
     free(b->blob);
@@ -1803,7 +1823,7 @@ void gx_dlcache_log(u32 frames) {
     const typeof(s_sum)* a = &s_sum;
     u32 pct = a->calls ? (u32)((u64)a->hits * 100u / a->calls) : 0;
     PLOG_I("gxstats   cache: calls %lu hits %lu (%lu%%, %lu verts) built %lu changed %lu variant %lu nocache %lu "
-           "dynamic %lu too-big %lu odd %lu evicted %lu full %lu alloc-fail %lu verified %lu mismatched %lu relinks/frame %lu | "
+           "dynamic %lu too-big %lu odd %lu evicted %lu full %lu alloc-fail %lu verified %lu mismatched %lu relinks/frame %lu deferred %lu | "
            "%lu entries %lu KB of %lu KB",
            (unsigned long)(a->calls / f), (unsigned long)(a->hits / f), (unsigned long)pct,
            (unsigned long)(a->hit_verts / f), (unsigned long)(a->built / f), (unsigned long)(a->changed / f),
@@ -1811,7 +1831,7 @@ void gx_dlcache_log(u32 frames) {
            (unsigned long)(a->too_big / f), (unsigned long)(a->sparse / f), (unsigned long)a->evicted,
            (unsigned long)a->full,
            (unsigned long)a->alloc_fail, (unsigned long)a->verified, (unsigned long)a->mismatched,
-           (unsigned long)(a->relinks / f),
+           (unsigned long)(a->relinks / f), (unsigned long)(a->deferred / f),
            (unsigned long)s_live, (unsigned long)(s_used_bytes / 1024),
            (unsigned long)(s_budget / 1024));
     PlatMemStableStats ms;

@@ -318,7 +318,7 @@ static void apply(u32 frame) {
         /* held, as after walking into the parlor: the counter counts (monteCountDisp) only with the tokens out */
         yuwp->tokens = s_piantas;
         yuwp->dispTokens = (u32)s_piantas;
-        yuwp->flags |= PARLOR_FLAG_TOKENS_OUT;
+        yuwp->flags |= PARLOR_FLAG_TOKENS_OUT | PARLOR_FLAG_COUNTER_SHOWN; /* the counter, which animates dispTokens, runs only when shown */
         tst_log("sys: piantas set to %d", s_piantas);
     }
     {

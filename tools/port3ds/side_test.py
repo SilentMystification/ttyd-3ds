@@ -428,13 +428,13 @@ _pit_deep("pit99", "jon_02", 99, win=False)
 @scenario("parlor_teresa", "map=gor_03 story=30 party=1 piantas=20 gswf=1232 mash=10 msgkeys=sysyuu_00_00:down.a "
           "marioat2=-200,30,40@800 marioat3=hit:npc11,0,-70,0@1450 shots=60 shotfrom=1500",
           pad=st.pad([(900, "cu", 300), (1230, "a", 3), (1500, "cu", 8), (1540, "a", 3)]),
-          until=until_frame(2610), timeout=600,
-          doc="Bunny Teresa: talk, pick the plane game, pay 10 Piantas, the pipe, the round (stalls after the fee)")
+          until=until_frame(3510), timeout=900,
+          doc="Bunny Teresa: talk, pick the plane game, pay 10 Piantas, the pipe, the round")
 def _parlor_teresa(ctx):
     seen(ctx, "bunny_teresa_00", "Teresa's greeting")
     chose(ctx, "bunny_teresa_yesno2", 0, "(Yes) ")
     p = values(ctx.log, "piantas")
-    ctx.check(p and p[-1][1] == 10, f"fee paid: 20 -> 10 Piantas ({[v for f, v in p]})")
+    ctx.check(len(p) >= 3 and p[2][1] == 10 and p[-1][1] > 10, f"fee paid 20 -> 10, then the round paid out ({[v for f, v in p]})")
     ctx.check("gor_03 -> yuu_00" in map_changes(ctx.log), "down the pipe into the plane game (yuu_00)")
     ctx.check("yuu_00 -> gor_03" in map_changes(ctx.log), "round played, back at the parlor (gor_03)")
 

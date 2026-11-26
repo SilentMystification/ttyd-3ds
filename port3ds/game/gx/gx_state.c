@@ -1031,7 +1031,7 @@ void GXSetFog(GXFogType type, f32 startz, f32 endz, f32 nearz, f32 farz, GXColor
     gx.fog_near = nearz;
     gx.fog_far = farz;
     gx.fog_color = color;
-    touch(GXD_PIX);
+    touch(GXD_PIX | GXD_TEV); /* the fog takes a TEV stage and a texture unit (gx_draw.c, gxfogramp) */
 }
 
 void GXSetZTexture(GXZTexOp op, GXTexFmt fmt, u32 bias) {

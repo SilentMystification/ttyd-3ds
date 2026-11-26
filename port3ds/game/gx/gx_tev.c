@@ -93,7 +93,7 @@ extern int gx_unit_of_stage[GX_MAX_TEV];
 static u8 clamp8(int v) { return (u8)(v < 0 ? 0 : v > 255 ? 255 : v); }
 
 static Opnd k_const(u8 r, u8 g, u8 b, u8 a) {
-    Opnd o = {SRC_CONST, OPC_COLOR, 1, 0, {r, g, b, a}};
+    Opnd o = {SRC_CONST, OPC_COLOR, 1, 0, {r, g, b, a}, 0};
     return o;
 }
 
@@ -211,7 +211,7 @@ static Opnd ras_opnd(Ctx* c, int s, int want_alpha, int is_alpha) {
     if (gx.tev[s].color == GX_COLOR_ZERO || gx.tev[s].color == GX_COLOR_NULL) {
         return k_const(0, 0, 0, 0);
     }
-    Opnd o = {SRC_PRIMARY, 0, 0, 0, {0}};
+    Opnd o = {SRC_PRIMARY, 0, 0, 0, {0}, 0};
     const u8* sw = gx.swap_table[gx.tev[s].ras_swap & 3];
     if (is_alpha) {
         u8 a = sw[3];
@@ -351,7 +351,7 @@ static int plan(Half* out, Opnd a, Opnd b, Opnd cc, Opnd d, u8 op, u8 bias, u8 s
     } else {
         Half first = {F_INTERPOLATE, {b, a, cc}, 0};
         out[n++] = first;
-        Opnd prev = {SRC_PREV, (u8)(is_alpha ? OPA_ALPHA : OPC_COLOR), 0, 2, {0}}; /* inv 2: this plan's own previous */
+        Opnd prev = {SRC_PREV, (u8)(is_alpha ? OPA_ALPHA : OPC_COLOR), 0, 2, {0}, 0}; /* inv 2: this plan's own previous */
         h.func = sub ? F_SUBTRACT : F_ADD;
         h.s[0] = sub ? d : prev;
         h.s[1] = sub ? prev : d;
@@ -360,7 +360,7 @@ static int plan(Half* out, Opnd a, Opnd b, Opnd cc, Opnd d, u8 op, u8 bias, u8 s
         u8 sc = h.scale;
         h.scale = 0;
         out[n++] = h;
-        Opnd prev = {SRC_PREV, (u8)(is_alpha ? OPA_ALPHA : OPC_COLOR), 0, 2, {0}}; /* inv 2: this plan's own previous */
+        Opnd prev = {SRC_PREV, (u8)(is_alpha ? OPA_ALPHA : OPC_COLOR), 0, 2, {0}, 0}; /* inv 2: this plan's own previous */
         Half t = {0};
         if (bias == GX_TB_ADDHALF) {
             t.func = F_ADD_SIGNED;
@@ -447,8 +447,8 @@ static Opnd inv_opnd(Opnd o) {
     return o;
 }
 
-static const Opnd k_own_prev_c = {SRC_PREV, OPC_COLOR, 0, 2, {0}};
-static const Opnd k_own_prev_a = {SRC_PREV, OPA_ALPHA, 0, 2, {0}};
+static const Opnd k_own_prev_c = {SRC_PREV, OPC_COLOR, 0, 2, {0}, 0};
+static const Opnd k_own_prev_a = {SRC_PREV, OPA_ALPHA, 0, 2, {0}, 0};
 
 /* A negative S10 constant: an add of it becomes a subtract of its magnitude
  * (GX clamps the sum at 0, PICA's SUBTRACT does too); anywhere else it reads
@@ -633,8 +633,8 @@ static int emit(Ctx* c, const Half* hc, const Half* ha) {
     return 1;
 }
 
-static const Half k_pass_c = {F_REPLACE, {{SRC_PREV, OPC_COLOR, 0, 0, {0}}}, 0};
-static const Half k_pass_a = {F_REPLACE, {{SRC_PREV, OPA_ALPHA, 0, 0, {0}}}, 0};
+static const Half k_pass_c = {F_REPLACE, {{SRC_PREV, OPC_COLOR, 0, 0, {0}, 0}}, 0};
+static const Half k_pass_a = {F_REPLACE, {{SRC_PREV, OPA_ALPHA, 0, 0, {0}, 0}}, 0};
 
 /* Does a later stage (or the final output) read GX register `reg`'s color
  * (or alpha) before it is written again? */
@@ -793,6 +793,25 @@ void gx_tev_compile(PlatGpuState* st) {
             }
         }
     }
+}
+
+/* The fog stage: lerp(PREV, fog colour, ramp) for the colour (the ramp is the unit's texture, L8: its red is the
+ * fog amount), PREV's alpha unchanged. */
+int gx_tev_add_fog(PlatGpuState* st, int unit, u32 rgb) {
+    if (st->num_stages < 1 || st->num_stages >= 6 || unit < 0 || unit > 2) {
+        return 0;
+    }
+    PlatGpuTevStage* ps = &st->stages[st->num_stages];
+    memset(ps, 0, sizeof(*ps));
+    ps->src_rgb = (u16)(SRC_CONST | SRC_PREV << 4 | (SRC_TEX0 + unit) << 8);
+    ps->op_rgb = (u16)(OPC_COLOR | OPC_COLOR << 4 | OPC_COLOR << 8);
+    ps->src_alpha = (u16)(SRC_PREV | SRC_PREV << 4 | SRC_PREV << 8);
+    ps->op_alpha = (u16)(OPA_ALPHA | OPA_ALPHA << 4 | OPA_ALPHA << 8);
+    ps->func_rgb = F_INTERPOLATE;
+    ps->func_alpha = F_REPLACE;
+    ps->constant = rgb & 0xFFFFFFu;
+    st->num_stages++;
+    return 1;
 }
 
 /* One compile; returns 1 if the result needed more than six stages. */

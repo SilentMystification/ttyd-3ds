@@ -123,6 +123,9 @@ bool devupdate_running(void);
 
 /* An update is installed and waits for the relaunch. */
 bool devupdate_pending(void);
+/* A request holds the app (between on_begin and on_resume, or a relaunch under way). The
+ * supervisor client reports this as its "paused" heartbeat flag. */
+bool devupdate_busy(void);
 /* A relaunch was requested and on_relaunch is NULL: call devupdate_relaunch(). */
 bool devupdate_relaunch_requested(void);
 /* From the app's main thread: sets the chainloader (this title, or the

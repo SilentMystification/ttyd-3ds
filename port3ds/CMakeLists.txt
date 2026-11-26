@@ -329,6 +329,15 @@ if(TTYD_GX_O3)
     set_source_files_properties(${_gx_sources} TARGET_DIRECTORY ttyd_port_game PROPERTIES COMPILE_OPTIONS "-O3")
 endif()
 
+#   TTYD_RETAIL: the retail build (build.sh --retail; docs/PORT_3DS_TESTING.md, "Retail mode"): the port's logging
+#                (PLOG_*, OSReport, tst_log), the gxstats/gxphase/texframe timers and the PMU hooks compile out, and
+#                retail mode is always on. Only the port's two halves get the define: the decomp sources build as before.
+option(TTYD_RETAIL "Retail build: logging and instrumentation compiled out" OFF)
+if(TTYD_RETAIL)
+    target_compile_definitions(ttyd_port_game PRIVATE TTYD_RETAIL=1)
+    target_compile_definitions(ttyd_port_plat PRIVATE TTYD_RETAIL=1)
+endif()
+
 #   TTYD_HOT_O3: -O3 on the game-logic translation units the gxnull profile ranks highest (collision, animation,
 #                map driver), flags only (docs/PORT_3DS_60FPS.md, "Game logic floor").
 option(TTYD_HOT_O3 "-O3 on hitdrv, animdrv, mapdrv, mario_hit" ON)

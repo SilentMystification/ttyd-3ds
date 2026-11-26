@@ -141,6 +141,7 @@ static const char* const k_getter_name[GXG_COUNT] = {"vtxdesc", "vat", "proj", "
 /* ---- Phase timers (switch gxphase=N, gx_internal.h) ----
  * The counters are the translator's (one writer); the game thread logs them as differences from the last log
  * (32-bit, so no torn reads; tick sums wrap after 16 s, far above a log interval). */
+#undef gx_ph_on
 int gx_ph_on;
 static u32 gx_ph_sp;
 static struct {

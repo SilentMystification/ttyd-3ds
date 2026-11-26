@@ -62,7 +62,11 @@ typedef struct {
 static CacheExtra* s_x;
 
 /* ---- texframe=1: one log line per frame with the texture work of that frame (counts and game-thread time) ---- */
+#ifdef TTYD_RETAIL
+#define s_tf_on 0 /* the TTYD_RETAIL build: the texframe timers compile out */
+#else
 static int s_tf_on;
+#endif
 static int s_async;
 static struct {
     unsigned queued, taken, stale_gen, verify_bad, dropped, unused, wait_n, inline_n, calls, rej_clut, rej_fmt, rej_size, rej_cov, rej_dup, rej_full;
@@ -1824,7 +1828,9 @@ void gx_tex_init(void) {
     }
     s_verify = plat_switch_int("texverify", 0) != 0;
     s_copy_evict = plat_switch_int("copyevict", 1) != 0;
+#ifndef TTYD_RETAIL
     s_tf_on = plat_switch_int("texframe", 0) != 0;
+#endif
     s_fast_mode = plat_switch_int("texfast", 0);
     s_async = plat_switch_int("texasync", 0) != 0 && s_trust_on;
     mode_init();

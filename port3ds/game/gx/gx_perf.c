@@ -32,32 +32,40 @@ u32 gx_perf_frame_no(void) { return s_frame_no; }
 
 /* ---- Content hash (also the display-list cache's check) ---- */
 
-u32 gx_hash32(const void* data, u32 n, u32 seed) {
-    const u8* p = (const u8*)data;
-    u32 h = seed ^ (n * 0x9E3779B1u);
-    while (((uintptr_t)p & 3) != 0 && n > 0) {
-        h = (h ^ *p++) * 0x01000193u;
-        n--;
-    }
-    const u32* w = (const u32*)p;
+/* The words are the data's little-endian 32-bit words from its first byte, so the hash does not depend on the
+ * address (a copy of a list at another address mod 4 hashes the same: is_state_list in gx_rec.c). Aligned data,
+ * the common case, loads whole words as before; unaligned data builds each word from bytes. */
+static inline __attribute__((always_inline)) u32 hash32_body(const u8* p, u32 n, u32 h, int aligned) {
+#define LD(i) (aligned ? ((const u32*)p)[i] : (u32)p[4 * (i)] | (u32)p[4 * (i) + 1] << 8 | (u32)p[4 * (i) + 2] << 16 | (u32)p[4 * (i) + 3] << 24)
     while (n >= 16) {
-        h = (h ^ w[0]) * 0x9E3779B1u;
-        h = (h ^ w[1]) * 0x85EBCA77u;
-        h = (h ^ w[2]) * 0xC2B2AE3Du;
-        h = (h ^ w[3]) * 0x27D4EB2Fu;
+        h = (h ^ LD(0)) * 0x9E3779B1u;
+        h = (h ^ LD(1)) * 0x85EBCA77u;
+        h = (h ^ LD(2)) * 0xC2B2AE3Du;
+        h = (h ^ LD(3)) * 0x27D4EB2Fu;
         h ^= h >> 15;
-        w += 4;
+        p += 16;
         n -= 16;
     }
     while (n >= 4) {
-        h = (h ^ *w++) * 0x9E3779B1u;
+        h = (h ^ LD(0)) * 0x9E3779B1u;
         h ^= h >> 15;
+        p += 4;
         n -= 4;
     }
-    p = (const u8*)w;
+#undef LD
     while (n > 0) {
         h = (h ^ *p++) * 0x01000193u;
         n--;
+    }
+    return h;
+}
+
+u32 gx_hash32(const void* data, u32 n, u32 seed) {
+    u32 h = seed ^ (n * 0x9E3779B1u);
+    if (((uintptr_t)data & 3) == 0) {
+        h = hash32_body((const u8*)data, n, h, 1);
+    } else {
+        h = hash32_body((const u8*)data, n, h, 0);
     }
     h ^= h >> 16;
     h *= 0x85EBCA6Bu;

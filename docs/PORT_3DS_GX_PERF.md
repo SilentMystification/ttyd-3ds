@@ -1063,3 +1063,34 @@ All 192 comparisons identical; no differing pixels. The water shots have low con
 | battle | 22.1 to 21.0 | 20.5 to 18.9 |
 
 Identity: `determ` shots 780-785 byte-identical in all four scenes in C1 and C3; `gw_diff` (gor_01, 1600 frames padscript) 160 records equal in C1 and C3.
+
+## Fused state on the record (`gxrecfuse`, 2026-11-26)
+
+Switch `gxrecfuse` (default 0; 2 is a verify mode; `gxrecfuseparts=N`, bits 1 state lists, 2 vertex description, 4 channels, default 7, for measuring). File: `port3ds/game/gx/gx_rec.c` (recording side of `gxthread`; `gx_sdl_scan` exported from `gx_state.c`). No effect with `gxthread=0` (C1).
+
+Counts first (gor_01, C3 + `gxsdl=1`, a temporary per-call probe that compared `gx` before and after every call the translator applied): 9660 recorded calls a frame, of which 2615 changed nothing and 1918 changed only a version counter (`GXSetArray`, `GXSetVtxAttrFmt` with the values in force); plus 5855 calls from the 245 material state lists, 5519 of them with the values in force. Causes: the record's dedup table forgot everything at each state-list call, `GXClearVtxDesc` forgot the vertex-description slots, and overlapping channel ids (COLOR0A0 against COLOR0, ALPHA0) made `GXSetChanCtrl` count as changed. Cost, measured by applying each call twice (release, translator ms): +7.9 ms for the second application of the ring calls, +2.6 ms for the list calls.
+
+What it does:
+- A state list of NOPs and port opcodes only, whose bytes equal a copy kept on the game thread (compared in full on every call; a change decodes again), is not recorded as a list call: its calls go through the dedup table in order, and only those that change the translator's state are recorded. Its calls do not go into the game thread's shadow (they did not before; on the GameCube a display list does not change the SDK's register copy). Lists with vertex-description calls, primitives or anything else take the old way.
+- `GXClearVtxDesc`/`GXSetVtxDesc` are applied to a copy on the game thread and recorded, before the next non-state command or fence, as the `GXSetVtxDesc` calls that take the translator's description to the new one. With the translator's description unknown (start, after a forget) the calls go as made from their last `GXClearVtxDesc`.
+- `GXSetChanCtrl` and the channel colours are compared by channel and colour component.
+- `gxrecfuse=2`: on the translator, after each fused list the list is applied again and must change nothing in `gx`; after each vertex-description flush `gx.vtx_desc` must equal the shadow's. `gxrecfuse frame N:` line with `gxthreadstats`.
+
+Per frame after (gor_01): 245 lists fused, 5856 of their calls checked, 336 recorded; 2420 vertex-description calls, 80 recorded; calls applied on the translator 3102 (was 15 515), none of them without effect.
+
+Results, release, windows 722-841, best of 2, ms (A = port3ds `5bbfc235` `gxsdl=1`, B = this build `gxsdl=1 gxrecfuse=1`), C3:
+
+| Scene | frame A -> B | game busy A -> B | translator A -> B | render |
+|---|---|---|---|---|
+| gor_01 | 33.4 -> 33.5 | 23.4 -> 24.6 | 21.4 -> **14.8** | 7.4 |
+| pik_00 | 33.4 -> 33.6 | 29.9 -> 31.8 | 31.5 -> **17.1** | 7.5 |
+| usu_00 | 33.5 -> 33.5 | 21.5 -> 21.1 | 16.3 -> **14.5** | 6.4 |
+| battle | 32.5 -> 32.5 | 15.5 -> 16.2 (fence 7.8 -> 6.3) | 19.2 -> **15.4** | 3.7 |
+
+C1 (no translator): unchanged within 0.2 ms (gor_01 34.1/31.5, pik_00 50.2/39.6, usu_00 35.0/29.9, battle 26.8/20.7 frame/busy in both).
+
+The work moved in part to the game thread: the list's calls are compared there (about 0.4 us each in Azahar, as the setters' own compare on the translator was); without the list part the game thread is unchanged. pik_00's game thread (31.8) is close to the 33.4 ms vblank step. Frames stay vblank-bound at 2 frames.
+
+Identity: `determ` shots 780-785 byte-identical in gor_01, pik_00, usu_00, battle in C1 and C3 (48 of 48); `gw_diff` 1600-frame padscript gor_01 160 records equal in C1 and C3; `gxrecfuse=2` 0 mismatches in gor_01, pik_00, battle (to frame 841) and a `map_sweep.py --area tik` (22 maps, 828 K checks) and `--area jin` (12 maps, 451 K checks), every map ok. Stereo (`stereo_ab.py`, `stereoforce=1`, C3, shots 780-781): gor_01 6 of 6 identical (EFB, left, right); pik_00 left and right 4 of 4 identical, the EFB files missing in A (780) and in both runs (781), a capture gap of the run, not compared.
+
+**Default stays 0.** Not done: console run, the other six scenes, `vsh_accept.py`.

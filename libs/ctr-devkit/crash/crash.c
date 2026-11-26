@@ -191,10 +191,26 @@ void crash_thread_register(const char* name, unsigned size) {
     r->handle = 0;
     svcDuplicateHandle(&r->handle, CUR_THREAD_HANDLE);
     r->lo = (top + 512 - size) & ~3u;
+    MemInfo mi;
+    PageInfo pi;
+    if (R_FAILED(svcQueryMemory(&mi, &pi, top))) {
+        r->lo = 0;
+        r->hi = 0; /* no known bounds: left out of the dumps, nothing written */
+        return;
+    }
+    u32 base = (mi.base_addr + 3u) & ~3u;
+    u32 mem_end = mi.base_addr + mi.size;
+    if (r->lo < base) {
+        r->lo = base; /* never below the mapped region */
+    }
+    u32 hi = top + 512;
+    if (hi > mem_end) {
+        hi = mem_end;
+    }
     for (volatile u32* p = (volatile u32*)r->lo; (u32)p < top - 256; p++) {
         *p = STACK_PATTERN;
     }
-    r->hi = top + 512; /* the real top is a little above this frame; set last: it marks the slot valid */
+    r->hi = hi; /* the real top is a little above this frame; set last: it marks the slot valid */
 }
 
 static const StackRec* stack_of(u32 sp) {

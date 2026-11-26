@@ -1013,6 +1013,7 @@ Rows for the switch table:
 | `gxcache=0/1/2` | The decoded display-list cache (`port3ds/game/gx/gx_dlcache.c`): 1 (default) draws repeated lists from their decoded vertices after checking every input; 0 decodes every list every time (A/B); 2 decodes every hit again and compares it with the cache (`mismatched` in the `gxstats` cache line, and one warning line) |
 | `gxcachekb=N` | The cache's memory budget in KB (default 8192) |
 | `gxtrust=0/1` | 1 (default): a cache entry whose list and array spans lie in covered memory of the content-stable registry (`port3ds/plat/memstable.c`), unchanged since its last full check, is a hit without hashing; 0 hashes every hit (A/B). `gxcache=2` still hashes and decodes trusted hits and counts what trust skipped (`stale`, `mismatched`) |
+| `gxsdl=0/1` | 0 (default): 1 keeps the decoded leading state calls (NOPs and port opcodes) of each display list that misses the display-list cache, with a copy of their bytes, so a repeated list skips the LEB128 decode (`gx_sdl_run`, gx_state.c); the bytes are compared on every call, so changed memory decodes again. Same calls in the same order. Log `gxsdl:` every 262144 lookups. |
 | `gxscribble=N` | Test of the verify mode, not for play: at game frame N, xors one byte of an array a cached (preferably trusted) list reads, with no flush and no report. With `gxcache=2` it must show as `mismatched` and `stale`; with trust on it keeps drawing the old vertices, and the `gxstats scribble` line counts those hits (the contract) |
 | `gxstatever=0/1` | 0 (default): every state version change rebuilds the PICA state. 1: matrix and projection loads do not bump the version, and a version change whose state (texgen to pixel engine without the lights, viewport) equals the last build skips `build_state` (`builds N (unchanged M)` in `gxstats`). Fewer rebuilds, but no time saved yet (see Results) |
 | `gxdirty=0/1/2` | 0 (default): every state version change rebuilds the whole PICA state. 1: setters return early when their values are in force, others mark their class dirty; only dirty classes are rebuilt and sent (`plat_gpu_set_state_dirty`), and the uniform block by parts. 2: as 1, plus a full rebuild compared at every switch-off rebuild (`gxdirty verify` warnings, `gxdirty frame N:` line with `gxthreadstats`) |
@@ -1049,3 +1050,16 @@ All 192 comparisons identical; no differing pixels. The water shots have low con
 
 - **Stereo** (`stereo_ab.py`, `stereoforce=1`, gor_01 780-783, default against S8): 12 of 12 identical (EFB, left and right screens); left differs from right in every shot, so the shots are stereo.
 - **GPU hang recovery** (S8 + `gpuhangtest=700 gpuhangrecover=1`, gor_01): log shows the fence-wait hang at record 752 (frame 699), dump written, `reset #1 done`, citro3d state marked dirty, one 2306 ms slow frame at 703, then the run reached frame 900. Shots 720-725 after recovery have content (91.4% off the commonest colour, about 36 150 colours).
+
+## Pre-decoded state lists (`gxsdl`, 2026-11-26)
+
+`gx_call_list` on a cache miss ran `run_commands`, which decodes the LEB128 words of every port opcode of the list and calls `gx_apply_call`. With `gxsdl=1` the leading NOPs and port opcodes are decoded once and kept with a copy of the bytes (keyed by address and size, compared with `memcmp` on each call: a changed list decodes again, 0 stale in gor_01 to frame 1600); the rest of the list runs through `run_commands` from the first other opcode. Release build, windows 722-841, best of 2, ms per frame (translator / game-thread busy), `gxsdl=0` to `gxsdl=1`:
+
+| Scene | C1 busy | C3 translator |
+|---|---|---|
+| gor_01 | 33.9 to 32.0 | 23.7 to 22.1 |
+| pik_00 | 42.4 to 40.0 | 34.7 to 32.6 |
+| usu_00 | 30.4 to 30.3 | 16.8 to 16.8 |
+| battle | 22.1 to 21.0 | 20.5 to 18.9 |
+
+Identity: `determ` shots 780-785 byte-identical in all four scenes in C1 and C3; `gw_diff` (gor_01, 1600 frames padscript) 160 records equal in C1 and C3.

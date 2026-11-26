@@ -423,6 +423,9 @@ void gx_tev_compile_memo(PlatGpuState* st);
 
 /* ---- dl encoding helpers (gx_state.c) ---- */
 void gx_dl_replay_port_op(const u8** p, const u8* end);
+/* switch gxsdl (gx_state.c): applies the pre-decoded state calls at the start of a list, returns the bytes covered */
+extern int gx_opt_sdl;
+u32 gx_sdl_run(const u8* list, u32 nbytes);
 
 /* gx_pipe.c: a GXBegin not yet closed by GXEnd (see gx_end_open_primitive). The
  * primitive is the game thread's: a translating thread never closes it. */

@@ -1114,13 +1114,149 @@ static void pre_frame_end(void) {
 
 static u32 handle_for_impl(int map, u16* out_w, u16* out_h);
 
+/* ---- texfast (switch, default 0): direct-mapped lookup cache in front of the copy scan and the hash-table probe.
+ * Key: the texture object's identity (image, size, format, CI flag, TLUT data and format). Value: the s_cache (or
+ * s_copies) slot the full lookup found. A hit is used only if the slot still holds exactly that key, the copy
+ * registry is unchanged (s_copy_gen) and the entry needs no hash this frame (checked this frame, or trusted by
+ * the current memstable generation and texverify off); otherwise the full lookup runs. texfast=2: both lookups
+ * run, the results are compared and mismatches counted (must be 0). */
+#define FAST_SIZE 256
+typedef struct {
+    const void* image;
+    const void* tlut;
+    u32 tlut_fmt;
+    u16 w, h;
+    u8 fmt, is_ci;
+    u8 kind; /* 0 empty, 1 s_cache, 2 s_copies */
+    u16 idx;
+    u32 cgen;
+} FastEntry;
+static FastEntry s_fast[FAST_SIZE];
+static int s_fast_mode;
+static u32 s_copy_gen = 1;
+static int s_found_kind, s_found_idx; /* set by handle_for_impl for the fast cache to record */
+static unsigned s_fast_mism, s_fast_hits, s_fast_total;
+
+static inline FastEntry* fast_slot(const GxTexObj* t, const GxTlutObj* tl) {
+    u32 k = ((u32)t->image >> 5) ^ ((u32)t->width * 31u) ^ ((u32)t->height * 17u) ^ ((u32)t->format * 7u) ^
+            (tl ? ((u32)tl->data >> 5) : 0);
+    return &s_fast[(k ^ (k >> 8)) % FAST_SIZE];
+}
+
+/* Returns 1 and fills the result on a safe hit. */
+static int fast_try(const GxTexObj* t, u16* out_w, u16* out_h, u32* handle, u32* levels, int* copy) {
+    const GxTlutObj* tl = t->is_ci ? &gx.tlut[t->tlut_name < 20 ? t->tlut_name : 0] : NULL;
+    FastEntry* f = fast_slot(t, tl);
+    if (f->kind == 0 || f->cgen != s_copy_gen || f->image != t->image || f->w != t->width || f->h != t->height ||
+        f->fmt != t->format || f->is_ci != t->is_ci || f->tlut != (tl ? tl->data : NULL) ||
+        f->tlut_fmt != (tl ? tl->format : 0)) {
+        return 0;
+    }
+    if (f->kind == 2) {
+        CopyEntry* c = &s_copies[f->idx];
+        if (c->addr != t->image || c->handle == 0) {
+            return 0;
+        }
+        if (s_fast_mode == 1) {
+            c->last_frame = s_frame;
+        }
+        *out_w = c->w;
+        *out_h = c->h;
+        *handle = c->handle;
+        *levels = 0;
+        *copy = 1;
+        return 1;
+    }
+    CacheEntry* e = &s_cache[f->idx];
+    if (e->handle == 0 || e->image != t->image || e->w != t->width || e->h != t->height || e->fmt != t->format ||
+        e->is_ci != t->is_ci || e->tlut != f->tlut || e->tlut_fmt != f->tlut_fmt) {
+        return 0;
+    }
+    if (e->checked_frame != s_frame) {
+        if (s_verify || !s_trust_on || e->trust_gen == 0 || e->trust_gen != plat_memstable_gen()) {
+            return 0;
+        }
+        if (s_fast_mode == 1) {
+            e->checked_frame = s_frame;
+            s_st_trusted++;
+        }
+    }
+    if (s_fast_mode == 1) {
+        e->last_frame = s_frame;
+    }
+    *out_w = e->tex_w;
+    *out_h = e->tex_h;
+    *handle = e->handle;
+    *levels = s_x[f->idx].levels;
+    *copy = 0;
+    return 1;
+}
+
+static void fast_record(const GxTexObj* t) {
+    if (s_found_kind == 0) {
+        return;
+    }
+    const GxTlutObj* tl = t->is_ci ? &gx.tlut[t->tlut_name < 20 ? t->tlut_name : 0] : NULL;
+    FastEntry* f = fast_slot(t, tl);
+    f->image = t->image;
+    f->tlut = tl ? tl->data : NULL;
+    f->tlut_fmt = tl ? tl->format : 0;
+    f->w = t->width;
+    f->h = t->height;
+    f->fmt = t->format;
+    f->is_ci = t->is_ci;
+    f->kind = (u8)s_found_kind;
+    f->idx = (u16)s_found_idx;
+    f->cgen = s_copy_gen;
+}
+
 /* Converts (or finds) the texture of texture map slot `map`. */
-u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
-    if (!s_tf_on) {
+static u32 handle_for_full(int map, u16* out_w, u16* out_h) {
+    if (!s_fast_mode) {
         return handle_for_impl(map, out_w, out_h);
     }
-    u64 t0 = plat_ticks();
+    const GxTexObj* t = &gx.tex_map[map];
+    int valid = map >= 0 && map < GX_MAX_TEXMAP && gx.tex_map_valid[map] && t->image != NULL && t->width != 0 &&
+                t->height != 0 && t->width <= 1024 && t->height <= 1024;
+    u16 fw = 0, fh = 0;
+    u32 fh_, fl = 0;
+    int fc = 0, hit = valid && fast_try(t, &fw, &fh, &fh_, &fl, &fc);
+    if (hit && s_fast_mode == 1) {
+        s_last.copy = fc;
+        s_last.levels = (u8)fl;
+        s_st_lookups += s_stats_every != 0;
+        s_fast_hits++;
+        *out_w = fw;
+        *out_h = fh;
+        return fh_;
+    }
+    s_found_kind = 0;
     u32 r = handle_for_impl(map, out_w, out_h);
+    if (valid) {
+        s_fast_total++;
+        if (hit) {
+            s_fast_hits++;
+            if (r != fh_ || *out_w != fw || *out_h != fh || s_last.levels != fl || s_last.copy != fc) {
+                s_fast_mism++;
+                if (s_fast_mism <= 8) {
+                    PLOG_W("texfast: MISMATCH map %d image %p fast h%u %ux%u l%u c%d, full h%u %ux%u l%u c%d", map,
+                           t->image, (unsigned)fh_, (unsigned)fw, (unsigned)fh, (unsigned)fl, fc, (unsigned)r,
+                           (unsigned)*out_w, (unsigned)*out_h, (unsigned)s_last.levels, (int)s_last.copy);
+                }
+            }
+        } else if (s_found_kind && r != 0) {
+            fast_record(t);
+        }
+    }
+    return r;
+}
+
+u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
+    if (!s_tf_on) {
+        return handle_for_full(map, out_w, out_h);
+    }
+    u64 t0 = plat_ticks();
+    u32 r = handle_for_full(map, out_w, out_h);
     s_tf.t_total += plat_ticks() - t0;
     s_tf.lookups++;
     return r;
@@ -1142,6 +1278,8 @@ static u32 handle_for_impl(int map, u16* out_w, u16* out_h) {
             *out_h = s_copies[i].h;
             s_copies[i].last_frame = s_frame;
             s_last.copy = 1;
+            s_found_kind = 2;
+            s_found_idx = i;
             return s_copies[i].handle;
         }
     }
@@ -1201,6 +1339,8 @@ static u32 handle_for_impl(int map, u16* out_w, u16* out_h) {
             *out_w = e->tex_w;
             *out_h = e->tex_h;
             s_last.levels = s_x[e - s_cache].levels;
+            s_found_kind = 1;
+            s_found_idx = (int)(e - s_cache);
             return e->handle;
         }
     }
@@ -1311,6 +1451,8 @@ static u32 handle_for_impl(int map, u16* out_w, u16* out_h) {
     }
     *out_w = e->tex_w;
     *out_h = e->tex_h;
+    s_found_kind = 1;
+    s_found_idx = (int)(e - s_cache);
     return e->handle;
 }
 
@@ -1465,6 +1607,10 @@ void gx_tex_frame_end(void) {
                (unsigned)(s_tf.t_dec / tpu), (unsigned)(s_tf.t_create / tpu), (unsigned)(s_tf.t_hash / tpu));
         memset(&s_tf, 0, sizeof(s_tf));
     }
+    if (s_fast_mode && s_frame % 300 == 0) {
+        PLOG_I("texfast: mode %d frame %u: lookups %u fast-hits %u mismatches %u", s_fast_mode, (unsigned)s_frame,
+               s_fast_total, s_fast_hits, s_fast_mism);
+    }
     pre_frame_end();
     s_frame++;
     for (int i = 0; i < CACHE_SIZE; i++) {
@@ -1480,6 +1626,7 @@ void gx_tex_frame_end(void) {
             plat_gpu_tex_free(s_copies[i].handle);
             s_copies[i].handle = 0;
             s_copies[i].addr = NULL;
+            s_copy_gen++;
         }
     }
     s_uploads = 0;
@@ -1505,6 +1652,9 @@ u32 gx_tex_copy_target(const void* addr, u16 w, u16 h, u8 fmt) {
         slot = &s_copies[0];
     }
     u16 pw = (u16)pow2(w), ph = (u16)pow2(h);
+    if (slot->addr != addr || slot->handle == 0) {
+        s_copy_gen++; /* a new address joins the registry: the fast cache's non-copy hits may be shadowed */
+    }
     if (slot->handle != 0 && (slot->addr != addr || slot->w != pw || slot->h != ph || slot->fmt != fmt)) {
         plat_gpu_tex_free(slot->handle);
         slot->handle = 0;
@@ -1524,6 +1674,7 @@ u32 gx_tex_copy_target(const void* addr, u16 w, u16 h, u8 fmt) {
                     plat_gpu_tex_free(o->handle);
                     o->handle = 0;
                     o->addr = NULL;
+                    s_copy_gen++;
                 }
             }
             PLOG_I("GX: copy target memory low: evicted %u stale copy slots, %u KB", (unsigned)n, (unsigned)kb);
@@ -1548,6 +1699,7 @@ void gx_tex_init(void) {
     s_verify = plat_switch_int("texverify", 0) != 0;
     s_copy_evict = plat_switch_int("copyevict", 1) != 0;
     s_tf_on = plat_switch_int("texframe", 0) != 0;
+    s_fast_mode = plat_switch_int("texfast", 0);
     s_async = plat_switch_int("texasync", 0) != 0 && s_trust_on;
     mode_init();
     s_x = calloc(CACHE_SIZE, sizeof(CacheExtra));

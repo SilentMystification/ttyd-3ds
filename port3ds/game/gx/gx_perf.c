@@ -19,6 +19,7 @@
 #include "plat/plat.h"
 
 GxPerf gx_perf;
+#undef gx_perf_on
 int gx_perf_on = -1;
 u64 gx_perf_drawdone_end;
 

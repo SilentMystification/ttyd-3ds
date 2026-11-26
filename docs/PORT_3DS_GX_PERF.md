@@ -1337,3 +1337,94 @@ Build the release CIA first: `TTYD_CCACHE=1 tools/port3ds/build.sh` (QTM placeme
 5. Stereo: `stereo_ab.py --a "C1 stereoforce=1" --b "G stereoforce=1" --scenes gor_01 --count 3`: EFB, left, right identical.
 6. GPU hang: `run_azahar.py --build build/3ds/game/ttyd.cia --frames 840 --switches "map=gor_01 story=30 G gpuhangtest=700 gpuhangrecover=1 shots=1 shotfrom=820 shotmax=1"`: `reset #1 done`, the shot has content.
 7. Timings per thread: `gx_perf_ab.py --repeat 2 --scenes gor_01,pik_00,usu_00,battle --a "C1" --b "G"` and `--a "C3" --b "G"` (`--allow-hw-faults` if the boot fault lines of the release build appear, as in the Stage 5 runs). Report frame, core-0 busy, render; with `gxthreadstats=60` the `gxone frame` lines give blocks built/sent per frame, texture re-encodes and resets (a reset per frame or many re-encodes means a table or the texture epoch is too small/too busy).
+
+## Heap margin (2026-11-27)
+
+Release builds, Azahar (3dsx: heap 83 100 KiB, linear heap 32 768 KiB), runs to frame 841. C0 = no switches (the defaults); C1 and C3 as above. Base = port3ds `156cf717`.
+
+### Method
+
+- **The peak without a walk** (committed, `plat/boot.c`): newlib's malloc takes all memory with `sbrk` and gives the top back once more than 128 KiB is free there, so its arena (`__malloc_current_mallinfo.arena`) is in-use memory plus holes plus at most 128 KiB, and newlib keeps the arena's high-water mark (`__malloc_max_sbrked_mem`). `plat_heap_peak_take()` reads that mark and starts a new period (two loads, no walk). heap size - peak arena is the least room any allocation had in the period: a lower bound of the free margin (holes not counted).
+- **Log lines** (committed, cheap): `heap until map change from <map>: peak arena ... at least N KiB free` at every map change (the period holds that map's load and play), with switch `heaplog=N` also every N frames; `heap: <table> N KiB (arena ...)` for each GX table (`gx_big_alloc`); the texasync line (`texstats`) shows `results at most N KB`.
+- **Census** (local build, not committed): `--wrap` of malloc/calloc/realloc/memalign/free logged every allocation of 32 KiB or more with its caller (symbolised from the ELF) and whether it was freed; `--wrap` of linearAlloc/linearMemAlign/linearFree counted linear memory in use and its peak; counters for the gxcache blobs and the gxsdl/gxrecfuse pools.
+
+### Where the heap goes (pik_00 C3, KiB; base -> this build)
+
+| Owner | Base | Now | Notes |
+|---|---|---|---|
+| Game arena (`OSInit`, the GameCube's main memory) | 20 178 | 20 178 | game |
+| ARAM (`ARInit`) | 16 384 | 16 384 | game (`arammgr` sizes its heap from `ARGetSize`) |
+| gxcache blobs (`gxcachekb` budget 8 MB, heap + linear streams) | 6 535 | 6 535 | 10 100 entries; the budget is full in every scene |
+| Placed memory (`memplace`: gx ring 4 096 with `gxthread` only, gx record 1 024, log 320, gx state 128, audio 128) | 5 696 | 5 696 | C0/C1: 1 600 |
+| texasync results (transient, at map loads) | about 6 700 at the peak | at most 6 144 | see below |
+| Texture conversion scratch `s_rgba` + `s_tiled` | 8 192 | 4 096 | `s_tiled` only with `texfilter=mip` |
+| REL data snapshots | 4 073 | 1 579 | all configs |
+| gxcache tables (entries 1 920, indices 192, capture 864, gxbatch 360) | 3 336 | 3 336 | |
+| GXInit tables (pipe 2 x 512, pipe vertices 432, transformed vertices 224, vsh records/groups/touches 720) | 2 400 | 2 400 | |
+| texasync decode scratch | 2 560 | 1 280 | |
+| gxsdl pool (`gxsdl=1`) | 2 048 + 96 | 64 + 96 | in use under 32 KiB in all four scenes |
+| gxrecfuse pool (`gxrecfuse=1`) | 1 024 + 40 | 512 + 40 | in use at most 421 KiB (gor_01) |
+| Threads, devupdate, direct-write buffers, TEV memo, DVD, small | about 1 900 | about 1 900 | |
+
+### Changes (no switch; same pictures)
+
+1. **Textures tiled straight into their own memory** (`gx_tex.c` `upload_rgba8`, `plat_gpu_tex_create_begin/_end` in `plat/gpu.c`): a texture without a mip chain was tiled into the 4 MB `s_tiled` scratch and then copied by `plat_gpu_tex_create`; it is now tiled into the PICA texture's linear memory and flushed (the bytes the copy wrote; one copy less). `s_tiled` comes with the mip scratch (`texfilter=mip`). -4 096 KiB in every config.
+2. **texasync** (`gx_tex.c`): one decode scratch, not two. One runner decodes at a time (`pre_kick` joins the last runner before it submits another); a decode at the bind uses the binding thread's own scratch (`s_rgba`, which the bind's own conversion uses right after). -1 280 KiB. The result cap (`PRE_BYTES_MAX`, 6 MB) counted 2 bytes a texel; an RGBA8 result takes 4, so the results could take up to twice the cap. A queued texture now counts 4 bytes a texel and, once decoded, its real size: the cap holds for the heap the results take. Counts (C3, frame 841, base -> now): taken pik_00 111 -> 93, gor_01 175 -> 164, battle 84 -> 64 of 1 300-2 000 queued; most queued results are never bound (unused 1 300-1 900). A texture not taken converts at its bind, as before (load frames only).
+3. **gxsdl and gxrecfuse pools grow** (`gx_state.c`, `gx_rec.c`): they start at 64 KiB and 128 KiB and double, up to the old sizes (2 MB, 1 MB); the words, positions and reset points are those of the old full-size pools, so the decoded calls are the same. A growth that fails runs the list as before (gxsdl: the byte decoder; gxrecfuse: the old way).
+4. **REL data snapshots packed** (`os_link.c`, `plat/lz.c`, a small LZ77 codec): at boot each REL's data is packed, unpacked again and compared (a fault stops the boot there), and kept packed; `OSLink` unpacks over the REL's data (the bytes the copy wrote). Boot cost 400 ms in Azahar (pack and check of 4 MB); an `OSLink` unpacks one REL (100-500 KiB).
+5. `REQUIRED_HEAP`/`REQUIRED_LINEAR` comments (`plat/boot.c`) carry the measured peaks; `REQUIRED_LINEAR` 24 -> 28 MB (libctru gives 32 MB).
+
+### Results: least free heap to frame 841 (KiB, base -> this build)
+
+| Scene | C0 | C1 | C3 |
+|---|---|---|---|
+| pik_00 | 17 220 -> **23 804** | 7 500 -> **16 488** | **384 -> 11 352** |
+| gor_01 | 17 440 -> 24 020 | 7 872 -> 16 264 | 2 000 -> 13 964 |
+| usu_00 | 18 972 -> 25 556 | 9 548 -> 18 508 | 2 264 -> 14 016 |
+| battle | 17 580 -> 24 168 | 8 652 -> 18 320 | 2 668 -> 15 344 |
+
+The low point is the first map load in every run (frames 630-720): gxcache's tables and blobs, the texasync results and the map's own data come in at once. `map_sweep.py --area tik` and `--area jin` (C3 + `gxrecfuse=2`, this build): least free 8 292 KiB (tik_05) and 11 404 KiB (jin_07) per map. Peak arena now: C0 57.5-59.3 MB, C1 64.6-66.8 MB, C3 67.8-71.7 MB.
+
+**Linear memory is not a donor:** in use at most 22.0-26.6 MB with C0 and 28.2 MB with C3 (pik_00; `linearSpaceFree` sampled every 30 frames down to 4.5 MB), of 32 MB. Moving heap tables there, or shrinking the linear heap, would eat the texture memory (a texture that does not fit is drawn without it).
+
+Not done (measured, left): the gx ring (4 MB, C3) carries 50-55 K words (215 KiB) a frame, but one command may take half the ring (`put_slow`), so a smaller ring needs the largest command known first; the gxcache entry table (16 384 entries, 10 100 live) and the 8 MB blob budget are cache sizes (a smaller one changes hit rates); ARAM and the game arena are the game's.
+
+Steady-state time does not change (windows 722-841, best of 2, game busy / translator ms, base -> this build): C3 gor_01 22.5/13.3 -> 22.5/13.3, pik_00 28.1/15.5 -> 28.2/15.5, usu_00 18.9/13.5 -> 18.9/13.3, battle 15.9/13.7 -> 15.7/14.1 (content changes); C1 busy gor_01 31.8 -> 31.7, pik_00 39.5 -> 39.6, usu_00 28.3 -> 28.3, battle 19.5 -> 19.6. The GX setters' sizes in the ELF are unchanged (inlining check).
+
+Identity (this build against base): `determ` shots 780-785 byte-identical in gor_01, pik_00, usu_00, battle in C0, C1 and C3 (72 of 72); `gw_diff` 1600-frame padscript gor_01: 160 records equal in C1 and C3; `gxrecfuse=2 gxreclgroup=1` (C3): `map_sweep.py --area tik` 22 of 22 maps ok, 0 mismatches of 247 K + 565 K checks, `--area jin` 12 of 12 ok, 0 of 124 K + 334 K (the sweeps load a REL at each area change, so they also run the packed snapshots); stereo (`stereoforce=1`, C3, gor_01 780-782): 9 of 9 identical (EFB, left, right).
+
+## GXEnd on the game thread: the plan lookup (2026-11-27)
+
+Ablation in C3 (local build, not committed; switch `gxphx=mask` returns early at one point, `phxvbl=2` holds every frame at 2 retraces; pik_00, windows 722-841, best of 2, game busy ms):
+
+| Left out | busy | cost |
+|---|---|---|
+| nothing | 28.5 | |
+| the whole direct record (`gx_rec_prim_direct` at entry) | 23.6 | **4.9** |
+| everything after `gx_imm_rec_ok` | 24.0 | check 0.4 |
+| the conversion (`gx_imm_convert`) | 24.4 | **4.1** |
+| the conversion's vertices (convert with n = 0) | 26.8 | vertices 1.7; **per primitive 2.4** |
+| indexed float steps / the fill / indexed colours | 27.7 / 27.8 / 28.1 | 0.8 / 0.7 / 0.4 |
+| the conversion twice | 32.7 | +4.2 |
+
+So the vertex loop is not the largest part any more: 2.4 ms of the 4.1 is per primitive (1 155 a frame, 2 us each), and most of that is the plan lookup, which compared the plan's vertex description and formats (104 bytes) with the state's, for up to four plans, at every primitive.
+
+Changes (no switch; same plans, same bytes):
+1. **`gx_imm_convert`** (`gx_pipe.c`): every write to the vertex description or formats of `gx` or `gx_game` bumps that state's `gx_vdesc_ver` (`VDESC_TOUCH`, and the two whole-state copies). A plan keeps the version at which it last matched; while the state's version is the same, the plan matches without the compare. A changed version takes the old compare (and a match sets the version).
+2. **`gx_imm_rec_ok`**: the vertex-description part of the check is kept per `gx_vdesc_ver[1]` (game thread only).
+
+Results, release, windows 722-841, best of 2 (A = the heap-margin build above, B = this build), game busy ms:
+
+| Scene | C1 busy A -> B | C3 game busy A -> B | C3 translator |
+|---|---|---|---|
+| gor_01 | 31.7 -> 31.7 | 22.5 -> 22.4 | 13.3 -> 13.3 |
+| pik_00 | 39.5 -> **38.7** | 28.2 -> **27.2** | 15.5 -> 15.5 |
+| usu_00 | 28.3 -> 28.1 | 19.0 -> 18.7 | 13.4 -> 13.4 |
+| battle | 19.5 -> 19.3 | 15.6 -> 15.7 | 13.4 -> 14.2 (content changes) |
+
+Change 1 gave all of it (pik_00 C3 28.2 -> 27.3); change 2 is within the spread (27.3 -> 27.2). The rest of the per-primitive time (about 1.4 ms in pik_00) is the step set-up, `put` and the TLS read of `gx_tls_translator`. No GX setter changed size; `gx_imm_convert` +560 bytes.
+
+Identity (B against port3ds `156cf717`): `determ` shots 780-785 byte-identical in gor_01, pik_00, usu_00, battle in C1 and C3; `gw_diff` 1600-frame padscript gor_01 equal in C1 and C3; `gximmdirect=2` to frame 841, 0 mismatches, 0 vertex-state differences, 0 skipped: C3 pik_00 265 343 checks, gor_01 91 923, battle 156 629-196 043, C1 pik_00 264 228. With the heap margin above, `gximmdirect=2` now runs pik_00 C3 to frame 841 with 11.4 MB free at the map load (it ran out of heap before).
+Stereo (`stereoforce=1`, C3, gor_01 780-782, against `156cf717`): 9 of 9 identical (EFB, left, right).
+
+Not done: the translator task (pik_00 15.5 ms). Phases now (C3, `gxphase=1`, frame 841, calls / us per frame): primitives `GXR_PRIMD` 1 154 / 6 375, batch open 358 / 2 620, state build 1 606 / 2 616, list calls 5 885 / 1 519, slow path 102 / 982, state calls 2 843 / 799, batch close 358 / 295, other 603. Batch open and the primitives share `ensure_state`, `vsh_state`, the route and the uniforms (section "Translator, immediate primitives and batch open" above); no cut was tried in this round.

@@ -11,6 +11,8 @@
 #include "plat/plat.h"
 #include "plat/pmu.h"
 
+#ifndef TTYD_RETAIL /* the TTYD_RETAIL build has no PMU hooks (include/plat/pmu.h) */
+
 typedef struct {
     volatile u32 seq; /* odd while the owner updates total */
     CtrdkPerfSample total;
@@ -200,3 +202,5 @@ void plat_pmu_frame(void) {
         set_pair(s_pair + 1);
     }
 }
+
+#endif /* TTYD_RETAIL */

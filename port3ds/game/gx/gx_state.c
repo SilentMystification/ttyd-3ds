@@ -1202,7 +1202,8 @@ void gx_dl_replay_port_op(const u8** pp, const u8* end) {
  * does not scan again. A mismatch decodes the list afresh. Same calls, same order, same words: no picture change. */
 int gx_opt_sdl;
 #define SDL_SLOTS 4096
-#define SDL_POOL_WORDS (512 * 1024)
+#define SDL_POOL_WORDS (512 * 1024) /* the most the pool holds before it starts again */
+#define SDL_POOL_FIRST (16 * 1024)  /* what it starts with: it grows to what the lists need (gor_01: under 8 K words) */
 typedef struct {
     const u8* list;
     u32 nbytes;
@@ -1213,7 +1214,7 @@ typedef struct {
 } SdlEntry;
 static SdlEntry* s_sdl;
 static u32* s_sdl_pool;
-static u32 s_sdl_used;
+static u32 s_sdl_used, s_sdl_cap; /* words in use, words allocated (up to SDL_POOL_WORDS) */
 static u32 s_sdl_hit, s_sdl_miss, s_sdl_stale, s_sdl_reset, s_sdl_lookups;
 
 static inline int sdl_is_port(u32 op) { return op >= GXDL_OP_PORT && op != GXDL_OP_RAW_PRIM; }
@@ -1283,7 +1284,8 @@ u32 gx_sdl_run(const u8* list, u32 nbytes, u16* hint) {
     }
     if (s_sdl == NULL) {
         s_sdl = gx_big_alloc("gxsdl entries", sizeof(SdlEntry) * SDL_SLOTS);
-        s_sdl_pool = gx_big_alloc("gxsdl calls", sizeof(u32) * SDL_POOL_WORDS);
+        s_sdl_pool = gx_big_alloc("gxsdl calls", sizeof(u32) * SDL_POOL_FIRST);
+        s_sdl_cap = SDL_POOL_FIRST;
     }
     if ((++s_sdl_lookups & 0x3FFFF) == 0) {
         PLOG_I("gxsdl: %lu lookups: %lu hit, %lu decoded, %lu stale, %lu resets", (unsigned long)s_sdl_lookups,
@@ -1351,8 +1353,28 @@ u32 gx_sdl_run(const u8* list, u32 nbytes, u16* hint) {
     }
     /* the calls are scanned into the pool after room for the copy, whose size is not known yet: scan first */
     u32 room = SDL_POOL_WORDS - s_sdl_used;
-    u32* scratch = s_sdl_pool + s_sdl_used + ((nbytes + 3) >> 2); /* the copy of the whole list would fit before */
     u32 cap = room - ((nbytes + 3) >> 2);
+    /* the scan writes at most `nbytes` words (a call of 1 + n words takes at least 3 + n bytes): the pool grows to
+     * hold them; the words and the reset points are those of a pool of SDL_POOL_WORDS */
+    u32 need = s_sdl_used + ((nbytes + 3) >> 2) + (cap < nbytes ? cap : nbytes);
+    if (need > s_sdl_cap) {
+        u32 ncap = s_sdl_cap * 2;
+        while (ncap < need) {
+            ncap *= 2;
+        }
+        ncap = ncap < SDL_POOL_WORDS ? ncap : SDL_POOL_WORDS;
+        u32* np = realloc(s_sdl_pool, ncap * sizeof(u32));
+        if (np == NULL) {
+            e->list = NULL; /* no room: this call runs the list's bytes as before */
+            if (hint != NULL) {
+                *hint = 0;
+            }
+            return 0;
+        }
+        s_sdl_pool = np;
+        s_sdl_cap = ncap;
+    }
+    u32* scratch = s_sdl_pool + s_sdl_used + ((nbytes + 3) >> 2); /* the copy of the whole list would fit before */
     u32 nw = 0;
     u32 pbytes = gx_sdl_scan(list, nbytes, scratch, cap, &nw);
     e->list = list;

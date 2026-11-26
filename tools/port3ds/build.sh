@@ -5,6 +5,7 @@
 #   tools/port3ds/build.sh . -DREGION=PAL     (the game for one region; US by default)
 #   tools/port3ds/build.sh --dev              (fast dev build: LTO and GX -O3 off)
 #   tools/port3ds/build.sh --no-cia           (3dsx only: skips makerom, 70-100 s; TTYD_NO_CIA=1 does the same)
+#   tools/port3ds/build.sh --retail           (retail build: logging and instrumentation compiled out, -DTTYD_RETAIL=ON)
 #
 # project is a directory under port3ds/ ("probe" builds port3ds/probe; the
 # default "." builds the game in port3ds/), or a path from the repository
@@ -14,6 +15,8 @@
 # --dev (or TTYD_DEV=1) configures a separate build directory (build/3ds/<name>-dev)
 # with -DTTYD_LTO=OFF -DTTYD_GX_O3=OFF, so the release directory keeps its LTO build.
 # Explicit -D options after it still win. Dev builds do not archive the ELF.
+# --retail (or TTYD_RETAIL=1) adds -DTTYD_RETAIL=ON in its own directory (build/3ds/<name>-retail, or
+# <name>-dev-retail with --dev); docs/PORT_3DS_TESTING.md, "Retail mode".
 #
 # Compile jobs go through ccache by default (TTYD_CCACHE=0 turns it off; cache shared in
 # ${XDG_CACHE_HOME:-~/.cache}/ttyd3ds/ccache). The ELF of a ccache build is byte-identical to a no-ccache
@@ -41,8 +44,14 @@ dev=0
 if [ "${TTYD_DEV:-0}" = 1 ]; then dev=1; fi
 nocia=0
 if [ "${TTYD_NO_CIA:-0}" = 1 ]; then nocia=1; fi
-while [ "${1:-}" = --dev ] || [ "${1:-}" = --no-cia ]; do
-    if [ "$1" = --dev ]; then dev=1; else nocia=1; fi
+retail=0
+if [ "${TTYD_RETAIL:-0}" = 1 ]; then retail=1; fi
+while [ "${1:-}" = --dev ] || [ "${1:-}" = --no-cia ] || [ "${1:-}" = --retail ]; do
+    case "$1" in
+        --dev) dev=1 ;;
+        --no-cia) nocia=1 ;;
+        --retail) retail=1 ;;
+    esac
     shift
 done
 project=${1:-.}
@@ -71,6 +80,12 @@ if [ "$dev" = 1 ]; then
     out="$out-dev"
     # Dev defaults come first, so explicit -D options after them override.
     set -- -DTTYD_LTO=OFF -DTTYD_GX_O3=OFF "$@"
+fi
+if [ "$retail" = 1 ]; then
+    out="$out-retail"
+    set -- -DTTYD_RETAIL=ON "$@"
+else
+    set -- -DTTYD_RETAIL=OFF "$@"
 fi
 
 # --no-cia (or TTYD_NO_CIA=1): build the 3dsx only. makerom compresses the code and takes 70-100 s, about
@@ -218,6 +233,7 @@ if [ "$dev" = 0 ] && [ "${name%%_*}" = game ] && [ -f "$repo/$out/ttyd.elf" ] &&
     id=$(sed -n 's/.*PORT3DS_BUILD_STRING "#\([0-9]*\) \([0-9a-f]*\).*/\1_\2/p' "$repo/$out/generated/port3ds_build.h")
     # JP and PAL builds of the same commit get a region suffix (<build>_jp.elf).
     [ "$name" != game ] && id="${id}_${name#game_}"
+    [ "$retail" = 1 ] && id="${id}_retail"
     if [ -n "$id" ]; then
         mkdir -p "$repo/build/elfs"
         cp "$repo/$out/ttyd.elf" "$repo/build/elfs/$id.elf"

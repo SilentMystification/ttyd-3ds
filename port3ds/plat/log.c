@@ -47,7 +47,9 @@ typedef struct {
 static Slot* s_slots; /* placed with PLAT_PLACE_LOG once memplace is up */
 static u32 s_head, s_tail, s_seq;
 static u32 s_dropped, s_drop_total;
-static int s_level = PLAT_LOG_INFO;
+static int s_level = PLAT_LOG_INFO; /* the chosen level (loglevel=, the Select menu) */
+static int s_max = PLAT_LOG_INFO;   /* the level in force: -1 in retail mode, nothing is formatted */
+static int s_off;                   /* booted in retail mode without retailkeep=log: no file, queue or writer */
 static int s_log_fd = -1;
 static int s_writer_on, s_writer_stop, s_crashed, s_dirty;
 static Thread s_writer;
@@ -68,7 +70,13 @@ void plat_console_lock(void) { LightLock_Lock(&s_console_lock); }
 int plat_console_trylock(void) { return LightLock_TryLock(&s_console_lock) == 0; }
 void plat_console_unlock(void) { LightLock_Unlock(&s_console_lock); }
 int plat_log_level(void) { return s_level; }
-void plat_log_set_level(int level) { s_level = level < 0 ? 0 : level > 3 ? 3 : level; }
+void plat_log_set_level(int level) {
+    s_level = level < 0 ? 0 : level > 3 ? 3 : level;
+    if (!plat_retail()) {
+        s_max = s_level;
+    }
+}
+void plat_log_retail_now(int on) { s_max = on || s_off ? -1 : s_level; }
 static void (*s_line_hook)(const char* line);
 void plat_log_set_line_hook(void (*fn)(const char* line)) { s_line_hook = fn; }
 unsigned plat_log_dropped(void) { return s_drop_total + s_dropped; }
@@ -134,6 +142,9 @@ static void console_write(const char* body, size_t n) {
 void plat_log_console_ready(void) {
     plat_console_lock();
     s_console_up = 1;
+    if (s_off) {
+        s_console_pending_n = 0; /* retail: no log on the screen, not even the boot lines */
+    }
     if (s_console_pending_n) {
         plat_console_log(s_console_pending, s_console_pending_n);
         s_console_pending_n = 0;
@@ -151,6 +162,16 @@ void plat_log_init(int live) {
      * start moves latest.log to previous.log (replacing it) and starts a new one. */
     unlink("previous.log");
     rename("latest.log", "previous.log");
+    if (plat_retail() && (PLAT_RETAIL_BUILD || !plat_retail_keeps("log"))) {
+        /* Retail mode: no latest.log, no live log, no writer thread; plat_vlog returns at its first compare.
+         * The lines kept before this point (the options file read) are dropped. retailkeep=log keeps the log
+         * (identity checks with gwdump); the TTYD_RETAIL build has no log to keep. */
+        s_off = 1;
+        s_max = -1;
+        s_ring_pos = s_ring_len = 0;
+        s_console_pending_n = 0;
+        return;
+    }
     s_log_fd = open("latest.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
 
     char lv[16];
@@ -161,6 +182,7 @@ void plat_log_init(int live) {
                 : lv[0] == 'd' ? PLAT_LOG_DEBUG
                 : PLAT_LOG_INFO;
     }
+    s_max = s_level;
 
     if (!live) {
         return;
@@ -218,7 +240,7 @@ static void direct_write(const char* line, int n, const char* body, size_t bl) {
 }
 
 void plat_vlog(int level, const char* fmt, va_list ap) {
-    if (level > s_level) {
+    if (PLAT_RETAIL_BUILD || level > s_max) {
         return;
     }
     int on = __atomic_load_n(&s_writer_on, __ATOMIC_ACQUIRE);
@@ -388,8 +410,8 @@ static void writer_main(void* arg) {
 }
 
 void plat_log_start_writer(void) {
-    if (s_writer != NULL) {
-        return;
+    if (s_writer != NULL || s_off) {
+        return; /* retail mode: no queue memory, no thread */
     }
     s_slots = plat_place_alloc(PLAT_PLACE_LOG, sizeof(Slot) * SLOTS, 64);
     if (s_slots == NULL) {
@@ -466,6 +488,26 @@ void plat_log_crash_close(void) {
         close(s_log_fd);
         s_log_fd = -1;
     }
+}
+
+void plat_log_always(const char* fmt, ...) {
+    char line[SLOT_TEXT];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof(line) - 1, fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        return;
+    }
+    if (n > (int)sizeof(line) - 2) {
+        n = (int)sizeof(line) - 2;
+    }
+    if (!PLAT_RETAIL_BUILD && s_max >= PLAT_LOG_INFO && s_log_fd >= 0) {
+        plat_log(PLAT_LOG_INFO, "%s", line);
+        return;
+    }
+    line[n++] = '\n';
+    plat_sd_append("latest.log", line, (size_t)n);
 }
 
 /* The crash library's line sink (plat/crash.c). The library itself writes

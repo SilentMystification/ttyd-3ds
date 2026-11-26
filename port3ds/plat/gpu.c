@@ -151,7 +151,9 @@ void plat_gpudump_init(void);
 void plat_gpudump_record(u32 seq, u32 frame, const void* verts, u32 vert_bytes, const void* idx, u32 idx_bytes);
 void plat_gpudump_hang(u32 seq, u32 done, u32 game_frame, const char* phase_line);
 int plat_gpudump_test_hang(u32 frame);
-int plat_gpudump_draw_filter(u32 frame, u32 seq, u32 idx); /* switches gpudrawcut / gpudrawskip: 0 drops the draw */
+extern int plat_gpudump_filter_on;
+#define plat_gpudump_draw_filter(f, s, i) (!plat_gpudump_filter_on || plat_gpudump_draw_filter_fn(f, s, i))
+int plat_gpudump_draw_filter_fn(u32 frame, u32 seq, u32 idx); /* switches gpudrawcut / gpudrawskip: 0 drops the draw */
 int plat_gpudump_test_hang_from(u32 frame);
 static void gpudump_note(void);
 
@@ -1117,6 +1119,29 @@ uint32_t plat_gpu_tex_create(uint32_t width, uint32_t height, uint32_t fmt, cons
     C3D_TexFlush(&t->tex);
     return h;
 }
+
+/* plat_gpu_tex_create in two steps, for a caller that writes level 0 itself: the texture's memory (*size bytes;
+ * its contents undefined, as after plat_gpu_tex_create past `bytes`), then plat_gpu_tex_create_end once written. */
+uint32_t plat_gpu_tex_create_begin(uint32_t width, uint32_t height, uint32_t fmt, void** data, uint32_t* size) {
+    GMARK("tex_create");
+    if (width < 8 || height < 8 || width > 1024 || height > 1024) {
+        return 0;
+    }
+    u32 h = tex_alloc_slot();
+    if (h == 0) {
+        return 0;
+    }
+    TexSlot* t = &s_tex[h];
+    if (!C3D_TexInit(&t->tex, (u16)width, (u16)height, (GPU_TEXCOLOR)fmt)) {
+        t->live = 0;
+        return 0;
+    }
+    *data = t->tex.data;
+    *size = t->tex.size;
+    return h;
+}
+
+void plat_gpu_tex_create_end(uint32_t handle) { C3D_TexFlush(&s_tex[handle].tex); }
 
 uint32_t plat_gpu_tex_max_levels(uint32_t width, uint32_t height) {
     if (width < 8 || height < 8 || width > 1024 || height > 1024) {
@@ -4754,7 +4779,8 @@ static void capture_efb(const Record* r, const char* path) {
     if (s_depth_shots) {
         capture_depth(buf, path);
     }
-    PLOG_I("shot %s: this record %lu bytes %lu vertices; %lu draws, %lu vertices, %lu states, %lu record bytes, %lu segments", path,
+    /* through plat_log_always: in retail mode too, the line tells a runner the shot is queued (determ_ab.py) */
+    plat_log_always("shot %s: this record %lu bytes %lu vertices; %lu draws, %lu vertices, %lu states, %lu record bytes, %lu segments", path,
            (unsigned long)r->used, (unsigned long)r->nverts,
            (unsigned long)s_stats.draws, (unsigned long)s_stats.vertices, (unsigned long)s_stats.state_changes,
            (unsigned long)s_stats.record_bytes, (unsigned long)s_stats.segments);

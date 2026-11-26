@@ -142,6 +142,7 @@ static const char* const k_getter_name[GXG_COUNT] = {"vtxdesc", "vat", "proj", "
 /* ---- Phase timers (switch gxphase=N, gx_internal.h) ----
  * The counters are the translator's (one writer); the game thread logs them as differences from the last log
  * (32-bit, so no torn reads; tick sums wrap after 16 s, far above a log interval). */
+#undef gx_ph_on
 int gx_ph_on;
 static u32 gx_ph_sp;
 static struct {
@@ -1120,7 +1121,8 @@ void gx_rec_call(u32 id, const u32* w, u32 n) {
 
 /* gxrecfuse: decoded state lists, keyed by address and size, with a copy of their bytes (game thread) */
 #define FL_SLOTS 2048
-#define FL_POOL_WORDS (256 * 1024)
+#define FL_POOL_WORDS (256 * 1024) /* the most the pool holds before it starts again */
+#define FL_POOL_FIRST (32 * 1024)  /* what it starts with: it grows to what the lists need (gor_01: 108 K words) */
 typedef struct {
     const void* list;
     u32 nbytes;
@@ -1130,7 +1132,7 @@ typedef struct {
 } FlEntry;
 static FlEntry* s_fl;
 static u32* s_fl_pool;
-static u32 s_fl_used;
+static u32 s_fl_used, s_fl_cap; /* words in use, words allocated (up to FL_POOL_WORDS) */
 
 /* The entry for this list with its bytes as they are now, or NULL. hint (gxlobj): the slot the list had last
  * time, taken when it still holds the list (a key is in at most one slot of its probe window, so the slot is
@@ -1199,6 +1201,20 @@ static inline __attribute__((always_inline)) FlEntry* fl_get_body(const void* li
         s_fl_used = 0;
         e = &s_fl[h & (FL_SLOTS - 1)];
     }
+    if (s_fl_used + cw + nbytes + 64 > s_fl_cap) {
+        /* grows to what this list writes; the words and the reset points are those of a pool of FL_POOL_WORDS */
+        u32 ncap = s_fl_cap * 2;
+        while (ncap < s_fl_used + cw + nbytes + 64) {
+            ncap *= 2;
+        }
+        ncap = ncap < FL_POOL_WORDS ? ncap : FL_POOL_WORDS;
+        u32* np = realloc(s_fl_pool, ncap * sizeof(u32));
+        if (np == NULL) {
+            return NULL; /* no room: the list takes the old way */
+        }
+        s_fl_pool = np;
+        s_fl_cap = ncap;
+    }
     u32* calls = s_fl_pool + s_fl_used + cw;
     u32 nw = 0;
     u32 good = gx_sdl_scan((const u8*)list, nbytes, calls, nbytes + 64, &nw);
@@ -1260,7 +1276,8 @@ static inline __attribute__((always_inline)) int fuse_list(const void* list, u32
     }
     if (s_fl == NULL) {
         s_fl = calloc(FL_SLOTS, sizeof(FlEntry));
-        s_fl_pool = malloc(sizeof(u32) * FL_POOL_WORDS);
+        s_fl_pool = malloc(sizeof(u32) * FL_POOL_FIRST);
+        s_fl_cap = FL_POOL_FIRST;
         if (s_fl == NULL || s_fl_pool == NULL) {
             free(s_fl);
             free(s_fl_pool);
@@ -1271,6 +1288,9 @@ static inline __attribute__((always_inline)) int fuse_list(const void* list, u32
         }
     }
     const FlEntry* e = fl_get(list, nbytes, hint);
+    if (e == NULL) {
+        return 0;
+    }
     if (e->words == 0) {
         s_fst.list_other++;
         s_fst.other_why[e->why & 3]++;

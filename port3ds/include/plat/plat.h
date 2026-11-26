@@ -24,11 +24,34 @@ extern "C" {
 enum { PLAT_LOG_ERROR = 0, PLAT_LOG_WARN = 1, PLAT_LOG_INFO = 2, PLAT_LOG_DEBUG = 3 };
 void plat_log(int level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 void plat_vlog(int level, const char* fmt, va_list ap);
-#define PLOG_E(...) plat_log(PLAT_LOG_ERROR, __VA_ARGS__)
-#define PLOG_W(...) plat_log(PLAT_LOG_WARN, __VA_ARGS__)
-#define PLOG_I(...) plat_log(PLAT_LOG_INFO, __VA_ARGS__)
-#define PLOG_D(...) plat_log(PLAT_LOG_DEBUG, __VA_ARGS__)
+/* The TTYD_RETAIL build (CMake -DTTYD_RETAIL=ON, build.sh --retail) compiles every PLOG_* out: the arguments are
+ * type-checked and never evaluated. Other builds call plat_log, which returns at its first compare when the
+ * level is off or retail mode is on. */
+#ifdef TTYD_RETAIL
+#define PLAT_RETAIL_BUILD 1
+#define PLAT_LOG_AT(level, ...) (0 ? plat_log(level, __VA_ARGS__) : (void)0)
+#else
+#define PLAT_RETAIL_BUILD 0
+#define PLAT_LOG_AT(level, ...) plat_log(level, __VA_ARGS__)
+#endif
+#define PLOG_E(...) PLAT_LOG_AT(PLAT_LOG_ERROR, __VA_ARGS__)
+#define PLOG_W(...) PLAT_LOG_AT(PLAT_LOG_WARN, __VA_ARGS__)
+#define PLOG_I(...) PLAT_LOG_AT(PLAT_LOG_INFO, __VA_ARGS__)
+#define PLOG_D(...) PLAT_LOG_AT(PLAT_LOG_DEBUG, __VA_ARGS__)
 int plat_log_level(void);
+/* One line that is written in every mode and build (the bench switch): through the log when it runs, else
+ * appended to latest.log by the SD worker. */
+void plat_log_always(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+
+/* ---- Retail mode (plat/switches.c; docs/PORT_3DS_TESTING.md "Retail mode") ----
+ * All debugging off: no log, no stats, counters, verify modes, dumps or test hooks, no update server or
+ * supervisor heartbeat (unless the devupdate switch or setting asks), the HUD at most fps. Decided at boot:
+ * switch retail=1/retail=0, else the Select menu setting, else off; always on in a TTYD_RETAIL build. */
+extern int plat_retail_on;
+static inline int plat_retail(void) { return PLAT_RETAIL_BUILD || plat_retail_on; }
+int plat_retail_booted(void);  /* the mode this launch booted in */
+int plat_retail_setting(void); /* the stored setting: what the next launch does */
+void plat_retail_set(int on);  /* the Select menu; see switches.c for what changes at once */
 
 /* ---- Debug switches (plat/switches.c) ----
  * Words from sdmc:/3ds/ttyd/debug3ds.txt and the 3dslink arguments, for

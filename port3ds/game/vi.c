@@ -526,7 +526,7 @@ static void frame_hooks(void) {
     }
     fastboot_frame(s_sweep_state > 1 || s_warp_switch_done);
     /* log output only; mallinfo walks the whole heap (452 us in Azahar, gor_01), a hitch on the game thread: not in release builds */
-    if (s_frames % 1800 == 0 && plat_is_dev_build()) {
+    if (s_frames % 1800 == 0 && !plat_retail() && plat_is_dev_build()) {
         plat_memory_log("now");
     }
     PlatHudStats st;
@@ -566,6 +566,51 @@ static void frame_hooks(void) {
     }
     if (s_heartbeat > 0 && s_frames % (u32)s_heartbeat == 0) {
         PLOG_I("hb %u", (unsigned)s_frames);
+    }
+}
+
+/* Switch bench=F,T (read in every mode and build, retail too): from game frame F to T, one tick pair per frame,
+ * then one line "bench F-T: frame <us> busy <us> render <us> frames N vblanks V" (per game frame: wall time, the
+ * game thread's time outside VIWaitForRetrace's wait, the render thread's last record), written even with the
+ * log off (plat_log_always). The measurement for retail runs, where gxthreadstats and the other counters are off. */
+static int s_bench_from = -1, s_bench_to;
+static u64 s_bench_t0, s_bench_busy, s_bench_render;
+static u32 s_bench_vb0, s_bench_n;
+
+static void bench_frame(u64 now) {
+    if (s_bench_from < 0) {
+        char v[24];
+        s_bench_from = 0;
+        if (plat_switch_value("bench", v, sizeof(v))) {
+            char* end;
+            long a = strtol(v, &end, 0);
+            long b = *end == ',' ? strtol(end + 1, NULL, 0) : 0;
+            if (a > 0 && b > a) {
+                s_bench_from = (int)a;
+                s_bench_to = (int)b;
+            }
+        }
+    }
+    if (s_bench_from == 0 || s_frames < (u32)s_bench_from || s_frames > (u32)s_bench_to) {
+        return;
+    }
+    if (s_frames == (u32)s_bench_from) {
+        s_bench_t0 = now;
+        s_bench_vb0 = plat_vblank_count();
+        return;
+    }
+    PlatGpuStats g;
+    plat_gpu_stats(&g);
+    s_bench_busy += s_frame_start ? now - s_frame_start - (plat_paused_ticks() - s_pause_base) : 0;
+    s_bench_render += g.render_us;
+    s_bench_n++;
+    if (s_frames == (u32)s_bench_to) {
+        u32 n = s_bench_n ? s_bench_n : 1;
+        u64 us = PLAT_TICKS_PER_SEC / 1000000u;
+        plat_log_always("bench %d-%d: frame %lu busy %lu render %lu frames %lu vblanks %lu", s_bench_from, s_bench_to,
+                        (unsigned long)((now - s_bench_t0) / us / n), (unsigned long)(s_bench_busy / us / n),
+                        (unsigned long)(s_bench_render / n), (unsigned long)n,
+                        (unsigned long)(plat_vblank_count() - s_bench_vb0));
     }
 }
 
@@ -655,6 +700,7 @@ static void dvd_settle(void) {
 
 void VIWaitForRetrace(void) {
     frame_hooks();
+    bench_frame(plat_ticks());
     wait_retrace();
     if (tst_determ()) {
         determ_retrace();

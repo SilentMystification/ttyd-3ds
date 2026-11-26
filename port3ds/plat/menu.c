@@ -332,7 +332,7 @@ int plat_take_warp_request(char* map, uint32_t map_size, char* bero, uint32_t be
 
 static const char* const s_level_names[] = {"error", "warn", "info", "debug"};
 
-static int rows_in_tab(void) { return s_tab == TAB_GENERAL ? 5 : 4; }
+static int rows_in_tab(void) { return 5; }
 
 /* Debug row 3: the ctr-devkit supervisor (development only; docs/CTR_DEVKIT_PLAN.md "Supervisor"). A installs
  * (or updates) it from the CIA put in the queue folder with `devupdate.py files put`, or removes it. */
@@ -402,6 +402,13 @@ static void draw_menu(void) {
                          !st.installed ? "off" : st.running ? "running" : "installed", s_sv_msg);
                 break;
             }
+            case 4: {
+                /* Retail mode (all debugging off): logging stops at once; the rest at the next launch */
+                int want = plat_retail_setting();
+                snprintf(line, sizeof(line), "%s Retail mode: %s%s", cur, want ? "on" : "off",
+                         PLAT_RETAIL_BUILD ? " (retail build)" : want != plat_retail_booted() ? " (after relaunch)" : "");
+                break;
+            }
             default: break;
             }
         }
@@ -469,6 +476,7 @@ static void activate(int dir) {
                 supervisor_toggle();
             }
             break;
+        case 4: plat_retail_set(!plat_retail_setting()); break;
         default: break;
         }
     }
@@ -594,6 +602,9 @@ void plat_hud_frame(const PlatHudStats* stats) {
         return;
     }
     int mode = opt_get_hud_mode();
+    if (mode == PLAT_OPT_HUD_FULL && plat_retail()) {
+        mode = PLAT_OPT_HUD_FPS; /* retail mode: no heap walk (mallinfo), VRAM probe or timing rows */
+    }
     char l[HUD_ROWS][48] = {"", "", "", "", ""};
     if (mode != PLAT_OPT_HUD_OFF) {
         snprintf(l[0], sizeof(l[0]), "%4.1f fps  %4.1f ms", (double)s_fps, s_fps > 0.0f ? 1000.0 / (double)s_fps : 0.0);

@@ -196,9 +196,11 @@ static void write_mem(const char* stem, const ListNote* n) {
  * of the draw triggers in the dumped list (tools/port3ds/gpu_cmd_diff.py prints the same number). The filter applies
  * to the records of game frame gpudump=N when gpudump is given, else to every record; gpudrawrec=S narrows it to the
  * record with submit number S. cut: only draws 0..K-1 are made. skip: draws A..B (inclusive) are not made. */
-static int s_cut = -1, s_skip_a = -1, s_skip_b = -1, s_rec_only = -1, s_filter;
+static int s_cut = -1, s_skip_a = -1, s_skip_b = -1, s_rec_only = -1;
+int plat_gpudump_filter_on; /* gpu.c tests it inline before each draw: no call while no filter is set */
+#define s_filter plat_gpudump_filter_on
 
-int plat_gpudump_draw_filter(u32 frame, u32 seq, u32 idx) {
+int plat_gpudump_draw_filter_fn(u32 frame, u32 seq, u32 idx) {
     if (!s_filter || (s_target_frame >= 0 && (int)frame != s_target_frame) || (s_rec_only >= 0 && (int)seq != s_rec_only)) {
         return 1;
     }

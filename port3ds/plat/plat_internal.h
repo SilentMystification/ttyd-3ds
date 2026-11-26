@@ -22,6 +22,8 @@ void plat_log_console_ready(void);   /* the bottom console exists: show the line
 void plat_log_poll(void);            /* accept a live-log client while the writer does not run */
 unsigned plat_log_dropped(void);
 void plat_log_set_level(int level);
+int plat_retail_keeps(const char* name); /* retail mode: retailkeep= names it (or it is always read) */
+void plat_log_retail_now(int on);    /* retail mode switched in the Select menu: lines stop (1) or come back (0) at once */
 /* Every log line (no sequence number) goes to fn, one call at a time, on the thread that writes the log
  * (the core 1 writer once it runs). For the devupdate queue's `until` pattern. */
 void plat_log_set_line_hook(void (*fn)(const char* line));

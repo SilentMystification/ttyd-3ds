@@ -69,7 +69,24 @@ uint64_t plat_rtc_ms_since_1900(void) { return osGetTime(); }
 int plat_started_by_netload(void) { return s_netload; }
 const char* plat_build_string(void) { return PORT3DS_BUILD_STRING; }
 /* A development build is one whose PORT3DS_VERSION has "-dev" (cmake/BuildStamp.cmake). */
-int plat_is_dev_build(void) { return strstr(PORT3DS_VERSION, "-dev") != NULL; }
+int plat_is_dev_build(void) {
+    static int s_dev = -1; /* the string test once, not per frame */
+    if (s_dev < 0) {
+        s_dev = strstr(PORT3DS_VERSION, "-dev") != NULL;
+    }
+    return s_dev;
+}
+
+/* The ctr-devkit supervisor link (boot ensure, the heartbeat thread): development builds, and in retail mode
+ * only with the update server asked for (switch or setting devupdate). Decided once: a heartbeat that stops
+ * would look like a hang to the supervisor. */
+static int supervisor_wanted(void) {
+    static int s_on = -1;
+    if (s_on < 0) {
+        s_on = plat_is_dev_build() && (!plat_retail() || plat_devupdate_enabled());
+    }
+    return s_on;
+}
 
 static void cpu_limit_set(u32 value, const char* why) {
     Result r = APT_SetAppCpuTimeLimit(value);
@@ -192,7 +209,7 @@ int plat_frame_poll(void) {
     }
     s_last_poll = nowt;
     plat_wd_progress();
-    if (plat_is_dev_build()) {
+    if (supervisor_wanted()) {
         /* ctr-devkit supervisor (docs/CTR_DEVKIT_PLAN.md "Supervisor"): stores two words; a client
          * thread sends them once per second. A held watchdog (load, menu) is reported as loading. */
         static u32 s_sv_frame;
@@ -325,7 +342,7 @@ int main(int argc, char** argv) {
     PLOG_I("TTYD 3DS v%s build %s, switches \"%s\"", PORT3DS_VERSION, PORT3DS_BUILD_STRING, plat_switches_text());
     PLOG_I("boot: argc %d argv[0] \"%s\" 3dslink_host 0x%08lx netload %d", argc,
            (argc > 0 && argv[0] != NULL) ? argv[0] : "(null)", (unsigned long)__3dslink_host.s_addr, s_netload);
-    if (plat_is_dev_build()) {
+    if (supervisor_wanted()) {
         /* Before the GPU, audio and the disc: a build that hangs later still brings the supervisor up
          * (nothing happens when it is not installed). */
         PLOG_I("boot: supervisor ensure: %08lx", (unsigned long)ctrdk_supervisor_ensure());

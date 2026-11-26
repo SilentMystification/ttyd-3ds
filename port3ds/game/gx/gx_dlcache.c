@@ -1183,8 +1183,10 @@ static void bat_verify_life(const Batch* b) {
 static __attribute__((noinline)) void bat_chunk_build(Batch* b) {
     PlatGpuChunkDraw cd[BAT_MAX_DRAWS];
     const BatDraw* d = b_draws(b);
+    /* D2: ix_count counts the copied draws' indices only; the members' last idx_end is the batch's total */
+    const u32 total = b_members(b)[b->n - 1].idx_end;
     for (u32 i = 0; i < b->ndraws; i++) {
-        u32 end = i + 1 < b->ndraws ? d[i + 1].idx_first : b->ix_count;
+        u32 end = i + 1 < b->ndraws ? d[i + 1].idx_first : total;
         /* D2: in-place draws use the stream's own index segment, the others their copy in the batch's pool range */
         const u16* src = d[i].lin != NULL ? d[i].lin : s_ix + b->ix_first + d[i].pool_off;
         cd[i] = (PlatGpuChunkDraw){d[i].stream, d[i].layout, d[i].scales, src, end - d[i].idx_first};

@@ -464,7 +464,15 @@ enum { CALL_MISS = 0, CALL_HIT, CALL_HIT_FORMABLE, CALL_BATCH };
 static DlcEntry* s_form_e;
 u16* gx_sdl_hint;
 
+static inline __attribute__((always_inline)) int call_slow_body(const GxState* st, const void* list, u32 nbytes);
 static int call_slow(const GxState* st, const void* list, u32 nbytes) {
+    int p_ = gx_ph_nested(1, GPH_T_SLOW);
+    int r_ = call_slow_body(st, list, nbytes);
+    gx_ph_leave(1, p_);
+    return r_;
+}
+
+static inline __attribute__((always_inline)) int call_slow_body(const GxState* st, const void* list, u32 nbytes) {
     u64 t0 = GX_PERF_T();
     gx_sdl_hint = NULL;
     u32 frame = gx_perf_frame_no();
@@ -997,7 +1005,15 @@ static int bat_same_state(Batch* b) {
 }
 
 /* Opens batch b for a call of its first list: 1 when every check passed (the call is consumed). */
+static inline __attribute__((always_inline)) int bat_open_body(Batch* b);
 static int bat_open(Batch* b) {
+    int p_ = gx_ph_nested(1, GPH_T_BOPEN);
+    int r_ = bat_open_body(b);
+    gx_ph_leave(1, p_);
+    return r_;
+}
+
+static inline __attribute__((always_inline)) int bat_open_body(Batch* b) {
     BatMember* m = b_members(b);
     u32 fail;
     if (b->dlc_epoch != s_dlc_epoch) {
@@ -1088,7 +1104,14 @@ static void bat_verify_life(const Batch* b) {
 }
 
 /* Records the draws of the open batch's members called so far. */
+static inline __attribute__((always_inline)) void bat_close_body(void);
 static void bat_close(void) {
+    int p_ = gx_ph_nested(1, GPH_T_BCLOSE);
+    bat_close_body();
+    gx_ph_leave(1, p_);
+}
+
+static inline __attribute__((always_inline)) void bat_close_body(void) {
     Batch* b = s_act;
     if (s_bat_on == 2) {
         bat_verify_life(b);
@@ -1127,7 +1150,14 @@ static void bat_close(void) {
 }
 
 /* Makes the collected run a batch. */
+static inline __attribute__((always_inline)) void form_end_body(void);
 static void form_end(void) {
+    int p_ = gx_ph_nested(1, GPH_T_FORM);
+    form_end_body();
+    gx_ph_leave(1, p_);
+}
+
+static inline __attribute__((always_inline)) void form_end_body(void) {
     u32 n = s_form.n;
     s_form.n = 0;
     if (n == 0) {
@@ -1299,7 +1329,14 @@ static void form_end(void) {
 }
 
 /* A trusted list the shader just drew (s_form_e, gx_vsh_last): the next member of the run, or the first of a new one. */
+static inline __attribute__((always_inline)) void form_add_body(const void* list, u32 nbytes);
 static void form_add(const void* list, u32 nbytes) {
+    int p_ = gx_ph_nested(1, GPH_T_FORM);
+    form_add_body(list, nbytes);
+    gx_ph_leave(1, p_);
+}
+
+static inline __attribute__((always_inline)) void form_add_body(const void* list, u32 nbytes) {
     DlcEntry* e = s_form_e;
     u32 tg = plat_memstable_gen();
     if (s_form.n != 0 && (s_form.ver != gx.version || s_form.xfv != gx_xf_version || s_form.vtxv != gx_vtx_version ||

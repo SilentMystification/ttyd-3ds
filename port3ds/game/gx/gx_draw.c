@@ -1652,7 +1652,14 @@ static void perf_draw(u8 prim, const GxVertex* v, u32 n) {
 /* The PICA state for the GX state in force (rebuilt when the version changed). */
 static u32 s_vsh_dirty = GXD_ALL; /* gxdirty: the classes the uniform block has not seen yet */
 
+static inline __attribute__((always_inline)) void ensure_state_body(void);
 static void ensure_state(void) {
+    int p_ = gx_ph_nested(1, GPH_T_STATE);
+    ensure_state_body();
+    gx_ph_leave(1, p_);
+}
+
+static inline __attribute__((always_inline)) void ensure_state_body(void) {
     if (gx_opt_dirty) {
         u32 d = gx_dirty & GXD_STATE;
         if (gx_opt_dirty == 2 && (gx.version != s_built_version || d != 0)) {

@@ -328,6 +328,35 @@ After a map warp the console's GPU can hang: the log repeats `gpu: fence wait fo
 - **Azahar test.** `gpuhangtest=N` stops the render thread before the record of game frame N: the fence timeout dump, the watchdog (`wdog=N`), the crash screen and recovery all run (`crashshot=shots/crash` saves the screens).
 - **Crash path.** Nothing in the crash report, the screen or recovery waits for the GPU or the render thread: no `C3D_Fini`, no `gfxExit`, no `gspWaitForVBlank`. A relaunch while the GPU is hung (`devupdate.py restart`) skips the GPU wait of the pause and of `gpu_shutdown`; if the game thread is stuck behind the GPU the updater's 8 s deadline ends the process through `crash_recovery_exit` (EXIT hooks, then the chainload).
 
+### GPU hang survival
+
+- **Reset in the game (`plat/gpu.c`, `libs/ctr-devkit/gpureset/`).** A fence wait (`gpu_fence_wait`) or a wait for the render thread (`wait_idle`, after 2.5 s) that times out, after `gpudump` wrote its dump, calls `gpu_reset_try`: 100 ms check that nothing moves, then `gpureset_core` (stop libctru's GX queue, `GSPGPU_ResetGpuCore`, one synthetic `gxCmdQueueInterrupt(P3D)` that ends the queue the dead GPU never finishes) and one `PLOG_W` `gpu: GPU hang (...): reset #N done`. The render thread then runs `gpu_reset_apply`: citro3d's own APT hook with `APTHOOK_ONRESTORE` marks the whole context dirty (program, shader code, buffers, targets, textures, state), and the record in hand is replayed. `C3D_Fini`/`C3D_Init` are not used: Fini destroys all render targets. At most 3 resets within 10 s; the next hang gives up for good (`no more resets`), the waits go on and the watchdog's crash path (recovery) takes over.
+- **Start-up check.** `plat_gpu_init` calls `gpureset_startup` after `gfxInitDefault`, before `C3D_Init`: a minimal command list, P3D interrupt with a 500 ms limit. Log `gpu: start-up check: the GPU answered in N us`; on a hang left by an earlier process `... resetting it`, then `start-up reset (rc ...) worked` or `did not bring the GPU back`.
+- **Azahar tests.** `gpuhangtest=N gpuhangrecover=1` makes the render thread stop before `C3D_FrameBegin` of frame N until a reset is requested (`gpuhangtimes=K`: K records in a row, K above 3 shows the give-up). Azahar has no `ResetGpuCore` (the call is logged as unimplemented and returns 0), and its GPU never really hangs, so the console-only parts are listed in the report: whether `ResetGpuCore` plus the synthetic interrupt frees a real PICA hang, and whether the start-up probe sees a hang left by the earlier process.
+- **Crash path order** (`libs/ctr-devkit/crash/crash.c`): report lines (written without a per-line `fsync`: a long report took over 5 s on the card, which is the likeliest cause of `the crash handler did not finish in time`), one sync, SCREEN hooks, recovery service, then the screen on a helper thread waited for 2.5 s. The deadline line now names the stage. A guard thread (`crash_guard_arm`) ends the process with `svcExitProcess` if a checkpoint (crash report 15 s, exit 8 s, relaunch 15 s) is not reached.
+
+### Fault matrix: waits in the crash, recovery, relaunch, exit, pause and update paths
+
+| Where | Wait | Bound before | Now |
+|---|---|---|---|
+| crash report lines | `fsync` per line to `crash.txt` and `latest.log` (SD) | none, 5 s deadline missed | one `fsync` at the checkpoints; 5 s deadline names the stage |
+| crash screen | `gfxFlushBuffers`, `gfxSwapBuffers` (GSP requests) | inside the 5 s deadline | helper thread, 2.5 s, then skipped |
+| recovery start | after the screen | behind the screen draw | before the screen |
+| crash deadline exit | `crash_exit_process` hooks (log close, `s_wd_hold` up to 1 s, `aptExit`) | none | guard thread ends the process 2.5 s later (8 s after any exit start) |
+| crash report as a whole | all of the above | 5 s only before the screen | guard 15 s |
+| watchdog deadline line | `emit_line` (SD) | none | debugger line first, then guard |
+| GPU fence wait | `LightEvent_WaitTimeout` loop | none (logged every 2 s) | reset, give up after 3 in 10 s, then watchdog |
+| `wait_idle` (render thread) | `LightEvent_WaitTimeout` loop | none (one log) | reset after 2.5 s (not while suspended or parked) |
+| `gpu_shutdown` | `C3D_Fini` queue wait | 3 s then abort | unchanged |
+| pause screen grey | `gspWaitForVBlank` x2 | none | 40 ms sleep |
+| `plat_thread_join` | `threadJoin(U64_MAX)` | none | 10 s then the thread is left |
+| updater pause (`plat_devupdate_frame`) | `LightEvent_Wait(&s_resume)` | none | 240 s, then the game goes on |
+| updater `on_begin` | wait for a frame boundary | 2 s | unchanged |
+| updater `on_ready` | wait for a save | 10 s | unchanged |
+| relaunch | server thread deadline 8 s (library) | needs the server thread | plus guard 15 s from `on_relaunch` |
+| recovery relaunch/exit | `crash_recovery_exit` then `aptExit` | 4.5 s watchdog | plus guard 8 s |
+| GSP transfers in citro3d (`C3D_SyncDisplayTransfer`, `gspWaitForPPF`, shots) | no limit in libctru | none | not bounded; a hang there is a hung GPU: the watchdog and the crash path end it |
+
 ## Running on the New 3DS
 
 Setup on the console (once):

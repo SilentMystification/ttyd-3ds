@@ -2198,8 +2198,8 @@ static int gpu_reset_try(const char* why) {
     if (__atomic_load_n(&s_gpu_done_seq, __ATOMIC_ACQUIRE) != done0 || s_rseq != rseq0 || s_rphase != ph0) {
         return 0;
     }
-    if (!gpureset_allow(&s_reset_lim, 3, 10000)) {
-        static int given_up;
+    static int given_up; /* once given up, for good: the watchdog's crash path is the way out */
+    if (given_up || !gpureset_allow(&s_reset_lim, 3, 10000)) {
         if (!given_up) {
             given_up = 1;
             PLOG_E("gpu: the GPU hung again after %lu resets within 10 s (%s): no more resets, the watchdog takes over",

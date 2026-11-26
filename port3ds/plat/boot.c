@@ -55,10 +55,15 @@ int plat_is_new3ds(void) { return s_new3ds; }
 
 /* Heap and linear memory in use, for the requirements checked at boot. */
 void plat_memory_log(const char* when) {
+    /* mallinfo walks every free chunk of the heap and linearSpaceFree every block of the linear heap: the time
+     * is in the line, because the game thread calls this every 1800 frames (vi.c) */
+    u64 t0 = svcGetSystemTick();
     struct mallinfo mi = mallinfo();
-    PLOG_I("memory %s: heap %lu KiB in use of %lu (arena %lu), linear %lu KiB free of %lu", when,
+    u32 lin_free = linearSpaceFree();
+    u32 us = (u32)((svcGetSystemTick() - t0) / (PLAT_TICKS_PER_SEC / 1000000u));
+    PLOG_I("memory %s: heap %lu KiB in use of %lu (arena %lu), linear %lu KiB free of %lu (measured in %lu us)", when,
            (unsigned long)(mi.uordblks >> 10), (unsigned long)(__ctru_heap_size >> 10), (unsigned long)(mi.arena >> 10),
-           (unsigned long)(linearSpaceFree() >> 10), (unsigned long)(__ctru_linear_heap_size >> 10));
+           (unsigned long)(lin_free >> 10), (unsigned long)(__ctru_linear_heap_size >> 10), (unsigned long)us);
 }
 uint64_t plat_rtc_ms_since_1900(void) { return osGetTime(); }
 int plat_started_by_netload(void) { return s_netload; }

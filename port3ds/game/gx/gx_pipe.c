@@ -506,32 +506,86 @@ int gx_imm_convert(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, u8* out
     }
     FLUSH_SKIP();
 #undef FLUSH_SKIP
+    /* No libc call per vertex: the template is copied a word at a time (four words a turn, so the compiler does
+     * not turn the loop back into a memcpy call), and each component is stored where it is converted. The bytes
+     * are those of memcpy(o, tmpl, stride) and memcpy(o + dst, c, n * 4). */
+    const u32 tw = stride / 4;
     for (u32 v = 0; v < n; v++) {
         u8* o = out + v * stride;
-        memcpy(o, tmpl, stride);
+        {
+            u32 i = 0;
+            for (; i + 4 <= tw; i += 4) {
+                u32 a0, a1, a2, a3;
+                __builtin_memcpy(&a0, tmpl + i * 4, 4);
+                __builtin_memcpy(&a1, tmpl + i * 4 + 4, 4);
+                __builtin_memcpy(&a2, tmpl + i * 4 + 8, 4);
+                __builtin_memcpy(&a3, tmpl + i * 4 + 12, 4);
+                __builtin_memcpy(o + i * 4, &a0, 4);
+                __builtin_memcpy(o + i * 4 + 4, &a1, 4);
+                __builtin_memcpy(o + i * 4 + 8, &a2, 4);
+                __builtin_memcpy(o + i * 4 + 12, &a3, 4);
+            }
+            switch (tw - i) {
+            case 3: o[i * 4 + 8] = tmpl[i * 4 + 8], o[i * 4 + 9] = tmpl[i * 4 + 9], o[i * 4 + 10] = tmpl[i * 4 + 10],
+                    o[i * 4 + 11] = tmpl[i * 4 + 11]; /* fallthrough */
+            case 2: o[i * 4 + 4] = tmpl[i * 4 + 4], o[i * 4 + 5] = tmpl[i * 4 + 5], o[i * 4 + 6] = tmpl[i * 4 + 6],
+                    o[i * 4 + 7] = tmpl[i * 4 + 7]; /* fallthrough */
+            case 1: o[i * 4] = tmpl[i * 4], o[i * 4 + 1] = tmpl[i * 4 + 1], o[i * 4 + 2] = tmpl[i * 4 + 2],
+                    o[i * 4 + 3] = tmpl[i * 4 + 3]; /* fallthrough */
+            default: break;
+            }
+            for (u32 b = tw * 4; b < stride; b++) {
+                o[b] = tmpl[b];
+            }
+        }
         for (u32 k = 0; k < ns; k++) {
             const ImmStep* p = &st[k];
             switch (p->op) {
             case IS_SKIP: sl += p->n; break;
             case IS_COMP: {
-                f32 c[3];
-                for (u32 i = 0; i < p->n; i++) {
-                    c[i] = slot_comp(sl++, p->type, p->sc);
+                u8* q = o + p->dst;
+                f32 c;
+                switch (p->n) {
+                case 3: c = slot_comp(sl, p->type, p->sc), __builtin_memcpy(q, &c, 4);
+                        c = slot_comp(sl + 1, p->type, p->sc), __builtin_memcpy(q + 4, &c, 4);
+                        c = slot_comp(sl + 2, p->type, p->sc), __builtin_memcpy(q + 8, &c, 4);
+                        break;
+                case 2: c = slot_comp(sl, p->type, p->sc), __builtin_memcpy(q, &c, 4);
+                        c = slot_comp(sl + 1, p->type, p->sc), __builtin_memcpy(q + 4, &c, 4);
+                        break;
+                default: c = slot_comp(sl, p->type, p->sc), __builtin_memcpy(q, &c, 4); break;
                 }
-                memcpy(o + p->dst, c, p->n * sizeof(f32));
+                sl += p->n;
                 break;
             }
             case IS_COMP_IDX: {
                 u32 i_ = slot_index(&sl, p->idx16);
                 const u8* a = p->base + i_ * p->stride;
-                f32 c[3];
-                for (u32 i = 0; i < p->n; i++) {
-                    c[i] = mem_comp(a, p->type, p->sc, i);
+                u8* q = o + p->dst;
+                f32 c;
+                switch (p->n) {
+                case 3: c = mem_comp(a, p->type, p->sc, 0), __builtin_memcpy(q, &c, 4);
+                        c = mem_comp(a, p->type, p->sc, 1), __builtin_memcpy(q + 4, &c, 4);
+                        c = mem_comp(a, p->type, p->sc, 2), __builtin_memcpy(q + 8, &c, 4);
+                        break;
+                case 2: c = mem_comp(a, p->type, p->sc, 0), __builtin_memcpy(q, &c, 4);
+                        c = mem_comp(a, p->type, p->sc, 1), __builtin_memcpy(q + 4, &c, 4);
+                        break;
+                default: c = mem_comp(a, p->type, p->sc, 0), __builtin_memcpy(q, &c, 4); break;
                 }
-                memcpy(o + p->dst, c, p->n * sizeof(f32));
                 break;
             }
             case IS_CLR: {
+                if (p->type == GX_RGBA8 || p->type == GX_RGBX8) {
+                    /* four byte writes: rd_color's default case and color_from_bits, without the calls */
+                    u8* q = o + p->dst;
+                    q[0] = sl[0].u8;
+                    q[1] = sl[1].u8;
+                    q[2] = sl[2].u8;
+                    q[3] = p->rgb || p->type == GX_RGBX8 ? 255 : sl[3].u8;
+                    sl += 4;
+                    break;
+                }
                 Reader r = {sl, NULL, NULL};
                 GXColor c = rd_color(&r, p->type);
                 sl = r.slot;
@@ -540,7 +594,16 @@ int gx_imm_convert(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, u8* out
             }
             default: { /* IS_CLR_IDX */
                 u32 i_ = slot_index(&sl, p->idx16);
-                put_color(o + p->dst, mem_color(p->base + i_ * p->stride, p->type), p->rgb);
+                const u8* a = p->base + i_ * p->stride;
+                if (p->type == GX_RGBA8 || p->type == GX_RGBX8 || p->type == GX_RGB8) {
+                    u8* q = o + p->dst; /* mem_color's byte order, without the calls */
+                    q[0] = a[0];
+                    q[1] = a[1];
+                    q[2] = a[2];
+                    q[3] = p->rgb || p->type != GX_RGBA8 ? 255 : a[3];
+                    break;
+                }
+                put_color(o + p->dst, mem_color(a, p->type), p->rgb);
                 break;
             }
             }

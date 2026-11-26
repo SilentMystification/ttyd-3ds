@@ -80,6 +80,7 @@ GXFifoObj* GXInit(void* base, u32 size) {
     plat_gpu_frame_begin();
     gx_draw_frame_begin();
     memcpy(&gx_game, &gx, sizeof(gx));
+    gx_vdesc_ver[1]++;
     gx_rec_excl_end();
     PLOG_I("GXInit: FIFO %p (%lu bytes)", base, (unsigned long)size);
     return &s_fifo;

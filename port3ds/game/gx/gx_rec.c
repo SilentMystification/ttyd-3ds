@@ -103,6 +103,9 @@ static s32 s_dir = -1;
 static u64 s_ts_busy; /* translator thread busy ticks (atomic adds) */
 static u64 s_ts_present; /* translating GXCopyDisp (the frame's submit) */
 static u32 s_snap_mism; /* snapshots not used: the translator's vertex state or array differed */
+/* counters of the hand-off (gxthreadstats): the translator's sleeps, the game thread's wake-up signals, and the
+ * display lists hashed to see whether they are a copy of a state list (is_state_list) */
+static u32 s_ts_sleeps, s_gs_signals, s_sl_hashes, s_sl_hash_bytes;
 
 /* verify */
 #define REP_MAX 4096
@@ -277,6 +280,7 @@ static void translator_main(void* arg) {
             store_sci(&s_sleeping, 0);
             continue;
         }
+        __atomic_fetch_add(&s_ts_sleeps, 1, __ATOMIC_RELAXED);
         plat_event_wait(s_ev_work);
         store_sci(&s_sleeping, 0);
     }
@@ -289,7 +293,12 @@ static void publish(void) {
         return;
     }
     store_sc(&s_wr_pub, s_wr);
-    if (load_sci(&s_sleeping)) {
+    /* One signal per sleep: the flag is taken (set back to 0) by the thread that signals, so the publishes that
+     * follow, until the translator runs and sleeps again, make no system call. Before, every publish signalled
+     * while the flag stood (up to 2500 signals a frame for 1 to 3 sleeps). The translator sets the flag, then
+     * looks at s_wr_pub again before it waits, and the event stays set until waited for: no wake-up is lost. */
+    if (load_sci(&s_sleeping) && __atomic_exchange_n(&s_sleeping, 0, __ATOMIC_SEQ_CST)) {
+        s_gs_signals++;
         plat_event_signal(s_ev_work);
     }
 }
@@ -369,76 +378,99 @@ static u32 s_dd_skipped, s_dd_calls;
 
 static inline u32 nbt_nrm(u32 a) { return a == GX_VA_NBT ? GX_VA_NRM : a; }
 
-/* The slot of call `id`, or -1 (always recorded). */
-static int dd_slot(u32 id, const u32* w) {
-    enum { B_VTX = 0, B_VAT = 32, B_ARR = 32 + 8 * 32, B_POSMTX = B_ARR + 32, B_NRMMTX = B_POSMTX + 10,
-           B_TEXMTX = B_NRMMTX + 10, B_TG = B_TEXMTX + 64, B_CHAN = B_TG + 8, B_LIGHT = B_CHAN + 18,
-           B_TEV = B_LIGHT + 8, B_KCOLOR = B_TEV + 16 * 9, B_SWAPT = B_KCOLOR + 4, B_TEVREG = B_SWAPT + 4,
-           B_TEXOBJ = B_TEVREG + 4, B_TLUT = B_TEXOBJ + 8, B_IND = B_TLUT + 20, B_GLOBAL = B_IND + 12 };
-    _Static_assert(B_GLOBAL + 40 <= DD_SLOTS, "dedup slots");
-    switch (id) {
-    case REC_SetVtxDesc: return w[0] < 32 ? B_VTX + (int)nbt_nrm(w[0]) : -1;
-    case REC_SetVtxAttrFmt: return w[0] < 8 && w[1] < 32 ? B_VAT + (int)(w[0] * 32 + nbt_nrm(w[1])) : -1;
-    case REC_SetArray: return w[0] < 32 ? B_ARR + (int)nbt_nrm(w[0]) : -1;
-    case REC_LoadPosMtx: return w[0] / 3 < 10 ? B_POSMTX + (int)(w[0] / 3) : -1;
-    case REC_LoadNrmMtx: return w[0] / 3 < 10 ? B_NRMMTX + (int)(w[0] / 3) : -1;
-    case REC_LoadTexMtx: return w[0] / 3 < 64 ? B_TEXMTX + (int)(w[0] / 3) : -1;
-    case REC_SetTexCoordGen2: return w[0] < 8 ? B_TG + (int)w[0] : -1;
-    case REC_SetChanCtrl: return w[0] < 6 ? B_CHAN + (int)w[0] : -1;
-    case REC_SetChanAmbColor: return w[0] < 6 ? B_CHAN + 6 + (int)w[0] : -1;
-    case REC_SetChanMatColor: return w[0] < 6 ? B_CHAN + 12 + (int)w[0] : -1;
-    case REC_LoadLightObj: {
-        u32 l = w[0] & 0xFF;
-        return l != 0 && (l & (l - 1)) == 0 ? B_LIGHT + (31 - __builtin_clz(l)) : -1;
+/* The slot of call `id`, or -1 (always recorded): a rule per call id, read from a table (one indexed load and
+ * a short switch on the rule's kind instead of a jump over every call id). */
+enum { B_VTX = 0, B_VAT = 32, B_ARR = 32 + 8 * 32, B_POSMTX = B_ARR + 32, B_NRMMTX = B_POSMTX + 10,
+       B_TEXMTX = B_NRMMTX + 10, B_TG = B_TEXMTX + 64, B_CHAN = B_TG + 8, B_LIGHT = B_CHAN + 18,
+       B_TEV = B_LIGHT + 8, B_KCOLOR = B_TEV + 16 * 9, B_SWAPT = B_KCOLOR + 4, B_TEVREG = B_SWAPT + 4,
+       B_TEXOBJ = B_TEVREG + 4, B_TLUT = B_TEXOBJ + 8, B_IND = B_TLUT + 20, B_GLOBAL = B_IND + 12 };
+_Static_assert(B_GLOBAL + 40 <= DD_SLOTS, "dedup slots");
+/* DK_IDX: base + w[0] * mul when w[0] < limit; DK_NBT: an attribute (NBT shares NRM's slot); DK_VAT: format and
+ * attribute; DK_DIV3: a matrix id (base + w[0] / 3); DK_LIGHT: one light bit; DK_ITM: an indirect matrix id;
+ * DK_FIXED: one slot. DK_NONE (0, every id not listed): ClearVtxDesc (see dd_same), copies, syncs, the bounding box. */
+enum { DK_NONE, DK_IDX, DK_NBT, DK_VAT, DK_DIV3, DK_LIGHT, DK_ITM, DK_FIXED };
+typedef struct {
+    u16 base;
+    u8 kind, limit, mul;
+} DdRule;
+static const DdRule k_dd_rule[REC_COUNT] = {
+    [REC_SetVtxDesc] = {B_VTX, DK_NBT, 32, 1},
+    [REC_SetVtxAttrFmt] = {B_VAT, DK_VAT, 8, 32},
+    [REC_SetArray] = {B_ARR, DK_NBT, 32, 1},
+    [REC_LoadPosMtx] = {B_POSMTX, DK_DIV3, 10, 1},
+    [REC_LoadNrmMtx] = {B_NRMMTX, DK_DIV3, 10, 1},
+    [REC_LoadTexMtx] = {B_TEXMTX, DK_DIV3, 64, 1},
+    [REC_SetTexCoordGen2] = {B_TG, DK_IDX, 8, 1},
+    [REC_SetChanCtrl] = {B_CHAN, DK_IDX, 6, 1},
+    [REC_SetChanAmbColor] = {B_CHAN + 6, DK_IDX, 6, 1},
+    [REC_SetChanMatColor] = {B_CHAN + 12, DK_IDX, 6, 1},
+    [REC_LoadLightObj] = {B_LIGHT, DK_LIGHT, 0, 1},
+    [REC_SetTevOrder] = {B_TEV + 0, DK_IDX, 16, 9},
+    [REC_SetTevColorIn] = {B_TEV + 1, DK_IDX, 16, 9},
+    [REC_SetTevAlphaIn] = {B_TEV + 2, DK_IDX, 16, 9},
+    [REC_SetTevColorOp] = {B_TEV + 3, DK_IDX, 16, 9},
+    [REC_SetTevAlphaOp] = {B_TEV + 4, DK_IDX, 16, 9},
+    [REC_SetTevKColorSel] = {B_TEV + 5, DK_IDX, 16, 9},
+    [REC_SetTevKAlphaSel] = {B_TEV + 6, DK_IDX, 16, 9},
+    [REC_SetTevSwapMode] = {B_TEV + 7, DK_IDX, 16, 9},
+    [REC_SetTevDirect] = {B_TEV + 8, DK_IDX, 16, 9}, /* both write ind_enabled */
+    [REC_SetTevIndirect] = {B_TEV + 8, DK_IDX, 16, 9},
+    [REC_SetTevKColor] = {B_KCOLOR, DK_IDX, 4, 1},
+    [REC_SetTevSwapModeTable] = {B_SWAPT, DK_IDX, 4, 1},
+    [REC_SetTevColor] = {B_TEVREG, DK_IDX, 4, 1}, /* one register */
+    [REC_SetTevColorS10] = {B_TEVREG, DK_IDX, 4, 1},
+    [REC_LoadTexObj] = {B_TEXOBJ, DK_IDX, 8, 1},
+    [REC_LoadTlut] = {B_TLUT, DK_IDX, 20, 1},
+    [REC_SetIndTexOrder] = {B_IND, DK_IDX, 4, 1},
+    [REC_SetIndTexCoordScale] = {B_IND + 4, DK_IDX, 4, 1},
+    [REC_SetIndTexMtx] = {B_IND + 8, DK_ITM, 3, 1},
+    [REC_SetDispCopySrc] = {B_GLOBAL + 0, DK_FIXED, 0, 0}, /* one copy source */
+    [REC_SetTexCopySrc] = {B_GLOBAL + 0, DK_FIXED, 0, 0},
+    [REC_SetCurrentMtx] = {B_GLOBAL + 1, DK_FIXED, 0, 0},
+    [REC_SetNumTexGens] = {B_GLOBAL + 2, DK_FIXED, 0, 0},
+    [REC_SetNumChans] = {B_GLOBAL + 3, DK_FIXED, 0, 0},
+    [REC_SetNumTevStages] = {B_GLOBAL + 4, DK_FIXED, 0, 0},
+    [REC_SetAlphaCompare] = {B_GLOBAL + 5, DK_FIXED, 0, 0},
+    [REC_SetBlendMode] = {B_GLOBAL + 6, DK_FIXED, 0, 0},
+    [REC_SetZMode] = {B_GLOBAL + 7, DK_FIXED, 0, 0},
+    [REC_SetZCompLoc] = {B_GLOBAL + 8, DK_FIXED, 0, 0},
+    [REC_SetColorUpdate] = {B_GLOBAL + 9, DK_FIXED, 0, 0},
+    [REC_SetAlphaUpdate] = {B_GLOBAL + 10, DK_FIXED, 0, 0},
+    [REC_SetCullMode] = {B_GLOBAL + 11, DK_FIXED, 0, 0},
+    [REC_SetFog] = {B_GLOBAL + 12, DK_FIXED, 0, 0},
+    [REC_SetScissor] = {B_GLOBAL + 13, DK_FIXED, 0, 0},
+    [REC_SetViewport] = {B_GLOBAL + 14, DK_FIXED, 0, 0},
+    [REC_SetProjection] = {B_GLOBAL + 15, DK_FIXED, 0, 0},
+    [REC_SetLineWidth] = {B_GLOBAL + 16, DK_FIXED, 0, 0},
+    [REC_SetNumIndStages] = {B_GLOBAL + 17, DK_FIXED, 0, 0},
+    [REC_SetZScaleOffset] = {B_GLOBAL + 18, DK_FIXED, 0, 0},
+    [REC_SetScissorBoxOffset] = {B_GLOBAL + 19, DK_FIXED, 0, 0},
+    [REC_SetDstAlpha] = {B_GLOBAL + 20, DK_FIXED, 0, 0},
+    [REC_SetPixelFmt] = {B_GLOBAL + 21, DK_FIXED, 0, 0},
+    [REC_SetZTexture] = {B_GLOBAL + 22, DK_FIXED, 0, 0},
+    [REC_SetCopyClear] = {B_GLOBAL + 23, DK_FIXED, 0, 0},
+    [REC_SetDispCopyDst] = {B_GLOBAL + 24, DK_FIXED, 0, 0},
+    [REC_SetDispCopyYScale] = {B_GLOBAL + 25, DK_FIXED, 0, 0},
+    [REC_SetTexCopyDst] = {B_GLOBAL + 26, DK_FIXED, 0, 0},
+};
+
+static inline int dd_slot(u32 id, const u32* w) {
+    if (id >= REC_COUNT) {
+        return -1;
     }
-    case REC_SetTevOrder: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 0 : -1;
-    case REC_SetTevColorIn: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 1 : -1;
-    case REC_SetTevAlphaIn: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 2 : -1;
-    case REC_SetTevColorOp: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 3 : -1;
-    case REC_SetTevAlphaOp: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 4 : -1;
-    case REC_SetTevKColorSel: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 5 : -1;
-    case REC_SetTevKAlphaSel: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 6 : -1;
-    case REC_SetTevSwapMode: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 7 : -1;
-    case REC_SetTevDirect:
-    case REC_SetTevIndirect: return w[0] < 16 ? B_TEV + (int)w[0] * 9 + 8 : -1; /* both write ind_enabled */
-    case REC_SetTevKColor: return w[0] < 4 ? B_KCOLOR + (int)w[0] : -1;
-    case REC_SetTevSwapModeTable: return w[0] < 4 ? B_SWAPT + (int)w[0] : -1;
-    case REC_SetTevColor:
-    case REC_SetTevColorS10: return w[0] < 4 ? B_TEVREG + (int)w[0] : -1; /* one register */
-    case REC_LoadTexObj: return w[0] < 8 ? B_TEXOBJ + (int)w[0] : -1;
-    case REC_LoadTlut: return w[0] < 20 ? B_TLUT + (int)w[0] : -1;
-    case REC_SetIndTexOrder: return w[0] < 4 ? B_IND + (int)w[0] : -1;
-    case REC_SetIndTexCoordScale: return w[0] < 4 ? B_IND + 4 + (int)w[0] : -1;
-    case REC_SetIndTexMtx: return w[0] >= GX_ITM_0 && w[0] < GX_ITM_0 + 3 ? B_IND + 8 + (int)(w[0] - GX_ITM_0) : -1;
-    case REC_SetDispCopySrc:
-    case REC_SetTexCopySrc: return B_GLOBAL + 0; /* one copy source */
-    case REC_SetCurrentMtx: return B_GLOBAL + 1;
-    case REC_SetNumTexGens: return B_GLOBAL + 2;
-    case REC_SetNumChans: return B_GLOBAL + 3;
-    case REC_SetNumTevStages: return B_GLOBAL + 4;
-    case REC_SetAlphaCompare: return B_GLOBAL + 5;
-    case REC_SetBlendMode: return B_GLOBAL + 6;
-    case REC_SetZMode: return B_GLOBAL + 7;
-    case REC_SetZCompLoc: return B_GLOBAL + 8;
-    case REC_SetColorUpdate: return B_GLOBAL + 9;
-    case REC_SetAlphaUpdate: return B_GLOBAL + 10;
-    case REC_SetCullMode: return B_GLOBAL + 11;
-    case REC_SetFog: return B_GLOBAL + 12;
-    case REC_SetScissor: return B_GLOBAL + 13;
-    case REC_SetViewport: return B_GLOBAL + 14;
-    case REC_SetProjection: return B_GLOBAL + 15;
-    case REC_SetLineWidth: return B_GLOBAL + 16;
-    case REC_SetNumIndStages: return B_GLOBAL + 17;
-    case REC_SetZScaleOffset: return B_GLOBAL + 18;
-    case REC_SetScissorBoxOffset: return B_GLOBAL + 19;
-    case REC_SetDstAlpha: return B_GLOBAL + 20;
-    case REC_SetPixelFmt: return B_GLOBAL + 21;
-    case REC_SetZTexture: return B_GLOBAL + 22;
-    case REC_SetCopyClear: return B_GLOBAL + 23;
-    case REC_SetDispCopyDst: return B_GLOBAL + 24;
-    case REC_SetDispCopyYScale: return B_GLOBAL + 25;
-    case REC_SetTexCopyDst: return B_GLOBAL + 26;
-    default: return -1; /* ClearVtxDesc (see below), copies, syncs, the bounding box */
+    const DdRule* r = &k_dd_rule[id];
+    switch (r->kind) {
+    case DK_FIXED: return r->base;
+    case DK_IDX: return w[0] < r->limit ? r->base + (int)(w[0] * r->mul) : -1;
+    case DK_NBT: return w[0] < 32 ? r->base + (int)nbt_nrm(w[0]) : -1;
+    case DK_VAT: return w[0] < 8 && w[1] < 32 ? r->base + (int)(w[0] * 32 + nbt_nrm(w[1])) : -1;
+    case DK_DIV3: return w[0] / 3 < r->limit ? r->base + (int)(w[0] / 3) : -1;
+    case DK_LIGHT: {
+        u32 l = w[0] & 0xFF;
+        return l != 0 && (l & (l - 1)) == 0 ? r->base + (31 - __builtin_clz(l)) : -1;
+    }
+    case DK_ITM: return w[0] >= GX_ITM_0 && w[0] < GX_ITM_0 + 3 ? r->base + (int)(w[0] - GX_ITM_0) : -1;
+    default: return -1;
     }
 }
 
@@ -524,6 +556,8 @@ static int is_state_list(const void* list, u32 nbytes) {
     if (nbytes == 0 || nbytes > 0x10000 || s_state_content == NULL || !(s_sl_sizes[(nbytes >> 5) >> 5] >> ((nbytes >> 5) & 31) & 1)) {
         return 0;
     }
+    s_sl_hashes++;
+    s_sl_hash_bytes += nbytes;
     u32 hash = gx_hash32(list, nbytes, 0x5EC1u);
     h = hash * 2654435761u >> 21;
     for (u32 i = 0; i < SC_SLOTS; i++, h = (h + 1) & (SC_SLOTS - 1)) {
@@ -544,13 +578,26 @@ static int dd_same(DdSlot* tbl, u32 gen, u32 id, const u32* w, u32 n) {
     int sl = n != 0 && n <= DD_WORDS ? dd_slot(id, w) : -1;
     if (sl >= 0) {
         DdSlot* d = &tbl[sl];
-        if (d->gen == gen && d->id == id && d->n == n && gx_mem_equal(d->w, w, n * 4)) {
+        /* one pass: the words are noted while they are compared (a store of an equal word changes nothing), with
+         * no libc call; two words a turn so the compiler keeps the loop */
+        u32 diff = (d->gen ^ gen) | ((u32)d->id ^ id) | ((u32)d->n ^ n);
+        u32 i = 0;
+        for (; i + 2 <= n; i += 2) {
+            u32 a0 = w[i], a1 = w[i + 1];
+            diff |= (d->w[i] ^ a0) | (d->w[i + 1] ^ a1);
+            d->w[i] = a0;
+            d->w[i + 1] = a1;
+        }
+        if (i < n) {
+            diff |= d->w[i] ^ w[i];
+            d->w[i] = w[i];
+        }
+        if (diff == 0) {
             return 1;
         }
         d->gen = gen;
         d->id = (u8)id;
         d->n = (u8)n;
-        memcpy(d->w, w, n * 4);
         if (id == REC_SetChanCtrl || id == REC_SetChanAmbColor || id == REC_SetChanMatColor) {
             /* channel selectors overlap (COLOR0A0 covers COLOR0 and ALPHA0): only this one stays valid */
             int base = sl - (int)w[0];
@@ -643,7 +690,23 @@ void gx_rec_list(const void* list, u32 nbytes, const void* caller) {
  * copy when its own vertex state and array match the shadow's. */
 static u32 comp_bytes(u8 type) { return type == GX_U8 || type == GX_S8 ? 1 : type == GX_U16 || type == GX_S16 ? 2 : 4; }
 
+/* The hash of a state's vertex description and format `fmt` (g is &gx or &gx_game). Kept per state and format
+ * while that state's gx_vdesc_ver stands still (every write to either bumps it), so a run of primitives under one
+ * vertex state hashes once. */
 static u32 vtx_state_hash(const GxState* g, u32 fmt) {
+    static struct {
+        u64 ver; /* 0: nothing kept (the counters start at 1) */
+        u32 hash;
+    } s_kept[2][GX_MAX_VTXFMT];
+    u32 w = g == &gx_game;
+    if ((g == &gx || w) && fmt < GX_MAX_VTXFMT) {
+        typeof(s_kept[0][0])* k = &s_kept[w][fmt];
+        if (k->ver != gx_vdesc_ver[w]) {
+            k->hash = gx_hash32(g->vat[fmt], sizeof(g->vat[fmt]), gx_hash32(g->vtx_desc, sizeof(g->vtx_desc), 0x51A9u));
+            k->ver = gx_vdesc_ver[w];
+        }
+        return k->hash;
+    }
     return gx_hash32(g->vat[fmt], sizeof(g->vat[fmt]), gx_hash32(g->vtx_desc, sizeof(g->vtx_desc), 0x51A9u));
 }
 
@@ -955,6 +1018,7 @@ static void frame_sync(u64 waited, u64 now) {
  * ring is empty since the last fence), so the shadow can start from the translated state. */
 void gx_rec_switch(void) {
     memcpy(&gx_game, &gx, sizeof(gx));
+    gx_vdesc_ver[1]++;
     gx_rec_direct = 0;
     dd_forget();
 }
@@ -1122,9 +1186,18 @@ void gx_rec_frame(void) {
            (unsigned long)(s_snap_bytes / f), (unsigned long)s_snap_live, (unsigned long)s_snap_mism,
            s_pipeline ? " | pipelined" : "");
     if (s_dedup) {
-        PLOG_I("gxthread   dedup: %lu of %lu state calls per frame not recorded (unchanged)",
-               (unsigned long)(s_dd_skipped / f), (unsigned long)(s_dd_calls / f));
+        PLOG_I("gxthread   dedup: %lu of %lu state calls per frame not recorded (unchanged); lists hashed as "
+               "possible state-list copies: %lu, %lu bytes per frame",
+               (unsigned long)(s_dd_skipped / f), (unsigned long)(s_dd_calls / f), (unsigned long)(s_sl_hashes / f),
+               (unsigned long)(s_sl_hash_bytes / f));
         s_dd_skipped = s_dd_calls = 0;
+    }
+    s_sl_hashes = s_sl_hash_bytes = 0;
+    if (gx_rec_mode == 2) {
+        PLOG_I("gxthread   hand-off: the translator slept %lu times, the game thread signalled it %lu times per frame",
+               (unsigned long)(__atomic_exchange_n(&s_ts_sleeps, 0, __ATOMIC_RELAXED) / f),
+               (unsigned long)(s_gs_signals / f));
+        s_gs_signals = 0;
     }
     if (s_pipeline) {
         PLOG_I("gxthread   pipeline: %lu of %lu frame ends waited for the frame before", (unsigned long)s_pipe_waits,

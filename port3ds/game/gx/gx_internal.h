@@ -639,8 +639,11 @@ typedef struct {
     u8 slot_k[3];
     u32 nidx;
     u32 bytes;         /* memory it takes (vertex bytes and this struct), for the cache budget */
-    u16 idx[];         /* triangle list, indices from the segment's base */
+    const u16* lidx;   /* the triangle list in linear memory beside the segments (drawn in place), or NULL */
+    u32 iseg, ifirst;  /* its index segment and first index there (lidx != NULL) */
+    u16 idx[];         /* triangle list, indices from the segment's base; filled only when lidx is NULL */
 } GxVshStream;
+#define GXV_STREAM_BYTES 36u /* what the struct counted towards `bytes` before lidx: keeps the cache budget unchanged */
 
 void gx_vsh_init(void);
 /* The stream of a cache entry, or NULL with *reason set. */

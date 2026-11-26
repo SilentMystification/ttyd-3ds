@@ -733,8 +733,10 @@ typedef struct {
 typedef struct {
     const void* stream;
     u32 layout, scales;
-    u32 idx_first;  /* in the batch's indices */
+    u32 idx_first;  /* in the batch's indices (the members' indices end to end, whether or not they are copied) */
     u32 m_end;      /* one past its last member */
+    const u16* lin; /* the members' own indices, when they follow each other in linear memory: drawn in place */
+    u32 pool_off;   /* else: where this draw's copy starts in the batch's range of the index pool */
 } BatDraw;
 
 typedef struct {
@@ -755,7 +757,7 @@ typedef struct {
     u8 vtx_desc[GX_VA_MAX_ATTR];
     u8 cur_texmtx[8];
     void* blob;     /* BatMember[n], BatDraw[ndraws], GxAttrFmt[popcount(fmt_mask)][GX_VA_MAX_ATTR] */
-    u32 ix_first, ix_count; /* its range of the index pool */
+    u32 ix_first, ix_count; /* its range of the index pool (the copied draws' indices only) */
 } Batch;
 
 int gx_batch_pending;
@@ -783,6 +785,7 @@ typedef struct {
     u32 layout, scales;
     const u16* idx;
     u32 nidx, nverts;
+    u32 lin;        /* idx is the stream's own linear index list */
 } FormX;
 static struct {
     u32 n, ver, xfv, vtxv, trust_gen, cull;
@@ -1192,10 +1195,11 @@ static inline __attribute__((always_inline)) void bat_close_body(void) {
         if (first >= idx_end) {
             break;
         }
+        const u16* src = d[i].lin != NULL ? d[i].lin : s_ix + b->ix_first + d[i].pool_off;
         u32 m0 = i ? d[i - 1].m_end : 0;
         u32 mend = d[i].m_end < p ? d[i].m_end : p;
         u32 end = m[mend - 1].idx_end;
-        plat_gpu_vsh_drawp(d[i].stream, d[i].layout, d[i].scales, s_act_cull, s_ix + b->ix_first + first, end - first,
+        plat_gpu_vsh_drawp(d[i].stream, d[i].layout, d[i].scales, s_act_cull, src + (first - d[i].idx_first), end - first,
                            mend - m0);
     }
     gx_draw_batch_end(s_act_group, p, m[p - 1].verts_end, idx_end);
@@ -1292,13 +1296,29 @@ static inline __attribute__((always_inline)) void form_end_body(void) {
         bat_kill(last); /* the oldest of the batches that start here */
     }
     /* the GPU draws: members that share stream, layout and scale word merge */
-    u32 nd = 0, nidx = 0;
+    u32 nd = 0, ncopy = 0, gn = 0, gip = 0;
+    u8 ipg[BAT_MAX_DRAWS]; /* per draw: its members' indices are used in place */
     for (u32 i = 0; i < n; i++) {
         if (i == 0 || fx[i].stream != fx[i - 1].stream || fx[i].layout != fx[i - 1].layout ||
             fx[i].scales != fx[i - 1].scales) {
+            if (i != 0) {
+                ncopy += gip ? 0 : gn;
+                if (nd <= BAT_MAX_DRAWS) {
+                    ipg[nd - 1] = (u8)gip;
+                }
+            }
             nd++;
+            gn = 0;
+            gip = 1;
+        } else if (fx[i - 1].idx + fx[i - 1].nidx != fx[i].idx) {
+            gip = 0; /* not end to end in memory */
         }
-        nidx += fx[i].nidx;
+        gip &= fx[i].lin != 0;
+        gn += fx[i].nidx;
+    }
+    ncopy += gip ? 0 : gn;
+    if (nd <= BAT_MAX_DRAWS) {
+        ipg[nd - 1] = (u8)gip;
     }
     if (nd > BAT_MAX_DRAWS) {
         s_bst.form_fail++;
@@ -1307,17 +1327,19 @@ static inline __attribute__((always_inline)) void form_end_body(void) {
     if (!s_bat_free) {
         bat_evict_old(8);
     }
-    u32 ix = ix_alloc(nidx);
+    u32 ix = ncopy != 0 ? ix_alloc(ncopy) : 0;
     if (ix == ~0u) {
         bat_evict_old(BAT_SLOTS); /* their ranges come back after the frames in flight */
-        ix = ix_alloc(nidx);
+        ix = ix_alloc(ncopy);
     }
     u32 nfmt = (u32)__builtin_popcount(s_form.fmt_mask);
     u32 bytes = n * sizeof(BatMember) + nd * sizeof(BatDraw) + nfmt * sizeof(s_form.vat[0]);
     void* blob = ix != ~0u && s_bat_free ? malloc(bytes) : NULL;
     if (blob == NULL) {
         if (ix != ~0u) {
-            ix_release(ix, (nidx + 3u) & ~3u); /* never drawn from: free at once */
+            if (ncopy != 0) {
+                ix_release(ix, (ncopy + 3u) & ~3u); /* never drawn from: free at once */
+            }
         }
         s_bst.form_fail++;
         return;
@@ -1330,7 +1352,7 @@ static inline __attribute__((always_inline)) void form_end_body(void) {
     b->ndraws = (u8)nd;
     b->blob = blob;
     b->ix_first = ix;
-    b->ix_count = nidx;
+    b->ix_count = ncopy;
     b->dlc_epoch = s_dlc_epoch;
     b->trust_gen = s_form.trust_gen;
     b->last_frame = gx_perf_frame_no();
@@ -1342,7 +1364,7 @@ static inline __attribute__((always_inline)) void form_end_body(void) {
     BatMember* bm = b_members(b);
     BatDraw* bd = b_draws(b);
     u16* out = s_ix + ix;
-    u32 at = 0, verts = 0, k = 0;
+    u32 at = 0, verts = 0, k = 0, pool_at = 0;
     for (u32 i = 0; i < n; i++) {
         if (i == 0 || fx[i].stream != fx[i - 1].stream || fx[i].layout != fx[i - 1].layout ||
             fx[i].scales != fx[i - 1].scales) {
@@ -1353,9 +1375,14 @@ static inline __attribute__((always_inline)) void form_end_body(void) {
             bd[k].layout = fx[i].layout;
             bd[k].scales = fx[i].scales;
             bd[k].idx_first = at;
+            bd[k].lin = ipg[k] ? fx[i].idx : NULL;
+            bd[k].pool_off = pool_at;
             k++;
         }
-        memcpy(out + at, fx[i].idx, fx[i].nidx * sizeof(u16));
+        if (!ipg[k - 1]) {
+            memcpy(out + pool_at, fx[i].idx, fx[i].nidx * sizeof(u16));
+            pool_at += fx[i].nidx;
+        }
         at += fx[i].nidx;
         verts += fx[i].nverts;
         bm[i] = fm[i];
@@ -1364,7 +1391,9 @@ static inline __attribute__((always_inline)) void form_end_body(void) {
         s_e[fm[i].eidx].bat = (u16)BIDX(b);
     }
     bd[k - 1].m_end = n;
-    plat_gpu_stream_commit(out, nidx * sizeof(u16));
+    if (pool_at != 0) {
+        plat_gpu_stream_commit(out, pool_at * sizeof(u16));
+    }
     GxAttrFmt* v = b_vat(b);
     for (u32 f = 0; f < GX_MAX_VTXFMT; f++) {
         if (s_form.fmt_mask & (1u << f)) {
@@ -1431,8 +1460,9 @@ static inline __attribute__((always_inline)) void form_add_body(const void* list
     }
     u32 i = s_form.n++;
     s_form.m[i] = (BatMember){list, nbytes, (u16)(e - s_e), 0, e->gen, 0, 0};
-    s_form.x[i] = (FormX){gx_vsh_last.stream, gx_vsh_last.layout, gx_vsh_last.scales, e->vsh->idx, e->vsh->nidx,
-                          e->nverts};
+    s_form.x[i] = (FormX){gx_vsh_last.stream, gx_vsh_last.layout, gx_vsh_last.scales,
+                          e->vsh->lidx != NULL ? e->vsh->lidx : e->vsh->idx, e->vsh->nidx, e->nverts,
+                          e->vsh->lidx != NULL};
     s_form.fmt_mask |= e->fmt_mask;
     gx_batch_pending = 1;
 }

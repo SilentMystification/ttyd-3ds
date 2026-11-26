@@ -238,6 +238,7 @@ static int s_merge = 1;
 static u32* s_last_draw;              /* body of the last command when it is a CMD_DRAW */
 static PlatGpuVertex* s_last_alloc;   /* the last plat_gpu_alloc_vertices block, until its draw */
 static VshDraw* s_last_vdraw;         /* body of the last command when it is a CMD_VSH_DRAW */
+static VshDrawP* s_last_vdrawp;       /* body of the last command when it is a CMD_VSH_DRAWP from plat_gpu_vsh_drawl */
 static PlatGpuVshConst s_last_vconst;
 static int s_last_vconst_valid;       /* s_last_vconst was recorded in the current record */
 static u32 s_last_vconst_id;
@@ -324,7 +325,7 @@ static int oh_state_one(const PlatGpuState* st);
 struct OhCap;
 static void one_import(const struct OhCap* b);
 static void one_log(u32 frames);
-static u32 s_oh_idx_end;        /* index arena end of the last mergeable shader draw (gxonehop=1) */
+static const u16* s_oh_idx_end; /* index end (arena or linear range) of the last mergeable shader draw (gxonehop=1) */
 
 static void* rec_put(u16 type, u32 size) {
     Record* r = &s_rec[s_cur];
@@ -352,6 +353,7 @@ static void* rec_put(u16 type, u32 size) {
     r->used += need;
     s_last_draw = NULL; /* plat_gpu_draw sets it again for a draw */
     s_last_vdraw = NULL;
+    s_last_vdrawp = NULL;
     return h + 1;
 }
 
@@ -421,6 +423,7 @@ static void submit(int present) {
     s_rec[s_cur].nidx = 0;
     s_last_draw = NULL;
     s_last_vdraw = NULL;
+    s_last_vdrawp = NULL;
     s_last_vconst_valid = 0;
     s_last_vlight_id = 0;
     s_last_alloc = NULL;
@@ -883,7 +886,9 @@ void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uin
         return; /* no uniform block in this record (cannot happen: end_segment puts it back) */
     }
     u32 first = r->nidx;
-    memcpy(r->idx + first, idx, nidx * sizeof(u16));
+    if (idx != r->idx + first) { /* plat_gpu_vsh_idx_reserve'd indices are in the arena already */
+        memcpy(r->idx + first, idx, nidx * sizeof(u16));
+    }
     r->nidx += nidx;
     s_stats_frame.vsh_calls++;
     s_stats_frame.vsh_indices += nidx;
@@ -891,7 +896,7 @@ void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uin
         /* the merge test of the record below, on what the words hold */
         VshDraw* l = s_last_vdraw;
         int merged = s_merge && l != NULL && l->stream == stream && l->layout == layout && l->scales == scales &&
-                     l->cull == cull && s_oh_idx_end == first;
+                     l->cull == cull && s_oh_idx_end == r->idx + first;
         if (!merged) {
             s_stats_frame.vsh_draws++;
         }
@@ -918,10 +923,45 @@ void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uin
     }
 }
 
-static const u8 *s_ixpool_lo, *s_ixpool_hi; /* gxbatch's index pool: every DRAWP index range lies inside it */
+/* The linear index ranges DRAWP indices may come from (gxbatch's pool, the stream index segments of gx_vsh.c). */
+#define IXPOOL_MAX 80
+static struct {
+    const u8 *lo, *hi;
+} s_ixpool[IXPOOL_MAX];
+static u32 s_ixpool_n;
 void plat_gpu_set_index_pool(const void* base, uint32_t bytes) {
-    s_ixpool_lo = base;
-    s_ixpool_hi = base ? (const u8*)base + bytes : NULL;
+    if (base == NULL || bytes == 0) {
+        return;
+    }
+    u32 n = s_ixpool_n;
+    if (n == IXPOOL_MAX) {
+        PLOG_E("gpu: index pool ranges full (%d)", IXPOOL_MAX);
+        return;
+    }
+    s_ixpool[n].lo = base;
+    s_ixpool[n].hi = (const u8*)base + bytes;
+    __atomic_store_n(&s_ixpool_n, n + 1, __ATOMIC_RELEASE);
+}
+/* 1 when [idx, idx + count) lies in one range (or no range is registered: unchecked). */
+static int ixpool_ok(const u16* idx, u32 count) {
+    u32 n = __atomic_load_n(&s_ixpool_n, __ATOMIC_ACQUIRE);
+    if (n == 0) {
+        return 1;
+    }
+    for (u32 i = 0; i < n; i++) {
+        if ((const u8*)idx >= s_ixpool[i].lo && (const u8*)(idx + count) <= s_ixpool[i].hi) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+uint16_t* plat_gpu_vsh_idx_reserve(uint32_t max) {
+    Record* r = &s_rec[s_cur];
+    if (max > INDEX_ARENA || r->nidx + max > INDEX_ARENA) {
+        return NULL; /* plat_gpu_vsh_draw would flush first: the caller writes elsewhere and it copies */
+    }
+    return r->idx + r->nidx;
 }
 
 void plat_gpu_vsh_drawp(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, const uint16_t* idx,
@@ -952,6 +992,54 @@ void plat_gpu_vsh_drawp(const void* stream, uint32_t layout, uint32_t scales, ui
     VshDrawP* d = rec_put(CMD_VSH_DRAWP, sizeof(VshDrawP));
     if (d != NULL) {
         *d = (VshDrawP){stream, layout, scales, cull, idx, nidx};
+        s_stats_frame.vsh_draws++;
+    }
+}
+
+void plat_gpu_vsh_drawl(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, const uint16_t* idx,
+                        uint32_t nidx) {
+    nidx -= nidx % 3;
+    if (stream == NULL || idx == NULL || nidx < 3 || PLAT_VSH_STRIDE(layout) == 0) {
+        return;
+    }
+    Record* r = &s_rec[s_cur];
+    if (r->used + sizeof(CmdHead) + sizeof(VshDrawP) + 64 > RECORD_BYTES) {
+        flush_segment();
+    }
+    if (s_onehop) {
+        oh_need_room(0, 0);
+    }
+    if (!s_last_vconst_valid) {
+        return; /* no uniform block in this record (cannot happen: end_segment puts it back) */
+    }
+    s_stats_frame.vsh_calls++;
+    s_stats_frame.vsh_indices += nidx;
+    if (s_onehop == 1) {
+        VshDraw* l = s_last_vdraw;
+        int merged = s_merge && l != NULL && l->stream == stream && l->layout == layout && l->scales == scales &&
+                     l->cull == cull && s_oh_idx_end == idx;
+        if (!merged) {
+            s_stats_frame.vsh_draws++;
+        }
+        oh_draw(stream, layout, scales, cull, idx, nidx, 2, merged);
+        return;
+    }
+    VshDrawP* l = s_last_vdrawp;
+    if (s_merge && l != NULL && l->stream == stream && l->layout == layout && l->scales == scales && l->cull == cull &&
+        l->idx + l->count == idx) {
+        l->count += nidx; /* the next range follows in the index memory: one draw */
+        if (s_onehop) {
+            oh_draw(stream, layout, scales, cull, idx, nidx, 2, 1);
+        }
+        return;
+    }
+    if (s_onehop) {
+        oh_draw(stream, layout, scales, cull, idx, nidx, 2, 0);
+    }
+    VshDrawP* d = rec_put(CMD_VSH_DRAWP, sizeof(VshDrawP));
+    if (d != NULL) {
+        *d = (VshDrawP){stream, layout, scales, cull, idx, nidx};
+        s_last_vdrawp = d;
         s_stats_frame.vsh_draws++;
     }
 }
@@ -2476,6 +2564,7 @@ static void fog_bind(const void* body) {
 #define TPL_IDX_MARK 0xA5A5A5A4u
 #define TPL_CNT_MARK 0x5A5A5A5Au
 static u32 s_oh_base; /* the attribute buffers' base address (BufInfo_Init's base_paddr; gxonehop's draw packets) */
+static int dtab_alloc(void);
 static int direct_init(void) {
     /* citro3d's context words: the flags (active bit; C3D_SetBufInfo sets the buffer bit) and the buffer base
      * (C3D_SetBufInfo copies the BufInfo there) */
@@ -2526,6 +2615,22 @@ static int direct_init(void) {
     }
     s_tpl_idx = (u32)fi;
     s_tpl_cnt = (u32)fc;
+    s_dlog_every = (u32)plat_switch_int("gxthreadstats", plat_switch_int("gxstats", 0));
+    if (s_onehop == 1) {
+        /* gxonehop=1 draws nothing through the replay's tables (the shader path's words come from s_otab): they are
+         * allocated only if gxonehop turns out off (dtab_alloc) */
+        PLOG_I("gxdirect=%d: draw packet %lu words, kept words 0 KB (gxonehop=1 uses its own tables)", s_direct,
+               (unsigned long)s_tpl_n);
+        return 1;
+    }
+    return dtab_alloc();
+}
+
+/* The replay's tables of kept words (gxdirect: direct_block; gxonehop=2: the compare). 1 on success. */
+static int dtab_alloc(void) {
+    if (s_dtab[0].mem != NULL) {
+        return 1;
+    }
     /* largest blocks (counted from the encoders): tev 42, tex 30, pix 46, lay 76 words; a larger one is not kept */
     static const u16 k_slots0[DC_N] = {256, 512, 256, 512}, k_slots2[DC_N] = {512, 2048, 512, 1024};
     const u16* k_slots = s_onehop == 2 ? k_slots2 : k_slots0; /* gxonehop=2 looks up the one-hop keys here */
@@ -2549,7 +2654,6 @@ static int direct_init(void) {
             return 0;
         }
     }
-    s_dlog_every = (u32)plat_switch_int("gxthreadstats", plat_switch_int("gxstats", 0));
     PLOG_I("gxdirect=%d: draw packet %lu words, kept words %lu KB", s_direct, (unsigned long)s_tpl_n,
            (unsigned long)(bytes >> 10));
     return 1;
@@ -3127,7 +3231,7 @@ static void oh_draw(const void* stream, u32 layout, u32 scales, u32 cull, const 
         return; /* the replay skips a draw before the record's first state */
     }
     int cls = oh_class(&s_last_state);
-    if (drawp && s_ixpool_hi != NULL && ((const u8*)idx < s_ixpool_lo || (const u8*)(idx + count) > s_ixpool_hi)) {
+    if (drawp && !ixpool_ok(idx, count)) {
         if (cls != OHS_SCENE && s_om.after_scene) {
             oh_mark();
         }
@@ -3197,12 +3301,12 @@ static void oh_draw(const void* stream, u32 layout, u32 scales, u32 cull, const 
     s_om.packet = packet;
     if (s_onehop == 1) {
         r = oh_rec();
-        if (drawp) {
+        if (drawp == 1) {
             s_last_vdraw = NULL;
         } else {
             s_oh_md = (VshDraw){stream, layout, scales, cull, 0, 0};
             s_last_vdraw = &s_oh_md;
-            s_oh_idx_end = (u32)(idx - r->idx) + count;
+            s_oh_idx_end = idx + count;
         }
     }
 }
@@ -4199,11 +4303,11 @@ eye_again:
                 if (d_count < 3) {
                     break;
                 }
-                if (s_ixpool_hi != NULL && ((const u8*)d_idx < s_ixpool_lo || (const u8*)(d_idx + d_count) > s_ixpool_hi)) {
+                if (!ixpool_ok(d_idx, d_count)) {
                     static u32 s_logged;
                     if (s_logged++ == 0) {
-                        PLOG_E("gpu: drawp indices %p +%lu outside the index pool %p..%p: draw skipped", (const void*)d_idx,
-                               (unsigned long)d_count, (const void*)s_ixpool_lo, (const void*)s_ixpool_hi);
+                        PLOG_E("gpu: drawp indices %p +%lu outside the index ranges: draw skipped", (const void*)d_idx,
+                               (unsigned long)d_count);
                     }
                     break;
                 }
@@ -5035,6 +5139,9 @@ void plat_gpu_init(void) {
     }
     if (s_onehop && (!s_direct || !oh_init())) {
         s_onehop = 0;
+        if (s_direct && !dtab_alloc()) {
+            s_direct = 0; /* gxonehop=1 had left the replay's tables out */
+        }
     }
     if (!s_onehop && s_one) {
         PLOG_W("gxone: off (gxonehop could not start)");

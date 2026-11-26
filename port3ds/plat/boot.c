@@ -331,12 +331,16 @@ int main(int argc, char** argv) {
     plat_sd_start();
     /* Development tool mode (switch gpuprobe, dev builds only): the probe runs instead of the game. */
     int probe_mode = plat_gpuprobe_requested();
+    int calib_mode = !probe_mode && plat_calib_requested(); /* switch calib: the CPU and memory benchmark instead of the game */
     plat_memplace_init(); /* the log queue lives in the placed memory */
     plat_log_start_writer();
     plat_crash_init();
     plat_devupdate_init();
     if (probe_mode) {
         plat_gpuprobe_mode_run(); /* never returns */
+    }
+    if (calib_mode) {
+        plat_calib_mode_run(); /* never returns */
     }
     plat_memplace_report();
 

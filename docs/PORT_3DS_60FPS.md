@@ -244,6 +244,99 @@ In eki_00 under each of `cache`, `hull` and `corners`, `gxbbox_verify=1` showed 
 
 Rosalina profiles plus `gxthreadstats`, `gxstats`, `stereostats` and the counters above, in the same scenes, for `gxthread=0` and `gxthread=2`. Plus a CPU and memory microbenchmark run on both Azahar and the console, to calibrate Azahar's ratios. This is the only way to know how far we are from 16.7 ms.
 
+Two tools make one console session enough. Both run inside the development CIA; neither starts the game. Neither is in a release build.
+
+### 2a. `calib`: CPU and memory microbenchmarks (`port3ds/plat/calib_mode.c`)
+
+Switch `calib` (dev builds only) runs 46 benchmarks in the game binary instead of the game, as `gpuprobe` does, and keeps the devupdate server answering. Each row is the best of 3 timed runs of about 120 ms (`calibms=N` changes that), timed with `svcGetSystemTick`. It writes `sdmc:/3ds/ttyd/calib.txt` and logs `CALIB DONE`. About 20 s in Azahar.
+
+Rows: integer ALU, multiply, 32 and 64-bit divide; float dependent and independent multiply-add, divide, sqrt; newlib `sinf`, `cosf`, `atan2f`; the game's own `sincosf`, the port's `PSMTXConcat`, `PSMTXMultVec`, `PSMTXInverse`, `PSMTXRotRad`, `PSVECNormalize` (and a local copy of the concat and of the normalize, to show call cost); `memcpy` and `memset` of 4 KB, 64 KB, 1 MB in the heap, the linear heap and QTM RAM (QTM has room for 4 KB and 64 KB only, the log queue and the 2 MB limit take the rest); sequential 32-bit reads over 16 KB (L1), 256 KB and 1 MB (L2), 16 MB (streaming); pointer chasing over the same sizes (one hop per 32-byte line, random cycle); a pointer chase with a data-dependent branch; a data-dependent branch over random against sorted bytes.
+
+`calibpmu` adds a second pass with the ARM11 counters through `ctrdk_perf` (cycles, data-cache read misses, instruction-cache misses per operation, `calib_pmu.txt`). It needs the SVC or backdoor the ExHeader allows; when the way in is missing the run logs `CALIB pmu: not available` and goes on (Azahar: not available). It is a separate switch because the first call into the kernel may fail on a console.
+
+Azahar, build #580, `calib` in the dev CIA (QTM mapped). Azahar's CPU is a JIT with no cache or memory model: every size of the read and chase rows is flat, the sorted and random branch rows are equal, and heap, linear and QTM copy at the same speed. Where the console differs, the ratio column shows how much of Azahar's time in that kind of work to believe. The "New 3DS" columns are for the owner session; the ratio is console ns / Azahar ns (above 1: the console is slower).
+
+| group | benchmark | Azahar ns/op | Azahar MB/s | New 3DS ns/op | New 3DS MB/s | ratio (console / Azahar) |
+|---|---|---|---|---|---|---|
+| cpu int | `int_alu` | 22.46 |  | | | |
+| cpu int | `int_mul` | 18.72 |  | | | |
+| cpu int | `int_div32` | 405.40 |  | | | |
+| cpu int | `int_div64` | 2,240 |  | | | |
+| cpu float | `flt_madd_dep` | 22.46 |  | | | |
+| cpu float | `flt_madd_x4` | 14.04 |  | | | |
+| cpu float | `flt_div` | 71.13 |  | | | |
+| cpu float | `flt_sqrt` | 86.10 |  | | | |
+| libm | `sinf` | 257.47 |  | | | |
+| libm | `cosf` | 239.12 |  | | | |
+| libm | `atan2f` | 671.62 |  | | | |
+| sdk | `game_sincosf` | 1,149 |  | | | |
+| sdk | `mtxconcat_local` | 374.37 |  | | | |
+| sdk | `PSMTXConcat` | 700.06 |  | | | |
+| sdk | `PSMTXMultVec` | 142.26 |  | | | |
+| sdk | `PSMTXInverse` | 572.77 |  | | | |
+| sdk | `PSMTXRotRad` | 638.84 |  | | | |
+| sdk | `vecnorm_local` | 168.46 |  | | | |
+| sdk | `PSVECNormalize` | 228.36 |  | | | |
+| memory copy | `memcpy_heap_4K` | 12,601 | 309.99 | | | |
+| memory copy | `memset_heap_4K` | 6,828 | 572.06 | | | |
+| memory copy | `memcpy_heap_64K` | 199,483 | 313.31 | | | |
+| memory copy | `memset_heap_64K` | 107,457 | 581.63 | | | |
+| memory copy | `memcpy_heap_1M` | 3,189,781 | 313.50 | | | |
+| memory copy | `memset_heap_1M` | 1,717,590 | 582.21 | | | |
+| memory copy | `memcpy_linear_4K` | 12,601 | 309.99 | | | |
+| memory copy | `memset_linear_4K` | 6,828 | 572.06 | | | |
+| memory copy | `memcpy_linear_64K` | 199,483 | 313.31 | | | |
+| memory copy | `memset_linear_64K` | 107,456 | 581.63 | | | |
+| memory copy | `memcpy_linear_1M` | 3,189,781 | 313.50 | | | |
+| memory copy | `memset_linear_1M` | 1,717,590 | 582.21 | | | |
+| memory copy | `memcpy_qtm_4K` | 12,601 | 309.99 | | | |
+| memory copy | `memset_qtm_4K` | 6,828 | 572.06 | | | |
+| memory copy | `memcpy_qtm_64K` | 199,483 | 313.31 | | | |
+| memory copy | `memset_qtm_64K` | 107,457 | 581.63 | | | |
+| memory read (op = 32-bit word) | `read_seq_16K` | 8.90 | 428.52 | | | |
+| memory read (op = 32-bit word) | `read_seq_256K` | 8.89 | 429.01 | | | |
+| memory read (op = 32-bit word) | `read_seq_1M` | 8.89 | 429.02 | | | |
+| memory read (op = 32-bit word) | `read_seq_16M` | 8.89 | 429.17 | | | |
+| pointer chase (op = hop) | `chase_16K` | 14.97 |  | | | |
+| pointer chase (op = hop) | `chase_256K` | 14.97 |  | | | |
+| pointer chase (op = hop) | `chase_1M` | 14.97 |  | | | |
+| pointer chase (op = hop) | `chase_16M` | 14.97 |  | | | |
+| pointer chase (op = hop) | `chase_branchy_256K` | 33.69 |  | | | |
+| branch (op = element) | `branch_random_16K` | 18.72 |  | | | |
+| branch (op = element) | `branch_sorted_16K` | 18.72 |  | | | |
+
+### 2b. `tools/port3ds/hw_baseline.py`: the ten scenes, three configurations
+
+For gor_01, gon_02, aaa_00, tik_01, hei_01, jin_00, the effects battle, eki_00, usu_00, pik_00 (the scene switches of `gx_perf_ab.py`) and for today's defaults, `gxdirty=1` and `gxdirect=1`: 30 runs. Each run is `devupdate.py restart` with the scene switches, `gxthreadstats=60`, `fastboot`, `livelog` and a run id; then `run_hw.py --no-send` follows the live log until the third counted window has ended. The counted windows are the first three that end at game frame 781 or later (781, 841, 901; the warp is at about frame 595). The table has frame ms, core-0 busy ms and render ms (render minus its vblank wait; the same fields as `gx_perf_ab.py`) as the mean of the windows, and the range of the frame time. `--dry-run` prints the commands and touches nothing. Output: `build/hw-baseline/baseline.md`, `results.json` and one log per run. About 1.5-2 minutes a run on the console (boot, warp, three windows).
+
+The same tool ran against Azahar (`azahar-session --supervise`, `--ip 127.0.0.1 --port 5060`) to test the parsing; see the commit message.
+
+### 2c. The console session: exact commands (planner, with the owner's go)
+
+The console is at `192.168.8.221`; the ARP entry takes about 20 s to warm up, so retry a refused first call. Nothing here is run without the owner's go.
+
+```bash
+export N3DS_IP=192.168.8.221
+# 0. The dev build with the CIA (build.sh --dev, no --no-cia), pushed with the calibration switch.
+tools/port3ds/build.sh --dev
+python3 libs/ctr-devkit/devupdate/devupdate.py push build/3ds/game-dev/ttyd.cia --switches "calib devupdate" --wait 120
+# 1. calib runs by itself (about 20-40 s). Wait for the line, then fetch the table.
+python3 libs/ctr-devkit/devupdate/devupdate.py log | grep "CALIB DONE"      # repeat until it shows
+mkdir -p build/hw-calib
+python3 libs/ctr-devkit/devupdate/devupdate.py files get @/calib.txt -o build/hw-calib/calib.txt
+# 1b. Optional, counters: a second run of the same set with them.
+python3 libs/ctr-devkit/devupdate/devupdate.py restart "calib calibpmu"
+python3 libs/ctr-devkit/devupdate/devupdate.py log | grep "CALIB DONE"
+python3 libs/ctr-devkit/devupdate/devupdate.py files get @/calib_pmu.txt -o build/hw-calib/calib_pmu.txt
+# 2. The ten scenes, three configurations (30 runs, about 45-60 minutes); restart leaves calib mode.
+tools/port3ds/hw_baseline.py
+# or a part first:  tools/port3ds/hw_baseline.py --scenes gor_01,hei_01 --configs default
+# 3. Back to the normal game.
+python3 libs/ctr-devkit/devupdate/devupdate.py restart ""
+```
+
+Afterwards: copy the `calib.txt` ns/op values into the "New 3DS" columns above and fill the ratios; copy `build/hw-baseline/baseline.md` into PORT_3DS_GX_PERF.md next to the Azahar numbers.
+
 ## Step 3: the levers, in expected order of payoff
 
 1. **Shader path completion** (running): lighting, the matrix palette, texgen, bounding box from positions. Removes per-vertex CPU work.

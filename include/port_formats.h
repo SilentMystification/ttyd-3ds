@@ -15,4 +15,8 @@ void portCamRoadSwap(void* data, u32 size, const char* name);
 void portSwapU16Run(void* data, u32 count);
 // Runs of 32-bit words (float and s32 tables).
 void portSwapU32Run(void* data, u32 count);
+// A plain texture is in memory and will probably be drawn soon (port3ds/game/gx/gx_tex.c, switch texasync).
+// An unpacked TPL (TEXPalette*): queues its textures for GXPrefetchTexPort.
+void portTplPrefetch(void* palette);
+void GXPrefetchTexPort(const void* image, u16 width, u16 height, u32 format, int hasClut);
 #endif

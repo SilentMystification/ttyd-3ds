@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "gx_internal.h"
+#include "plat/job.h"
 #include "plat/memstable.h"
 #include "plat/options.h"
 #include "plat/plat.h"
@@ -59,6 +60,19 @@ typedef struct {
     u32 bytes0, bytes_mip; /* PICA texture memory: level 0, and the levels after it */
 } CacheExtra;
 static CacheExtra* s_x;
+
+/* ---- texframe=1: one log line per frame with the texture work of that frame (counts and game-thread time) ---- */
+static int s_tf_on;
+static int s_async;
+static struct {
+    unsigned queued, taken, stale_gen, verify_bad, dropped, unused, wait_n, inline_n, calls, rej_clut, rej_fmt, rej_size, rej_cov, rej_dup, rej_full;
+    u64 wait_ticks;
+} s_as;
+static struct {
+    unsigned lookups, uploads, hashes, hash_bytes, async_hit, async_miss;
+    u64 t_total, t_dec, t_conv, t_create, t_hash;
+} s_tf;
+#define TF_T() (s_tf_on ? plat_ticks() : 0)
 
 static CacheEntry s_cache[CACHE_SIZE];
 static u32 s_frame = 1;
@@ -234,6 +248,12 @@ static void stat_frame_end(void) {
                        st->h, st->fmt, st->interval_mism, (unsigned)f, st->mism);
                 st->interval_mism = 0;
             }
+        }
+        if (s_async) {
+            PLOG_I("texasync: queued %u taken %u stale-gen %u verify-bad %u dropped %u unused %u, binds that waited %u "
+                   "(%u us), decoded at the bind %u; prefetch calls %u: clut %u fmt %u size %u dup %u full %u uncovered %u", s_as.queued, s_as.taken, s_as.stale_gen, s_as.verify_bad, s_as.dropped, s_as.unused,
+                   s_as.wait_n, (unsigned)(s_as.wait_ticks / (PLAT_TICKS_PER_SEC / 1000000u)), s_as.inline_n, s_as.calls, s_as.rej_clut,
+                   s_as.rej_fmt, s_as.rej_size, s_as.rej_dup, s_as.rej_full, s_as.rej_cov);
         }
         s_st_hashes = s_st_bytes = s_st_lookups = s_st_checks = s_st_mism = s_st_uploads = s_st_frames = 0;
         s_st_trusted = s_st_stale = s_st_grants = 0;
@@ -684,7 +704,10 @@ static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h, cons
     }
     if (levels == 0) {
         tile_level(px, w, h, pw, ph, fmt, s_tiled);
-        return plat_gpu_tex_create(pw, ph, fmt, s_tiled, pw * ph * bpp);
+        u64 tc = TF_T();
+        u32 hd = plat_gpu_tex_create(pw, ph, fmt, s_tiled, pw * ph * bpp);
+        s_tf.t_create += s_tf_on ? plat_ticks() - tc : 0;
+        return hd;
     }
     int from_gx = gxt != NULL && gxt->mipmap;
     const u8* lin = NULL; /* the level being tiled and filtered, linear rows, lw x lh */
@@ -714,7 +737,10 @@ static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h, cons
     *out_levels = (u8)levels;
     *out_mip_bytes = off;
     s_mip_extra_made++;
-    return plat_gpu_tex_create_mip(pw, ph, fmt, s_tiled, pw * ph * bpp, s_mip_out, off, levels);
+    u64 tc = TF_T();
+    u32 hd = plat_gpu_tex_create_mip(pw, ph, fmt, s_tiled, pw * ph * bpp, s_mip_out, off, levels);
+    s_tf.t_create += s_tf_on ? plat_ticks() - tc : 0;
+    return hd;
 }
 
 typedef u32 __attribute__((may_alias)) u32_alias;
@@ -750,12 +776,25 @@ static u32 hash_span(u32 h, const u8* p, u32 n) {
     return h;
 }
 
+static u32 hash_bytes_raw(const u8* p, u32 n);
 static u32 hash_bytes(const u8* p, u32 n) {
-    u32 h = 2166136261u;
     if (s_stats_every) {
         s_st_hashes++;
         s_st_bytes += n <= 32 * 1024 ? n : 64 * 64;
     }
+    if (!s_tf_on) {
+        return hash_bytes_raw(p, n);
+    }
+    u64 t0 = plat_ticks();
+    u32 r = hash_bytes_raw(p, n);
+    s_tf.t_hash += plat_ticks() - t0;
+    s_tf.hashes++;
+    s_tf.hash_bytes += n <= 32 * 1024 ? n : 64 * 64;
+    return r;
+}
+
+static u32 hash_bytes_raw(const u8* p, u32 n) {
+    u32 h = 2166136261u;
     if (n <= 32 * 1024) {
         return hash_span(h, p, n);
     }
@@ -798,8 +837,296 @@ static void tex_trust(CacheEntry* e, const GxTexObj* t, const GxTlutObj* tl, u32
     }
 }
 
+
+/* ---- texasync (switch, default 0): textures decoded on the core-2 job queue before their first bind ----
+ * The game tells the GX layer about a texture set (GXPrefetchTexPort, called when a TPL is unpacked). Each plain
+ * (non-CI) texture whose image lies in covered memory is queued: decode to RGBA8, pick the PICA format, tile and hash,
+ * all on private buffers, by a runner job on the job worker (one job walks the queue; the entries are claimed one at a
+ * time by compare-and-swap). The input is vouched stable by memstable at queue time: plat_memstable_trust marks the
+ * span relied and returns the trust generation G. At the first bind the result is used only when the generation is
+ * still G (no relied range written, released or refilled since the queue time, so the bytes the worker read are the
+ * bytes there now); otherwise it is dropped and the texture is converted at the bind as before. The result goes through
+ * the same plat_gpu_tex_create, so the picture is the one the synchronous path makes. A bind of a texture the worker
+ * has not started decodes it on the game thread; one the worker is decoding is waited for. texverify=1 also
+ * re-hashes at the bind. Only plain textures without mip chains (texfilter=mip converts at the bind), up to 640x512 texels (1024x512 padded). Results unused after PRE_AGE frames are dropped. */
+#define PRE_MAX 1024
+#define PRE_BYTES_MAX (6u << 20)
+#define PRE_MAX_PIX (640u * 512u)  /* texels of a texture (the decode scratch is 4 bytes each) */
+#define PRE_MAX_PAD (1024u * 512u) /* texels after padding to powers of two */
+#define PRE_AGE 60
+enum { PS_FREE = 0, PS_TODO, PS_RUN, PS_DONE };
+typedef struct {
+    u32 state; /* atomic: FREE -> TODO (game thread) -> RUN (worker or game thread) -> DONE -> FREE (game thread) */
+    const void* image;
+    u16 w, h;
+    u8 fmt, ok;
+    u32 gx_bytes, gen, frame, est_bytes;
+    u8* out;
+    u32 out_bytes, pfmt, hash;
+    u16 pw, ph;
+} PreTex;
+static PreTex* s_pre;
+static u8* s_pre_rgba[2];
+static u32 s_pre_busy[2];
+static u32 s_pre_bytes;
+static u32 s_pre_active; /* a runner job is walking the queue */
+static PlatJob s_pre_runner;
+extern void svcSleepThread(long long ns);
+
+static inline int pre_cas(PreTex* p, u32 from, u32 to) {
+    return __atomic_compare_exchange_n(&p->state, &from, to, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+
+/* Decodes one claimed (PS_RUN) entry, on any thread: the result stays in the entry, DONE is published last. */
+static void pre_decode(PreTex* p) {
+    int k = 0;
+    for (;;) { /* at most two threads decode at a time (the worker and the game thread): one scratch is free */
+        u32 e = 0;
+        if (__atomic_compare_exchange_n(&s_pre_busy[k], &e, 1u, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+            break;
+        }
+        k ^= 1;
+    }
+    u8* rgba = s_pre_rgba[k];
+    gx_tex_decode_rgba8(p->image, p->w, p->h, p->fmt, NULL, 0, rgba);
+    u32 fmt = pick_format(rgba, p->w, p->h);
+    u32 pw = pow2(p->w), ph = pow2(p->h);
+    u32 bytes = pw * ph * (fmt == PLAT_TEXFMT_RGBA8 ? 4 : 2);
+    u8* out = malloc(bytes);
+    if (out != NULL) {
+        tile_level(rgba, p->w, p->h, pw, ph, fmt, out);
+        p->hash = hash_bytes_raw(p->image, p->gx_bytes);
+        p->out = out;
+        p->out_bytes = bytes;
+        p->pfmt = fmt;
+        p->pw = (u16)pw;
+        p->ph = (u16)ph;
+        p->ok = 1;
+    }
+    __atomic_store_n(&s_pre_busy[k], 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->state, PS_DONE, __ATOMIC_RELEASE);
+}
+
+static int pre_any_todo(void) {
+    for (int i = 0; i < PRE_MAX; i++) {
+        if (__atomic_load_n(&s_pre[i].state, __ATOMIC_ACQUIRE) == PS_TODO) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The runner job: claims queued entries in order until none is left. */
+static void pre_runner(void* unused) {
+    (void)unused;
+    for (;;) {
+        for (int i = 0; i < PRE_MAX; i++) {
+            PreTex* p = &s_pre[i];
+            if (__atomic_load_n(&p->state, __ATOMIC_ACQUIRE) == PS_TODO && pre_cas(p, PS_TODO, PS_RUN)) {
+                pre_decode(p);
+            }
+        }
+        __atomic_store_n(&s_pre_active, 0u, __ATOMIC_RELEASE);
+        u32 z = 0;
+        if (!pre_any_todo() || !__atomic_compare_exchange_n(&s_pre_active, &z, 1u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            return; /* nothing new, or the game thread started another runner */
+        }
+    }
+}
+
+/* Game thread: makes sure a runner is walking the queue. */
+static void pre_kick(void) {
+    u32 z = 0;
+    if (__atomic_compare_exchange_n(&s_pre_active, &z, 1u, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        if (s_pre_runner != 0) {
+            plat_job_join(s_pre_runner); /* the previous runner has finished (it cleared the flag) or is about to */
+        }
+        s_pre_runner = plat_job_submit(pre_runner, NULL);
+    }
+}
+
+static void pre_free(PreTex* p) {
+    s_pre_bytes -= p->est_bytes;
+    free(p->out);
+    memset(p, 0, sizeof(*p)); /* state FREE */
+}
+
+static int cache_has(const void* image, u16 w, u16 h, u8 fmt) {
+    u32 slot = ((u32)image >> 5) % CACHE_SIZE;
+    for (u32 probe = 0; probe < 16; probe++) {
+        const CacheEntry* e = &s_cache[(slot + probe) % CACHE_SIZE];
+        if (e->handle != 0 && e->image == image && e->w == w && e->h == h && e->fmt == fmt && !e->is_ci) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static PreTex* pre_find(const void* image, u16 w, u16 h, u8 fmt) {
+    for (int i = 0; i < PRE_MAX; i++) {
+        PreTex* p = &s_pre[i];
+        if (p->state != PS_FREE && p->image == image && p->w == w && p->h == h && p->fmt == fmt) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+/* Public: the game has a plain texture in memory that it will probably draw soon. */
+void GXPrefetchTexPort(const void* image, u16 w, u16 h, u32 format, int has_clut) {
+    if (!s_async || s_pre == NULL || image == NULL || s_mode == TF_MIP) {
+        return;
+    }
+    s_as.calls++;
+    if (has_clut) {
+        s_as.rej_clut++;
+        return;
+    }
+    switch (format) {
+    case GX_TF_I4: case GX_TF_I8: case GX_TF_IA4: case GX_TF_IA8: case GX_TF_RGB565: case GX_TF_RGB5A3:
+    case GX_TF_RGBA8: case GX_TF_CMPR: break;
+    default: s_as.rej_fmt++; return;
+    }
+    if (w == 0 || h == 0 || (u32)w * h > PRE_MAX_PIX || pow2(w) * pow2(h) > PRE_MAX_PAD) {
+        s_as.rej_size++;
+        return;
+    }
+    u32 est = pow2(w) * pow2(h) * 2;
+    while (s_pre_bytes + est > PRE_BYTES_MAX) {
+        /* make room: the oldest finished result that no bind has asked for in a while goes first */
+        PreTex* old = NULL;
+        for (int i = 0; i < PRE_MAX; i++) {
+            PreTex* q = &s_pre[i];
+            if (q->state == PS_DONE && s_frame - q->frame >= 2 && (old == NULL || q->frame < old->frame)) {
+                old = q;
+            }
+        }
+        if (old == NULL) {
+            s_as.rej_full++;
+            return;
+        }
+        s_as.unused++;
+        pre_free(old);
+    }
+    if (cache_has(image, w, h, (u8)format) || pre_find(image, w, h, (u8)format) != NULL) {
+        s_as.rej_dup++;
+        return;
+    }
+    PreTex* p = NULL;
+    for (int i = 0; i < PRE_MAX; i++) {
+        if (s_pre[i].state == PS_FREE) {
+            p = &s_pre[i];
+            break;
+        }
+    }
+    if (p == NULL) {
+        s_as.rej_full++;
+        return;
+    }
+    u32 bytes = GXGetTexBufferSize(w, h, format, GX_FALSE, 0);
+    PlatMemSpan sp = {image, bytes};
+    u32 g = plat_memstable_trust(&sp, 1, plat_memstable_epoch());
+    if (g == 0) {
+        s_as.rej_cov++;
+        return; /* not covered memory: the bind hashes it as before */
+    }
+    memset(p, 0, sizeof(*p));
+    p->image = image;
+    p->w = w;
+    p->h = h;
+    p->fmt = (u8)format;
+    p->gx_bytes = bytes;
+    p->gen = g;
+    p->frame = s_frame;
+    p->est_bytes = est;
+    s_pre_bytes += est;
+    s_as.queued++;
+    __atomic_store_n(&p->state, PS_TODO, __ATOMIC_RELEASE);
+    pre_kick();
+}
+
+/* The result for texture `t` if one is valid: creates the PICA texture from it and fills the handle and sizes; 0
+ * when the bind must convert. The entry is gone afterwards either way. */
+static int pre_take(const GxTexObj* t, u32* handle, u16* tw, u16* th, u32* bytes0, u32* hash, u32* gen) {
+    PreTex* p = pre_find(t->image, t->width, t->height, t->format);
+    if (p == NULL) {
+        return 0;
+    }
+    int ok = 0;
+    if (pre_cas(p, PS_TODO, PS_RUN)) {
+        pre_decode(p); /* the worker has not started it: here, as the synchronous path would */
+        s_as.inline_n++;
+    } else if (__atomic_load_n(&p->state, __ATOMIC_ACQUIRE) == PS_RUN) {
+        u64 t0 = plat_ticks();
+        while (__atomic_load_n(&p->state, __ATOMIC_ACQUIRE) == PS_RUN) {
+            svcSleepThread(20000);
+        }
+        s_as.wait_n++;
+        s_as.wait_ticks += plat_ticks() - t0;
+    }
+    if (!p->ok || s_mode == TF_MIP || p->gen != plat_memstable_gen()) {
+        s_as.stale_gen += p->ok;
+    } else if (s_verify && hash_bytes_raw(t->image, p->gx_bytes) != p->hash) {
+        s_as.verify_bad++;
+        s_st_stale++;
+        PLOG_W("texverify: texasync result stale: image %p %ux%u fmt %u frame %u", t->image, t->width, t->height,
+               t->format, (unsigned)s_frame);
+    } else {
+        u32 h = plat_gpu_tex_create(p->pw, p->ph, p->pfmt, p->out, p->out_bytes);
+        if (h != 0) {
+            *handle = h;
+            *tw = p->pw;
+            *th = p->ph;
+            *bytes0 = p->out_bytes;
+            *hash = p->hash;
+            *gen = p->gen;
+            ok = 1;
+            s_as.taken++;
+            s_uploads++;
+        }
+    }
+    pre_free(p);
+    return ok;
+}
+
+static void pre_frame_end(void) {
+    if (s_pre == NULL) {
+        return;
+    }
+    for (int i = 0; i < PRE_MAX; i++) {
+        PreTex* p = &s_pre[i];
+        u32 st = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE);
+        if (st == PS_FREE || s_frame - p->frame <= PRE_AGE) {
+            continue;
+        }
+        if (st == PS_TODO && pre_cas(p, PS_TODO, PS_RUN)) {
+            st = PS_DONE; /* claimed by us: nothing was made */
+        }
+        if (st == PS_DONE) {
+            s_as.unused++;
+            pre_free(p);
+        }
+    }
+    if (pre_any_todo()) {
+        pre_kick();
+    }
+}
+
+static u32 handle_for_impl(int map, u16* out_w, u16* out_h);
+
 /* Converts (or finds) the texture of texture map slot `map`. */
 u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
+    if (!s_tf_on) {
+        return handle_for_impl(map, out_w, out_h);
+    }
+    u64 t0 = plat_ticks();
+    u32 r = handle_for_impl(map, out_w, out_h);
+    s_tf.t_total += plat_ticks() - t0;
+    s_tf.lookups++;
+    return r;
+}
+
+static u32 handle_for_impl(int map, u16* out_w, u16* out_h) {
     s_last.copy = 0;
     s_last.levels = 0;
     if (map < 0 || map >= GX_MAX_TEXMAP || !gx.tex_map_valid[map]) {
@@ -890,12 +1217,34 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
         free_e = lru;
     }
     u32 up_epoch = plat_memstable_epoch();
-    gx_tex_decode_rgba8(t->image, t->width, t->height, t->format, tl ? tl->data : NULL, tl ? tl->format : 0,
-                        s_rgba);
     CacheEntry* e = free_e;
     int mips = wants_mips(t);
     CacheExtra* xe = &s_x[free_e - s_cache];
-    e->handle = upload_rgba8(s_rgba, t->width, t->height, &e->tex_w, &e->tex_h, t, tl, mips, &xe->levels, &xe->bytes0, &xe->bytes_mip);
+    u32 pre_hash = 0, pre_gen = 0;
+    int from_pre = 0;
+    u64 tu0 = TF_T();
+    if (s_async && !tl && !mips && s_pre != NULL) {
+        from_pre = pre_take(t, &e->handle, &e->tex_w, &e->tex_h, &xe->bytes0, &pre_hash, &pre_gen);
+        if (from_pre) {
+            xe->levels = 0;
+            xe->bytes_mip = 0;
+            s_tf.async_hit++;
+        } else {
+            s_tf.async_miss++;
+        }
+    }
+    if (!from_pre) {
+        u64 td = TF_T();
+        gx_tex_decode_rgba8(t->image, t->width, t->height, t->format, tl ? tl->data : NULL, tl ? tl->format : 0,
+                            s_rgba);
+        s_tf.t_dec += s_tf_on ? plat_ticks() - td : 0;
+        e->handle = upload_rgba8(s_rgba, t->width, t->height, &e->tex_w, &e->tex_h, t, tl, mips, &xe->levels,
+                                 &xe->bytes0, &xe->bytes_mip);
+    }
+    if (s_tf_on) {
+        s_tf.uploads++;
+        s_tf.t_conv += plat_ticks() - tu0;
+    }
     if (e->handle == 0) {
         /* texture memory full: free everything not used this frame, retry. At most once per frame: a second
          * miss in the same frame would free nothing new and repeat the full GPU sync every state rebuild. */
@@ -946,13 +1295,19 @@ u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h) {
     e->is_ci = t->is_ci;
     e->tlut = tl ? tl->data : NULL;
     e->tlut_fmt = tl ? tl->format : 0;
-    u32 th0 = tl ? hash_bytes(tl->data, (u32)tl->n_entries * 2) : 0;
-    s_dbg_tlut_hash[e - s_cache] = th0;
     s_st_uploads += s_stats_every != 0;
-    e->hash = hash_bytes(t->image, bytes) ^ th0;
     e->last_frame = e->checked_frame = s_frame;
-    if (s_trust_on) {
-        tex_trust(e, t, tl, bytes, up_epoch);
+    if (from_pre) {
+        s_dbg_tlut_hash[e - s_cache] = 0;
+        e->hash = pre_hash;
+        e->trust_gen = pre_gen; /* still the current generation: checked in pre_take */
+    } else {
+        u32 th0 = tl ? hash_bytes(tl->data, (u32)tl->n_entries * 2) : 0;
+        s_dbg_tlut_hash[e - s_cache] = th0;
+        e->hash = hash_bytes(t->image, bytes) ^ th0;
+        if (s_trust_on) {
+            tex_trust(e, t, tl, bytes, up_epoch);
+        }
     }
     *out_w = e->tex_w;
     *out_h = e->tex_h;
@@ -1102,6 +1457,15 @@ void gx_tex_frame_end(void) {
                k_mode_names[s_mode], (unsigned)s_live_n, (unsigned)(s_live_bytes >> 10), (unsigned)(s_live_mip >> 10),
                (unsigned)s_mip_extra_made);
     }
+    if (s_tf_on) {
+        const u32 tpu = PLAT_TICKS_PER_SEC / 1000000u;
+        PLOG_I("texframe: %u lk %u up %u hash %u/%uB async %u/%u | us: total %u conv %u (dec %u create %u) hash %u",
+               (unsigned)s_frame, s_tf.lookups, s_tf.uploads, s_tf.hashes, s_tf.hash_bytes, s_tf.async_hit,
+               s_tf.async_hit + s_tf.async_miss, (unsigned)(s_tf.t_total / tpu), (unsigned)(s_tf.t_conv / tpu),
+               (unsigned)(s_tf.t_dec / tpu), (unsigned)(s_tf.t_create / tpu), (unsigned)(s_tf.t_hash / tpu));
+        memset(&s_tf, 0, sizeof(s_tf));
+    }
+    pre_frame_end();
     s_frame++;
     for (int i = 0; i < CACHE_SIZE; i++) {
         if (s_cache[i].handle && s_frame - s_cache[i].last_frame > EVICT_FRAMES) {
@@ -1183,6 +1547,8 @@ void gx_tex_init(void) {
     s_trust_on = plat_switch_int("textrust", 1) != 0;
     s_verify = plat_switch_int("texverify", 0) != 0;
     s_copy_evict = plat_switch_int("copyevict", 1) != 0;
+    s_tf_on = plat_switch_int("texframe", 0) != 0;
+    s_async = plat_switch_int("texasync", 0) != 0 && s_trust_on;
     mode_init();
     s_x = calloc(CACHE_SIZE, sizeof(CacheExtra));
     if (s_x == NULL) {
@@ -1204,5 +1570,18 @@ void gx_tex_init(void) {
     s_tiled = memalign(64, 1024 * 1024 * 4);
     if (s_rgba == NULL || s_tiled == NULL) {
         plat_fatal("GX: no memory for texture conversion buffers");
+    }
+    if (s_async) {
+        s_pre = calloc(PRE_MAX, sizeof(PreTex));
+        s_pre_rgba[0] = memalign(64, PRE_MAX_PIX * 4);
+        s_pre_rgba[1] = memalign(64, PRE_MAX_PIX * 4);
+        if (s_pre == NULL || s_pre_rgba[0] == NULL || s_pre_rgba[1] == NULL || !plat_job_enabled()) {
+            PLOG_W("texasync: off (no memory or no job worker)");
+            free(s_pre);
+            s_pre = NULL;
+            s_async = 0;
+        } else {
+            PLOG_I("texasync: on (%u slots, %u KB result cap)", (unsigned)PRE_MAX, (unsigned)(PRE_BYTES_MAX >> 10));
+        }
     }
 }

@@ -136,8 +136,13 @@ void gx_opts_init(void) {
             gx_opt_immdirect = 1; /* gxonehop=1 under it */
         }
     }
-    PLOG_I("gx: statever %d fogcache %d unlit %d dirty %d immdirect %d one %d", gx_opt_statever, gx_opt_fogcache,
-           gx_opt_unlit, gx_opt_dirty, gx_opt_immdirect, gx_opt_one);
+    gx_opt_fifo = plat_switch_int("gxfifo", 0);
+    if (gx_opt_fifo < 0 || gx_opt_fifo > 2) {
+        gx_opt_fifo = 0;
+    }
+    gx_rec_fast_update(); /* the setters' word (gx_rec_fast.fifo) reads gxfifo, gxdirty and gxstatededup */
+    PLOG_I("gx: statever %d fogcache %d unlit %d dirty %d immdirect %d one %d fifo %d", gx_opt_statever,
+           gx_opt_fogcache, gx_opt_unlit, gx_opt_dirty, gx_opt_immdirect, gx_opt_one, gx_opt_fifo);
     gx_vsh_init();
 }
 

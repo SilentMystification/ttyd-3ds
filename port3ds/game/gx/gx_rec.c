@@ -65,6 +65,8 @@ GxState gx_game;
 void gx_rec_fast_update(void) {
     int quiet = !gx_dl_recording() && !gx_prim_is_open();
     gx_rec_fast.w = gx_rec_mode == 0 && quiet && !gx_tls_translator ? 0 : gx_rec_on() && quiet ? 1 : 2;
+    const int fifo_ok = gx_rec_fast.w == 0 && gx_opt_dirty != 0 && !gx_opt_statededup;
+    gx_rec_fast.fifo = fifo_ok && gx_opt_fifo == 1 ? 0 : fifo_ok && gx_opt_fifo == 2 ? 2 : 1;
 }
 
 static __thread int t_game; /* the thread that called GXInit */
@@ -2078,6 +2080,7 @@ void gx_rec_frame(void) {
         gx_ph_log(s_frame_no, f);
     }
     gx_dirty_log(f);
+    gx_fifo_log(f);
     gx_immdirect_log(f);
     if (gx_rec_mode == 3) {
         u32 gm = 0;

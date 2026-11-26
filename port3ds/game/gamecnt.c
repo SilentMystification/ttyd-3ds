@@ -91,11 +91,16 @@ void port_cnt_qqsort(void* caller, u32 n) {
 void port_cnt_hitvec(void) { s_hitvec++; }
 void port_cnt_animpose(void) { s_anim++; }
 
-void port_cnt_mapdisp(u32 objects, u32 entries) {
+static u64 s_mapdisp_ticks, s_lookup_ticks;
+
+void port_cnt_mapdisp(u32 objects, u32 entries, u64 ticks) {
     s_mapdisp++;
     s_mapobj += objects;
     s_mapent += entries;
+    s_mapdisp_ticks += ticks;
 }
+
+void port_cnt_lookup_ticks(u64 ticks) { s_lookup_ticks += ticks; }
 
 /* x / d with one decimal, as "12.3" */
 static const char* dec1(char* buf, u64 x, u32 d) {
@@ -175,6 +180,12 @@ void port_gamepar_frame(u32 frame) {
            (unsigned long)frame, (unsigned long)frames, dec1(a, s_mapdisp, frames), dec1(b, s_mapobj, frames), dec1(c, s_mapent, frames),
            dec1(d, s_hitvec, frames), dec1(e, s_anim, frames), dec1(f, s_sort.calls, frames), dec1(g, s_sort.probes, s_sort.calls),
            (unsigned long)s_sort_max);
+    {
+        const u64 tpu = PLAT_TICKS_PER_SEC / 1000000u;
+        PLOG_I("[GAMECNT]   time per frame: mapDisp %lu us, name lookups %lu us (both include the counters)",
+               (unsigned long)(s_mapdisp_ticks / tpu / frames), (unsigned long)(s_lookup_ticks / tpu / frames));
+        s_mapdisp_ticks = s_lookup_ticks = 0;
+    }
     static const char* const k_kind[3] = {"mapGetMapObj", "hitNameToPtr", "lightNameToPtr"};
     for (int k = 0; k < 3; k++) {
         LookupCnt* l = &s_look[k];

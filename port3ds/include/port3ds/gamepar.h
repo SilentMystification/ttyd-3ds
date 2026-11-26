@@ -36,7 +36,8 @@ static inline int port_gamecnt_on(void) { return port_gamecnt > 0 || (port_gamec
 void port_cnt_qqsort(void* caller, u32 n);
 void port_cnt_hitvec(void);
 void port_cnt_animpose(void);
-void port_cnt_mapdisp(u32 objects, u32 entries);
+void port_cnt_mapdisp(u32 objects, u32 entries, u64 ticks);
+void port_cnt_lookup_ticks(u64 ticks); /* nameidx.c: time in the three lookups */
 /* Once per game frame (vi.c frame hooks). */
 void port_gamepar_frame(u32 frame);
 /* The name-lookup counters (nameidx.c reports each lookup here when gamecnt is on). kind: 0 map, 1 hit, 2 light. */

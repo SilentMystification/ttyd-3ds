@@ -334,6 +334,7 @@ static void mismatch(int kind, const char* name, const void* idx, const void* wa
 
 MapObject* portMapGetMapObj(MapWork* wp, const char* name, void* caller) {
     u32 probes = 0, compares = 0, p2 = 0; /* p2: the walk's probes in mode 2 (what gamecnt reports) */
+    u64 t0 = port_gamecnt > 0 ? plat_ticks() : 0;
     MapObject* r;
     if (s_mode == 0) {
         r = walk_map(wp, name, &probes);
@@ -363,6 +364,7 @@ MapObject* portMapGetMapObj(MapWork* wp, const char* name, void* caller) {
     s_stats[KIND_MAP].probes += probes;
     s_stats[KIND_MAP].compares += compares;
     if (port_gamecnt_on()) {
+        port_cnt_lookup_ticks(plat_ticks() - t0);
         port_cnt_lookup(KIND_MAP, caller, p2 ? p2 : probes, p2 ? p2 : compares);
     }
     return r;
@@ -370,6 +372,7 @@ MapObject* portMapGetMapObj(MapWork* wp, const char* name, void* caller) {
 
 HitEntry* portHitNameToPtr(MapWork* wp, const char* name, void* caller) {
     u32 probes = 0, compares = 0, p2 = 0; /* p2: the walk's probes in mode 2 (what gamecnt reports) */
+    u64 t0 = port_gamecnt > 0 ? plat_ticks() : 0;
     HitEntry* r;
     if (s_mode == 0) {
         r = walk_hit(wp, name, &probes);
@@ -399,6 +402,7 @@ HitEntry* portHitNameToPtr(MapWork* wp, const char* name, void* caller) {
     s_stats[KIND_HIT].probes += probes;
     s_stats[KIND_HIT].compares += compares;
     if (port_gamecnt_on()) {
+        port_cnt_lookup_ticks(plat_ticks() - t0);
         port_cnt_lookup(KIND_HIT, caller, p2 ? p2 : probes, p2 ? p2 : compares);
     }
     return r;
@@ -406,6 +410,7 @@ HitEntry* portHitNameToPtr(MapWork* wp, const char* name, void* caller) {
 
 LightEntry* portLightNameToPtr(LightWork* wp, const char* name, void* caller) {
     u32 probes = 0, compares = 0, p2 = 0; /* p2: the walk's probes in mode 2 (what gamecnt reports) */
+    u64 t0 = port_gamecnt > 0 ? plat_ticks() : 0;
     LightEntry* r;
     if (s_mode == 0) {
         r = walk_light(wp, name, &probes);
@@ -434,6 +439,7 @@ LightEntry* portLightNameToPtr(LightWork* wp, const char* name, void* caller) {
     s_stats[KIND_LIGHT].probes += probes;
     s_stats[KIND_LIGHT].compares += compares;
     if (port_gamecnt_on()) {
+        port_cnt_lookup_ticks(plat_ticks() - t0);
         port_cnt_lookup(KIND_LIGHT, caller, p2 ? p2 : probes, p2 ? p2 : compares);
     }
     return r;

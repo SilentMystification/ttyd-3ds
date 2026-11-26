@@ -2805,6 +2805,7 @@ void mapDisp(void) {
 #endif
 #ifdef TARGET_PORT
     s32 port_n0 = entry_n;
+    u64 port_t0 = port_gamecnt_on() ? plat_ticks() : 0;
     s32 port_verify_n = -1; // mapdispjob=2: where phase B's records began
     u32 port_verify_objs = 0;
     if (portMapDispJob(wp, camera, &port_verify_n, &port_verify_objs)) {
@@ -2944,7 +2945,7 @@ port_done:
         for (i = 0; i < wp->entries[0].count; i++) {
             walked += wp->entries[i].numJoints;
         }
-        port_cnt_mapdisp(walked, (u32)(entry_n - port_n0));
+        port_cnt_mapdisp(walked, (u32)(entry_n - port_n0), plat_ticks() - port_t0);
     }
 #endif
 }

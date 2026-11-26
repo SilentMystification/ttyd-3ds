@@ -40,9 +40,11 @@
 #include "stereo.h"
 
 #define TARGET_W 512
-#define TARGET_H 1024
+#define VIEW_H 1024 /* the textures' rows; the EFB target has s_in.target_h of them (VIEW_V0 fewer rows) */
+#define TARGET_H (s_in.target_h)
+#define VIEW_V0 (VIEW_H - s_in.target_h)
 #define REGION_W 480
-#define REGION_H 800
+#define REGION_H (s_in.region_h)
 #define EFB_W 608
 #define EFB_H 480
 #define SS 4 /* depth samples per cell side */
@@ -124,9 +126,10 @@ static int make_resources(void) {
         PLOG_W("stereo: no VRAM for the right eye's screen target: mono");
         return 0;
     }
+    C3D_RenderTargetClear(s_right, C3D_CLEAR_COLOR, 0, 0); /* the bars of efb608 are never drawn */
     C3D_RenderTargetSetOutput(s_right, GFX_TOP, GFX_RIGHT, s_in.screen_flags);
-    if (!C3D_TexInit(&s_snap, TARGET_W, TARGET_H, GPU_RGBA8)) {
-        PLOG_W("stereo: no linear memory for the %d KB colour snapshot: mono", TARGET_W * TARGET_H * 4 / 1024);
+    if (!C3D_TexInit(&s_snap, TARGET_W, VIEW_H, GPU_RGBA8)) {
+        PLOG_W("stereo: no linear memory for the %d KB colour snapshot: mono", TARGET_W * VIEW_H * 4 / 1024);
         return 0;
     }
     memset(s_snap.data, 0, s_snap.size);
@@ -185,7 +188,7 @@ static int make_resources(void) {
                     o->pos[3] = 1.0f;
                     o->color[0] = o->color[1] = o->color[2] = o->color[3] = 255;
                     o->tc0[0] = tx / TARGET_W;
-                    o->tc0[1] = ty / TARGET_H;
+                    o->tc0[1] = (ty + VIEW_V0) / VIEW_H;
                 }
             }
         }
@@ -194,8 +197,8 @@ static int make_resources(void) {
     s_depth_tex.data = s_in.efb->frameBuf.depthBuf;
     s_depth_tex.fmt = GPU_RGBA8; /* D24S8 bytes: A = depth bits 0-7, B = 8-15, G = 16-23, R = stencil */
     s_depth_tex.width = TARGET_W;
-    s_depth_tex.height = TARGET_H;
-    s_depth_tex.size = TARGET_W * TARGET_H * 4;
+    s_depth_tex.height = VIEW_H;
+    s_depth_tex.size = TARGET_W * VIEW_H * 4;
     s_depth_tex.param = GPU_TEXTURE_MAG_FILTER(GPU_NEAREST) | GPU_TEXTURE_MIN_FILTER(GPU_NEAREST) |
                         GPU_TEXTURE_WRAP_S(GPU_CLAMP_TO_EDGE) | GPU_TEXTURE_WRAP_T(GPU_CLAMP_TO_EDGE);
     PLOG_I("stereo: on (grid %dx%d, depth samples %dx%d); VRAM free %lu KB, linear free %lu KB", s_gw, s_gh, s_sw,
@@ -329,7 +332,7 @@ static void replace_tex0(C3D_Tex* t) {
 void stereo_snapshot(void) {
     /* 1. the colour: memory rows 224..1023 hold viewport rows 0..799 (the region) */
     const u32 tile_row = TARGET_W * 8 * 4;
-    const u32 first = (TARGET_H - REGION_H) / 8, bytes = (REGION_H / 8) * tile_row;
+    const u32 first = (u32)(TARGET_H - REGION_H) / 8, bytes = (u32)(REGION_H / 8) * tile_row;
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
     GX_TextureCopy((u32*)((u8*)s_in.efb->frameBuf.colorBuf + first * tile_row), GX_BUFFER_DIM(bytes, 0),
                    (u32*)((u8*)s_snap.data + first * tile_row), GX_BUFFER_DIM(bytes, 0), bytes, 8);
@@ -347,7 +350,7 @@ void stereo_snapshot(void) {
         s_in.efb_point(cx[k] * EFB_W, cy[k] * EFB_H, &tx, &ty);
         C3D_ImmSendAttrib(-1.0f + 2.0f * cx[k] * gw / s_sw, -1.0f + 2.0f * cy[k] * gh / s_sh, -0.5f, 1.0f);
         C3D_ImmSendAttrib(255, 255, 255, 255);
-        C3D_ImmSendAttrib(tx / TARGET_W, ty / TARGET_H, 0, 1);
+        C3D_ImmSendAttrib(tx / TARGET_W, (ty + VIEW_V0) / VIEW_H, 0, 1);
         C3D_ImmSendAttrib(0, 0, 0, 1);
         C3D_ImmSendAttrib(0, 0, 0, 1);
     }

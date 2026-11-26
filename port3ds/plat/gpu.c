@@ -34,11 +34,20 @@
 #include "plat_internal.h"
 #include "stereo.h"
 
-#define TARGET_W 512  /* rotated render target, power of two so it can be sampled */
-#define TARGET_H 1024
+/* The EFB target is TARGET_H rows (switch efb608: 608, else 1024), sampled as a texture through a VIEW_H = 1024 row view
+ * at the colour buffer's address (the PICA samples only power-of-two sizes). Viewport pixel y of the target is memory
+ * row TARGET_H - 1 - y, so texel v = (y + VIEW_V0) / VIEW_H with VIEW_V0 = VIEW_H - TARGET_H. */
+#define TARGET_W 512
+static int s_target_h = 1024;
+static int s_region_h = 800;  /* the part shown, rotated: 800 (the picture centred) or 608 (it fills the target) */
+static int s_efb_xoff = 96;   /* (REGION_H - 608) / 2: TTYD's 608-wide EFB centred */
+static int s_efb608;          /* switch efb608 */
+#define TARGET_H s_target_h
+#define VIEW_H 1024
+#define VIEW_V0 (VIEW_H - s_target_h)
 #define REGION_W 480  /* the part shown: twice the top screen, rotated */
-#define REGION_H 800
-#define EFB_X_OFFSET 96 /* (800 - 608) / 2: TTYD's 608-wide EFB centred */
+#define REGION_H s_region_h
+#define EFB_X_OFFSET s_efb_xoff
 #define MAX_TEX 4096
 #define ARENA_VERTICES (96 * 1024)
 #define RECORD_BYTES (512u << 10) /* two records fill the 1 MiB gx record budget in QTM */
@@ -1463,7 +1472,7 @@ static void copy_pass(C3D_RenderTarget* target, u32 vp_w, u32 vp_h, u32 r0, u16 
     float tx, ty, tw, th;
     efb_to_target_rect(x, y, w, h, &tx, &ty, &tw, &th);
     float u0 = tx / s_efb_tex.width, u1 = (tx + tw) / s_efb_tex.width;
-    float v0 = ty / s_efb_tex.height, v1 = (ty + th) / s_efb_tex.height;
+    float v0 = (ty + VIEW_V0) / s_efb_tex.height, v1 = (ty + th + VIEW_V0) / s_efb_tex.height;
     /* corners: GX (s, t) = (0,0) (1,0) (0,1) (1,1) -> EFB corners -> target uv */
     float cx[4] = {0, 1, 0, 1}, cy[4] = {0, 0, 1, 1};
     C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uloc_rot0, 1, 0, 0, 0);
@@ -1473,7 +1482,7 @@ static void copy_pass(C3D_RenderTarget* target, u32 vp_w, u32 vp_h, u32 r0, u16 
         float ex = cx[i], ey = cy[i]; /* in the copied rect, 0..1 */
         float ttx, tty, dummy0, dummy1;
         efb_to_target_rect(x + ex * w, y + ey * h, 0, 0, &ttx, &tty, &dummy0, &dummy1);
-        float u = ttx / s_efb_tex.width, v = tty / s_efb_tex.height; /* viewport pixel -> texel (see present) */
+        float u = ttx / s_efb_tex.width, v = (tty + VIEW_V0) / s_efb_tex.height; /* viewport pixel -> texel (see present) */
         (void)u0;
         (void)u1;
         (void)v0;
@@ -1662,8 +1671,11 @@ static void present(C3D_RenderTarget* screen) {
      * viewport y runs right to left on the display, the EFB's left to
      * right (efb_to_target_rect), so screen viewport pixel (sx, sy) shows
      * EFB viewport pixel (2 sx, REGION_H - 2 sy). Checked with gputest. */
-    const float u1 = (float)REGION_W / TARGET_W, v1 = (float)REGION_H / TARGET_H;
-    const float c[4][4] = {{-1, -1, 0, v1}, {1, -1, u1, v1}, {-1, 1, 0, 0}, {1, 1, u1, 0}};
+    const float u1 = (float)REGION_W / TARGET_W, v1 = (float)(REGION_H + VIEW_V0) / VIEW_H, v0 = (float)VIEW_V0 / VIEW_H;
+    /* with efb608 the picture covers the middle REGION_H / 2 of the 400 screen columns; the screen targets are cleared to
+     * black once at their creation and the quad never draws the bars */
+    const float k = (float)REGION_H / 800.0f;
+    const float c[4][4] = {{-1, -k, 0, v1}, {1, -k, u1, v1}, {-1, k, 0, v0}, {1, k, u1, v0}};
     C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
     for (int i = 0; i < 4; i++) {
         C3D_ImmSendAttrib(c[i][0], c[i][1], -0.5f, 1.0f);
@@ -4084,7 +4096,7 @@ uint32_t plat_gpu_peek_argb(uint16_t x, uint16_t y) {
     plat_gpu_sync();
     float tx, ty, tw, th;
     efb_to_target_rect(x, y, 1, 1, &tx, &ty, &tw, &th);
-    u32 px = (u32)tx, py = TARGET_H - 1 - (u32)ty; /* viewport y counts up from the last memory row */
+    u32 px = (u32)tx, py = (u32)TARGET_H - 1 - (u32)ty; /* viewport y counts up from the last memory row */
     const u32* buf = (const u32*)s_efb->frameBuf.colorBuf;
     u32 idx = ((py >> 3) * (TARGET_W >> 3) + (px >> 3)) * 64 + ((px & 1) | ((py & 1) << 1) | ((px & 2) << 1) |
                                                                   ((py & 2) << 2) | ((px & 4) << 2) | ((py & 4) << 3));
@@ -4127,8 +4139,8 @@ static void capture_depth(u32* buf, const char* path) {
     }
     memcpy(dpath, path, n - 4);
     memcpy(dpath + n - 4, ".dep", 5);
-    const u32 bytes = TARGET_W * TARGET_H * 4;
-    const u32 dim = GX_BUFFER_DIM(TARGET_W, TARGET_H);
+    const u32 bytes = TARGET_W * (u32)TARGET_H * 4;
+    const u32 dim = GX_BUFFER_DIM(TARGET_W, (u32)TARGET_H);
     GSPGPU_InvalidateDataCache(buf, bytes);
     C3D_SyncDisplayTransfer((u32*)s_efb->frameBuf.depthBuf, dim, buf, dim,
                             GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
@@ -4145,7 +4157,7 @@ static void capture_depth(u32* buf, const char* path) {
         for (int x = 0; x < 608; x++) {
             float tx, ty, tw, th;
             efb_to_target_rect((float)x, (float)y, 1, 1, &tx, &ty, &tw, &th);
-            u32 px = (u32)tx, py = TARGET_H - 1 - (u32)ty;
+            u32 px = (u32)tx, py = (u32)TARGET_H - 1 - (u32)ty;
             row[x] = buf[py * TARGET_W + px];
         }
         memcpy(out + out_n, row, sizeof(row));
@@ -4165,7 +4177,7 @@ static void capture_efb(const Record* r, const char* path) {
     /* The GPU copies the EFB to linear memory first: a CPU read of VRAM can
      * miss what the GPU drew (Azahar keeps rendered surfaces on the host GPU
      * until a GPU transfer reads them). */
-    const u32 bytes = TARGET_W * TARGET_H * 4;
+    const u32 bytes = TARGET_W * (u32)TARGET_H * 4;
     static u32* buf;
     if (buf == NULL) {
         buf = (u32*)linearAlloc(bytes);
@@ -4176,7 +4188,7 @@ static void capture_efb(const Record* r, const char* path) {
         }
     }
     GSPGPU_InvalidateDataCache(buf, bytes);
-    const u32 dim = GX_BUFFER_DIM(TARGET_W, TARGET_H);
+    const u32 dim = GX_BUFFER_DIM(TARGET_W, (u32)TARGET_H);
     C3D_SyncDisplayTransfer((u32*)s_efb->frameBuf.colorBuf, dim, buf, dim,
                             GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
                                 GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
@@ -4188,7 +4200,7 @@ static void capture_efb(const Record* r, const char* path) {
         for (int x = 0; x < 608; x++) {
             float tx, ty, tw, th;
             efb_to_target_rect((float)x, (float)y, 1, 1, &tx, &ty, &tw, &th);
-            u32 px = (u32)tx, py = TARGET_H - 1 - (u32)ty;
+            u32 px = (u32)tx, py = (u32)TARGET_H - 1 - (u32)ty;
             u32 v = buf[py * TARGET_W + px]; /* untiled by the transfer; RGBA8: R in the top byte */
             row[x * 3 + 0] = (u8)(v >> 24);
             row[x * 3 + 1] = (u8)(v >> 16);
@@ -4321,6 +4333,10 @@ void plat_gpu_init(void) {
     s_rot = plat_switch_int("rot", 0) & 3;
     s_merge = plat_switch_int("gxmerge", 1) != 0;
     s_copy_full = plat_switch_int("copyfull", 1) != 0;
+    s_efb608 = plat_switch_int("efb608", 0) != 0;
+    s_target_h = s_efb608 ? 608 : 1024;
+    s_region_h = s_efb608 ? 608 : 800;
+    s_efb_xoff = s_efb608 ? 0 : 96;
     s_efb = C3D_RenderTargetCreate(TARGET_W, TARGET_H, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
     if (s_efb == NULL) {
         plat_fatal("gpu: no VRAM for the %dx%d EFB", TARGET_W, TARGET_H);
@@ -4335,6 +4351,7 @@ void plat_gpu_init(void) {
     if (s_screen == NULL) {
         plat_fatal("gpu: no VRAM for the screen target");
     }
+    C3D_RenderTargetClear(s_screen, C3D_CLEAR_COLOR, 0, 0);
     C3D_RenderTargetSetOutput(s_screen, GFX_TOP, GFX_LEFT, SCREEN_TRANSFER_FLAGS);
     /* the scratch target of the strip copies (bank A has room after the EFB and the screen) */
     s_scratch_mem = vramAllocAt(SCRATCH_BYTES, VRAM_ALLOC_A);
@@ -4348,11 +4365,11 @@ void plat_gpu_init(void) {
     s_efb_tex.data = s_efb->frameBuf.colorBuf;
     s_efb_tex.fmt = GPU_RGBA8;
     s_efb_tex.width = TARGET_W;
-    s_efb_tex.height = TARGET_H;
-    s_efb_tex.size = TARGET_W * TARGET_H * 4;
+    s_efb_tex.height = VIEW_H;
+    s_efb_tex.size = TARGET_W * VIEW_H * 4;
     s_efb_tex.param = GPU_TEXTURE_MAG_FILTER(GPU_LINEAR) | GPU_TEXTURE_MIN_FILTER(GPU_LINEAR) |
                       GPU_TEXTURE_WRAP_S(GPU_CLAMP_TO_EDGE) | GPU_TEXTURE_WRAP_T(GPU_CLAMP_TO_EDGE);
-    StereoInit si = {s_efb, s_screen, &s_attr, 0, 0, SCREEN_TRANSFER_FLAGS, efb_point};
+    StereoInit si = {s_efb, s_screen, &s_attr, 0, 0, SCREEN_TRANSFER_FLAGS, efb_point, TARGET_H, REGION_H};
 
     s_dvlb = DVLB_ParseFile((u32*)gx_shbin, gx_shbin_size);
     shaderProgramInit(&s_prog);

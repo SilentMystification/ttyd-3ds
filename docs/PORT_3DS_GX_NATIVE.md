@@ -121,3 +121,29 @@ Priority when room is short: rows 1-2, then 3, then batch chunks, then 4. Consol
 - In `plat/gpu.c`: shader-path record commands and their `render_record` replay, `PlatGpuState` build/compare, gxdirect DTab/capture, all of gxonehop, `vunif` pending sets, `gxmerge`, `gxflushrender`; the `gx record` QTM placement becomes the frame-list placement.
 - In `gx_vsh.c`/`gx_dlcache.c`/`gx_draw.c`: per-frame group keys and hashes, record hints, the `gx_vsh_frame` streak pass, decal links except for the CPU path, per-open batch epoch checks, the `s_ix` pool, `gxstatever`, `gxstatededup`. `gxdirty`, `gxstatecache`, `gxdirect`, `gximmdirect`, `gxonehop`, `gxbatch` stop being switches and become the only path.
 - Kept: the CPU path (`gxvsh=0` and rare draws), the stream builder, memstable trust, the texture tier, `dlspread`, the verify modes.
+
+## Revised plan after steps 2-3 (2026-11-27)
+
+Measured: K (gxone + gxchunk, all on core 0) gives no gain in Azahar (gor_01 core 0 35.7 ms vs C3 game 22.5 + translator 13.3). Steps 2-3 removed the render-side work (~5.8 ms) but moved it to core 0 as the id path (~+3.5 ms) and left the front end unchanged: the translator's list walk, `bat_open` validation, route, `vsh_state`, uniform block, class key builds, state-list decoding and the immediate route now run on the game thread, plus ~18 K setters at 36-70 instructions each. About 30 K GX events per frame cost 50-2,000 instructions each; the GameCube does them in about 10-20.
+
+Remaining duplicate work under K: state change detected by content twice (setter SAME, `build_one` key) and by id twice; a TEV change forces a TEX rebuild; batch validation in five epochs plus chunk validation; route recomputed though the chunk holds a decided route; uniforms built, compared, copied and compared again per row; state lists LEB128-decoded every call (no gxsdl under K) and compared again in each setter; leftover Record bookkeeping. Setter code: 121 GX setters take ~412 KB of .text (inlined record path, constprop clones), bad for the 16 KB L1-I on the console.
+
+Option B (game thread records cheap words, core 2 interns and writes the frame list, core 1 submits) is the right layout, because core 0 holds 7-15 ms of game logic; it pays only once recording is FIFO-cheap and the front end is cut.
+
+Ranked steps (each behind a default-off switch, gates as section 4; gains est., gor_01 / pik_00 core 0, Azahar):
+
+| # | Switch | Change | Gain est. |
+|---|---|---|---|
+| 0 | `gxphx` (local) | ablation under K at fixed vblanks, to measure the phases | measurement |
+| 1 | `gxsdl=1` with K | no LEB128 decode of state lists | -1.5-2.5 / -2-3 |
+| 2 | `gxfifo` | packed-word shadow for the hot setters; one mode-word load, cold out-of-line record/DL/verify paths; one-word compare + store + dirty OR; SAME for VtxDesc/VtxAttrFmt/Array/Load*Mtx; getters via accessors; setter text ~412 KB to ~40 KB; `gxfifo=2` verifies the shadow against `GxState` at each draw boundary | -2.5-3.5 / -3-4 |
+| 3 | `gxsdlx` | a state list becomes its net delta, applied as word compare + store | -1-1.5 / -1.5-2 |
+| 4 | `gxbopen` | one world generation instead of five epochs; batch keeps class ids + gens and skips `vsh_state`, route, `bat_same_state` on a match | -1.5-2 / -2-2.5 |
+| 5 | `gxlcall` | `GXCallDisplayList` tests the open batch's next member inline before the `gx_call_list` prologue | -1-1.3 / -1.2-1.5 |
+| 6 | `gxrows` | uniform rows built from class parts as f24 with per-row dirty bits | -0.5-1 / -1-1.5 |
+| 7 | `gxtexkey` | TEX rebuilt only when unit inputs change | -0.4-0.8 / -0.8-1.5 |
+| 8 | `gximmfl=1` | step 4 (built) | -1-1.5 / -3-4 |
+| 9 | `gxkold` | drop leftover Record bookkeeping and `PlatGpuState` region copies under K | -0.3-0.8 |
+| 10 | `gxsplit` (option B) | compact event ring (~80 KB, not 4 MB) to core 2; core 2 does steps 4-8 work and writes the frame list; core 1 submits; then immediate conversion on core 2 | core 0 to 10-14 / 15-19 |
+
+Steps 1-9 give gor_01 core 0 about 19-23 ms (est.); step 10 is needed for both scenes to reach 16.7.

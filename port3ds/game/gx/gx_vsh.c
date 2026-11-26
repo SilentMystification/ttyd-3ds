@@ -857,16 +857,18 @@ static Group* group_for(u32 pnmtx) {
     if (s_last_g != NULL && s_last_ver == gx.version && s_last_xfv == gx_xf_version && s_last_pn == pnmtx) {
         return s_last_g;
     }
+    s_last_ver = gx.version;
+    s_last_xfv = gx_xf_version;
+    s_last_pn = pnmtx;
+    /* the last group's key against the state in place, without building the key first */
+    if (s_last_g != NULL && gx_mem_equal(s_last_g->key, gx.pos_mtx[pnmtx % GX_POS_MTX_COUNT], 48) &&
+        gx_mem_equal(s_last_g->key + 12, gx.proj, 28) && gx_mem_equal(s_last_g->key + 19, gx.vp, 24)) {
+        return s_last_g;
+    }
     u32 key[KEY_WORDS];
     memcpy(key, gx.pos_mtx[pnmtx % GX_POS_MTX_COUNT], 48);
     memcpy(key + 12, gx.proj, 28);
     memcpy(key + 19, gx.vp, 24);
-    s_last_ver = gx.version;
-    s_last_xfv = gx_xf_version;
-    s_last_pn = pnmtx;
-    if (s_last_g != NULL && gx_mem_equal(s_last_g->key, key, sizeof(key))) {
-        return s_last_g;
-    }
     u32 h = hash_words(key, KEY_WORDS);
     for (u32 p = 0; p < GROUPS; p++) {
         Group* g = &s_grp[(h + p) & (GROUPS - 1)];

@@ -932,6 +932,7 @@ void GXBegin(GXPrimitive type, GXVtxFmt vtxfmt, u16 nverts) {
     s_begin_ra = __builtin_return_address(0);
     s_in_begin = 1;
     gx_prim_open = 1;
+    gx_rec_fast_update();
     s_prim = (u8)type;
     s_fmt = (u8)vtxfmt;
     s_nverts = nverts;
@@ -1002,6 +1003,7 @@ void GXEnd(void) {
     }
     s_in_begin = 0;
     gx_prim_open = 0;
+    gx_rec_fast_update();
     Reader r = {s_pipe, NULL, NULL};
     if (gx_dl_recording()) {
         /* The GameCube records the written bytes and decodes them with the
@@ -1176,7 +1178,16 @@ static void run_commands(Reader* r, int from_list) {
 }
 
 static void run_pending_raw(void) {
-    if (gx_tls_translator && gx_rec_mode) {
+    if (__builtin_expect(gx_rec_fast.w == 1, 1) && !gx_on_translator()) {
+        /* the game thread records with no primitive open and no display list (gx_internal.h): the tests below
+         * end here */
+        if (port_gx_wg_ptr != s_pipe) {
+            gx_rec_raw(s_pipe, (u32)((const PPCWGPipe*)port_gx_wg_ptr - s_pipe));
+            port_gx_wg_ptr = s_pipe;
+        }
+        return;
+    }
+    if (gx_rec_mode && gx_tls_translator) {
         return; /* the pipe is the game thread's; it recorded what was pending */
     }
     if (s_in_begin || port_gx_wg_ptr == s_pipe) {
@@ -1221,6 +1232,13 @@ void gx_pipe_reset(void) {
 }
 
 void GXCallDisplayList(void* list, u32 nbytes) {
+    if (__builtin_expect(gx_rec_fast.w == 1, 1) && !gx_on_translator()) {
+        /* the game thread records with no primitive open and no display list: the tests below end in
+         * gx_rec_list (run_pending_raw takes its own fast case) */
+        run_pending_raw();
+        gx_rec_list(list, nbytes, __builtin_return_address(0));
+        return;
+    }
     if (gx_prim_is_open()) {
         gx_end_open_primitive(__builtin_return_address(0));
     }
@@ -1288,6 +1306,7 @@ void GXBeginDisplayList(void* list, u32 size) {
     plat_memstable_release(list, size); /* the CPU builds a list here: no longer disc content */
     gx_dl_has_ops = 0;
     s_dl_buf = list;
+    gx_rec_fast_update();
     s_dl_size = size;
     s_dl_used = 0;
     s_dl_overflow = 0;
@@ -1311,5 +1330,6 @@ u32 GXEndDisplayList(void) {
         gx_rec_state_list(s_dl_buf, used); /* calling it changes the translator's state behind the record */
     }
     s_dl_buf = NULL;
+    gx_rec_fast_update();
     return used;
 }

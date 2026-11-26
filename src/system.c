@@ -13,6 +13,9 @@
 #include "R_build.h"
 #include "driver/mapdrv.h"
 #include "libc_decls.h"
+#ifdef TARGET_PORT
+#include "port3ds/gamepar.h"
+#endif
 
 #define HALF_PI 1.570796f
 #define PI 3.141592653589793f
@@ -500,6 +503,11 @@ void qqsort(void* base, u32 n, u32 size, s32 (*compare)(const void* a, const voi
     void** pp; /* r4  */
     u8* src;   /* r5  */
 
+#ifdef TARGET_PORT
+    if (port_gamecnt_on()) {
+        port_cnt_qqsort(__builtin_return_address(0), n);
+    }
+#endif
     table = tmp0;
     buf = tmp1;
     comp = compare;

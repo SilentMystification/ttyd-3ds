@@ -427,6 +427,9 @@ void gx_dl_replay_port_op(const u8** p, const u8* end);
 extern int gx_opt_sdl;
 /* `hint` (or NULL): a u16 that keeps the entry's slot, so the next call of the same list skips the hash and the probe */
 u32 gx_sdl_run(const u8* list, u32 nbytes, u16* hint);
+/* Decodes the leading NOPs and port opcodes of a list into calls (id | count << 8, then the words; at most cap
+ * words, *nw gets the number written); returns the bytes they cover. */
+u32 gx_sdl_scan(const u8* list, u32 nbytes, u32* out, u32 cap, u32* nw);
 /* gx_dlcache.c: set by the call that found an uncacheable (state-only) list's entry; the slot hint of gx_sdl_run for it.
  * NULL when the last call found no such entry. */
 extern u16* gx_sdl_hint;

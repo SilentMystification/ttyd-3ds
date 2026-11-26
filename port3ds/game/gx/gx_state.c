@@ -1194,7 +1194,7 @@ static u32 s_sdl_hit, s_sdl_miss, s_sdl_stale, s_sdl_reset, s_sdl_lookups;
 static inline int sdl_is_port(u32 op) { return op >= GXDL_OP_PORT && op != GXDL_OP_RAW_PRIM; }
 
 /* Decodes the prefix into `out` (cap words); returns the prefix bytes, *nw gets the words written. */
-static u32 sdl_scan(const u8* list, u32 nbytes, u32* out, u32 cap, u32* nw) {
+u32 gx_sdl_scan(const u8* list, u32 nbytes, u32* out, u32 cap, u32* nw) {
     const u8* p = list;
     const u8* end = list + nbytes;
     u32 k = 0, good = 0;
@@ -1329,7 +1329,7 @@ u32 gx_sdl_run(const u8* list, u32 nbytes, u16* hint) {
     u32* scratch = s_sdl_pool + s_sdl_used + ((nbytes + 3) >> 2); /* the copy of the whole list would fit before */
     u32 cap = room - ((nbytes + 3) >> 2);
     u32 nw = 0;
-    u32 pbytes = sdl_scan(list, nbytes, scratch, cap, &nw);
+    u32 pbytes = gx_sdl_scan(list, nbytes, scratch, cap, &nw);
     e->list = list;
     e->nbytes = nbytes;
     e->sig = sdl_sig(list, nbytes);

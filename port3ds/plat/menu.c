@@ -616,9 +616,15 @@ void plat_hud_frame(const PlatHudStats* stats) {
     if (mode == PLAT_OPT_HUD_FULL) {
         snprintf(l[1], sizeof(l[1]), "cpu %5.1fms gpu %5.1fms rnd %4.1fms", (double)s_stats.frame_us / 1000.0,
                  (double)s_stats.gpu_us / 1000.0, (double)s_stats.render_us / 1000.0);
-        struct mallinfo mi = mallinfo();
-        unsigned long heap_t = __ctru_heap_size >> 20, heap_u = (unsigned long)mi.uordblks >> 20;
-        unsigned long lin_t = __ctru_linear_heap_size >> 20, lin_u = (__ctru_linear_heap_size - linearSpaceFree()) >> 20;
+        static unsigned long heap_u, lin_u;
+        static uint32_t s_heap_ms;
+        if (!s_heap_ms || now - s_heap_ms >= 4000) {
+            struct mallinfo mi = mallinfo();
+            heap_u = (unsigned long)mi.uordblks >> 20;
+            lin_u = (__ctru_linear_heap_size - linearSpaceFree()) >> 20;
+            s_heap_ms = now;
+        }
+        unsigned long heap_t = __ctru_heap_size >> 20, lin_t = __ctru_linear_heap_size >> 20;
         snprintf(l[2], sizeof(l[2]), "heap%3lu/%luM%3lu%% lin%3lu/%luM%3lu%%", heap_u, heap_t,
                  heap_t ? heap_u * 100 / heap_t : 0, lin_u, lin_t, lin_t ? lin_u * 100 / lin_t : 0);
         uint32_t qused, qtotal;

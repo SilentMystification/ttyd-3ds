@@ -405,6 +405,7 @@ typedef struct {
     u8 idx_attr[24]; /* the array of an indexed step, 0xFF for the others */
     u8 tmpl[64];     /* the vertex every step writes into */
     u8 attr_slot[8];
+    u32 vwhy; /* gximmfl: the vertex description's GXV_R_* bits (gx_vsh_imm_vtx_reasons) */
     u8 nfill;
     u8 fill_w[16];  /* the template's words no step writes */
     u32 fill_v[16];
@@ -582,6 +583,7 @@ static void imm_plan_build(const GxState* g, u8 fmt, ImmPlan* pl) {
         }
         pl->nfill = (u8)nf;
     }
+    pl->vwhy = gx_vsh_imm_vtx_reasons(d);
     pl->g = g;
     pl->fmt = fmt;
     pl->ns = (u8)ns;
@@ -590,10 +592,8 @@ static void imm_plan_build(const GxState* g, u8 fmt, ImmPlan* pl) {
     memcpy(pl->vat, vat, sizeof(pl->vat));
 }
 
-int gx_imm_convert(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, u8* out, u8 attr_slot[8]) {
-    imm_layout_c();
-    const u32 stride = s_imm_stride_c;
-    const int t_ = gx_tls_translator != 0;
+/* The plan of the vertex description and format `fmt` of g (thread set t_): kept, or built now. */
+static inline __attribute__((always_inline)) ImmPlan* imm_plan_get(const GxState* g, u8 fmt, int t_) {
     ImmPlan* pl = NULL;
     /* every write to the vertex description or formats of gx or gx_game bumps its gx_vdesc_ver: a plan that matched
      * the state at this version still does, without the compare of its 104 bytes (2 us a primitive in Azahar) */
@@ -618,6 +618,13 @@ int gx_imm_convert(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, u8* out
         imm_plan_build(g, fmt, pl);
         pl->ok_ver = ver;
     }
+    return pl;
+}
+
+/* The primitive's n vertices in pipe slots sl through plan pl, into out. */
+static inline __attribute__((always_inline)) int imm_run(ImmPlan* pl, const GxState* g, const PPCWGPipe* sl, u32 n,
+                                                         u8* out, u8 attr_slot[8]) {
+    const u32 stride = s_imm_stride_c;
     ImmStep* st = pl->st;
     const u32 ns = pl->ns, vs = pl->vs;
     for (u32 k = 0; k < ns; k++) {
@@ -770,6 +777,26 @@ int gx_imm_convert(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, u8* out
     return 1;
 }
 
+int gx_imm_convert(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, u8* out, u8 attr_slot[8]) {
+    imm_layout_c();
+    return imm_run(imm_plan_get(g, fmt, gx_tls_translator != 0), g, sl, n, out, attr_slot);
+}
+
+/* gximmfl (gx_draw_imm_fl, the game thread with gxthread=0): the plan of gx's vertex class for format fmt, and its
+ * eligibility bits (GXV_R_* of the vertex description, computed once when the plan is built). The plan set of the
+ * thread that does not translate: no TLS read. */
+void* gx_imm_plan(u8 fmt, u32* vwhy) {
+    imm_layout_c();
+    ImmPlan* pl = imm_plan_get(&gx, fmt, 0);
+    *vwhy = pl->vwhy;
+    return pl;
+}
+
+/* gximmfl: the primitive through a plan gx_imm_plan gave (gx unchanged since), as gx_imm_convert writes it. */
+void gx_imm_convert_plan(void* plan, const PPCWGPipe* sl, u32 n, u8* out, u8 attr_slot[8]) {
+    imm_run(plan, &gx, sl, n, out, attr_slot);
+}
+
 /* Whether the game thread can write a recorded primitive to its chunks (gx_rec.c): what the ring holds must
  * rebuild the GxVertex read_vertex would make, for the draws the translator routes to the CPU. */
 static int imm_desc_ok(const u8* d) {
@@ -864,7 +891,17 @@ void gx_imm_verify(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, const u
 /* The immediate primitive in pipe slots `sl` (gxthread=0, the split's direct part, a recorded GXR_PRIM). 0: the
  * caller takes the GxVertex path. */
 static int imm_direct(const PPCWGPipe* sl, u8 prim, u8 fmt, u32 n) {
-    int k = gx_draw_imm_route(prim, n, gx_begin_caller, 0);
+    int k;
+    if (gx_opt_immfl) {
+        /* gximmfl: routed, converted and written into the frame list in one pass (GXI_SHADER: drawn) */
+        k = gx_draw_imm_fl(prim, fmt, sl, n);
+        if (k == GXI_SHADER) {
+            s_id.shader++;
+            return 1;
+        }
+    } else {
+        k = gx_draw_imm_route(prim, n, gx_begin_caller, 0);
+    }
     switch (k) {
     case GXI_SHADER: {
         u8 attr_slot[8];

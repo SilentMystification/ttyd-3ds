@@ -329,6 +329,7 @@ static int oh_init(void);
 static int s_oh_state_pending; /* the state changed since the words last sent it (mirrors the replay's) */
 static int s_one; /* switch gxone (GX native step 2; the gxone section after oh_import) */
 static int s_chunk; /* switch gxchunk (GX native step 3; the gxchunk section after the gxone section) */
+static int s_immfl; /* switch gximmfl (GX native step 4; the gximmfl section after plat_gpu_chunk_draw) */
 static int s_ck_tier_linear = 1; /* the frame list is in linear memory (C3D_FrameEnd(0) flushes it) */
 static void ck_verify(Record* r);
 static void ck_log(u32 frames);
@@ -429,7 +430,7 @@ static void submit(int present) {
         gpu_fence_wait(s_rec[s_cur].seq); /* the record refilled next is finished on the GPU */
     }
     if (s_onehop) {
-        if (s_chunk == 2) {
+        if (s_chunk == 2 || s_immfl == 2) {
             ck_verify(&s_rec[s_cur]); /* before the import: it reads the record's captures */
         }
         oh_import(&s_rec[s_cur]); /* the render thread is done with it: its captured words go into the tables */
@@ -4513,6 +4514,197 @@ int plat_gpu_chunk_draw(uint32_t id, uint32_t cull, uint32_t nd, uint32_t last, 
     return 1;
 }
 
+/* ---- switch gximmfl: immediate draws straight into the frame list (GX native step 4, docs/PORT_3DS_GX_NATIVE.md) ----
+ * Needs gxchunk (so gxone=1, gxonehop=1, gxthread=0: the game thread writes the frame list). plat_gpu_imm_begin
+ * gives the front end the place in the record's index arena for the draw's indices (it writes them there: nothing is
+ * copied), after the light and uniform block (sent when their ids changed, as plat_gpu_vsh_light/const) and
+ * plat_gpu_vsh_draw's room checks; plat_gpu_imm_end writes the draw as oh_draw writes a shader draw (stereo mark,
+ * flush, the class blocks whose ids the GPU does not hold, the layout block, the cull word, the pending uniform rows,
+ * the packet; or the merge into the last packet). The index address comes from the arena's physical base taken once
+ * per record (linear memory is physically contiguous), not osConvertVirtToPhys per draw.
+ * gximmfl=2: before the draw's words, the words the old path (plat_gpu_vsh_draw's oh_draw) writes from there are
+ * built from the old inputs into the record's ckref (as gxchunk=2's, whose buffers and ck_verify it shares); a merge
+ * patches the old packet's count too. When the record comes back both streams go through pica_model, compared at
+ * every immediate draw ("gximmfl frame" line: draws, merged; verify draws, differ). */
+static struct {
+    u32 draws, merged, none;
+    u32 fchecks, froute, fidx; /* the front end's totals (plat_gpu_immfl_note) */
+} s_imst;
+static u32 s_im_pa[2];   /* physical address of each record's index arena (0: not taken yet) */
+static u32* s_imv_pkt;   /* gximmfl=2: the last packet written by plat_gpu_imm_end ... */
+static u32 s_imv_cnt;    /* ... and the offset of its count word in the record's ckref (~0: none) */
+
+int plat_gpu_immfl_active(void) { return s_immfl; }
+
+void plat_gpu_immfl_note(uint32_t checks, uint32_t route_differ, uint32_t idx_differ) {
+    s_imst.fchecks = checks;
+    s_imst.froute = route_differ;
+    s_imst.fidx = idx_differ;
+}
+
+uint16_t* plat_gpu_imm_begin(const PlatGpuVshConst* c, uint32_t cid, const PlatGpuVshLight* l, uint32_t lid,
+                             uint32_t layout, uint32_t nidx) {
+    if (l != NULL) {
+        plat_gpu_vsh_light(l, lid);
+    }
+    plat_gpu_vsh_const(c, cid);
+    /* plat_gpu_vsh_draw's checks, in its order */
+    if (nidx < 3 || nidx > INDEX_ARENA || PLAT_VSH_STRIDE(layout) == 0) {
+        s_imst.none++;
+        return NULL;
+    }
+    Record* r = &s_rec[s_cur];
+    if (r->nidx + nidx > INDEX_ARENA || r->used + sizeof(CmdHead) + sizeof(VshDraw) + 64 > RECORD_BYTES) {
+        flush_segment();
+    }
+    oh_need_room(0, 0);
+    if (!s_last_vconst_valid) {
+        s_imst.none++;
+        return NULL;
+    }
+    r = &s_rec[s_cur];
+    return r->idx + r->nidx;
+}
+
+/* gximmfl=2: the words oh_draw writes for this draw from here (s_om and s_vg as they are, after the layout block),
+ * into the record's ckref: the scale rows when the scales changed, the cull word when it changed, the pending rows,
+ * the packet (index address by osConvertVirtToPhys). The region; NULL: not compared. */
+static CkReg* imv_ref(Record* r, u32 scales, u32 cull, const u16* idx, u32 count, u32 a0) {
+    s_imv_cnt = ~0u;
+    if (r->ckover || r->nckr >= CK_VREG || r->nckend + 1 > CK_VEND ||
+        r->nckref + OH_DRAW_WORDS + CK_DRAW_WORDS > s_oh_words) {
+        r->ckover = 1;
+        return NULL;
+    }
+    memcpy(&s_ck_rvu, &s_vg, sizeof(VUnif));
+    u32* w = r->ckref + r->nckref;
+    CkReg* g = (CkReg*)r->ckr + r->nckr;
+    *g = (CkReg){a0, r->nckref, 1, r->nckend};
+    if (scales != s_om.v_scales) {
+        vsh_scales_rows(&s_ck_rvu, scales);
+    }
+    if (cull != s_om.v_cull) {
+        w = enc_write(w, GPUREG_FACECULLING_CONFIG, (u32)vsh_cull(cull) & 3);
+    }
+    if ((s_ck_rvu.pend[0] | s_ck_rvu.pend[1] | s_ck_rvu.pend[2]) != 0) {
+        w = oh_rows_u(w, s_ck_rvu.pend, &s_ck_rvu);
+    }
+    s_imv_cnt = (u32)(w - r->ckref) + s_tpl_cnt;
+    w = ck_packet(w, idx, count);
+    r->ckend[g->e * 2] = a0; /* the new stream's end: set by the caller */
+    r->ckend[g->e * 2 + 1] = (u32)(w - r->ckref);
+    r->nckref = (u32)(w - r->ckref);
+    r->nckr++;
+    r->nckend++;
+    return g;
+}
+
+void plat_gpu_imm_end(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, uint32_t nidx) {
+    Record* r = &s_rec[s_cur];
+    u32 first = r->nidx;
+    const u16* idx = r->idx + first;
+    r->nidx += nidx;
+    s_stats_frame.vsh_calls++;
+    s_stats_frame.vsh_indices += nidx;
+    /* plat_gpu_vsh_draw's merge test (gxonehop=1), on what the words hold */
+    VshDraw* l = s_last_vdraw;
+    if (s_merge && l != NULL && l->stream == stream && l->layout == layout && l->scales == scales && l->cull == cull &&
+        s_oh_idx_end == idx) { /* D2: the end is an address (arena or a stream's linear index segment) */
+        if (!s_last_state_valid) {
+            s_ost.skipped++;
+            return;
+        }
+        if (s_om.packet != NULL) {
+            s_om.packet[s_tpl_cnt] += nidx;
+            if (s_immfl == 2 && s_om.packet == s_imv_pkt && s_imv_cnt != ~0u) {
+                r->ckref[s_imv_cnt] += nidx; /* the old path merges the same way */
+            }
+        }
+        s_oh_idx_end += nidx;
+        s_ost.merged++;
+        s_imst.merged++;
+        return;
+    }
+    s_stats_frame.vsh_draws++;
+    if (!s_last_state_valid) {
+        s_ost.skipped++;
+        return; /* the replay skips a draw before the record's first state */
+    }
+    /* oh_draw, a draw from the index arena (drawp 0) */
+    int cls = oh_class(&s_last_state);
+    if (cls != OHS_SCENE && s_om.after_scene) {
+        oh_mark();
+    }
+    if (!s_om.vsh_mode) {
+        s_om.vsh_mode = 1;
+        s_om.c3d = 1;
+        s_om.v_stream = NULL;
+    }
+    if (s_om.c3d) {
+        oh_put(CMD_OH_FLUSH, 0);
+        s_om.c3d = 0;
+        s_ost.flushes++;
+    }
+    if (s_oh_state_pending || s_om.gpu_valid != 7) {
+        if (oh_state_one(&s_last_state)) {
+            s_om.v_cull = 0;
+        }
+        s_oh_state_pending = 0;
+    }
+    u32* packet = NULL;
+    if (!s_om.scissor_empty) {
+        if (!s_om.lay_valid || stream != s_om.v_stream || layout != s_om.v_layout) {
+            u32 k[DK_LAY] = {(u32)(uintptr_t)stream, layout};
+            oh_block(DC_LAY, k);
+            s_om.lay_valid = 1;
+            s_om.v_stream = stream;
+            s_om.v_layout = layout;
+        }
+        r = oh_rec();
+        CkReg* g = s_immfl == 2 ? imv_ref(r, scales, cull, idx, nidx, r->now) : NULL;
+        if (scales != s_om.v_scales) {
+            vsh_scales_rows(&s_vg, scales);
+            s_om.v_scales = scales;
+        }
+        u32* w = r->ow + r->now;
+        if (cull != s_om.v_cull) {
+            w = enc_write(w, GPUREG_FACECULLING_CONFIG, (u32)vsh_cull(cull) & 3);
+            s_om.v_cull = cull;
+        }
+        if ((s_vg.pend[0] | s_vg.pend[1] | s_vg.pend[2]) != 0) {
+            w = oh_rows(w, s_vg.pend);
+            s_vg.pend[0] = s_vg.pend[1] = s_vg.pend[2] = 0;
+        }
+        u32 ai = (u32)(r - s_rec) & 1u;
+        if (s_im_pa[ai] == 0) {
+            /* linear memory, VRAM and QTM are mapped physically contiguous (at 0x14000000 and above); the heap is
+             * not: there (place=) the address is converted per draw (1 marks it) */
+            s_im_pa[ai] = (uintptr_t)r->idx >= 0x14000000u ? osConvertVirtToPhys(r->idx) : 1u;
+        }
+        u32 pa = s_im_pa[ai] != 1u ? s_im_pa[ai] + first * 2u : osConvertVirtToPhys(idx);
+        if (pa >= s_oh_base && plat_gpudump_draw_filter(s_frame_counter, s_om.seq, s_om.gdraw++)) {
+            packet = w;
+            memcpy(packet, s_tpl, s_tpl_n * 4);
+            packet[s_tpl_idx] = (pa - s_oh_base) | (u32)C3D_UNSIGNED_SHORT << 31;
+            packet[s_tpl_cnt] = nidx;
+            w += s_tpl_n;
+            s_om.chunk_draws++;
+            s_ost.draws++;
+        }
+        r->now = (u32)(w - r->ow);
+        if (g != NULL) {
+            r->ckend[g->e * 2] = r->now;
+        }
+    }
+    oh_stereo_after(cls, s_last_state.depth_write);
+    s_om.packet = packet;
+    s_imv_pkt = packet;
+    s_oh_md = (VshDraw){stream, layout, scales, cull, 0, 0};
+    s_last_vdraw = &s_oh_md;
+    s_oh_idx_end = idx + nidx;
+    s_imst.draws++;
+}
+
 /* Render thread: a run of words as a command list of its own (1), or 0 when the GX queue has no room for it (the
  * caller copies the words into citro3d's buffer). citro3d's words since its last split go first. */
 static int ck_submit(const OhWords* c) {
@@ -4635,6 +4827,15 @@ static void ck_log(u32 f) {
            (unsigned long)s_frame_counter, (unsigned long)(s_ckst.subs / f), (unsigned long)(s_ckst.splits / f),
            (unsigned long)(s_ckst.subcopy / f), (unsigned long)s_ckst.vchecks, (unsigned long)s_ckst.vdiffer,
            (unsigned long)s_ckst.vone, (unsigned long)s_ckst.vunres, (unsigned long)s_ckst.vover);
+    if (s_immfl) {
+        /* with gxchunk=1 the verify counts of the line above are the immediate draws' alone */
+        PLOG_I("gximmfl frame %lu: per frame draws %lu merged %lu none %lu; front-end checks %lu route differ %lu "
+               "index differ %lu (total)",
+               (unsigned long)s_frame_counter, (unsigned long)(s_imst.draws / f), (unsigned long)(s_imst.merged / f),
+               (unsigned long)(s_imst.none / f), (unsigned long)s_imst.fchecks, (unsigned long)s_imst.froute,
+               (unsigned long)s_imst.fidx);
+        s_imst.draws = s_imst.merged = s_imst.none = 0;
+    }
     u32 logged = s_ckst.logged;
     memset(&s_ckst, 0, sizeof(s_ckst)); /* the render thread's counters: racy, for the log only */
     s_ckst.logged = logged;
@@ -4673,7 +4874,7 @@ static int ck_init(void) {
         }
         s_ck.smask[rows[i] >> 5] |= 1u << (rows[i] & 31);
     }
-    if (s_chunk == 2) {
+    if (s_chunk == 2 || s_immfl == 2) {
         s_ck_ma = malloc(sizeof(PicaModel));
         s_ck_mb = malloc(sizeof(PicaModel));
         for (int i = 0; i < 2; i++) {
@@ -4685,7 +4886,7 @@ static int ck_init(void) {
             }
         }
         if (s_ck_ma == NULL || s_ck_mb == NULL) {
-            PLOG_W("gxchunk=2: no memory for the verify buffers: off");
+            PLOG_W("gxchunk=2 / gximmfl=2: no memory for the verify buffers: off");
             return 0;
         }
     }
@@ -6044,8 +6245,21 @@ void plat_gpu_init(void) {
         PLOG_W("gxone: off (gxonehop could not start)");
         s_one = 0;
     }
+    s_immfl = plat_switch_int("gximmfl", 0);
+    if (s_immfl < 0 || s_immfl > 2) {
+        s_immfl = 0;
+    }
+    if (s_immfl && !s_chunk) {
+        PLOG_W("gximmfl: off (it needs gxchunk=1 or 2)");
+        s_immfl = 0;
+    }
     if (s_chunk && (!s_one || !ck_init())) {
         s_chunk = 0;
+        s_immfl = 0;
+    }
+    if (s_immfl) {
+        PLOG_I("gximmfl=%d: immediate draws straight into the frame list%s", s_immfl,
+               s_immfl == 2 ? ", their words compared with the old path's through the register model" : "");
     }
     s_vr.direct = s_direct != 0;
     s_vg.direct = 1;

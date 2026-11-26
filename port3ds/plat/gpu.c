@@ -1730,14 +1730,26 @@ static inline void vunif_u(VUnif* u, int id, float x, float y, float z, float w)
     if (id < 0 || id >= 96) {
         return;
     }
-    float v[4] = {x, y, z, w};
-    if (s_urow && memcmp(u->unif[id], v, 16) == 0) {
+    /* the row's four bit patterns, compared and stored as words (no libc memcmp/memcpy call per row) */
+    u32 b0, b1, b2, b3;
+    memcpy(&b0, &x, 4);
+    memcpy(&b1, &y, 4);
+    memcpy(&b2, &z, 4);
+    memcpy(&b3, &w, 4);
+    u32* d = u->unif[id];
+    if (s_urow && d[0] == b0 && d[1] == b1 && d[2] == b2 && d[3] == b3) {
         return;
     }
-    memcpy(u->unif[id], v, 16);
+    d[0] = b0;
+    d[1] = b1;
+    d[2] = b2;
+    d[3] = b3;
     if (u->direct) {
-        float p[4] = {w, z, y, x};
-        memcpy(u->val[id], p, 16);
+        u32* q = u->val[id]; /* {w, z, y, x} */
+        q[0] = b3;
+        q[1] = b2;
+        q[2] = b1;
+        q[3] = b0;
         u->pend[id >> 5] |= 1u << (id & 31);
         u->valid[id >> 5] |= 1u << (id & 31);
         return;
@@ -1764,17 +1776,29 @@ static void vsh_apply_const(const PlatGpuVshConst* c) {
 }
 
 static void vsh_const_rows(VUnif* u, const PlatGpuVshConst* c) {
-    float r[2][4];
-    rot_rows(r[0], r[1]);
-    for (int k = 0; k < 2; k++) {
-        float row[4];
-        for (int j = 0; j < 4; j++) {
-            row[j] = 0.0f;
+    /* each rotation row holds one +-1 and zeros (rot_rows): the row is 0.0f + (+-1 * a clip row), which the
+     * general sum below the old loop made, term for term */
+    static int s_rr_rot = -1, s_rr_i[2];
+    static float s_rr_s[2];
+    if (s_rr_rot != s_rot) {
+        float r[2][4];
+        rot_rows(r[0], r[1]);
+        for (int k = 0; k < 2; k++) {
             for (int i = 0; i < 4; i++) {
                 if (r[k][i] != 0.0f) {
-                    row[j] += r[k][i] * c->clip[i][j];
+                    s_rr_i[k] = i;
+                    s_rr_s[k] = r[k][i];
                 }
             }
+        }
+        s_rr_rot = s_rot;
+    }
+    for (int k = 0; k < 2; k++) {
+        const float* src = c->clip[s_rr_i[k]];
+        float sg = s_rr_s[k];
+        float row[4];
+        for (int j = 0; j < 4; j++) {
+            row[j] = 0.0f + sg * src[j];
         }
         vunif(s_uloc_clip + k, row[0], row[1], row[2], row[3]);
     }
@@ -2069,6 +2093,7 @@ static struct {
     u32 draws, copied[DC_N], captured[DC_N], uncached, flushes, runs, degenerate;
     u32 checks, mismatches;
     u32 maxw[DC_N];
+    u32 fl_calls, fl_bytes, fl_ranges; /* GSPGPU_FlushDataCache calls, bytes, and stream ranges among them (render thread) */
 } s_dst;
 static u32 s_dlog_every, s_dlog_n;
 
@@ -2508,6 +2533,9 @@ static void direct_log(void) {
            (unsigned long)s_dst.mismatches, (unsigned long)s_dst.uncached, (unsigned long)s_dst.degenerate,
            (unsigned long)s_dst.maxw[0], (unsigned long)s_dst.maxw[1], (unsigned long)s_dst.maxw[2],
            (unsigned long)s_dst.maxw[3]);
+    PLOG_I("gxdirect frame %lu: GSP data-cache flushes per frame %lu calls (%lu stream ranges), %lu bytes",
+           (unsigned long)s_frame_counter, (unsigned long)(s_dst.fl_calls / n), (unsigned long)(s_dst.fl_ranges / n),
+           (unsigned long)(s_dst.fl_bytes / n));
     memset(&s_dst, 0, sizeof(s_dst));
 }
 
@@ -3457,11 +3485,16 @@ static void render_record(Record* r) {
     C3D_SetBufInfo(&bi);
     for (u32 i = 0; i < r->ndirty; i++) {
         GSPGPU_FlushDataCache((const void*)r->dirty[i].lo, (u32)(r->dirty[i].hi - r->dirty[i].lo));
+        s_dst.fl_bytes += (u32)(r->dirty[i].hi - r->dirty[i].lo);
     }
+    s_dst.fl_calls += r->ndirty + 1 + (r->nidx > 0);
+    s_dst.fl_ranges += r->ndirty;
     r->ndirty = 0;
     GSPGPU_FlushDataCache(r->verts, r->nverts * sizeof(PlatGpuVertex));
+    s_dst.fl_bytes += r->nverts * (u32)sizeof(PlatGpuVertex);
     if (r->nidx > 0) {
         GSPGPU_FlushDataCache(r->idx, r->nidx * sizeof(u16));
+        s_dst.fl_bytes += r->nidx * 2u;
     }
     /* shader path: vsh is on from a CMD_VSH_DRAW until the next other draw */
     static C3D_AttrInfo vai;

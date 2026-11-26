@@ -1252,7 +1252,7 @@ static u32 sdl_sig(const u8* list, u32 nbytes) {
 }
 
 /* Applies the state calls at the start of the list; returns the bytes they covered (the caller runs the rest). */
-u32 gx_sdl_run(const u8* list, u32 nbytes) {
+u32 gx_sdl_run(const u8* list, u32 nbytes, u16* hint) {
     if (nbytes < 4) {
         return 0;
     }
@@ -1268,7 +1268,14 @@ u32 gx_sdl_run(const u8* list, u32 nbytes) {
     u32 h = ((u32)(uintptr_t)list >> 5 ^ nbytes * 0x9E3779B1u) * 2654435761u >> 20;
     SdlEntry* e = NULL;
     SdlEntry* freeslot = NULL;
-    for (u32 i = 0; i < 4; i++) {
+    if (hint != NULL && *hint != 0) {
+        /* the slot this list had last time (the entry holds the same list and size, or it is looked up as before) */
+        SdlEntry* c = &s_sdl[*hint - 1];
+        if (c->list == list && c->nbytes == nbytes) {
+            e = c;
+        }
+    }
+    for (u32 i = 0; e == NULL && i < 4; i++) {
         SdlEntry* c = &s_sdl[(h + i) & (SDL_SLOTS - 1)];
         if (c->list == list && c->nbytes == nbytes) {
             e = c;
@@ -1287,6 +1294,9 @@ u32 gx_sdl_run(const u8* list, u32 nbytes) {
         }
         if (same) {
             s_sdl_hit++;
+            if (hint != NULL) {
+                *hint = (u16)(e - s_sdl + 1);
+            }
             if (e->pbytes == 0) {
                 return 0;
             }
@@ -1310,6 +1320,9 @@ u32 gx_sdl_run(const u8* list, u32 nbytes) {
         s_sdl_used = 0;
         s_sdl_reset++;
         e = &s_sdl[h & (SDL_SLOTS - 1)];
+    }
+    if (hint != NULL) {
+        *hint = (u16)(e - s_sdl + 1);
     }
     /* the calls are scanned into the pool after room for the copy, whose size is not known yet: scan first */
     u32 room = SDL_POOL_WORDS - s_sdl_used;

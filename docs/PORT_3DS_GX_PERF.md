@@ -1379,6 +1379,31 @@ Build the release CIA first: `TTYD_CCACHE=1 tools/port3ds/build.sh`. C1 = `gxdir
 3. The framebuffer flush at the end of every run with draws (more flushes than citro3d's one per split).
 4. QTM for the frame list (`place=gx_frame_list:qtm qtmgpu`): only after `cb_qtm` passes; GSP's address check of a QTM command list is unknown.
 
+### Gate results of step 3 (`gxchunk`, 2026-11-27, branch gate-gxchunk = gxchunk + port3ds, Azahar)
+
+Identity runs on the dev build (3dsx), verify, sweep, hang and timing runs on the release build (CIA or 3dsx). Verify runs need `--long 200` (the 60 s default times out).
+
+1. **KV verify** (C1 + `gxone=1 gxchunk=2 gxthreadstats=60`, to frame 841): gor_01, pik_00, usu_00, battle all pass. Start line present; every `gxchunk frame` line from the map on has chunk uses above 0 (gor_01 244-245, pik_00 358, usu_00 135-153, battle 124-132), verify draws 14 880 / 22 060 / 9 313 / 7 508 in the last window, `differ 0`; no `gxchunk verify` warning; gxone `mismatches 0 missed 0 stale 0` in every line. **Not checked: `records over`.** The log line is cut at 255 characters, so its last fields (`not compared N records over N`) are missing from the log in the busy scenes (`not compared` is cut in battle). Shorten the format string in `plat/gpu.c` (the `verify draws %lu differ %lu one-sided %lu not compared %lu records over %lu` line) or split it into two lines.
+2. **Sweeps** (KV, `--story 30`): `--area tik` 22 of 22 ok, `--area jin` 12 of 12 ok; every map segment of verify.log has a chunk line with uses above 0, `differ 0` everywhere, 0 `gxchunk verify` warnings, every gxone line `mismatches 0 missed 0 stale 0` (58 and 41 lines).
+3. **determ_ab** shots 780-785 in gor_01, pik_00, usu_00, battle: C1 vs K 24 of 24 identical, C3 vs K 24 of 24 identical.
+4. **gw_diff** 1600 frames gor_01: C1 vs K `160 records equal (f 10..1600, fields compared: 32)`.
+5. **Stereo** (`stereoforce=1`, gor_01, 780-782): C1 vs K 9 of 9 identical (EFB, left, right).
+6. **GPU hang** (K, `gpuhangtest=700 gpuhangrecover=1`): `reset #1 done`, `citro3d state marked dirty after GPU reset #1`, shot 820 has content (36 970 colours, 92 % of pixels off the commonest colour).
+7. **Timing** (release 3dsx, `gx_perf_ab --repeat 2`, windows 722-841, ms per frame: frame / core-0 busy / render):
+
+| Scene | G | K | C1 | C3 (busy / translator / render) | G gpucore=1 | K gpucore=1 |
+|---|---|---|---|---|---|---|
+| gor_01 | 50.0 / 35.2 / 1.4 | 50.0 / 35.7 / 0.9 | 34.8 / 31.7 / 7.2 | 33.4 / 22.5 / 13.3 / 7.4 | 50.3 / 35.5 / 2.4 | 50.3 / 36.1 / 1.2 |
+| pik_00 | 50.2 / 42.6 / 1.5 | 50.2 / 43.2 / 0.9 | 50.2 / 38.7 / 7.5 | 33.4 / 27.3 / 15.5 / 7.5 | 50.2 / 42.9 / 1.7 | 50.2 / 43.2 / 1.1 |
+| usu_00 | 36.4 / 30.9 / 1.5 | 36.8 / 31.7 / 1.6 | 33.6 / 28.2 / 6.4 | 32.2 / 18.9 / 13.2 / 6.3 | 36.0 / 31.1 / 1.7 | 38.5 / 32.0 / 2.4 |
+| battle | 28.4 / 21.0 / 1.1 | 29.5 / 21.2 / 0.9 | 27.3 / 19.4 / 3.7 | 25.3 / 15.8 / 14.4 / 3.8 (fence 5.4) | 29.5 / 21.4 / 2.4 | 30.7 / 21.6 / 2.0 |
+
+  (K measured four times, in the four A/B runs: busy 35.7, 43.0-43.2, 31.7-31.8, 21.2-21.3.) **`gxchunk=1` brings no gain in Azahar:** core-0 busy is 0.2-0.8 ms above G (the chunk use costs as much as the per-draw `oh_draw` work it replaces), the render thread is 0.2-0.6 ms lower, and the frame is the same or up to 1 ms worse (usu_00, battle). `gpucore=1` timings are suspect (Azahar delivers GSP completions to core 0 only) and show the same picture.
+
+   Counters (K, `gxthreadstats=60`, frame 840): chunk uses per frame gor_01 245 (draws 247, 28 752 words), pik_00 358 (367, 42 987), usu_00 153 (155, 18 034), battle 125 (126, 14 789). "not yet" 0 and "never" 0 in all four, "built" 0 (battle 2: after its TEV table reset); store resets 0 (store 54 000-62 600 of 65 536 words, 449-530 chunks in gor_01, pik_00, battle; 42 880 and 366 chunks in usu_00); lists submitted 3 / 3 / 10 / 2, citro3d splits 1 / 1 / 9 / 1, runs copied 0 / 0 / 21 / 0 (usu_00 splits often: 9 splits a frame, and 21 copied runs means the GX queue budget is near full there).
+
+**Flush finding (report only, no change).** `render_record` flushes the record's stream ranges (`r->dirty`), `r->verts` and `r->idx` with `GSPGPU_FlushDataCache` before it replays the record (3 calls, 68-259 KB a frame, `gxdirect ... GSP data-cache flushes` line). The vertex arena (`linearAlloc`), the stream blocks (`linearMemAlign`) and the index arena (placed in LINEAR) are all in the linear heap, and `C3D_FrameEnd(0)` flushes the whole linear heap before the GX queue runs (docs/PORT_3DS_GX_NATIVE.md, libcitro3d 1.7.1 disassembly; the same call covers the gxchunk frame list). The GX queue only runs at `C3D_FrameEnd`, after these flushes, so for linear memory the three explicit flushes are duplicate work. They are needed only for memory outside the linear heap (QTM or `place=` tiers), which the code does not use for these three. Not measured: the saving (a local patch with the flushes removed, A/B in `gx_perf_ab`, would show it; the ranges are small next to the whole-heap flush, so it is likely small).
+
 ### Gate results of steps 0-2 (2026-11-27, merged on port3ds `1630266e`, Azahar)
 
 C1, C3, G, V as above. Identity runs on the dev build (`--dev --no-cia`), verify, hang and timing runs on the release build.

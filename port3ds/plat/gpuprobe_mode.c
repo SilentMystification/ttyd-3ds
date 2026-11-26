@@ -35,6 +35,38 @@ static void probe_log(const char* line, void* user) {
     PLOG_I("%s", line);
 }
 
+/* dt_tile reference: the game's CPU texture tiler, when the game links one (weak: the platform does not need it).
+ * Arguments as GpuProbeConfig.tile_ref; returns 0 for a format the game does not tile. */
+int plat_probe_tile_ref(int fmt, const unsigned char* rgba, unsigned w, unsigned h, unsigned char* out)
+    __attribute__((weak));
+
+static int tile_ref(int fmt, const unsigned char* rgba, unsigned w, unsigned h, unsigned char* out, void* user) {
+    (void)user;
+    return plat_probe_tile_ref != NULL ? plat_probe_tile_ref(fmt, rgba, w, h, out) : 0;
+}
+
+/* QTM for the cb_qtm/vb_qtm/ib_qtm cases: the free part of the application's 2 MiB after the placements
+ * (the log slots). CPU 0x1E800000 + n is physical 0x1F000000 + n (port3ds/rsf/ttyd.rsf, plat/memplace.c). */
+#define PROBE_QTM_VADDR 0x1E800000u
+#define PROBE_QTM_PADDR 0x1F000000u
+#define PROBE_QTM_BYTES (64u * 1024u)
+
+static void qtm_for_probe(GpuProbeConfig* pc) {
+    uint32_t used = 0, total = 0;
+    plat_qtm_usage(&used, &total);
+    uint32_t off = (used + 0xFFFu) & ~0xFFFu;
+    if (!plat_qtm_available() || off + PROBE_QTM_BYTES > total) {
+        PLOG_I("gpuprobe mode: no QTM for the probe (mapped %d, %lu of %lu bytes placed)", plat_qtm_available(),
+               (unsigned long)used, (unsigned long)total);
+        return;
+    }
+    pc->qtm = (void*)(uintptr_t)(PROBE_QTM_VADDR + off);
+    pc->qtm_bytes = PROBE_QTM_BYTES;
+    pc->qtm_phys = PROBE_QTM_PADDR + off;
+    PLOG_I("gpuprobe mode: QTM for the probe at %08lX (physical %08lX), %u bytes", (unsigned long)(PROBE_QTM_VADDR + off),
+           (unsigned long)pc->qtm_phys, PROBE_QTM_BYTES);
+}
+
 static bool on_emulator(void) {
     s64 v = 0, lv = -1;
     bool citra = R_SUCCEEDED(svcGetSystemInfo(&v, 0x20000, 0)) && v == 1;
@@ -69,6 +101,8 @@ void plat_gpuprobe_mode_run(void) {
     pc.no_dangerous = plat_switch_has("probesafe") != 0;
     pc.emulator = on_emulator();
     pc.log = probe_log;
+    pc.tile_ref = tile_ref;
+    qtm_for_probe(&pc);
 
     plat_wd_hold(1); /* a hung case makes no frames */
     GpuProbeSummary ps;

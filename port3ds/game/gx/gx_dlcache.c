@@ -99,6 +99,7 @@ typedef struct {
     u32 gen;          /* gxbatch: bumped whenever the entry's content or stream goes (kept across reuse of the slot) */
     u16 bat_head;     /* gxbatch: chain of the batches that start with this entry (index + 1) */
     u16 bat;          /* gxbatch: a batch that holds this entry (index + 1): while it is in use the entry is too */
+    u16 sdl;          /* gxsdl: the slot of the list's pre-decoded state calls (index + 1), a hint checked on use */
 } DlcEntry;
 
 static DlcEntry* s_e; /* DLC_ENTRIES, heap (gx_bigmem.h) */
@@ -461,9 +462,11 @@ static void replay(DlcEntry* e) {
  * CALL_BATCH: a batch that starts with this list was opened instead. */
 enum { CALL_MISS = 0, CALL_HIT, CALL_HIT_FORMABLE, CALL_BATCH };
 static DlcEntry* s_form_e;
+u16* gx_sdl_hint;
 
 static int call_slow(const GxState* st, const void* list, u32 nbytes) {
     u64 t0 = GX_PERF_T();
+    gx_sdl_hint = NULL;
     u32 frame = gx_perf_frame_no();
     s_st.calls++;
     u32 h = 0;
@@ -481,6 +484,7 @@ static int call_slow(const GxState* st, const void* list, u32 nbytes) {
              * reused for another list, that one goes uncached until the entry
              * is evicted) */
             s_st.nocache++;
+            gx_sdl_hint = &e->sdl;
             e->last_frame = frame;
             lru_unlink(e);
             lru_front(e);

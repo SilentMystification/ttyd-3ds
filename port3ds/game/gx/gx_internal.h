@@ -425,7 +425,11 @@ void gx_tev_compile_memo(PlatGpuState* st);
 void gx_dl_replay_port_op(const u8** p, const u8* end);
 /* switch gxsdl (gx_state.c): applies the pre-decoded state calls at the start of a list, returns the bytes covered */
 extern int gx_opt_sdl;
-u32 gx_sdl_run(const u8* list, u32 nbytes);
+/* `hint` (or NULL): a u16 that keeps the entry's slot, so the next call of the same list skips the hash and the probe */
+u32 gx_sdl_run(const u8* list, u32 nbytes, u16* hint);
+/* gx_dlcache.c: set by the call that found an uncacheable (state-only) list's entry; the slot hint of gx_sdl_run for it.
+ * NULL when the last call found no such entry. */
+extern u16* gx_sdl_hint;
 
 /* gx_pipe.c: a GXBegin not yet closed by GXEnd (see gx_end_open_primitive). The
  * primitive is the game thread's: a translating thread never closes it. */

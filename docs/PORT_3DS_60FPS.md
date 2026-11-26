@@ -466,3 +466,1096 @@ Results (Azahar, dev build):
 - `texfast=2` mismatches: gor_01 0 (421200 lookups, 330470 fast hits to frame 1500), pik_00 0 (405263 / 347319), battle 0 (387071 / 323680 to frame 2400), map-change run (map_sweep gor_01,gor_00,hei_01,tik_01,usu_00,pik_00, 6/6 ok) 0.
 - determ shots 780..785 `texfast=0` vs `1`: gor_01 6/6 and battle 6/6 byte-identical.
 - Release A/B game-thread busy: NOT measured. `gx_perf_ab.py` does not pass `--allow-hw-faults` and every local run logs the known boot `UnmappedAccess 0xA5A5A5A5` lines, so all runs fail. A local copy with the flag is needed (the auto-mode check refused the agent's edit of the tool).
+
+## Hot list 2026-11-26
+
+Facts only. Azahar ms are ratios, not console ms (the JIT has no cache model). Release build of port3ds `16ede892` (`TTYD_CCACHE=1 build.sh --no-cia`, 3dsx, ELF `build/elfs/631_16ede892.elf`).
+
+Configurations (defaults on in every one: `gxbatch`, `gxstatecache`, fog ramp):
+- C0: defaults.
+- C1: `gxdirty=1 gxdirect=1 gximmdirect=1 texfast=1 texasync=1`.
+- C2: `gxonehop=1 gxdirty=1 texfast=1 texasync=1`.
+- C3: C1 + `gxthread=2 gxpipeline=1`.
+
+Scenes: `gor_01` (story 30), `pik_00` (story 30), `usu_00` (story 30), battle (`gon_02`, `battle=1 btlauto=perfect`).
+
+### Timing (`gx_perf_ab.py --repeat 2`, windows 722-841, ms per frame, best of 2)
+
+`busy` is core-0 (game thread) busy time. `transl` is the translator thread (C3 only; 0.0 elsewhere because that work is inside `busy`). `render` is the render thread minus its vblank wait.
+
+| Scene | Config | frame | core-0 busy | translator | render |
+|---|---|---|---|---|---|
+| gor_01 | C0 | 50.5 | 45.4 | 0.0 | 16.3 |
+| gor_01 | C1 | 50.0 | 34.7 | 0.0 | 8.1 |
+| gor_01 | C2 | 50.5 | 40.9 | 0.0 | 1.4 |
+| gor_01 | C3 | 33.5 | 25.4 | 24.5 | 8.1 |
+| pik_00 | C0 | 66.9 | 55.0 | 0.0 | 16.0 |
+| pik_00 | C1 | 50.2 | 45.0 | 0.0 | 8.3 |
+| pik_00 | C2 | 66.9 | 51.4 | 0.0 | 1.5 |
+| pik_00 | C3 | 47.8 | 33.7 | 29.4 | 8.2 |
+| usu_00 | C0 | 50.2 | 39.4 | 0.0 | 13.1 |
+| usu_00 | C1 | 36.7 | 31.3 | 0.0 | 6.9 |
+| usu_00 | C2 | 49.7 | 36.0 | 0.0 | 1.5 |
+| usu_00 | C3 | 33.5 | 24.4 | 17.2 | 6.9 |
+| battle | C0 | 39.5 | 27.7 | 0.0 | 7.2 |
+| battle | C1 | 29.0 | 22.5 | 0.0 | 4.0 |
+| battle | C2 | 34.5 | 25.4 | 0.0 | 1.1 |
+| battle | C3 | 32.7 | 17.3 (fence wait 7.3) | 20.9 | 4.0 |
+
+Frame times sit on vblank multiples (16.7 ms steps) in Azahar. C2's render column is small because `gxonehop` writes the PICA registers in the game thread: its cost shows in `busy`.
+
+Best configuration by frame time: C3 in gor_01, pik_00 and usu_00; C1 in the battle (C3 is 3.7 ms slower there: translator 20.9 ms, and the game thread waits 7.3 ms on fences).
+
+### Profile method
+
+`run_azahar.py --gdb --gdb-port <own>` with `gxthreadstats=60 wdog=100000`; a kick (RSP connect, continue, interrupt, detach); then `pc_sample.py --interval 200 --duration 240 --start-after "gxthread \d frame 1141"`. Stops: 708-717 per run (about 3 Hz) except C0 gor_01: 365 (the stub was slower in that run). A function with 5 samples is about 0.7%; anything under 2% is an order, not a size. Percentages are of all samples of that thread (idle waits included). Thread 4 in every run is the on-screen log console (`newRow`, `consoleDrawChar`, `svcSendSyncRequest`), present because `gxthreadstats` logs each second; it is not game work and is left out of the tables. The audio thread and idle threads are left out when under 15% non-wait. Thread ids change between runs; the tables name the role in the heading: in C0-C2 the render thread is the second busy thread; in C3 thread `e` is the translator and `d` the render thread.
+
+Groups: GX front end = `gx_rec*`, `GXSet*`, `GXCallDisplayList`, `dd_slot`, `gx_dlcache*`, `gx_vsh*`, `gx_draw*`, `gx_call_list`, `gx_apply_call`, `gx_imm_convert`, `run_commands`, `run_pending_raw`, `rec_*`, `bat_*`, `vsh_*`, `consume`, `group_for`, `vtx_state_hash`, `plat_gpu_set_state*` (port code that translates GX, whichever thread runs it). GX render back end = citro3d and PICA register code (`GPUCMD_Add`, `C3D_*`, `vsh_const_rows`, `apply_*`). Texture = `tex_*`, `build_tex_units`, decode, Morton. SDK/libc = `memcpy`, `memset`, `memcmp`, `C_MTX*`, console print, malloc. Game logic = everything else (map, hit, anim, event, sort). Waits = `svc*`. Grouping is by name pattern and approximate: `memcpy` is counted as libc though most of it is called from the GX front end.
+
+Group totals of the game thread (thread 1; in C3 the translator is a separate thread), % of all its samples, over the listed top-40 functions:
+
+| Config | Scene | non-wait | GX front end | game logic | SDK/libc | texture | waits |
+|---|---|---|---|---|---|---|---|
+| C0 | gor_01 | 67% | 38% | 14% | 13% | 2% | 16% |
+| C0 | pik_00 | 66% | 33% | 24% | 8% | 0% | 15% |
+| C0 | usu_00 | 66% | 29% | 22% | 14% | 1% | 14% |
+| C0 | battle | 60% | 37% | 12% | 11% | 1% | 22% |
+| C1 | gor_01 | 71% | 19% | 34% | 17% | 1% | 8% |
+| C1 | pik_00 | 66% | 29% | 26% | 12% | 0% | 16% |
+| C1 | usu_00 | 64% | 23% | 24% | 16% | 0% | 14% |
+| C1 | battle | 56% | 29% | 11% | 16% | 1% | 20% |
+| C2 | gor_01 | 71% | 16% | 36% | 15% | 0% | 6% |
+| C2 | pik_00 | 70% | 17% | 33% | 16% | 0% | 13% |
+| C2 | usu_00 | 66% | 21% | 26% | 18% | 0% | 12% |
+| C2 | battle | 53% | 22% | 15% | 13% | 0% | 24% |
+| C3 | gor_01 | 62% | 24% | 33% | 5% | 0% | 24% |
+| C3 | pik_00 | 68% | 24% | 31% | 14% | 0% | 21% |
+| C3 | usu_00 | 61% | 24% | 26% | 12% | 0% | 21% |
+| C3 | battle | 54% | 33% | 12% | 9% | 0% | 26% |
+
+### Top 25 by self samples, per configuration and scene
+
+Headings: `Thread 1` is the game thread. The thread with the GX translation functions and no `svc` majority in C3 (`e`) is the translator; the thread with `C3D_*`/`vsh_const_rows` is the render thread.
+
+#### C0 / gor_01: 365 stops over 240 s
+
+Thread 1, 365 samples, non-wait 67%. Groups (of all samples; listed functions only): GX front end 38%, waits 16%, game logic 14%, SDK/libc 12%, texture 2%, SDK 1%, GX render back end (citro3d/PICA) 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 55 | 15.1 | waits |
+| 2 | `plat_gpu_set_state` | 36 | 9.9 | GX front end |
+| 3 | `gx_call_list` | 18 | 4.9 | GX front end |
+| 4 | `memcpy` | 16 | 4.4 | SDK/libc |
+| 5 | `run_commands.lto_priv.0` | 14 | 3.8 | GX front end |
+| 6 | `memcmp` | 13 | 3.6 | SDK/libc |
+| 7 | `handle_for_impl.part.0` | 13 | 3.6 | GX front end |
+| 8 | `hitCheckVecFilter` | 12 | 3.3 | game logic |
+| 9 | `mapDisp` | 11 | 3.0 | game logic |
+| 10 | `vsh_prepare` | 10 | 2.7 | GX front end |
+| 11 | `group_for.lto_priv.0` | 7 | 1.9 | GX front end |
+| 12 | `read_vertex` | 7 | 1.9 | GX front end |
+| 13 | `bat_open.lto_priv.0` | 7 | 1.9 | GX front end |
+| 14 | `mapReCalcMatrix.lto_priv.0` | 6 | 1.6 | game logic |
+| 15 | `memset` | 6 | 1.6 | SDK/libc |
+| 16 | `gx_apply_call` | 5 | 1.4 | GX front end |
+| 17 | `gx_hash32` | 5 | 1.4 | GX front end |
+| 18 | `animPoseMain` | 5 | 1.4 | game logic |
+| 19 | `gx_vsh_imm_write` | 4 | 1.1 | GX front end |
+| 20 | `mapSetMaterialLight` | 4 | 1.1 | game logic |
+| 21 | `C_MTX44MultVec` | 4 | 1.1 | SDK/libc |
+| 22 | `build_tex_units` | 4 | 1.1 | texture |
+| 23 | `gx_tev_compile_memo` | 3 | 0.8 | GX front end |
+| 24 | `__malloc_update_mallinfo` | 3 | 0.8 | SDK/libc |
+| 25 | `renderProc.part.0.lto_priv.0` | 3 | 0.8 | game logic |
+
+Thread c, 365 samples, non-wait 22%. Groups (of all samples; listed functions only): waits 78%, GX render back end (citro3d/PICA) 19%, SDK/libc 2%, texture 0%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 209 | 57.3 | waits |
+| 2 | `svcSendSyncRequest` | 77 | 21.1 | waits |
+| 3 | `GPUCMD_Add` | 29 | 7.9 | GX render back end (citro3d/PICA) |
+| 4 | `C3D_UpdateUniforms` | 18 | 4.9 | GX render back end (citro3d/PICA) |
+| 5 | `vsh_const_rows` | 9 | 2.5 | GX render back end (citro3d/PICA) |
+| 6 | `memcpy` | 8 | 2.2 | SDK/libc |
+| 7 | `vsh_apply_const` | 2 | 0.5 | GX render back end (citro3d/PICA) |
+| 8 | `apply_pix` | 2 | 0.5 | GX render back end (citro3d/PICA) |
+| 9 | `tex_prepare` | 1 | 0.3 | texture |
+| 10 | `apply_state` | 1 | 0.3 | GX render back end (citro3d/PICA) |
+| 11 | `AttrInfo_AddLoader` | 1 | 0.3 | GX render back end (citro3d/PICA) |
+| 12 | `C3D_ImmSendAttrib` | 1 | 0.3 | GX render back end (citro3d/PICA) |
+| 13 | `C3Di_TexEnvBind` | 1 | 0.3 | GX render back end (citro3d/PICA) |
+| 14 | `memset` | 1 | 0.3 | SDK/libc |
+| 15 | `C3D_DrawElements` | 1 | 0.3 | GX render back end (citro3d/PICA) |
+| 16 | `C3Di_SetTex` | 1 | 0.3 | GX render back end (citro3d/PICA) |
+| 17 | `scissor_rect.isra.0` | 1 | 0.3 | GX render back end (citro3d/PICA) |
+| 18 | `C3D_TexBind` | 1 | 0.3 | GX render back end (citro3d/PICA) |
+| 19 | `f32tof24` | 1 | 0.3 | GX render back end (citro3d/PICA) |
+
+#### C0 / pik_00: 715 stops over 240 s
+
+Thread 1, 715 samples, non-wait 66%. Groups (of all samples; listed functions only): GX front end 33%, game logic 24%, waits 15%, SDK/libc 8%, GX render back end (citro3d/PICA) 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 102 | 14.3 | waits |
+| 2 | `read_vertex` | 73 | 10.2 | GX front end |
+| 3 | `plat_gpu_set_state` | 50 | 7.0 | GX front end |
+| 4 | `memcpy` | 30 | 4.2 | SDK/libc |
+| 5 | `animPoseMain` | 28 | 3.9 | game logic |
+| 6 | `hitCheckVecFilter` | 28 | 3.9 | game logic |
+| 7 | `gx_vsh_imm_write` | 18 | 2.5 | GX front end |
+| 8 | `mapObjRotate` | 18 | 2.5 | game logic |
+| 9 | `draw_vsh_imm.lto_priv.0` | 16 | 2.2 | GX front end |
+| 10 | `renderProc.part.0.lto_priv.0` | 14 | 2.0 | game logic |
+| 11 | `evtmgrMain` | 14 | 2.0 | game logic |
+| 12 | `_sort.lto_priv.1` | 14 | 2.0 | game logic |
+| 13 | `mapDisp` | 14 | 2.0 | game logic |
+| 14 | `run_commands.lto_priv.0` | 12 | 1.7 | GX front end |
+| 15 | `plat_gpu_vsh_draw` | 9 | 1.3 | GX render back end (citro3d/PICA) |
+| 16 | `gx_call_list` | 9 | 1.3 | GX front end |
+| 17 | `draw_from_reader` | 8 | 1.1 | game logic |
+| 18 | `handle_for_impl.part.0` | 8 | 1.1 | GX front end |
+| 19 | `C_MTX44MultVec` | 7 | 1.0 | SDK/libc |
+| 20 | `group_for.lto_priv.0` | 7 | 1.0 | GX front end |
+| 21 | `fsort` | 7 | 1.0 | game logic |
+| 22 | `ttyd_main.isra.0` | 7 | 1.0 | game logic |
+| 23 | `mem_color.lto_priv.0` | 6 | 0.8 | game logic |
+| 24 | `rec_for` | 6 | 0.8 | GX front end |
+| 25 | `memset` | 6 | 0.8 | SDK/libc |
+
+Thread c, 715 samples, non-wait 26%. Groups (of all samples; listed functions only): waits 74%, GX render back end (citro3d/PICA) 21%, SDK/libc 3%, GX front end 1%, texture 1%, game logic 0%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 425 | 59.4 | waits |
+| 2 | `svcSendSyncRequest` | 107 | 15.0 | waits |
+| 3 | `GPUCMD_Add` | 64 | 9.0 | GX render back end (citro3d/PICA) |
+| 4 | `C3D_UpdateUniforms` | 28 | 3.9 | GX render back end (citro3d/PICA) |
+| 5 | `vsh_const_rows` | 22 | 3.1 | GX render back end (citro3d/PICA) |
+| 6 | `memcpy` | 16 | 2.2 | SDK/libc |
+| 7 | `C3Di_UpdateContext` | 7 | 1.0 | GX render back end (citro3d/PICA) |
+| 8 | `f32tof24` | 5 | 0.7 | GX render back end (citro3d/PICA) |
+| 9 | `apply_tev` | 5 | 0.7 | GX render back end (citro3d/PICA) |
+| 10 | `memset` | 4 | 0.6 | SDK/libc |
+| 11 | `tex_prepare` | 3 | 0.4 | texture |
+| 12 | `vsh_apply_layout` | 3 | 0.4 | GX render back end (citro3d/PICA) |
+| 13 | `C3D_GetTexEnv` | 3 | 0.4 | GX render back end (citro3d/PICA) |
+| 14 | `C3Di_SetTex` | 3 | 0.4 | GX render back end (citro3d/PICA) |
+| 15 | `render_record` | 3 | 0.4 | GX front end |
+| 16 | `scissor_rect.isra.0` | 2 | 0.3 | GX render back end (citro3d/PICA) |
+| 17 | `apply_pix` | 2 | 0.3 | GX render back end (citro3d/PICA) |
+| 18 | `C3D_DrawElements` | 2 | 0.3 | GX render back end (citro3d/PICA) |
+| 19 | `vsh_scales_rows.lto_priv.0` | 2 | 0.3 | GX front end |
+| 20 | `AttrInfo_AddFixed` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 21 | `C3Di_EffectBind` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 22 | `f32tof31` | 1 | 0.1 | game logic |
+| 23 | `C3D_TexEnvBufUpdate` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 24 | `apply_state` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 25 | `__wrap_C3D_TexBind` | 1 | 0.1 | texture |
+
+#### C0 / usu_00: 713 stops over 240 s
+
+Thread 1, 713 samples, non-wait 66%. Groups (of all samples; listed functions only): GX front end 29%, game logic 22%, waits 14%, SDK/libc 13%, SDK 1%, GX render back end (citro3d/PICA) 1%, texture 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 96 | 13.5 | waits |
+| 2 | `plat_gpu_set_state` | 64 | 9.0 | GX front end |
+| 3 | `mapDisp` | 51 | 7.2 | game logic |
+| 4 | `hitCheckVecFilter` | 45 | 6.3 | game logic |
+| 5 | `memcpy` | 39 | 5.5 | SDK/libc |
+| 6 | `read_vertex` | 39 | 5.5 | GX front end |
+| 7 | `gx_call_list` | 35 | 4.9 | GX front end |
+| 8 | `group_for.lto_priv.0` | 13 | 1.8 | GX front end |
+| 9 | `memcmp` | 12 | 1.7 | SDK/libc |
+| 10 | `renderProc.part.0.lto_priv.0` | 11 | 1.5 | game logic |
+| 11 | `C_MTX44MultVec` | 11 | 1.5 | SDK/libc |
+| 12 | `memset` | 11 | 1.5 | SDK/libc |
+| 13 | `__malloc_update_mallinfo` | 10 | 1.4 | SDK/libc |
+| 14 | `gx_tev_compile_memo` | 8 | 1.1 | GX front end |
+| 15 | `chkfilterVec.lto_priv.0` | 8 | 1.1 | game logic |
+| 16 | `vsh_prepare` | 8 | 1.1 | GX front end |
+| 17 | `gx_vsh_imm_write` | 7 | 1.0 | GX front end |
+| 18 | `GXCallDisplayList` | 7 | 1.0 | GX front end |
+| 19 | `animPoseMain` | 7 | 1.0 | game logic |
+| 20 | `handle_for_impl.part.0` | 7 | 1.0 | GX front end |
+| 21 | `svcArbitrateAddress` | 6 | 0.8 | waits |
+| 22 | `run_pending_raw.lto_priv.0` | 6 | 0.8 | GX front end |
+| 23 | `checkTriVec_xz` | 6 | 0.8 | game logic |
+| 24 | `GXLoadPosMtxImm.constprop.0` | 5 | 0.7 | SDK |
+| 25 | `bat_open.lto_priv.0` | 5 | 0.7 | GX front end |
+
+Thread c, 713 samples, non-wait 26%. Groups (of all samples; listed functions only): waits 74%, GX render back end (citro3d/PICA) 20%, SDK/libc 3%, GX front end 2%, texture 1%, game logic 0%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 465 | 65.2 | waits |
+| 2 | `GPUCMD_Add` | 79 | 11.1 | GX render back end (citro3d/PICA) |
+| 3 | `svcSendSyncRequest` | 64 | 9.0 | waits |
+| 4 | `C3D_UpdateUniforms` | 28 | 3.9 | GX render back end (citro3d/PICA) |
+| 5 | `vsh_const_rows` | 17 | 2.4 | GX render back end (citro3d/PICA) |
+| 6 | `memcpy` | 16 | 2.2 | SDK/libc |
+| 7 | `render_record` | 5 | 0.7 | GX front end |
+| 8 | `C3Di_UpdateContext` | 5 | 0.7 | GX render back end (citro3d/PICA) |
+| 9 | `vsh_light_rows.lto_priv.0` | 4 | 0.6 | GX front end |
+| 10 | `tex_prepare` | 4 | 0.6 | texture |
+| 11 | `__wrap_C3D_TexBind` | 3 | 0.4 | texture |
+| 12 | `C3Di_SetTex` | 3 | 0.4 | GX render back end (citro3d/PICA) |
+| 13 | `vsh_scales_rows.lto_priv.0` | 3 | 0.4 | GX front end |
+| 14 | `scissor_rect.isra.0` | 2 | 0.3 | GX render back end (citro3d/PICA) |
+| 15 | `f32tof24` | 2 | 0.3 | GX render back end (citro3d/PICA) |
+| 16 | `apply_tev` | 2 | 0.3 | GX render back end (citro3d/PICA) |
+| 17 | `C3D_SetViewport` | 2 | 0.3 | GX render back end (citro3d/PICA) |
+| 18 | `memset` | 2 | 0.3 | SDK/libc |
+| 19 | `vsh_apply_layout` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 20 | `C3D_TexBind` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 21 | `C3D_GetTexEnv` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 22 | `vsh_apply_const` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 23 | `C3D_DepthTest` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 24 | `apply_pix` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 25 | `f32tof31` | 1 | 0.1 | game logic |
+
+#### C0 / battle: 715 stops over 240 s
+
+Thread 1, 715 samples, non-wait 61%. Groups (of all samples; listed functions only): GX front end 37%, waits 22%, game logic 12%, SDK/libc 10%, SDK 1%, texture 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 150 | 21.0 | waits |
+| 2 | `plat_gpu_set_state` | 62 | 8.7 | GX front end |
+| 3 | `read_vertex` | 42 | 5.9 | GX front end |
+| 4 | `memcpy` | 39 | 5.5 | SDK/libc |
+| 5 | `run_commands.lto_priv.0` | 28 | 3.9 | GX front end |
+| 6 | `animPoseMain` | 25 | 3.5 | game logic |
+| 7 | `gx_call_list` | 22 | 3.1 | GX front end |
+| 8 | `mapDisp` | 17 | 2.4 | game logic |
+| 9 | `gx_vsh_imm_write` | 14 | 2.0 | GX front end |
+| 10 | `vsh_prepare` | 12 | 1.7 | GX front end |
+| 11 | `group_for.lto_priv.0` | 11 | 1.5 | GX front end |
+| 12 | `gx_tev_compile_memo` | 11 | 1.5 | GX front end |
+| 13 | `handle_for_impl.part.0` | 10 | 1.4 | GX front end |
+| 14 | `__malloc_update_mallinfo` | 10 | 1.4 | SDK/libc |
+| 15 | `GXCallDisplayList` | 10 | 1.4 | GX front end |
+| 16 | `memset` | 10 | 1.4 | SDK/libc |
+| 17 | `rec_for` | 8 | 1.1 | GX front end |
+| 18 | `gx_apply_call` | 8 | 1.1 | GX front end |
+| 19 | `renderProc.part.0.lto_priv.0` | 7 | 1.0 | game logic |
+| 20 | `finitef` | 6 | 0.8 | SDK/libc |
+| 21 | `call_slow.constprop.0` | 6 | 0.8 | game logic |
+| 22 | `gx_hash32` | 6 | 0.8 | GX front end |
+| 23 | `gather_hash.lto_priv.0` | 6 | 0.8 | game logic |
+| 24 | `dispProc.isra.0` | 5 | 0.7 | game logic |
+| 25 | `svcSendSyncRequest` | 5 | 0.7 | waits |
+
+Thread 4, 715 samples, non-wait 27%. Groups (of all samples; listed functions only): waits 73%, SDK/libc 27%, game logic 0%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcSendSyncRequest` | 515 | 72.0 | waits |
+| 2 | `newRow` | 154 | 21.5 | SDK/libc |
+| 3 | `consoleDrawChar` | 30 | 4.2 | SDK/libc |
+| 4 | `svcArbitrateAddress` | 6 | 0.8 | waits |
+| 5 | `memmove` | 5 | 0.7 | SDK/libc |
+| 6 | `plat_console_log` | 1 | 0.1 | SDK/libc |
+| 7 | `consolePrintChar` | 1 | 0.1 | SDK/libc |
+| 8 | `writer_main.lto_priv.0` | 1 | 0.1 | game logic |
+| 9 | `memcpy` | 1 | 0.1 | SDK/libc |
+| 10 | `con_write` | 1 | 0.1 | SDK/libc |
+
+Thread c, 715 samples, non-wait 22%. Groups (of all samples; listed functions only): waits 78%, GX render back end (citro3d/PICA) 17%, SDK/libc 2%, GX front end 1%, texture 0%, game logic 0%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 495 | 69.2 | waits |
+| 2 | `svcSendSyncRequest` | 66 | 9.2 | waits |
+| 3 | `GPUCMD_Add` | 53 | 7.4 | GX render back end (citro3d/PICA) |
+| 4 | `C3D_UpdateUniforms` | 36 | 5.0 | GX render back end (citro3d/PICA) |
+| 5 | `vsh_const_rows` | 25 | 3.5 | GX render back end (citro3d/PICA) |
+| 6 | `memcpy` | 11 | 1.5 | SDK/libc |
+| 7 | `render_record` | 7 | 1.0 | GX front end |
+| 8 | `tex_prepare` | 3 | 0.4 | texture |
+| 9 | `memset` | 3 | 0.4 | SDK/libc |
+| 10 | `f32tof31` | 1 | 0.1 | game logic |
+| 11 | `apply_tev` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 12 | `C3D_FixedAttribGetWritePtr` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 13 | `vsh_scales_rows.lto_priv.0` | 1 | 0.1 | GX front end |
+| 14 | `apply_pix` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 15 | `plat_gpudump_draw_filter` | 1 | 0.1 | GX front end |
+| 16 | `f32tof24` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 17 | `C3Di_UpdateContext` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 18 | `C3D_SetScissor` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 19 | `scissor_rect.isra.0` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 20 | `C3Di_SetTex` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 21 | `AttrInfo_AddLoader` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 22 | `vsh_apply_layout` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 23 | `osConvertVirtToPhys` | 1 | 0.1 | SDK/libc |
+| 24 | `C3D_DrawElements` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 25 | `BufInfo_Add` | 1 | 0.1 | game logic |
+
+Thread 11, 715 samples, non-wait 16%. Groups (of all samples; listed functions only): waits 84%, game logic 15%, SDK/libc 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcSleepThread` | 580 | 81.1 | waits |
+| 2 | `salPcProcessPb.constprop.0` | 48 | 6.7 | game logic |
+| 3 | `fetch1` | 29 | 4.1 | game logic |
+| 4 | `svcArbitrateAddressNoTimeout` | 23 | 3.2 | waits |
+| 5 | `snd_handle_irq.lto_priv.0` | 14 | 2.0 | game logic |
+| 6 | `_sscallback.lto_priv.0` | 6 | 0.8 | game logic |
+| 7 | `memcpy` | 6 | 0.8 | SDK/libc |
+| 8 | `salBuildCommandList` | 3 | 0.4 | game logic |
+| 9 | `DoDepopFade` | 1 | 0.1 | game logic |
+| 10 | `__ieee754_fmodf` | 1 | 0.1 | game logic |
+| 11 | `ai_fill.lto_priv.0` | 1 | 0.1 | SDK/libc |
+| 12 | `fmodf` | 1 | 0.1 | game logic |
+| 13 | `fill_block` | 1 | 0.1 | game logic |
+| 14 | `__aeabi_uldivmod` | 1 | 0.1 | SDK/libc |
+
+#### C1 / gor_01: 708 stops over 240 s
+
+Thread 1, 708 samples, non-wait 72%. Groups (of all samples; listed functions only): game logic 34%, GX front end 19%, SDK/libc 17%, waits 8%, GX render back end (citro3d/PICA) 1%, texture 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `memcpy` | 76 | 10.7 | SDK/libc |
+| 2 | `hitCheckVecFilter` | 66 | 9.3 | game logic |
+| 3 | `svcArbitrateAddressNoTimeout` | 57 | 8.1 | waits |
+| 4 | `gx_imm_convert.isra.0` | 43 | 6.1 | GX front end |
+| 5 | `mapMain` | 37 | 5.2 | game logic |
+| 6 | `mapDisp` | 28 | 4.0 | game logic |
+| 7 | `run_commands.lto_priv.0` | 18 | 2.5 | GX front end |
+| 8 | `mapReCalcMatrix.lto_priv.0` | 15 | 2.1 | game logic |
+| 9 | `vsh_state.part.0.lto_priv.0` | 13 | 1.8 | GX front end |
+| 10 | `gx_call_list` | 12 | 1.7 | GX front end |
+| 11 | `__malloc_update_mallinfo` | 11 | 1.6 | SDK/libc |
+| 12 | `group_for.lto_priv.0` | 11 | 1.6 | GX front end |
+| 13 | `animPoseMain` | 11 | 1.6 | game logic |
+| 14 | `mapGetMapObj` | 10 | 1.4 | game logic |
+| 15 | `C_MTX44MultVec` | 10 | 1.4 | SDK/libc |
+| 16 | `calcCamRoad` | 10 | 1.4 | game logic |
+| 17 | `renderProc.part.0.lto_priv.0` | 9 | 1.3 | game logic |
+| 18 | `memset` | 9 | 1.3 | SDK/libc |
+| 19 | `hitMain` | 9 | 1.3 | game logic |
+| 20 | `mapSetMaterialLight` | 7 | 1.0 | game logic |
+| 21 | `gather_hash.lto_priv.0` | 7 | 1.0 | game logic |
+| 22 | `ttyd_main.isra.0` | 7 | 1.0 | game logic |
+| 23 | `rec_for` | 7 | 1.0 | GX front end |
+| 24 | `C_MTXConcat` | 6 | 0.8 | SDK/libc |
+| 25 | `plat_gpu_vsh_draw` | 6 | 0.8 | GX render back end (citro3d/PICA) |
+
+Thread d, 708 samples, non-wait 29%. Groups (of all samples; listed functions only): waits 71%, GX render back end (citro3d/PICA) 12%, SDK/libc 9%, GX front end 7%, texture 0%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 439 | 62.0 | waits |
+| 2 | `svcSendSyncRequest` | 65 | 9.2 | waits |
+| 3 | `vsh_const_rows` | 63 | 8.9 | GX render back end (citro3d/PICA) |
+| 4 | `memcpy` | 42 | 5.9 | SDK/libc |
+| 5 | `render_record` | 31 | 4.4 | GX front end |
+| 6 | `memcmp` | 22 | 3.1 | SDK/libc |
+| 7 | `direct_block` | 17 | 2.4 | GX front end |
+| 8 | `GPUCMD_Add` | 15 | 2.1 | GX render back end (citro3d/PICA) |
+| 9 | `tex_prepare` | 3 | 0.4 | texture |
+| 10 | `C3D_UpdateUniforms` | 2 | 0.3 | GX render back end (citro3d/PICA) |
+| 11 | `dtab_find` | 2 | 0.3 | GX front end |
+| 12 | `cmd_put` | 1 | 0.1 | GX front end |
+| 13 | `C3Di_SetTex` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 14 | `C3Di_UpdateContext` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 15 | `__ssprint_r` | 1 | 0.1 | SDK/libc |
+| 16 | `f32tof24` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 17 | `c3d_flush` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 18 | `C3Di_FrameBufBind` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+
+#### C1 / pik_00: 717 stops over 240 s
+
+Thread 1, 717 samples, non-wait 66%. Groups (of all samples; listed functions only): GX front end 29%, game logic 26%, waits 16%, SDK/libc 11%, SDK 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 114 | 15.9 | waits |
+| 2 | `memcpy` | 67 | 9.3 | SDK/libc |
+| 3 | `hitCheckVecFilter` | 64 | 8.9 | game logic |
+| 4 | `gx_imm_convert.isra.0` | 42 | 5.9 | GX front end |
+| 5 | `run_commands.lto_priv.0` | 28 | 3.9 | GX front end |
+| 6 | `gx_call_list` | 20 | 2.8 | GX front end |
+| 7 | `checkTriVec_xz` | 19 | 2.6 | game logic |
+| 8 | `animPoseMain` | 16 | 2.2 | game logic |
+| 9 | `_sort.lto_priv.1` | 14 | 2.0 | game logic |
+| 10 | `mapDisp` | 12 | 1.7 | game logic |
+| 11 | `ttyd_main.isra.0` | 12 | 1.7 | game logic |
+| 12 | `plat_gpu_set_state_dirty.constprop.0` | 11 | 1.5 | GX front end |
+| 13 | `group_for.lto_priv.0` | 10 | 1.4 | GX front end |
+| 14 | `memset` | 10 | 1.4 | SDK/libc |
+| 15 | `bat_open.lto_priv.0` | 10 | 1.4 | GX front end |
+| 16 | `fsort` | 9 | 1.3 | game logic |
+| 17 | `renderProc.part.0.lto_priv.0` | 8 | 1.1 | game logic |
+| 18 | `run_pending_raw.lto_priv.0` | 8 | 1.1 | GX front end |
+| 19 | `iconGX` | 8 | 1.1 | game logic |
+| 20 | `evtmgrMain` | 7 | 1.0 | game logic |
+| 21 | `gx_vsh_route` | 7 | 1.0 | GX front end |
+| 22 | `vsh_state.part.0.lto_priv.0` | 7 | 1.0 | GX front end |
+| 23 | `effMain` | 7 | 1.0 | game logic |
+| 24 | `handle_for_full.lto_priv.0` | 7 | 1.0 | GX front end |
+| 25 | `GXLoadPosMtxImm.constprop.0` | 6 | 0.8 | SDK |
+
+Thread d, 717 samples, non-wait 19%. Groups (of all samples; listed functions only): waits 81%, GX render back end (citro3d/PICA) 7%, SDK/libc 6%, GX front end 6%, texture 0%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 448 | 62.5 | waits |
+| 2 | `svcSendSyncRequest` | 130 | 18.1 | waits |
+| 3 | `vsh_const_rows` | 27 | 3.8 | GX render back end (citro3d/PICA) |
+| 4 | `memcpy` | 23 | 3.2 | SDK/libc |
+| 5 | `memcmp` | 23 | 3.2 | SDK/libc |
+| 6 | `render_record` | 22 | 3.1 | GX front end |
+| 7 | `GPUCMD_Add` | 15 | 2.1 | GX render back end (citro3d/PICA) |
+| 8 | `direct_block` | 11 | 1.5 | GX front end |
+| 9 | `vsh_scales_rows.lto_priv.0` | 7 | 1.0 | GX front end |
+| 10 | `cmd_put` | 3 | 0.4 | GX front end |
+| 11 | `tex_prepare` | 2 | 0.3 | texture |
+| 12 | `C3D_UpdateUniforms` | 2 | 0.3 | GX render back end (citro3d/PICA) |
+| 13 | `C3D_SetViewport` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 14 | `f32tof24` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 15 | `C3D_ImmDrawEnd` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 16 | `scissor_rect.isra.0` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+
+#### C1 / usu_00: 715 stops over 240 s
+
+Thread 1, 715 samples, non-wait 64%. Groups (of all samples; listed functions only): game logic 24%, GX front end 23%, SDK/libc 15%, waits 14%, SDK 1%, GX render back end (citro3d/PICA) 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 92 | 12.9 | waits |
+| 2 | `memcpy` | 71 | 9.9 | SDK/libc |
+| 3 | `hitCheckVecFilter` | 59 | 8.3 | game logic |
+| 4 | `gx_call_list` | 46 | 6.4 | GX front end |
+| 5 | `mapDisp` | 36 | 5.0 | game logic |
+| 6 | `gx_imm_convert.isra.0` | 25 | 3.5 | GX front end |
+| 7 | `animPoseMain` | 13 | 1.8 | game logic |
+| 8 | `group_for.lto_priv.0` | 12 | 1.7 | GX front end |
+| 9 | `memset` | 12 | 1.7 | SDK/libc |
+| 10 | `plat_gpu_set_state_dirty.constprop.0` | 11 | 1.5 | GX front end |
+| 11 | `svcArbitrateAddress` | 11 | 1.5 | waits |
+| 12 | `renderProc.part.0.lto_priv.0` | 10 | 1.4 | game logic |
+| 13 | `mapSetMaterialLight` | 10 | 1.4 | game logic |
+| 14 | `GXCallDisplayList` | 9 | 1.3 | GX front end |
+| 15 | `gather_hash.lto_priv.0` | 9 | 1.3 | game logic |
+| 16 | `vsh_state.part.0.lto_priv.0` | 8 | 1.1 | GX front end |
+| 17 | `rec_for` | 8 | 1.1 | GX front end |
+| 18 | `ttyd_main.isra.0` | 7 | 1.0 | game logic |
+| 19 | `mapSetMaterial.lto_priv.0` | 7 | 1.0 | game logic |
+| 20 | `C_MTX44MultVec` | 7 | 1.0 | SDK/libc |
+| 21 | `GXLoadPosMtxImm.constprop.0` | 7 | 1.0 | SDK |
+| 22 | `__malloc_update_mallinfo` | 7 | 1.0 | SDK/libc |
+| 23 | `plat_gpu_vsh_draw` | 6 | 0.8 | GX render back end (citro3d/PICA) |
+| 24 | `run_pending_raw.lto_priv.0` | 6 | 0.8 | GX front end |
+| 25 | `handle_for_full.lto_priv.0` | 6 | 0.8 | GX front end |
+
+Thread d, 715 samples, non-wait 20%. Groups (of all samples; listed functions only): waits 80%, GX front end 7%, SDK/libc 7%, GX render back end (citro3d/PICA) 6%, texture 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 484 | 67.7 | waits |
+| 2 | `svcSendSyncRequest` | 86 | 12.0 | waits |
+| 3 | `vsh_const_rows` | 28 | 3.9 | GX render back end (citro3d/PICA) |
+| 4 | `memcpy` | 26 | 3.6 | SDK/libc |
+| 5 | `memcmp` | 23 | 3.2 | SDK/libc |
+| 6 | `render_record` | 18 | 2.5 | GX front end |
+| 7 | `vsh_light_rows.lto_priv.0` | 16 | 2.2 | GX front end |
+| 8 | `direct_block` | 13 | 1.8 | GX front end |
+| 9 | `C3D_UpdateUniforms` | 6 | 0.8 | GX render back end (citro3d/PICA) |
+| 10 | `GPUCMD_Add` | 6 | 0.8 | GX render back end (citro3d/PICA) |
+| 11 | `tex_prepare` | 4 | 0.6 | texture |
+| 12 | `dtab_find` | 3 | 0.4 | GX front end |
+| 13 | `vsh_scales_rows.lto_priv.0` | 1 | 0.1 | GX front end |
+| 14 | `scissor_rect.isra.0` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+
+Thread 4, 715 samples, non-wait 20%. Groups (of all samples; listed functions only): waits 80%, SDK/libc 20%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcSendSyncRequest` | 483 | 67.6 | waits |
+| 2 | `newRow` | 118 | 16.5 | SDK/libc |
+| 3 | `svcArbitrateAddress` | 90 | 12.6 | waits |
+| 4 | `consoleDrawChar` | 19 | 2.7 | SDK/libc |
+| 5 | `consolePrintChar` | 4 | 0.6 | SDK/libc |
+| 6 | `memmove` | 1 | 0.1 | SDK/libc |
+
+#### C1 / battle: 716 stops over 240 s
+
+Thread 1, 716 samples, non-wait 56%. Groups (of all samples; listed functions only): GX front end 29%, waits 20%, SDK/libc 15%, game logic 11%, SDK 1%, texture 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 129 | 18.0 | waits |
+| 2 | `memcpy` | 75 | 10.5 | SDK/libc |
+| 3 | `gx_imm_convert.isra.0` | 41 | 5.7 | GX front end |
+| 4 | `run_commands.lto_priv.0` | 35 | 4.9 | GX front end |
+| 5 | `animPoseMain` | 23 | 3.2 | game logic |
+| 6 | `vsh_state.part.0.lto_priv.0` | 17 | 2.4 | GX front end |
+| 7 | `gx_call_list` | 14 | 2.0 | GX front end |
+| 8 | `rec_for` | 12 | 1.7 | GX front end |
+| 9 | `gather_hash.lto_priv.0` | 12 | 1.7 | game logic |
+| 10 | `handle_for_full.lto_priv.0` | 12 | 1.7 | GX front end |
+| 11 | `memset` | 11 | 1.5 | SDK/libc |
+| 12 | `group_for.lto_priv.0` | 11 | 1.5 | GX front end |
+| 13 | `mapDisp` | 11 | 1.5 | game logic |
+| 14 | `GXSetChanCtrl` | 9 | 1.3 | GX front end |
+| 15 | `svcArbitrateAddress` | 9 | 1.3 | waits |
+| 16 | `GXSetVtxAttrFmt.constprop.0` | 7 | 1.0 | GX front end |
+| 17 | `call_slow.constprop.0` | 7 | 1.0 | game logic |
+| 18 | `read_vertex` | 7 | 1.0 | GX front end |
+| 19 | `finitef` | 7 | 1.0 | SDK/libc |
+| 20 | `plat_gpu_set_state_dirty.constprop.0` | 6 | 0.8 | GX front end |
+| 21 | `iconGX` | 6 | 0.8 | game logic |
+| 22 | `same_state_full.constprop.0` | 6 | 0.8 | game logic |
+| 23 | `svcSleepThread` | 6 | 0.8 | waits |
+| 24 | `searchPSSFXList` | 5 | 0.7 | game logic |
+| 25 | `GXLoadPosMtxImm.constprop.0` | 5 | 0.7 | SDK |
+
+Thread 4, 716 samples, non-wait 37%. Groups (of all samples; listed functions only): waits 63%, SDK/libc 37%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcSendSyncRequest` | 439 | 61.3 | waits |
+| 2 | `newRow` | 226 | 31.6 | SDK/libc |
+| 3 | `consoleDrawChar` | 32 | 4.5 | SDK/libc |
+| 4 | `svcArbitrateAddress` | 9 | 1.3 | waits |
+| 5 | `memmove` | 5 | 0.7 | SDK/libc |
+| 6 | `consolePrintChar` | 2 | 0.3 | SDK/libc |
+| 7 | `plat_console_log` | 2 | 0.3 | SDK/libc |
+| 8 | `svcArbitrateAddressNoTimeout` | 1 | 0.1 | waits |
+
+Thread d, 716 samples, non-wait 19%. Groups (of all samples; listed functions only): waits 81%, GX render back end (citro3d/PICA) 6%, SDK/libc 6%, GX front end 6%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 526 | 73.5 | waits |
+| 2 | `svcSendSyncRequest` | 55 | 7.7 | waits |
+| 3 | `vsh_const_rows` | 36 | 5.0 | GX render back end (citro3d/PICA) |
+| 4 | `memcpy` | 28 | 3.9 | SDK/libc |
+| 5 | `render_record` | 21 | 2.9 | GX front end |
+| 6 | `direct_block` | 17 | 2.4 | GX front end |
+| 7 | `memcmp` | 17 | 2.4 | SDK/libc |
+| 8 | `GPUCMD_Add` | 7 | 1.0 | GX render back end (citro3d/PICA) |
+| 9 | `dtab_find` | 3 | 0.4 | GX front end |
+| 10 | `C3D_UpdateUniforms` | 2 | 0.3 | GX render back end (citro3d/PICA) |
+| 11 | `vsh_scales_rows.lto_priv.0` | 2 | 0.3 | GX front end |
+| 12 | `cmd_put` | 1 | 0.1 | GX front end |
+| 13 | `c3d_flush` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+
+#### C2 / gor_01: 708 stops over 240 s
+
+Thread 1, 708 samples, non-wait 71%. Groups (of all samples; listed functions only): game logic 36%, GX front end 16%, SDK/libc 15%, waits 6%, GX render back end (citro3d/PICA) 4%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `hitCheckVecFilter` | 63 | 8.9 | game logic |
+| 2 | `memcpy` | 50 | 7.1 | SDK/libc |
+| 3 | `svcArbitrateAddressNoTimeout` | 42 | 5.9 | waits |
+| 4 | `mapMain` | 35 | 4.9 | game logic |
+| 5 | `mapDisp` | 31 | 4.4 | game logic |
+| 6 | `gx_imm_convert.isra.0` | 29 | 4.1 | GX front end |
+| 7 | `vsh_const_rows` | 24 | 3.4 | GX render back end (citro3d/PICA) |
+| 8 | `mapGetMapObj` | 20 | 2.8 | game logic |
+| 9 | `group_for.lto_priv.0` | 19 | 2.7 | GX front end |
+| 10 | `chkfilterVec.lto_priv.0` | 17 | 2.4 | game logic |
+| 11 | `__malloc_update_mallinfo` | 17 | 2.4 | SDK/libc |
+| 12 | `run_commands.lto_priv.0` | 15 | 2.1 | GX front end |
+| 13 | `mapReCalcMatrix.lto_priv.0` | 14 | 2.0 | game logic |
+| 14 | `C_MTX44MultVec` | 13 | 1.8 | SDK/libc |
+| 15 | `vsh_state.part.0.lto_priv.0` | 11 | 1.6 | GX front end |
+| 16 | `memset` | 11 | 1.6 | SDK/libc |
+| 17 | `oh_draw.part.0.lto_priv.0` | 10 | 1.4 | game logic |
+| 18 | `gx_call_list` | 10 | 1.4 | GX front end |
+| 19 | `renderProc.part.0.lto_priv.0` | 8 | 1.1 | game logic |
+| 20 | `oh_block.lto_priv.0` | 8 | 1.1 | game logic |
+| 21 | `plat_gpu_set_state_dirty.constprop.0` | 7 | 1.0 | GX front end |
+| 22 | `memcmp` | 7 | 1.0 | SDK/libc |
+| 23 | `rec_for` | 7 | 1.0 | GX front end |
+| 24 | `animPoseMain` | 7 | 1.0 | game logic |
+| 25 | `dispProc.isra.0` | 6 | 0.8 | game logic |
+
+Thread d, 708 samples, non-wait 17%. Groups (of all samples; listed functions only): waits 83%, SDK/libc 14%, GX render back end (citro3d/PICA) 3%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 474 | 66.9 | waits |
+| 2 | `svcSendSyncRequest` | 112 | 15.8 | waits |
+| 3 | `memcpy` | 102 | 14.4 | SDK/libc |
+| 4 | `GPUCMD_Add` | 8 | 1.1 | GX render back end (citro3d/PICA) |
+| 5 | `C3D_UpdateUniforms` | 8 | 1.1 | GX render back end (citro3d/PICA) |
+| 6 | `C3D_ImmDrawBegin` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 7 | `C3D_SetViewport` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 8 | `C3D_FrameEnd` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 9 | `f32tof24` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+
+#### C2 / pik_00: 716 stops over 240 s
+
+Thread 1, 716 samples, non-wait 71%. Groups (of all samples; listed functions only): game logic 33%, GX front end 17%, SDK/libc 15%, waits 13%, GX render back end (citro3d/PICA) 4%, SDK 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 89 | 12.4 | waits |
+| 2 | `hitCheckVecFilter` | 76 | 10.6 | game logic |
+| 3 | `memcpy` | 65 | 9.1 | SDK/libc |
+| 4 | `mapDisp` | 41 | 5.7 | game logic |
+| 5 | `gx_imm_convert.isra.0` | 38 | 5.3 | GX front end |
+| 6 | `vsh_const_rows` | 26 | 3.6 | GX render back end (citro3d/PICA) |
+| 7 | `run_commands.lto_priv.0` | 21 | 2.9 | GX front end |
+| 8 | `checkTriVec_xz` | 21 | 2.9 | game logic |
+| 9 | `memcmp` | 16 | 2.2 | SDK/libc |
+| 10 | `C_MTX44MultVec` | 14 | 2.0 | SDK/libc |
+| 11 | `renderProc.part.0.lto_priv.0` | 13 | 1.8 | game logic |
+| 12 | `mapObjRotate` | 12 | 1.7 | game logic |
+| 13 | `vsh_state.part.0.lto_priv.0` | 11 | 1.5 | GX front end |
+| 14 | `ttyd_main.isra.0` | 11 | 1.5 | game logic |
+| 15 | `oh_draw.part.0.lto_priv.0` | 11 | 1.5 | game logic |
+| 16 | `gx_call_list` | 10 | 1.4 | GX front end |
+| 17 | `animPoseMain` | 8 | 1.1 | game logic |
+| 18 | `memset` | 8 | 1.1 | SDK/libc |
+| 19 | `oh_block.lto_priv.0` | 8 | 1.1 | game logic |
+| 20 | `gx_draw_imm_route` | 6 | 0.8 | GX front end |
+| 21 | `consoleDrawChar` | 6 | 0.8 | SDK/libc |
+| 22 | `group_for.lto_priv.0` | 6 | 0.8 | GX front end |
+| 23 | `oh_rows.lto_priv.0` | 6 | 0.8 | game logic |
+| 24 | `chkfilterVec.lto_priv.0` | 6 | 0.8 | game logic |
+| 25 | `gather_hash.lto_priv.0` | 6 | 0.8 | game logic |
+
+#### C2 / usu_00: 714 stops over 240 s
+
+Thread 1, 714 samples, non-wait 67%. Groups (of all samples; listed functions only): game logic 26%, GX front end 21%, SDK/libc 17%, waits 12%, GX render back end (citro3d/PICA) 3%, SDK 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 77 | 10.8 | waits |
+| 2 | `memcpy` | 60 | 8.4 | SDK/libc |
+| 3 | `mapDisp` | 53 | 7.4 | game logic |
+| 4 | `hitCheckVecFilter` | 48 | 6.7 | game logic |
+| 5 | `gx_call_list` | 48 | 6.7 | GX front end |
+| 6 | `vsh_const_rows` | 22 | 3.1 | GX render back end (citro3d/PICA) |
+| 7 | `GXCallDisplayList` | 21 | 2.9 | GX front end |
+| 8 | `gx_imm_convert.isra.0` | 19 | 2.7 | GX front end |
+| 9 | `memcmp` | 14 | 2.0 | SDK/libc |
+| 10 | `C_MTX44MultVec` | 13 | 1.8 | SDK/libc |
+| 11 | `vsh_state.part.0.lto_priv.0` | 12 | 1.7 | GX front end |
+| 12 | `mapSetMaterialLight` | 11 | 1.5 | game logic |
+| 13 | `chkfilterVec.lto_priv.0` | 10 | 1.4 | game logic |
+| 14 | `group_for.lto_priv.0` | 9 | 1.3 | GX front end |
+| 15 | `memset` | 9 | 1.3 | SDK/libc |
+| 16 | `run_pending_raw.lto_priv.0` | 9 | 1.3 | GX front end |
+| 17 | `GXSetChanCtrl` | 7 | 1.0 | GX front end |
+| 18 | `oh_draw.part.0.lto_priv.0` | 7 | 1.0 | game logic |
+| 19 | `iconGX` | 7 | 1.0 | game logic |
+| 20 | `oh_rows.lto_priv.0` | 7 | 1.0 | game logic |
+| 21 | `renderProc.part.0.lto_priv.0` | 6 | 0.8 | game logic |
+| 22 | `mapSetMaterial.lto_priv.0` | 6 | 0.8 | game logic |
+| 23 | `run_commands.lto_priv.0` | 6 | 0.8 | GX front end |
+| 24 | `C_MTXConcat` | 6 | 0.8 | SDK/libc |
+| 25 | `svcArbitrateAddress` | 6 | 0.8 | waits |
+
+#### C2 / battle: 716 stops over 240 s
+
+Thread 1, 716 samples, non-wait 53%. Groups (of all samples; listed functions only): waits 24%, GX front end 22%, game logic 15%, SDK/libc 13%, GX render back end (citro3d/PICA) 3%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 162 | 22.6 | waits |
+| 2 | `memcpy` | 61 | 8.5 | SDK/libc |
+| 3 | `run_commands.lto_priv.0` | 33 | 4.6 | GX front end |
+| 4 | `gx_imm_convert.isra.0` | 28 | 3.9 | GX front end |
+| 5 | `vsh_const_rows` | 21 | 2.9 | GX render back end (citro3d/PICA) |
+| 6 | `mapDisp` | 20 | 2.8 | game logic |
+| 7 | `animPoseMain` | 18 | 2.5 | game logic |
+| 8 | `gx_call_list` | 17 | 2.4 | GX front end |
+| 9 | `memcmp` | 17 | 2.4 | SDK/libc |
+| 10 | `memset` | 13 | 1.8 | SDK/libc |
+| 11 | `gather_hash.lto_priv.0` | 13 | 1.8 | game logic |
+| 12 | `read_vertex` | 13 | 1.8 | GX front end |
+| 13 | `svcArbitrateAddress` | 11 | 1.5 | waits |
+| 14 | `group_for.lto_priv.0` | 10 | 1.4 | GX front end |
+| 15 | `oh_draw.part.0.lto_priv.0` | 9 | 1.3 | game logic |
+| 16 | `oh_block.lto_priv.0` | 7 | 1.0 | game logic |
+| 17 | `plat_gpu_set_state_dirty.constprop.0` | 7 | 1.0 | GX front end |
+| 18 | `iconGX` | 6 | 0.8 | game logic |
+| 19 | `vsh_state.part.0.lto_priv.0` | 6 | 0.8 | GX front end |
+| 20 | `renderProc.part.0.lto_priv.0` | 5 | 0.7 | game logic |
+| 21 | `same_state_full.constprop.0` | 5 | 0.7 | game logic |
+| 22 | `run_pending_raw.lto_priv.0` | 5 | 0.7 | GX front end |
+| 23 | `GXSetTevAlphaIn.constprop.0` | 5 | 0.7 | GX front end |
+| 24 | `searchPSSFXList` | 4 | 0.6 | game logic |
+| 25 | `gx_vsh_imm_reasons` | 4 | 0.6 | GX front end |
+
+Thread 4, 716 samples, non-wait 34%. Groups (of all samples; listed functions only): waits 66%, SDK/libc 34%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcSendSyncRequest` | 463 | 64.7 | waits |
+| 2 | `newRow` | 204 | 28.5 | SDK/libc |
+| 3 | `consoleDrawChar` | 29 | 4.1 | SDK/libc |
+| 4 | `svcArbitrateAddress` | 11 | 1.5 | waits |
+| 5 | `memmove` | 5 | 0.7 | SDK/libc |
+| 6 | `svcArbitrateAddressNoTimeout` | 2 | 0.3 | waits |
+| 7 | `memcpy` | 1 | 0.1 | SDK/libc |
+| 8 | `consolePrintChar` | 1 | 0.1 | SDK/libc |
+
+#### C3 / gor_01: 713 stops over 240 s
+
+Thread e, 713 samples, non-wait 69%. Groups (of all samples; listed functions only): GX front end 59%, waits 27%, SDK/libc 6%, GX render back end (citro3d/PICA) 2%, SDK 1%, game logic 1%, texture 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 196 | 27.5 | waits |
+| 2 | `consume` | 86 | 12.1 | GX front end |
+| 3 | `run_commands.lto_priv.0` | 49 | 6.9 | GX front end |
+| 4 | `memcpy` | 34 | 4.8 | SDK/libc |
+| 5 | `gx_draw_imm_shader` | 33 | 4.6 | GX front end |
+| 6 | `gx_call_list` | 32 | 4.5 | GX front end |
+| 7 | `gx_apply_call` | 29 | 4.1 | GX front end |
+| 8 | `GXClearVtxDesc` | 26 | 3.6 | GX front end |
+| 9 | `group_for.lto_priv.0` | 18 | 2.5 | GX front end |
+| 10 | `plat_gpu_set_state_dirty.constprop.0` | 15 | 2.1 | GX front end |
+| 11 | `memset` | 11 | 1.5 | SDK/libc |
+| 12 | `vtx_state_hash` | 10 | 1.4 | GX front end |
+| 13 | `rec_for` | 10 | 1.4 | GX front end |
+| 14 | `bat_open.lto_priv.0` | 10 | 1.4 | GX front end |
+| 15 | `vsh_state.part.0.lto_priv.0` | 10 | 1.4 | GX front end |
+| 16 | `gx_draw_frame_begin` | 9 | 1.3 | GX front end |
+| 17 | `GXSetChanCtrl` | 9 | 1.3 | GX front end |
+| 18 | `plat_gpu_vsh_draw` | 8 | 1.1 | GX render back end (citro3d/PICA) |
+| 19 | `GXLoadPosMtxImm` | 7 | 1.0 | SDK |
+| 20 | `GXSetVtxDesc` | 7 | 1.0 | GX front end |
+| 21 | `GXSetArray` | 6 | 0.8 | GX front end |
+| 22 | `GXSetTevSwapMode` | 6 | 0.8 | GX front end |
+| 23 | `GXSetTevAlphaIn` | 6 | 0.8 | GX front end |
+| 24 | `gx_vsh_route` | 6 | 0.8 | GX front end |
+| 25 | `rec_put.lto_priv.0` | 6 | 0.8 | GX front end |
+
+Thread 1, 713 samples, non-wait 63%. Groups (of all samples; listed functions only): game logic 33%, GX front end 24%, waits 24%, SDK/libc 4%, SDK 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 170 | 23.8 | waits |
+| 2 | `mapDisp` | 70 | 9.8 | game logic |
+| 3 | `gx_rec_list` | 42 | 5.9 | GX front end |
+| 4 | `mapGetMapObj` | 28 | 3.9 | game logic |
+| 5 | `dd_slot.lto_priv.0` | 25 | 3.5 | GX front end |
+| 6 | `hitCheckVecFilter` | 23 | 3.2 | game logic |
+| 7 | `gx_imm_convert.isra.0` | 20 | 2.8 | GX front end |
+| 8 | `C_MTX44MultVec` | 19 | 2.7 | SDK/libc |
+| 9 | `mapMain` | 17 | 2.4 | game logic |
+| 10 | `GXCallDisplayList` | 16 | 2.2 | GX front end |
+| 11 | `mapReCalcMatrix.lto_priv.0` | 15 | 2.1 | game logic |
+| 12 | `run_pending_raw.lto_priv.0` | 15 | 2.1 | GX front end |
+| 13 | `fsort` | 13 | 1.8 | game logic |
+| 14 | `_sort.lto_priv.1` | 13 | 1.8 | game logic |
+| 15 | `memcpy` | 10 | 1.4 | SDK/libc |
+| 16 | `GXClearVtxDesc` | 9 | 1.3 | GX front end |
+| 17 | `GXSetVtxAttrFmt.constprop.0` | 8 | 1.1 | GX front end |
+| 18 | `GXSetProjection` | 8 | 1.1 | GX front end |
+| 19 | `GXLoadPosMtxImm.constprop.0` | 7 | 1.0 | SDK |
+| 20 | `evtGetValue` | 6 | 0.8 | game logic |
+| 21 | `qqsort.part.0` | 6 | 0.8 | game logic |
+| 22 | `hitMain` | 6 | 0.8 | game logic |
+| 23 | `mapGrpFlagOn` | 6 | 0.8 | game logic |
+| 24 | `GXSetVtxDesc.constprop.4` | 5 | 0.7 | GX front end |
+| 25 | `_mapDispMapObj` | 5 | 0.7 | game logic |
+
+Thread 4, 713 samples, non-wait 24%. Groups (of all samples; listed functions only): waits 76%, SDK/libc 24%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcSendSyncRequest` | 541 | 75.9 | waits |
+| 2 | `newRow` | 140 | 19.6 | SDK/libc |
+| 3 | `consoleDrawChar` | 23 | 3.2 | SDK/libc |
+| 4 | `memmove` | 4 | 0.6 | SDK/libc |
+| 5 | `svcArbitrateAddress` | 1 | 0.1 | waits |
+| 6 | `consolePrintChar` | 1 | 0.1 | SDK/libc |
+| 7 | `plat_console_log` | 1 | 0.1 | SDK/libc |
+| 8 | `con_write` | 1 | 0.1 | SDK/libc |
+| 9 | `fsync` | 1 | 0.1 | SDK/libc |
+
+Thread d, 713 samples, non-wait 20%. Groups (of all samples; listed functions only): waits 80%, SDK/libc 9%, GX render back end (citro3d/PICA) 7%, GX front end 4%, texture 0%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 407 | 57.1 | waits |
+| 2 | `svcSendSyncRequest` | 161 | 22.6 | waits |
+| 3 | `memcpy` | 41 | 5.8 | SDK/libc |
+| 4 | `vsh_const_rows` | 35 | 4.9 | GX render back end (citro3d/PICA) |
+| 5 | `memcmp` | 19 | 2.7 | SDK/libc |
+| 6 | `render_record` | 18 | 2.5 | GX front end |
+| 7 | `GPUCMD_Add` | 7 | 1.0 | GX render back end (citro3d/PICA) |
+| 8 | `cmd_put` | 5 | 0.7 | GX front end |
+| 9 | `tex_prepare` | 3 | 0.4 | texture |
+| 10 | `f32tof24` | 3 | 0.4 | GX render back end (citro3d/PICA) |
+| 11 | `c3d_flush` | 2 | 0.3 | GX render back end (citro3d/PICA) |
+| 12 | `dtab_find` | 2 | 0.3 | GX front end |
+| 13 | `C3D_UpdateUniforms` | 2 | 0.3 | GX render back end (citro3d/PICA) |
+| 14 | `direct_block` | 2 | 0.3 | GX front end |
+| 15 | `osConvertVirtToPhys` | 1 | 0.1 | SDK/libc |
+| 16 | `scissor_rect.isra.0` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 17 | `C3Di_UpdateContext` | 1 | 0.1 | GX render back end (citro3d/PICA) |
+| 18 | `__syscall_getreent` | 1 | 0.1 | SDK/libc |
+| 19 | `vsh_scales_rows.lto_priv.0` | 1 | 0.1 | GX front end |
+| 20 | `svcGetSystemTick` | 1 | 0.1 | waits |
+
+#### C3 / pik_00: 711 stops over 240 s
+
+Thread 1, 711 samples, non-wait 68%. Groups (of all samples; listed functions only): game logic 31%, GX front end 24%, waits 21%, SDK/libc 14%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 150 | 21.1 | waits |
+| 2 | `gx_imm_convert.isra.0` | 76 | 10.7 | GX front end |
+| 3 | `memcpy` | 58 | 8.2 | SDK/libc |
+| 4 | `mapObjRotate` | 48 | 6.8 | game logic |
+| 5 | `mapDisp` | 34 | 4.8 | game logic |
+| 6 | `GXEnd` | 28 | 3.9 | GX front end |
+| 7 | `renderProc.part.0.lto_priv.0` | 23 | 3.2 | game logic |
+| 8 | `hitCheckVecFilter` | 16 | 2.3 | game logic |
+| 9 | `fsort` | 16 | 2.3 | game logic |
+| 10 | `evtmgrMain` | 15 | 2.1 | game logic |
+| 11 | `__malloc_update_mallinfo` | 14 | 2.0 | SDK/libc |
+| 12 | `dd_slot.lto_priv.0` | 12 | 1.7 | GX front end |
+| 13 | `mem_color.lto_priv.0` | 12 | 1.7 | game logic |
+| 14 | `evtGetValue` | 10 | 1.4 | game logic |
+| 15 | `ttyd_main.isra.0` | 9 | 1.3 | game logic |
+| 16 | `vtx_state_hash` | 9 | 1.3 | GX front end |
+| 17 | `GXSetVtxAttrFmt.constprop.0` | 7 | 1.0 | GX front end |
+| 18 | `consoleDrawChar` | 6 | 0.8 | SDK/libc |
+| 19 | `GXSetTevColorOp.constprop.0` | 6 | 0.8 | GX front end |
+| 20 | `gx_rec_list` | 6 | 0.8 | GX front end |
+| 21 | `_sort.lto_priv.1` | 5 | 0.7 | game logic |
+| 22 | `camMain` | 5 | 0.7 | game logic |
+| 23 | `GXClearVtxDesc` | 5 | 0.7 | GX front end |
+| 24 | `GXSetTevColorIn` | 5 | 0.7 | GX front end |
+| 25 | `mapReCalcMatrix.lto_priv.0` | 5 | 0.7 | game logic |
+
+Thread e, 711 samples, non-wait 67%. Groups (of all samples; listed functions only): GX front end 57%, waits 30%, SDK/libc 8%, GX render back end (citro3d/PICA) 1%, texture 0%, SDK 0%, game logic 0%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 214 | 30.1 | waits |
+| 2 | `consume` | 86 | 12.1 | GX front end |
+| 3 | `run_commands.lto_priv.0` | 61 | 8.6 | GX front end |
+| 4 | `gx_call_list` | 57 | 8.0 | GX front end |
+| 5 | `memcpy` | 44 | 6.2 | SDK/libc |
+| 6 | `gx_apply_call` | 39 | 5.5 | GX front end |
+| 7 | `gx_draw_frame_begin` | 27 | 3.8 | GX front end |
+| 8 | `bat_open.lto_priv.0` | 18 | 2.5 | GX front end |
+| 9 | `group_for.lto_priv.0` | 18 | 2.5 | GX front end |
+| 10 | `plat_gpu_set_state_dirty.constprop.0` | 12 | 1.7 | GX front end |
+| 11 | `memset` | 11 | 1.5 | SDK/libc |
+| 12 | `vtx_state_hash` | 10 | 1.4 | GX front end |
+| 13 | `vsh_state.part.0.lto_priv.0` | 9 | 1.3 | GX front end |
+| 14 | `GXSetVtxDesc` | 7 | 1.0 | GX front end |
+| 15 | `GXSetArray` | 5 | 0.7 | GX front end |
+| 16 | `ensure_state.lto_priv.0` | 5 | 0.7 | GX front end |
+| 17 | `rec_put.lto_priv.0` | 4 | 0.6 | GX front end |
+| 18 | `GXSetTevAlphaIn` | 4 | 0.6 | GX front end |
+| 19 | `handle_for_full.lto_priv.0` | 4 | 0.6 | GX front end |
+| 20 | `GXSetChanCtrl` | 4 | 0.6 | GX front end |
+| 21 | `rec_for` | 3 | 0.4 | GX front end |
+| 22 | `GXSetChanAmbColor` | 3 | 0.4 | GX front end |
+| 23 | `build_tex_units` | 3 | 0.4 | texture |
+| 24 | `build_dirty` | 3 | 0.4 | GX front end |
+| 25 | `GXSetTexCoordGen2` | 3 | 0.4 | GX front end |
+
+Thread 4, 711 samples, non-wait 26%. Groups (of all samples; listed functions only): waits 74%, SDK/libc 26%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcSendSyncRequest` | 454 | 63.9 | waits |
+| 2 | `newRow` | 156 | 21.9 | SDK/libc |
+| 3 | `svcArbitrateAddress` | 74 | 10.4 | waits |
+| 4 | `consoleDrawChar` | 24 | 3.4 | SDK/libc |
+| 5 | `memmove` | 2 | 0.3 | SDK/libc |
+| 6 | `con_write` | 1 | 0.1 | SDK/libc |
+
+#### C3 / usu_00: 709 stops over 240 s
+
+Thread e, 709 samples, non-wait 66%. Groups (of all samples; listed functions only): GX front end 39%, waits 30%, game logic 16%, SDK/libc 11%, GX render back end (citro3d/PICA) 1%, texture 0%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 215 | 30.3 | waits |
+| 2 | `gather_hash.lto_priv.0` | 76 | 10.7 | game logic |
+| 3 | `memcpy` | 61 | 8.6 | SDK/libc |
+| 4 | `consume` | 46 | 6.5 | GX front end |
+| 5 | `gx_call_list` | 35 | 4.9 | GX front end |
+| 6 | `group_for.lto_priv.0` | 27 | 3.8 | GX front end |
+| 7 | `gx_apply_call` | 24 | 3.4 | GX front end |
+| 8 | `call_slow.constprop.0` | 21 | 3.0 | game logic |
+| 9 | `plat_gpu_set_state_dirty.constprop.0` | 19 | 2.7 | GX front end |
+| 10 | `memset` | 15 | 2.1 | SDK/libc |
+| 11 | `gx_draw_frame_begin` | 13 | 1.8 | GX front end |
+| 12 | `vsh_state.part.0.lto_priv.0` | 11 | 1.6 | GX front end |
+| 13 | `gx_hash32` | 9 | 1.3 | GX front end |
+| 14 | `rec_put.lto_priv.0` | 8 | 1.1 | GX front end |
+| 15 | `emit_tris.lto_priv.0` | 7 | 1.0 | game logic |
+| 16 | `GXClearVtxDesc` | 6 | 0.8 | GX front end |
+| 17 | `vsh_part_color.constprop.0` | 6 | 0.8 | GX front end |
+| 18 | `plat_gpu_vsh_draw` | 6 | 0.8 | GX render back end (citro3d/PICA) |
+| 19 | `run_commands.lto_priv.0` | 6 | 0.8 | GX front end |
+| 20 | `vtx_state_hash` | 5 | 0.7 | GX front end |
+| 21 | `gx_draw_imm_route` | 5 | 0.7 | GX front end |
+| 22 | `GXSetVtxDesc` | 5 | 0.7 | GX front end |
+| 23 | `GXSetNumChans` | 5 | 0.7 | GX front end |
+| 24 | `ensure_state.lto_priv.0` | 5 | 0.7 | GX front end |
+| 25 | `gx_vsh_route` | 5 | 0.7 | GX front end |
+
+Thread 1, 709 samples, non-wait 61%. Groups (of all samples; listed functions only): game logic 26%, GX front end 24%, waits 21%, SDK/libc 9%, SDK 3%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 152 | 21.4 | waits |
+| 2 | `mapDisp` | 74 | 10.4 | game logic |
+| 3 | `gx_imm_convert.isra.0` | 50 | 7.1 | GX front end |
+| 4 | `hitCheckVecFilter` | 37 | 5.2 | game logic |
+| 5 | `memcpy` | 29 | 4.1 | SDK/libc |
+| 6 | `dd_slot.lto_priv.0` | 27 | 3.8 | GX front end |
+| 7 | `gx_rec_list` | 22 | 3.1 | GX front end |
+| 8 | `C_MTX44MultVec` | 21 | 3.0 | SDK/libc |
+| 9 | `vtx_state_hash` | 10 | 1.4 | GX front end |
+| 10 | `C_MTXConcat` | 10 | 1.4 | SDK/libc |
+| 11 | `GXLoadPosMtxImm.constprop.0` | 10 | 1.4 | SDK |
+| 12 | `mapSetMaterialLight` | 10 | 1.4 | game logic |
+| 13 | `GXEnd` | 9 | 1.3 | GX front end |
+| 14 | `mapSetMaterial.lto_priv.0` | 9 | 1.3 | game logic |
+| 15 | `renderProc.part.0.lto_priv.0` | 8 | 1.1 | game logic |
+| 16 | `pushGXModelMtx_TransformNode__.lto_priv.0` | 8 | 1.1 | game logic |
+| 17 | `GXSetVtxAttrFmt.constprop.0` | 8 | 1.1 | GX front end |
+| 18 | `run_pending_raw.lto_priv.0` | 7 | 1.0 | GX front end |
+| 19 | `GXSetTevAlphaOp.constprop.0` | 6 | 0.8 | GX front end |
+| 20 | `GXLoadTexObj.part.0` | 6 | 0.8 | SDK |
+| 21 | `GXCallDisplayList` | 5 | 0.7 | GX front end |
+| 22 | `mapReCalcMatrix.lto_priv.0` | 5 | 0.7 | game logic |
+| 23 | `evtmgrMain` | 5 | 0.7 | game logic |
+| 24 | `animPoseMain` | 5 | 0.7 | game logic |
+| 25 | `effMain` | 5 | 0.7 | game logic |
+
+Thread 4, 709 samples, non-wait 40%. Groups (of all samples; listed functions only): waits 60%, SDK/libc 40%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcSendSyncRequest` | 424 | 59.8 | waits |
+| 2 | `newRow` | 229 | 32.3 | SDK/libc |
+| 3 | `consoleDrawChar` | 37 | 5.2 | SDK/libc |
+| 4 | `memmove` | 9 | 1.3 | SDK/libc |
+| 5 | `svcArbitrateAddress` | 3 | 0.4 | waits |
+| 6 | `plat_console_log` | 3 | 0.4 | SDK/libc |
+| 7 | `con_write` | 1 | 0.1 | SDK/libc |
+| 8 | `memcpy` | 1 | 0.1 | SDK/libc |
+| 9 | `consolePrintChar` | 1 | 0.1 | SDK/libc |
+| 10 | `svcArbitrateAddressNoTimeout` | 1 | 0.1 | waits |
+
+#### C3 / battle: 713 stops over 240 s
+
+Thread e, 713 samples, non-wait 80%. Groups (of all samples; listed functions only): GX front end 64%, waits 11%, SDK/libc 8%, game logic 5%, SDK 1%, GX render back end (citro3d/PICA) 1%, texture 1%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `consume` | 81 | 11.4 | GX front end |
+| 2 | `svcArbitrateAddressNoTimeout` | 78 | 10.9 | waits |
+| 3 | `run_commands.lto_priv.0` | 77 | 10.8 | GX front end |
+| 4 | `gx_call_list` | 49 | 6.9 | GX front end |
+| 5 | `memcpy` | 45 | 6.3 | SDK/libc |
+| 6 | `gx_apply_call` | 37 | 5.2 | GX front end |
+| 7 | `group_for.lto_priv.0` | 23 | 3.2 | GX front end |
+| 8 | `bat_open.lto_priv.0` | 22 | 3.1 | GX front end |
+| 9 | `vsh_state.part.0.lto_priv.0` | 17 | 2.4 | GX front end |
+| 10 | `gather_hash.lto_priv.0` | 13 | 1.8 | game logic |
+| 11 | `memset` | 13 | 1.8 | SDK/libc |
+| 12 | `plat_gpu_set_state_dirty.constprop.0` | 12 | 1.7 | GX front end |
+| 13 | `rec_for` | 11 | 1.5 | GX front end |
+| 14 | `call_slow.constprop.0` | 11 | 1.5 | game logic |
+| 15 | `vtx_state_hash` | 10 | 1.4 | GX front end |
+| 16 | `rec_put.lto_priv.0` | 10 | 1.4 | GX front end |
+| 17 | `GXSetVtxDesc` | 9 | 1.3 | GX front end |
+| 18 | `GXLoadPosMtxImm` | 8 | 1.1 | SDK |
+| 19 | `gx_draw_frame_begin` | 8 | 1.1 | GX front end |
+| 20 | `handle_for_full.lto_priv.0` | 7 | 1.0 | GX front end |
+| 21 | `read_vertex` | 7 | 1.0 | GX front end |
+| 22 | `GXSetBlendMode` | 7 | 1.0 | GX front end |
+| 23 | `gx_vsh_route` | 7 | 1.0 | GX front end |
+| 24 | `plat_gpu_vsh_draw` | 7 | 1.0 | GX render back end (citro3d/PICA) |
+| 25 | `gx_hash32` | 6 | 0.8 | GX front end |
+
+Thread 1, 713 samples, non-wait 55%. Groups (of all samples; listed functions only): GX front end 33%, waits 26%, game logic 12%, SDK/libc 6%, SDK 3%, texture 0%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcArbitrateAddressNoTimeout` | 183 | 25.7 | waits |
+| 2 | `gx_imm_convert.isra.0` | 41 | 5.8 | GX front end |
+| 3 | `gx_rec_list` | 40 | 5.6 | GX front end |
+| 4 | `dd_slot.lto_priv.0` | 38 | 5.3 | GX front end |
+| 5 | `memcpy` | 26 | 3.6 | SDK/libc |
+| 6 | `GXLoadPosMtxImm.constprop.0` | 23 | 3.2 | SDK |
+| 7 | `animPoseMain` | 19 | 2.7 | game logic |
+| 8 | `GXCallDisplayList` | 14 | 2.0 | GX front end |
+| 9 | `vtx_state_hash` | 14 | 2.0 | GX front end |
+| 10 | `mapDisp` | 12 | 1.7 | game logic |
+| 11 | `renderProc.part.0.lto_priv.0` | 12 | 1.7 | game logic |
+| 12 | `GXSetVtxAttrFmt.constprop.0` | 11 | 1.5 | GX front end |
+| 13 | `GXSetColorUpdate.constprop.0` | 9 | 1.3 | GX front end |
+| 14 | `GXEnd` | 9 | 1.3 | GX front end |
+| 15 | `GXClearVtxDesc` | 8 | 1.1 | GX front end |
+| 16 | `C_MTXConcat` | 8 | 1.1 | SDK/libc |
+| 17 | `_mapDispMapObj` | 7 | 1.0 | game logic |
+| 18 | `ttyd_main.isra.0` | 7 | 1.0 | game logic |
+| 19 | `GXSetTevAlphaOp.constprop.0` | 6 | 0.8 | GX front end |
+| 20 | `_JUTFont_DrawPos.lto_priv.0` | 6 | 0.8 | game logic |
+| 21 | `pushGXModelMtx_TransformNode__.lto_priv.0` | 5 | 0.7 | game logic |
+| 22 | `GXSetTexCoordGen2.constprop.2` | 5 | 0.7 | GX front end |
+| 23 | `GXSetZMode.constprop.1` | 5 | 0.7 | GX front end |
+| 24 | `effMain` | 5 | 0.7 | game logic |
+| 25 | `GXSetArray.constprop.1` | 5 | 0.7 | GX front end |
+
+Thread 4, 713 samples, non-wait 37%. Groups (of all samples; listed functions only): waits 63%, SDK/libc 37%
+
+| # | function | n | % of samples | group |
+|---|---|---|---|---|
+| 1 | `svcSendSyncRequest` | 451 | 63.3 | waits |
+| 2 | `newRow` | 192 | 26.9 | SDK/libc |
+| 3 | `consoleDrawChar` | 51 | 7.2 | SDK/libc |
+| 4 | `memmove` | 10 | 1.4 | SDK/libc |
+| 5 | `con_write` | 3 | 0.4 | SDK/libc |
+| 6 | `plat_console_log` | 2 | 0.3 | SDK/libc |
+| 7 | `consolePrintChar` | 2 | 0.3 | SDK/libc |
+| 8 | `svcArbitrateAddress` | 1 | 0.1 | waits |
+| 9 | `memcpy` | 1 | 0.1 | SDK/libc |
+
+
+
+### Where the remaining ms are, best configuration
+
+ms below are the thread's measured time per frame (table above) split by each function's share of the thread's non-wait samples. This assumes the samples are proportional to time; the error is about +-1 ms per function. Target: 16.7 ms per thread. Azahar ms are not console ms.
+
+Distance to 16.7 ms, best configuration per scene:
+
+| Scene | Config | game thread (core 0) | over 16.7 | translator | over 16.7 | render |
+|---|---|---|---|---|---|---|
+| gor_01 | C3 | 25.4 | +8.7 | 24.5 | +7.8 | 8.1 |
+| pik_00 | C3 | 33.7 | +17.0 | 29.4 | +12.7 | 8.2 |
+| usu_00 | C3 | 24.4 | +7.7 | 17.2 | +0.5 | 6.9 |
+| battle | C1 | 22.5 | +5.8 | none (in game thread) | | 4.0 |
+
+Ranked, gor_01 C3:
+1. Game thread, game logic: about 13 ms of 25.4. `mapDisp` 3.9, `mapGetMapObj` 1.6 (name lookups), `hitCheckVecFilter` 1.3, `mapMain` 1.0, `mapReCalcMatrix` 0.9, the sorts (`fsort`, `_sort`, `qqsort`) 1.8, `evtGetValue` 0.3.
+2. Game thread, GX front end: about 9.7 ms. `gx_rec_list` 2.4, `dd_slot` 1.4, `gx_imm_convert` 1.1, `GXCallDisplayList` 0.9, `run_pending_raw` 0.9, `GXClearVtxDesc` 0.5, `GXSetVtxAttrFmt` 0.4, `GXSetProjection` 0.4.
+3. Translator thread, 24.5 ms: `consume` 4.3, `run_commands` 2.4, `memcpy` 1.7, `gx_draw_imm_shader` 1.6, `gx_call_list` 1.6, `gx_apply_call` 1.5, `GXClearVtxDesc` 1.3, `group_for` 0.9, `plat_gpu_set_state_dirty` 0.8, `vtx_state_hash` 0.5.
+4. Game thread libc and SDK: about 2 ms (`C_MTX44MultVec` 1.1, `memcpy` 0.6).
+5. Render thread: 8.1 ms (not over budget): `memcpy` 5.8%, `vsh_const_rows` 4.9%, `memcmp` 2.7%, `render_record` 2.5% of its samples; 57% of its samples are idle waits.
+
+Ranked, pik_00 C3:
+1. Game thread, GX front end: about 11.9 ms of 33.7. `gx_imm_convert` 5.3 (10.7% of samples), `GXEnd` 1.9, `dd_slot` 0.8, `GXSetVtxAttrFmt` 0.5.
+2. Game thread, game logic: about 15 ms. `mapObjRotate` 3.4, `mapDisp` 2.4, `renderProc` 1.6, `hitCheckVecFilter` 1.1, `fsort` 1.1, `evtmgrMain` 1.0, `__malloc_update_mallinfo` 1.0, `mem_color` 0.6, `evtGetValue` 0.5.
+3. Game thread `memcpy`: 4.1 ms (8.2% of samples; the caller is mostly `gx_imm_convert`).
+4. Translator thread, 29.4 ms: `consume` 5.3, `run_commands` 3.8, `gx_call_list` 3.5, `memcpy` 2.7, `gx_apply_call` 2.4, `gx_draw_frame_begin` 1.7, `bat_open` 1.1, `group_for` 1.1.
+
+usu_00 C3: game thread 24.4 ms (game logic 26% and GX front end 24% of all samples), translator 17.2 ms (0.5 over). Battle C1: game thread 22.5 ms (GX front end 29%, SDK/libc 15%, game logic 11% of all samples; waits 20%).
+
+Across configurations (game thread self shares, % of all samples): in C0 `plat_gpu_set_state`, `gx_call_list`, `run_commands`, `handle_for_impl` and `vsh_prepare` rank first in gor_01 (the PICA state work runs in the game thread); in C1 (gor_01) `memcpy` 10.7%, `hitCheckVecFilter` 9.3%, `gx_imm_convert` 6.1%, `mapMain` 5.2% and `mapDisp` 4.0% lead; in C3 the translator thread holds `consume`, `run_commands`, `gx_call_list`, `gx_apply_call` and `memcpy`. `C_MTX44MultVec` is 1.1-2.7% of the game thread in C3 and C1.

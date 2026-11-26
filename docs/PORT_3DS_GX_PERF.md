@@ -1461,6 +1461,27 @@ Build the release CIA first: `TTYD_CCACHE=1 tools/port3ds/build.sh`. C1 = `gxdir
 
 **Console-test items** (owner-gated): the index arena's physical base taken once per record (linear memory is physically contiguous: the packet's index address must equal `osConvertVirtToPhys` of the draw's indices; `gximmfl=2` compares exactly that on Azahar).
 
+### Gate results of steps 3 and 4 on D2 (2026-11-27, branch native34 = port3ds `a92665c5` + gate-gxchunk + gximm, Azahar)
+
+Merge fixes (D2 draws a batch member's indices in place, `BatDraw.lin`, and `Batch.ix_count` counts only the copied draws' indices): `bat_chunk_build` takes each draw's real index address (`lin`, else the pool copy at `pool_off`) and the last draw's count from the members' `idx_end` (with `ix_count` every in-place batch got 0 indices and was marked "never": gor_01 6 chunk uses a frame instead of 245); `plat_gpu_chunk_build` checks the range with `ixpool_ok` (D2's range list); `plat_gpu_imm_end` uses `s_oh_idx_end` as an address. The `gxchunk frame` line is split in two, so `records over` is in the log.
+
+Release CIA; verify runs `--long 200`, `--allow-hw-faults`.
+
+1. **KV** (C1 + `gxone=1 gxchunk=2`), gor_01, pik_00, usu_00, battle to frame 841: chunk uses per frame 245 / 358 / 153 / 124 (as on gate-gxchunk), verify draws 14 880 / 22 060 / 9 313 / 7 502 in the last window, `differ 0`, **`records over 0`**, not compared 0; no `gxchunk verify` warning; no `drawp indices ... outside the index ranges`; gxone `mismatches 0 missed 0 stale 0`. (`one-sided` is 2 per compared draw in the field scenes: the chunk writes all four scale rows; not a mismatch.) Sweeps: tik 22 of 22, jin 12 of 12 ok, 58 and 41 chunk lines, 0 differ, 0 verify warnings.
+2. **Step 3 identity:** `determ_ab` C1 vs K and C3 vs K 24 of 24 each; `gw_diff` C1 vs K 160 records equal (32 fields).
+3. **IV** (K + `gximmfl=2`), the same 4 scenes: `gximmfl frame` route differ 0, index differ 0 (front-end checks 47 153 / 196 043 / 75 576 / 154 873), gxchunk verify differ 0, records over 0; immediate draws per frame 231 / 122 / 204 / 112 (merged 138 / 1 032 / 273 / 95). Sweeps tik 22 of 22, jin 12 of 12 ok, 0 differ, 0 `gximmfl verify` warnings (map_sweep keeps only lines with "verify", so the `gximmfl frame` totals are not in its log).
+4. **Step 4 identity:** `determ_ab` C1 vs I, C3 vs I, K vs I 24 of 24 each; `gw_diff` C1 vs I 160 records equal; stereo C1 vs I 9 of 9; `gpuhangtest=700 gpuhangrecover=1` with I: `reset #1 done`, state marked dirty, shot 820 has content (36 976 colours, 92 %).
+5. **Timing** (release 3dsx, `gx_perf_ab --repeat 2`, windows 722-841, frame / core-0 busy / render ms):
+
+| Scene | K | I | C3 (busy / translator / render) |
+|---|---|---|---|
+| gor_01 | 50.3 / 35.6 / 0.8 | 50.0 / 35.4 / 0.9 (C3 run: 50.3 / 35.2) | 33.4 / 22.6 / 13.1 / 7.4 |
+| pik_00 | 50.2 / 42.9 / 0.9 | 50.2 / 41.8 / 0.9 | 33.4 / 27.2 / 15.4 / 7.5 |
+| usu_00 | 36.9 / 31.7 / 1.6 | 36.4 / 31.3 / 1.6 | 32.5 / 18.9 / 13.3 / 6.4 |
+| battle | 31.7 / 24.3 / 0.9 | 32.0 / 23.8 / 0.9 | 33.4 / 15.6 / 20.8 / 3.8 (fence 12.4) |
+
+  `gximmfl=1` takes 0.2-1.1 ms of core-0 busy off K (pik_00 most: 1 150 immediate draws a frame); the frame does not change. C3 stays the faster config (busy 15.6-27.2 ms).
+
 ## Heap margin (2026-11-27)
 
 Release builds, Azahar (3dsx: heap 83 100 KiB, linear heap 32 768 KiB), runs to frame 841. C0 = no switches (the defaults); C1 and C3 as above. Base = port3ds `156cf717`.

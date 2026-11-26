@@ -30,6 +30,22 @@ def extract(text):
     return out
 
 
+def concat_body():
+    """C_MTXConcat with the SDK's arithmetic unchanged (same operations, same order, same
+    rounding) but all twelve results computed before any is stored: the same answer in the
+    aliased case (ab == a or b) without the temporary matrix and the copy-back call."""
+    lines = ["void C_MTXConcat(const Mtx a, const Mtx b, Mtx ab) {"]
+    for r in range(3):
+        for c in range(3):
+            lines.append(f"    f32 t{r}{c} = 0 + a[{r}][2] * b[2][{c}] + ((a[{r}][0] * b[0][{c}]) + (a[{r}][1] * b[1][{c}]));")
+        lines.append(f"    f32 t{r}3 = a[{r}][3] + (a[{r}][2] * b[2][3] + (a[{r}][0] * b[0][3] + (a[{r}][1] * b[1][3])));")
+    for r in range(3):
+        for c in range(4):
+            lines.append(f"    ab[{r}][{c}] = t{r}{c};")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
 def main():
     dest = Path(sys.argv[1])
     funcs = []
@@ -59,6 +75,8 @@ def main():
             if fn in seen:
                 continue
             seen.add(fn)
+            if fn == "C_MTXConcat":
+                body = concat_body()
             funcs.append((ret, fn, args, body, name))
 
     lines = [

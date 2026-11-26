@@ -389,6 +389,35 @@ def _pit(ctx):
     ctx.check(shot, f"battle shot: {rel(shot)}")
 
 
+# Deeper floors of the Pit: the same entry as "pit" with GSW 1321 (the 0-based floor) set while the map loads, so
+# the floor's own enemy (NPC slot 0) is fought: floor 11 on jon_00 (floors 1-49), floor 51 on jon_01 (51-79),
+# floor 99 on jon_02 (81-99). Floors 10, 20, ... 100 are rest rooms or the boss and have no enemy in slot 0.
+def _pit_deep(name, mp, floor, win=True, timeout=900):
+    @scenario(name, f"map={mp},dokan_2 story=30 party=1 btlauto=perfect gsw=1321:{floor - 1} swwatch=1321,33 "
+              f"marioat2=hit:npc0,0@800 shots=60 shotfrom=820",
+              until=r"sys: seq 4 -> 2 at frame" if win else r"btlauto: action command ends at frame \d+, result 2",
+              timeout=timeout,
+              doc=f"Pit of 100 Trials: floor {floor} ({mp}), one battle (btlauto)")
+    def _check(ctx):
+        path = st.seq_path(ctx.log)
+        battles = [f for a, b, f, m in path if (a, b) == (2, 4) and m == mp]
+        ends = [f for a, b, f, m in path if (a, b) == (4, 2) and m == mp]
+        floor_now = watched(ctx.log, "gsw 1321")
+        ctx.check(floor_now and floor_now[-1][1] == floor - 1, f"warped to floor {floor} (GSW 1321: {floor_now})")
+        ctx.check(battles, f"floor {floor} battle started (frame {battles[0] if battles else '-'})")
+        ctx.check(re.search(r"btlauto: action command ends at frame \d+, result 2", ctx.log),
+                  "btlauto: action commands succeeded")
+        if win:
+            ctx.check(ends, f"battle won, back on the floor (frame {ends[0] if ends else '-'})")
+        shot = shot_after(ctx, (battles[0] if battles else 0) + 200, 60)
+        ctx.check(shot, f"battle shot: {rel(shot)}")
+
+
+_pit_deep("pit11", "jon_00", 11)
+_pit_deep("pit51", "jon_01", 51, win=False)
+_pit_deep("pit99", "jon_02", 99, win=False)
+
+
 def run_scenario(build, sc):
     dest = OUT / sc["name"]
     shutil.rmtree(dest, ignore_errors=True)

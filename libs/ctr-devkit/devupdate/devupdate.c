@@ -375,7 +375,12 @@ static void status(DevUpdatePhase phase, u32 done, u32 total, const char* text) 
     }
 }
 
+static volatile bool s_busy; /* between begin and resume: the update holds the app */
+
+bool devupdate_busy(void) { return s_busy; }
+
 static void begin(bool recovery) {
+    s_busy = true;
     if (!recovery && s_cfg.on_begin != NULL) {
         s_cfg.on_begin(s_cfg.user);
     }
@@ -385,6 +390,7 @@ static void resume(bool recovery) {
     if (!recovery && s_cfg.on_resume != NULL) {
         s_cfg.on_resume(s_cfg.user);
     }
+    s_busy = false;
 }
 
 /* After a push, a restart or a launch: hands over to the next launch. */

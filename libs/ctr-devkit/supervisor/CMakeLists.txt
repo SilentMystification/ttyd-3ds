@@ -17,7 +17,12 @@ if(NOT TARGET ctrdk_supervisor_client)
     add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/.." ctr-devkit)
 endif()
 
-set(sv_common "${CMAKE_CURRENT_LIST_DIR}/server.c" "${CMAKE_CURRENT_LIST_DIR}/../devupdate/proto.c")
+set(sv_common
+    "${CMAKE_CURRENT_LIST_DIR}/server.c"
+    "${CMAKE_CURRENT_LIST_DIR}/actions.c"
+    "${CMAKE_CURRENT_LIST_DIR}/hb.c"
+    "${CMAKE_CURRENT_LIST_DIR}/policy.c"
+    "${CMAKE_CURRENT_LIST_DIR}/../devupdate/proto.c")
 
 # The system module.
 add_executable(ctrdk_supervisor "${CMAKE_CURRENT_LIST_DIR}/main.c" ${sv_common})
@@ -51,7 +56,8 @@ endif()
 add_executable(ctrdk_supervisor_app "${CMAKE_CURRENT_LIST_DIR}/app_main.c" ${sv_common})
 target_compile_options(ctrdk_supervisor_app PRIVATE -O2 -g -Wall -Wextra -Werror)
 target_include_directories(ctrdk_supervisor_app PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../include")
-target_link_libraries(ctrdk_supervisor_app PRIVATE ctru m)
+# The app build sends itself heartbeats through the real client.
+target_link_libraries(ctrdk_supervisor_app PRIVATE ctrdk_supervisor_client ctru m)
 ctrdk_build_stamp(ctrdk_supervisor_app)
 set(app_out "${CMAKE_CURRENT_BINARY_DIR}/ctrdk-supervisor-app")
 ctr_generate_smdh(OUTPUT "${app_out}.smdh" NAME "ctr-devkit supervisor (app)"

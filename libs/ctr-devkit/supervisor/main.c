@@ -4,7 +4,8 @@
  * until the console reboots, outside the app's process: the app hanging, crashing, being ended
  * or not running at all does not touch it. It must never take the console down with it:
  *   - fixed, small heap (libctru's default would take all free memory of the region);
- *   - no APT, no GSP, no HID: it never competes with the app or the HOME Menu for them;
+ *   - no APT session, no HID; GSP only for the short GPU-reset attempt after it ended the game
+ *     (actions.c): it never competes with the app or the HOME Menu for them;
  *   - every fault ends this process quietly: an exception handler on each thread and a wrapped
  *     svcBreak call svcExitProcess, so Luma3DS's exception screen (which needs a reboot) is
  *     never reached from here;
@@ -83,7 +84,7 @@ void __wrap_svcBreak(UserBreakType reason) {
 
 /* ---- Faults ---- */
 
-static u8 s_exc_stack[2][0x1000] __attribute__((aligned(8)));
+static u8 s_exc_stack[4][0x800] __attribute__((aligned(8)));
 
 static void on_exception(ERRF_ExceptionInfo* info, CpuRegisters* regs) {
     (void)info;
@@ -91,7 +92,11 @@ static void on_exception(ERRF_ExceptionInfo* info, CpuRegisters* regs) {
     svcExitProcess(); /* a fault here must never become an exception screen */
 }
 
-static void guard_thread(int i) { threadOnException(on_exception, s_exc_stack[i] + sizeof(s_exc_stack[i]), WRITE_DATA_TO_HANDLER_STACK); }
+void sv_guard_thread(int i) {
+    if (i >= 0 && i < 4) {
+        threadOnException(on_exception, s_exc_stack[i] + sizeof(s_exc_stack[i]), WRITE_DATA_TO_HANDLER_STACK);
+    }
+}
 
 /* ---- Server thread ---- */
 
@@ -100,7 +105,7 @@ static SvConfig s_cfg;
 
 static void server_main(void* arg) {
     (void)arg;
-    guard_thread(1);
+    sv_guard_thread(1);
     void* soc_buf = memalign(0x1000, SOC_SIZE);
     /* soc:U is registered by the socket module; at boot it may come late. */
     for (;;) {
@@ -119,11 +124,22 @@ static void server_main(void* arg) {
 }
 
 int main(void) {
-    guard_thread(0);
-    s_cfg.port = CTRDK_SV_PORT;
+    sv_server_init_clock();
+    sv_guard_thread(0);
+    /* No service request may wait for a free session (pm:app has 4 system-wide): a full port fails at once. */
+    srvSetBlockingPolicy(true);
     s_cfg.kind = "sysmodule";
     s_cfg.version = CTRDK_BUILD_STAMP;
-    sv_config_load(&s_cfg);
+    sv_config_defaults(&s_cfg);
+    sv_config_load(&s_cfg, true);
+    sv_log_enable_file(s_cfg.log_file);
+    sv_log("supervisor %s start: game %016llx dir %s watch %lu gpureset %d launch %s ndm_hold %d", s_cfg.version,
+           (unsigned long long)s_cfg.game_title_id, s_cfg.dir[0] ? s_cfg.dir : "none", (unsigned long)s_cfg.watch_s,
+           s_cfg.gpureset, s_cfg.launch_pm ? "pm" : "ns", s_cfg.ndm_hold ? 1 : 0);
+    if (s_cfg.ndm_hold) {
+        sv_log("supervisor: NDM infrastructure hold: %08lx", (unsigned long)sv_ndm_hold(true));
+    }
+    sv_hb_start(); /* before the network: heartbeats count from the game's first frame */
 
     Handle notif = 0;
     if (R_FAILED(srvEnableNotification(&notif))) {
@@ -134,7 +150,14 @@ int main(void) {
         return 0;
     }
     for (;;) {
-        if (R_FAILED(svcWaitSynchronization(notif, -1LL))) {
+        Result r = svcWaitSynchronization(notif, 1000000000LL);
+        if (sv_exit_requested) {
+            break; /* the exit command, or a self-update */
+        }
+        if (r == (Result)0x09401BFE) {
+            continue; /* timeout */
+        }
+        if (R_FAILED(r)) {
             break;
         }
         u32 id = 0;
@@ -147,6 +170,12 @@ int main(void) {
     }
     s_quit = true;
     threadJoin(t, 2000000000LL); /* the server checks s_quit every 0.5 s */
+    sv_hb_stop();
+    if (s_cfg.ndm_hold) {
+        sv_ndm_hold(false);
+    }
+    sv_log("supervisor: exit");
     svcCloseHandle(notif);
     return 0;
 }
+

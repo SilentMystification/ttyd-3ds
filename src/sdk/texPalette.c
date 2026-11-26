@@ -10,6 +10,20 @@
 
 #define PALETTE_VERSION 0x0020AF30
 
+#ifdef TARGET_PORT
+// The textures of an unpacked TPL are in memory: the GX layer may convert them ahead of their first draw (texasync).
+void portTplPrefetch(void* palette) {
+    TEXPalettePtr pal = palette;
+    u32 i;
+    for (i = 0; i < pal->numDescriptors; i++) {
+        TEXHeaderPtr th = pal->descriptorArray[i].textureHeader;
+        if (th != NULL) {
+            GXPrefetchTexPort(th->data, th->width, th->height, th->format, pal->descriptorArray[i].CLUTHeader != NULL);
+        }
+    }
+}
+#endif
+
 /**
  * Turns a TPL loaded in memory into usable form:
  * checks the version and converts the descriptor, texture and CLUT offsets to pointers (only once).
@@ -50,6 +64,9 @@ void UnpackTexPalette(TEXPalettePtr pal) {
                 }
             }
         }
+#ifdef TARGET_PORT
+        portTplPrefetch(pal);
+#endif
     }
 }
 

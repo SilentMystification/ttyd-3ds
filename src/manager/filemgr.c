@@ -378,6 +378,9 @@ static void fileGarbageDataAdrSet(void* data, s32 type) {
                         }
                     }
                 }
+#ifdef TARGET_PORT
+                portTplPrefetch(tpl); // the textures are in memory: convert them ahead of their first draw (texasync)
+#endif
             }
             break;
         case 5:

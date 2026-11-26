@@ -1198,3 +1198,74 @@ Identity (B against A, both `gxsdl=1 gxrecfuse=1 gxreclgroup=1`): `determ` shots
 - The unmeasured 11.6 ms (gor_01) needs a split between game logic and the GX entry points that are not measured here (`GXCallDisplayList`, `GXBegin`/`GXEnd`, pipe writes), by the same ablation under `gxnull`.
 - Translator: `bat_open` (8-9 us a call), `call_slow` and immediate primitives (5-7 us each, 6.2 ms in pik_00) are the largest per call. pik_00's translator (16.0-16.3 ms) is close to 16.7.
 
+## The setters' one-word test, the remainder split, and small translator cuts (2026-11-27)
+
+Release builds, Azahar, windows 722-841, best of 2, ms per frame. C1 = `gxdirty=1 gxdirect=1 gximmdirect=1 texfast=1 texasync=1`; C3 = C1 + `gxthread=2 gxpipeline=1 gxsdl=1 gxrecfuse=1 gxreclgroup=1`; N = C3 + `gxnull=1` (game thread alone). Base = port3ds `38bf6170`.
+
+### Changes (no switch; same records, same order, same pictures)
+
+1. **One word for the setters' test** (`gx_internal.h` `gx_rec_fast`, `gx_state.c` REC/REC0/RECT, `GX_CLOSE_PRIMITIVE`). `gx_rec_fast.w`: 0 = nothing records and no display list or primitive is open (every thread applies the call); 1 = the game thread records with no display list and no primitive open (`gx_rec_call`); 2 = the full test as before. The translator thread always applies; it is told apart by its stack range (`tr_lo`, `tr_len`, set by `translator_main`), not by a TLS read. `gx_rec_fast_update()` runs at every change of `gx_rec_mode`, `gx_rec_direct`, the display list being recorded, `gx_prim_open` and the game thread's `gx_tls_translator`. Setters stay inlined (no call of the generic `gx_rec_call` from `GXSetVtxDesc`, `GXSetChanCtrl`, `GXSetTevOrder`, `GXSetTevColorIn`, `GXLoadPosMtxImm`, `GXSetNumChans`, `GXSetVtxAttrFmt`, `GXSetArray`, `GXClearVtxDesc`, `GXSetCurrentMtx`, `GXSetTevOp`; `.text` +4 KB).
+   - Not kept: the thread's TPIDRURO (`mrc p15, 0, rX, c13, c0, 3`) as the word. Game thread C3 -1.0 / -0.9 / -1.4 / -0.4 ms, but C1 +1.2..+1.8 ms and the translator +0.1..+0.4: an `mrc` (and so a TLS read, `__aeabi_read_tp`) costs about 0.1 us in Azahar. The word 0/1/2 with the stack test gives up part of the game-thread gain and has no C1 cost.
+2. **Immediate primitives** (`gx_rec.c`, `gx_vsh.c`): the vertex-state hash of each `GXR_PRIMD` (game thread at `GXEnd`, translator at the draw) only fed the "vertex-state differences" counter (the primitive is drawn as written, never seen non-zero); both threads compute it with `gximmdirect=2` only. `group_for` compares the last group's key with the state in place before it builds a key.
+3. **`GXCallDisplayList` and `run_pending_raw`** (`gx_pipe.c`): with `w == 1` off the translator they go straight to `gx_rec_raw`/`gx_rec_list`; `run_pending_raw` reads `gx_rec_mode` before the TLS word.
+
+Results, base -> this build (game busy; translator in brackets; N is game busy with `gxnull`):
+
+| Scene | C1 busy | C3 game busy | C3 translator | N busy |
+|---|---|---|---|---|
+| gor_01 | 33.5 -> 33.0 | 24.2 -> **23.1** | 14.0 -> 13.8 | 24.2 -> **23.4** |
+| pik_00 | 42.3 -> 42.4 | 31.2 -> **30.4** | 16.2 -> 16.4 | 33.4 -> 32.8 (frame 46.8 -> 36.6, n/a) |
+| usu_00 | 30.0 -> 29.6 | 21.0 -> **20.0** | 13.9 -> 13.8 | 21.2 -> **20.2** |
+| battle | 21.7 -> 20.8 | 16.0 -> 15.8 | 15.0 -> **13.4** | 18.0 -> 17.6 |
+
+Frames stay vblank-bound (C3 33.3-33.4, battle 32.1-32.3). Per change (C3 game / N): change 1: gor_01 -0.6 / -0.5, pik_00 -0.3 / n/a, usu_00 -0.8 / -0.6, battle 0.0 / -0.1; change 3: -0.5 / -0.3, -0.4 / -0.3, -0.5 / -0.5, -0.2 / -0.3; change 2: game -0.1..-0.2, translator -0.1..-0.2. pik_00's translator read 16.6 in all three builds with change 1 against 16.2-16.4 for base (render-thread preemption on core 2 is in that number; not resolved). The battle translator (15.0 -> 13.4) moves with the battle's content in the window and is not claimed as a gain of these changes.
+
+Identity (this build against base, both `gxsdl=1 gxrecfuse=1 gxreclgroup=1`): `determ` shots 780-785 byte-identical in gor_01, usu_00, battle (C1 and C3) and pik_00 C1, 6 of 6 each; pik_00 C3: the first run of this build timed out (no shots); in the second, base saved 4 of 6 shots (782 and 785 missing, the capture gap described above) and all 4 were identical. `gw_diff` 1600-frame padscript gor_01: 160 records equal in C1 and C3. `gxrecfuse=2 gxreclgroup=1`: 0 mismatches in gor_01, pik_00, battle (to frame 841), `map_sweep.py --area tik` (22 of 22 maps ok, 819 K checks) and `--area jin` (12 of 12 ok, 458 K checks). `gximmdirect=2` (C3): gor_01 to frame 841, 91 923 checks, 0 mismatches, 0 vertex-state differences; pik_00 0 mismatches to frame 601, then a fatal "no memory to convert 41756 bytes" (texture conversion, frame 631), the same with base: the verify buffers leave too little memory in pik_00 (not a change of this round). Stereo (`stereo_ab.py`, `stereoforce=1`, this build, `gxrecfuse=0` against `gxrecfuse=1 gxreclgroup=1`, gor_01 780-781): 6 of 6 identical (EFB, left, right); left differs from right. (`stereo_ab.py` uses `build/azahar-profile`, which needs `game.iso` in its sdmc; without it the runs stall at the boot screen.)
+
+### The game thread's remainder, split (ablation under `gxnull=1`)
+
+Method as above: a local build (not committed) with switch `gxphx=mask` returns early at one point per bit; the busy time that goes away is that part's cost. New here: a local switch `phxvbl=N` makes every frame last at least N retraces, so all runs of a scene have the same frame period (2 retraces, pik_00 3) and can be compared; without it 8 of 24 runs changed period. With `phxvbl=2` the battle reaches a different part of its script in the window (busy 10.2 against 18 without), so its column is a different content. Counters per frame from the same build. Bits: 1 `GXCallDisplayList` at entry; 16 only its `gx_rec_list`; 2 `GXEnd` after the state reset; 4 `GXLoadTexObj`/`GXLoadTlut`; 8 the setters' `gx_rec_call` (after the one-word test); 64 the setters at the start of REC.
+
+| Part (calls per frame gor_01 / usu_00 / battle / pik_00) | gor_01 | usu_00 | battle (other content) | pik_00 (50 ms frames) |
+|---|---|---|---|---|
+| busy, `gxnull=1` | 24.8 | 20.7 | 10.2 | 34.0 |
+| `GXCallDisplayList` in all (5 264 / 4 106 / 2 698 / 6 200) | 5.6 | 2.9 | 2.9 | 7.2 |
+| - `gx_rec_list` | 4.5 | 2.0 | 2.3 | 5.9 |
+| - the entry point around it (primitive, display-list and TLS tests, `run_pending_raw`) | **1.1** | 0.9 | 0.6 | 1.3 |
+| `GXEnd` (391 / 478 / 228 / 1 155 primitives: `gx_rec_prim_direct`, `gx_imm_convert`, ring write) | 3.0 | 3.8 | 1.4 | 10.1 |
+| texture loads (254 / 343 / 107 / 178) | 0.3 | 0.3 | 0.1 | 0.3 |
+| setters from REC (about 18 000 calls in gor_01) | 8.6 | 7.2 | 3.9 | 11.9 |
+| - `gx_rec_call` and the argument array | 5.5 | 5.7 | 2.3 | 9.2 |
+| - the test before it and what the setter does before REC (includes the two ablation tests, about 0.3-0.5 ms) | 3.1 | 1.5 | 1.6 | 2.7 |
+| the four parts at once (bits 1, 2, 4, 64) | 14.4 | 12.3 | 6.8 | 22.0 |
+| sum of the four alone | 17.5 | 14.2 | 8.3 | 29.5 |
+| **left with all four off: game logic, pipe writes, `GXBegin`, other GX entry points (`GXInitTexObj`, getters, SDK matrix code)** | **10.4** | **8.4** | 3.4 | 12.0 |
+
+- The parts are not additive: the four alone sum to 1.5-7.5 ms more than all four at once. Work that runs at a list or a primitive for the setters before it (the vertex-description flush, `fuse_vd_flush`) is counted in both. So "game logic" in gor_01 is at most 10.4 ms and at least 24.8 - 17.5 = 7.3 ms.
+- Pipe writes (the game's `GXPosition`/`GXColor`/... inline writes) were not ablated: they cannot be left out without changing what the game draws, and doubling them changes the slot layout. Count: 5 995 slots a frame in gor_01, 7 343 usu_00, 4 502 battle, 15 947 pik_00; at 4-6 instructions a write and about 4.5 ns an instruction (Azahar, from the 0.21 us of the 50-instruction `GXCallDisplayList` entry) that is about 0.1-0.4 ms (estimate).
+- The largest GX-side part not measured before was the `GXCallDisplayList` entry (1.1 ms in gor_01, 0.2 us a call): change 3 above cut it (-0.3..-0.5 ms).
+
+### Translator, immediate primitives and batch open (C3, `gxphase=1`, local probe phases, frame 841)
+
+Local nested phases (not committed) inside `gx_draw_imm_route`, `gx_draw_imm_shader`, `gx_draw_prim_ring` and `gx_draw_batch_begin`, ms per frame (calls):
+
+| Phase | gor_01 | pik_00 | usu_00 | battle |
+|---|---|---|---|---|
+| primitive, own time (dispatch, the vertex-state hash, route checks) | 0.24 (375) | 2.93 (1 154) | 0.94 (479) | 0.21 (209) |
+| `vsh_state` (primitives and batch opens) | 0.88 (618) | 1.50 (1 513) | 1.84 (629) | 0.72 (333) |
+| route: `gx_vsh_route` / `gx_vsh_batch_route` (group key, hash, record) | 1.77 (618) | **2.80** (1 513) | 1.59 (629) | 0.83 (333) |
+| uniforms `plat_gpu_vsh_const`/`_light` | 0.98 (618) | 1.34 (1 513) | 1.64 (629) | 0.49 (330) |
+| draw `plat_gpu_vsh_draw` | 0.26 (375) | 1.13 (1 154) | 0.42 (479) | 0.24 (206) |
+| index build `gx_vsh_imm_at` | 0.13 (375) | 0.92 (1 154) | 0.27 (479) | 0.07 (206) |
+| batch member state check `bat_same_state` | 0.43 (242) | 0.48 (358) | 0.20 (150) | 0.27 (123) |
+| `bat_open` own | 0.07 | 0.21 | 0.19 | 0.05 |
+| state build `ensure_state` (as before) | 2.22 | 2.37 | 1.76 | 1.64 |
+
+So a pik_00 primitive is about 2.5 us own + 1.0 `vsh_state` + 1.9 route + 0.9 uniforms + 1.0 draw + 0.8 indices + its share of `ensure_state`. Change 2 took the vertex-state hash out of the own time (pik_00 translator -0.2 ms). The rest is spread; the route (group key of 25 words, its hash and the record probe, 1.8 us a call in pik_00) is the largest single piece.
+
+### Next steps
+
+- Game thread (gor_01 C3 23.1 ms, 6.4 over 16.7): the setters' `gx_rec_call` (5.5 ms) and `gx_rec_list` (4.5 ms) stay the largest GX parts; `GXEnd` is 10 ms in pik_00 (1 155 primitives, 8.7 us each). Game logic is 7-10 ms in gor_01, so the GX side must lose 6+ ms, or work must move off core 0 (owner decision pending).
+- Translator: the vertex-shader route per draw (group key and hash) and `vsh_state` per draw; a cache of the group per loaded matrix slot would skip the key build when only another slot changed.
+- C1 is not changed (within ±0.5 ms).
+

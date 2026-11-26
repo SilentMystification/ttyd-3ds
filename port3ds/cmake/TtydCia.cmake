@@ -98,7 +98,10 @@ function(ttyd_add_cia target)
                 -icon "${art}/icon.smdh" -banner "${art}/banner.bnr"
                 "-DAPP_TITLE=${ARG_TITLE}" "-DAPP_PRODUCT_CODE=${ARG_PRODUCT_CODE}"
                 "-DAPP_UNIQUE_ID=${ARG_UNIQUE_ID}"
+        # makerom randomises the ticket title key, ticket ID and TMD content ID: pin them (reproducible CIA).
+        COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/cia_deterministic.py" "${out_dir}/${target}.cia"
         DEPENDS ${target} "${rsf}" "${art}/icon.smdh" "${art}/banner.bnr"
+                "${TTYD_REPO_DIR}/tools/port3ds/cia_deterministic.py"
         VERBATIM
         COMMENT "Building ${target}.cia")
 

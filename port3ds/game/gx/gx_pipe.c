@@ -635,19 +635,34 @@ int gx_imm_rec_ok(const GxState* g, u8 prim, u32 n) {
 
 /* counters (switch gximmdirect; the gxthreadstats line) */
 static struct {
-    u32 shader, cpu, old, none, rec, rec_fail, verify, mism, state_diff;
+    u32 shader, cpu, old, none, rec, rec_fail, verify, mism, state_diff, verify_skip;
 } s_id;
 /* gximmdirect=2: the reference decode and bytes, one set per thread (the game thread's GXEnd while recording, the
- * translating thread) */
+ * translating thread). Sized to the largest primitive seen so far, not to VERTS_MAX: two full sets took 1.4 MB of
+ * heap, and pik_00's first map load (gxcache's tables) leaves about 1.3 MB free at its peak, so the verify mode
+ * ran the game out of heap ("no memory to convert"). A buffer that cannot grow skips the check (counted). */
 static u8* s_id_ref_t[2];
 static GxVertex* s_id_verts_t[2];
+static u32 s_id_cap_t[2];
 
 /* gximmdirect=2: decodes the primitive the old way (read_vertex under g) and compares the ring bytes. */
 void gx_imm_verify(const GxState* g, u8 fmt, const PPCWGPipe* sl, u32 n, const u8* got, const u8 attr_slot[8]) {
     int t = gx_tls_translator != 0;
-    if (s_id_ref_t[t] == NULL) {
-        s_id_ref_t[t] = gx_big_alloc("gximmdirect verify", (u32)VERTS_MAX * 64u);
-        s_id_verts_t[t] = gx_big_alloc("gximmdirect verify vertices", sizeof(GxVertex) * VERTS_MAX);
+    if (n > s_id_cap_t[t]) {
+        u32 cap = (n + 63u) & ~63u;
+        free(s_id_ref_t[t]);
+        free(s_id_verts_t[t]);
+        s_id_ref_t[t] = memalign(32, cap * 64u);
+        s_id_verts_t[t] = memalign(32, sizeof(GxVertex) * cap);
+        s_id_cap_t[t] = s_id_ref_t[t] != NULL && s_id_verts_t[t] != NULL ? cap : 0;
+        if (s_id_cap_t[t] == 0) {
+            free(s_id_ref_t[t]);
+            free(s_id_verts_t[t]);
+            s_id_ref_t[t] = NULL;
+            s_id_verts_t[t] = NULL;
+            s_id.verify_skip++;
+            return;
+        }
     }
     u8* s_id_ref = s_id_ref_t[t];
     GxVertex* s_id_verts = s_id_verts_t[t];
@@ -773,11 +788,11 @@ void gx_immdirect_log(u32 frames) {
     u32 f = frames ? frames : 1;
     PLOG_I("gximmdirect frame %lu: per frame %lu to the ring, %lu routed to the cpu, %lu the old way, %lu nothing to "
            "draw | recorded at GXEnd %lu, the old way %lu | verify %lu checks, %lu mismatches, %lu vertex-state "
-           "differences (total)",
+           "differences, %lu skipped for want of memory (total)",
            (unsigned long)gx_perf_frame_no(), (unsigned long)(s_id.shader / f), (unsigned long)(s_id.cpu / f),
            (unsigned long)(s_id.old / f), (unsigned long)(s_id.none / f), (unsigned long)(s_id.rec / f),
            (unsigned long)(s_id.rec_fail / f), (unsigned long)s_id.verify, (unsigned long)s_id.mism,
-           (unsigned long)s_id.state_diff);
+           (unsigned long)s_id.state_diff, (unsigned long)s_id.verify_skip);
     s_id.shader = s_id.cpu = s_id.old = s_id.none = s_id.rec = s_id.rec_fail = 0;
 }
 

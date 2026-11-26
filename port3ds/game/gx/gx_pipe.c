@@ -1238,7 +1238,7 @@ u32 GXEndDisplayList(void) {
         PLOG_W("GX: display list overflowed its %lu-byte buffer", (unsigned long)s_dl_size);
     }
     if (gx_dl_has_ops) {
-        gx_rec_state_list(s_dl_buf); /* calling it changes the translator's state behind the record */
+        gx_rec_state_list(s_dl_buf, used); /* calling it changes the translator's state behind the record */
     }
     s_dl_buf = NULL;
     return used;

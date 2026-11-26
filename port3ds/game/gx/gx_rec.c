@@ -455,10 +455,19 @@ static const void** s_state_lists; /* SL_SLOTS, allocated with the ring */
 
 static u32 sl_hash(const void* p) { return ((u32)p >> 5) * 2654435761u >> 21; }
 
-void gx_rec_state_list(const void* list) {
-    if (!gx_rec_mode || s_state_lists == NULL) {
-        return;
-    }
+/* A state list is known by address (the buffer it was built in) and by content: the game copies built lists
+ * (mapdrv's per-material lists go from a scratch buffer into the map's block), and the copy is what it calls.
+ * Content entries: size and hash of the bytes at GXEndDisplayList; `s_sl_sizes` has a bit per 32 bytes of size
+ * so that only a list of a known size is hashed when it is called. */
+#define SC_SLOTS 2048
+typedef struct {
+    u32 size, hash;
+} StateContent;
+static StateContent* s_state_content; /* SC_SLOTS, allocated with the ring */
+static u32 s_sl_sizes[(0x10000 >> 10) + 1];
+static u32 s_sc_count;
+
+static void sl_add_addr(const void* list) {
     u32 h = sl_hash(list);
     for (u32 i = 0; i < SL_SLOTS; i++, h = (h + 1) & (SL_SLOTS - 1)) {
         if (s_state_lists[h] == list) {
@@ -473,13 +482,57 @@ void gx_rec_state_list(const void* list) {
     PLOG_W("gxthread: more than %d display lists with state calls: dedup off", SL_SLOTS);
 }
 
-static int is_state_list(const void* list) {
+void gx_rec_state_list(const void* list, u32 nbytes) {
+    if (!gx_rec_mode || s_state_lists == NULL) {
+        return;
+    }
+    sl_add_addr(list);
+    if (nbytes == 0 || nbytes > 0x10000 || s_state_content == NULL) {
+        return;
+    }
+    u32 hash = gx_hash32(list, nbytes, 0x5EC1u);
+    u32 h = hash * 2654435761u >> 21;
+    for (u32 i = 0; i < SC_SLOTS; i++, h = (h + 1) & (SC_SLOTS - 1)) {
+        StateContent* e = &s_state_content[h];
+        if (e->size == nbytes && e->hash == hash) {
+            return;
+        }
+        if (e->size == 0) {
+            e->size = nbytes;
+            e->hash = hash;
+            s_sl_sizes[(nbytes >> 5) >> 5] |= 1u << ((nbytes >> 5) & 31);
+            if (++s_sc_count > SC_SLOTS / 2) {
+                s_dedup = 0; /* table (half) full: stop skipping calls */
+                PLOG_W("gxthread: more than %d state list contents: dedup off", SC_SLOTS / 2);
+            }
+            return;
+        }
+    }
+}
+
+static int is_state_list(const void* list, u32 nbytes) {
     u32 h = sl_hash(list);
     for (u32 i = 0; i < SL_SLOTS; i++, h = (h + 1) & (SL_SLOTS - 1)) {
         if (s_state_lists[h] == list) {
             return 1;
         }
         if (s_state_lists[h] == NULL) {
+            break;
+        }
+    }
+    /* a copy of a state list: same size and bytes as one the game built */
+    if (nbytes == 0 || nbytes > 0x10000 || s_state_content == NULL || !(s_sl_sizes[(nbytes >> 5) >> 5] >> ((nbytes >> 5) & 31) & 1)) {
+        return 0;
+    }
+    u32 hash = gx_hash32(list, nbytes, 0x5EC1u);
+    h = hash * 2654435761u >> 21;
+    for (u32 i = 0; i < SC_SLOTS; i++, h = (h + 1) & (SC_SLOTS - 1)) {
+        const StateContent* e = &s_state_content[h];
+        if (e->size == nbytes && e->hash == hash) {
+            sl_add_addr(list); /* known from now on by address (a stale entry only costs a dedup reset) */
+            return 1;
+        }
+        if (e->size == 0) {
             return 0;
         }
     }
@@ -564,7 +617,7 @@ void gx_rec_call(u32 id, const u32* w, u32 n) {
 }
 
 void gx_rec_list(const void* list, u32 nbytes, const void* caller) {
-    if (s_dedup && is_state_list(list)) {
+    if (s_dedup && is_state_list(list, nbytes)) {
         dd_forget(); /* its state calls change the translator's state */
     }
     u32 n = gx_rec_mode == 3 ? 4 : 3;
@@ -1164,7 +1217,8 @@ void gx_rec_init(void) {
     }
     s_dd = calloc(DD_SLOTS, sizeof(DdSlot));
     s_state_lists = calloc(SL_SLOTS, sizeof(*s_state_lists));
-    if (s_dd == NULL || s_state_lists == NULL) {
+    s_state_content = calloc(SC_SLOTS, sizeof(*s_state_content));
+    if (s_dd == NULL || s_state_lists == NULL || s_state_content == NULL) {
         s_dedup = 0;
     }
     s_ring_words = words;

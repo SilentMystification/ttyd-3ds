@@ -1171,6 +1171,28 @@ static FlEntry* fl_get(const void* list, u32 nbytes) {
     return e;
 }
 
+/* fuse_list: a call that compares its own way (bit 31), has no slot, or whose slot differs. Notes it in the table as
+ * dd_same does and records it; 1 when recorded. */
+static __attribute__((noinline)) u32 fuse_call_slow(u32 hd, const u32* c, u32 gen) {
+    u32 id = hd & 0xFF, n = hd >> 8 & 0xFF, sl = hd >> 16 & 0xFFF;
+    if (hd >> 31) {
+        if (dd_same(s_dd, gen, id, c, n)) {
+            return 0;
+        }
+    } else if (sl != 0) {
+        /* the loop found the slot different */
+        DdSlot* d = &s_dd[sl - 1];
+        d->gen = gen;
+        d->id = (u8)id;
+        d->n = (u8)n;
+        for (u32 i = 0; i < n; i++) {
+            d->w[i] = c[i];
+        }
+    }
+    rec_words(id, c, n); /* not into the shadow (see above) */
+    return 1;
+}
+
 /* A state list's calls through the dedup table: 1 when done, 0 when the list takes the old way. */
 static int fuse_list(const void* list, u32 nbytes) {
     if (nbytes == 0 || nbytes > 0x4000) {
@@ -1198,36 +1220,40 @@ static int fuse_list(const void* list, u32 nbytes) {
     const u32* c = s_fl_pool + e->pos + ((e->nbytes + 3) >> 2);
     const u32* ce = c + e->words;
     const u32 gen = s_dd_gen;
+    const DdSlot* const dd = s_dd;
     u32 calls = 0, sent = 0;
+    /* dd_same's compare with the slot known; a call that compares its own way, has no slot or changed goes to
+     * fuse_call_slow (5519 of 5856 calls a frame in gor_01 are unchanged), so the loop keeps its values in registers */
     while (c < ce) {
         u32 hd = *c++;
-        u32 id = hd & 0xFF, n = hd >> 8 & 0xFF, sl = hd >> 16 & 0xFFF;
-        int same;
-        if (hd >> 31) {
-            same = dd_same(s_dd, gen, id, c, n);
-        } else if (sl != 0) {
-            /* dd_same's compare and note, with the slot known */
-            DdSlot* d = &s_dd[sl - 1];
-            u32 diff = (d->gen ^ gen) | ((u32)d->id ^ id) | ((u32)d->n ^ n);
-            for (u32 i = 0; i < n; i++) {
-                diff |= d->w[i] ^ c[i];
-            }
-            if (diff != 0) {
-                d->gen = gen;
-                d->id = (u8)id;
-                d->n = (u8)n;
-                for (u32 i = 0; i < n; i++) {
-                    d->w[i] = c[i];
-                }
-            }
-            same = diff == 0;
-        } else {
-            same = 0;
-        }
+        u32 n = hd >> 8 & 0xFF, sl = hd >> 16 & 0xFFF;
         calls++;
-        if (!same) {
-            rec_words(id, c, n); /* not into the shadow (see above) */
-            sent++;
+        if (__builtin_expect((s32)hd < 0 || sl == 0, 0)) {
+            sent += fuse_call_slow(hd, c, gen);
+            c += n;
+            continue;
+        }
+        const DdSlot* d = &dd[sl - 1];
+        u32 diff = (d->gen ^ gen) | ((u32)d->id ^ (hd & 0xFF)) | ((u32)d->n ^ n);
+        const u32* dw = d->w;
+        switch (n) { /* n <= DD_WORDS for a call with a slot */
+        default:
+            for (u32 i = 8; i < n; i++) {
+                diff |= dw[i] ^ c[i];
+            }
+            /* fallthrough */
+        case 8: diff |= dw[7] ^ c[7]; /* fallthrough */
+        case 7: diff |= dw[6] ^ c[6]; /* fallthrough */
+        case 6: diff |= dw[5] ^ c[5]; /* fallthrough */
+        case 5: diff |= dw[4] ^ c[4]; /* fallthrough */
+        case 4: diff |= dw[3] ^ c[3]; /* fallthrough */
+        case 3: diff |= dw[2] ^ c[2]; /* fallthrough */
+        case 2: diff |= dw[1] ^ c[1]; /* fallthrough */
+        case 1: diff |= dw[0] ^ c[0]; /* fallthrough */
+        case 0: break;
+        }
+        if (__builtin_expect(diff != 0, 0)) {
+            sent += fuse_call_slow(hd, c, gen);
         }
         c += n;
     }

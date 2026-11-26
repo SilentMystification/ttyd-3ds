@@ -201,8 +201,12 @@ static void build_fog(PlatGpuState* st) {
         s_fog.n = gx.fog_near;
         s_fog.f = gx.fog_far;
     }
-    memcpy(st->fog_lut, s_fog.lut, sizeof(s_fog.lut));
-    st->fog_lut_id = s_fog.id;
+    /* a nonzero id names the LUT's contents, and the kept state's id and LUT are written only here, as a pair (a
+     * disabled fog leaves them as they were): the same id means the LUT is in place already */
+    if (st->fog_lut_id != s_fog.id) {
+        memcpy(st->fog_lut, s_fog.lut, sizeof(s_fog.lut));
+        st->fog_lut_id = s_fog.id;
+    }
 }
 
 /* The PICA fog LUT for the current GX fog parameters (type not NONE). */
@@ -596,7 +600,8 @@ static void build_dirty(u32 d) {
         build_chan_flags();
     }
     if (d & GXD_PIX) {
-        memset((u8*)st + PIX_FROM, 0, PIX_TO - PIX_FROM);
+        /* not the fog LUT and its id: they are read only while fog_enable is set, and build_fog keeps them as a pair */
+        memset((u8*)st + PIX_FROM, 0, offsetof(PlatGpuState, fog_lut_id) - PIX_FROM);
         build_pix(st);
         regions |= PLAT_GPU_R_PIX;
     }
@@ -630,7 +635,11 @@ static void verify_dirty(u32 d) {
     u32 bad = 0;
     static const u16 k_rg[5] = {0, offsetof(PlatGpuState, tex), PIX_FROM, PIX_TO, sizeof(PlatGpuState)};
     for (int r = 0; r < 4; r++) {
-        if (memcmp((const u8*)&full + k_rg[r], (const u8*)&s_state + k_rg[r], k_rg[r + 1] - k_rg[r]) != 0) {
+        size_t to = k_rg[r + 1];
+        if (r == 2 && !full.fog_enable) {
+            to = offsetof(PlatGpuState, fog_lut_id); /* the LUT and its id are not read with fog off */
+        }
+        if (memcmp((const u8*)&full + k_rg[r], (const u8*)&s_state + k_rg[r], to - k_rg[r]) != 0) {
             bad |= 1u << r;
         }
     }

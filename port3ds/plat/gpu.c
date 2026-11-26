@@ -622,8 +622,11 @@ void plat_gpu_set_state_dirty(const PlatGpuState* state, uint32_t regions) {
             }
         }
     }
-    if (regions & PLAT_GPU_R_PIX) {
-        /* the LUT words are not compared, but s_last_state carries them (end_segment gives it again) */
+    if ((regions & PLAT_GPU_R_PIX) && state->fog_enable &&
+        (state->fog_lut_id == 0 || state->fog_lut_id != s_last_state.fog_lut_id)) {
+        /* the LUT words are not compared, but s_last_state carries them (end_segment gives it again). They are read
+         * only with fog_enable (end_segment's set_state), and a nonzero id names the LUT's contents, so the copy is
+         * made only for an enabled state whose LUT is not the kept one. */
         memcpy(&s_last_state.fog_lut_id, &state->fog_lut_id,
                offsetof(PlatGpuState, scissor_x0) - offsetof(PlatGpuState, fog_lut_id));
     }

@@ -8,6 +8,8 @@
 #include "port3ds/loadprof.h"
 #include "port3ds/port_swap.h"
 
+void plat_memory_log(const char* when); /* plat/boot.c */
+
 void port_swap_begin(PortSwap* s, void* base, u32 size, const char* what) {
     s->base = base;
     s->size = size;
@@ -15,6 +17,7 @@ void port_swap_begin(PortSwap* s, void* base, u32 size, const char* what) {
     s->done = calloc(size / 8 + 1, 1);
     s->visited = calloc(size / 8 + 1, 1);
     if (s->done == NULL || s->visited == NULL) {
+        plat_memory_log("conversion failed");
         plat_fatal("%s: no memory to convert %lu bytes", s->what, (unsigned long)size);
     }
 }

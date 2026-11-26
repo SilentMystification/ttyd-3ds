@@ -51,7 +51,9 @@ static void rec(u32 id, const u32* words, u32 n) {
  * Inside a display list being recorded the call goes into the list; while
  * the game thread records for a translator (gx_rec.c) it goes into that
  * record. RECT: a call display lists do not hold (it applies at once while a
- * list is being recorded, as before), recorded only for the translator. */
+ * list is being recorded, as before), recorded only for the translator. gx_rec_fast.w (gx_internal.h) decides the
+ * common cases in one load: nothing records, or the game thread records with nothing open; the translator thread
+ * always applies. */
 /* gxstatecache: the call is being applied here; when `gx` holds these words already there is nothing to do */
 #define DD_APPLY(id, ...)                                                            \
     do {                                                                             \
@@ -62,45 +64,68 @@ static void rec(u32 id, const u32* words, u32 n) {
             }                                                                        \
         }                                                                            \
     } while (0)
-#define REC(id, ...)                                         \
-    do {                                                     \
-        GX_CLOSE_PRIMITIVE();                                \
-        if (gx_dl_recording()) {                             \
-            const u32 w_[] = {__VA_ARGS__};                  \
-            rec(REC_##id, w_, sizeof(w_) / sizeof(w_[0]));   \
-            return;                                          \
-        }                                                    \
-        if (gx_rec_on()) {                                   \
-            const u32 w_[] = {__VA_ARGS__};                  \
-            gx_rec_call(REC_##id, w_, sizeof(w_) / sizeof(w_[0])); \
-            return;                                          \
-        }                                                    \
-        DD_APPLY(id, __VA_ARGS__);                           \
+#define REC(id, ...)                                                   \
+    do {                                                               \
+        const uintptr_t rw_ = gx_rec_fast.w;                           \
+        if (rw_ != 0 && !gx_on_translator()) {                         \
+            if (__builtin_expect(rw_ == 1, 1)) {                       \
+                const u32 w_[] = {__VA_ARGS__};                        \
+                gx_rec_call(REC_##id, w_, sizeof(w_) / sizeof(w_[0])); \
+                return;                                                \
+            }                                                          \
+            GX_CLOSE_PRIMITIVE();                                      \
+            if (gx_dl_recording()) {                                   \
+                const u32 w_[] = {__VA_ARGS__};                        \
+                rec(REC_##id, w_, sizeof(w_) / sizeof(w_[0]));         \
+                return;                                                \
+            }                                                          \
+            if (gx_rec_on()) {                                         \
+                const u32 w_[] = {__VA_ARGS__};                        \
+                gx_rec_call(REC_##id, w_, sizeof(w_) / sizeof(w_[0])); \
+                return;                                                \
+            }                                                          \
+        }                                                              \
+        DD_APPLY(id, __VA_ARGS__);                                     \
     } while (0)
-#define REC0(id)                         \
-    do {                                 \
-        GX_CLOSE_PRIMITIVE();            \
-        if (gx_dl_recording()) {         \
-            rec(REC_##id, NULL, 0);      \
-            return;                      \
-        }                                \
-        if (gx_rec_on()) {               \
-            gx_rec_call(REC_##id, NULL, 0); \
-            return;                      \
-        }                                \
-        if (gx_opt_statededup) {         \
-            gx_dd_apply_same(REC_##id, NULL, 0); \
-        }                                \
+#define REC0(id)                                    \
+    do {                                            \
+        const uintptr_t rw_ = gx_rec_fast.w;        \
+        if (rw_ != 0 && !gx_on_translator()) {      \
+            if (__builtin_expect(rw_ == 1, 1)) {    \
+                gx_rec_call(REC_##id, NULL, 0);     \
+                return;                             \
+            }                                       \
+            GX_CLOSE_PRIMITIVE();                   \
+            if (gx_dl_recording()) {                \
+                rec(REC_##id, NULL, 0);             \
+                return;                             \
+            }                                       \
+            if (gx_rec_on()) {                      \
+                gx_rec_call(REC_##id, NULL, 0);     \
+                return;                             \
+            }                                       \
+        }                                           \
+        if (gx_opt_statededup) {                    \
+            gx_dd_apply_same(REC_##id, NULL, 0);    \
+        }                                           \
     } while (0)
-#define RECT(id, ...)                                        \
-    do {                                                     \
-        GX_CLOSE_PRIMITIVE();                                \
-        if (gx_rec_on()) {                                   \
-            const u32 w_[] = {__VA_ARGS__};                  \
-            gx_rec_call(REC_##id, w_, sizeof(w_) / sizeof(w_[0])); \
-            return;                                          \
-        }                                                    \
-        DD_APPLY(id, __VA_ARGS__);                           \
+#define RECT(id, ...)                                                  \
+    do {                                                               \
+        const uintptr_t rw_ = gx_rec_fast.w;                           \
+        if (rw_ != 0 && !gx_on_translator()) {                         \
+            if (__builtin_expect(rw_ == 1, 1)) {                       \
+                const u32 w_[] = {__VA_ARGS__};                        \
+                gx_rec_call(REC_##id, w_, sizeof(w_) / sizeof(w_[0])); \
+                return;                                                \
+            }                                                          \
+            GX_CLOSE_PRIMITIVE();                                      \
+            if (gx_rec_on()) {                                         \
+                const u32 w_[] = {__VA_ARGS__};                        \
+                gx_rec_call(REC_##id, w_, sizeof(w_) / sizeof(w_[0])); \
+                return;                                                \
+            }                                                          \
+        }                                                              \
+        DD_APPLY(id, __VA_ARGS__);                                     \
     } while (0)
 
 /* `cls`: the gxdirty class (GXD_*) the setter wrote; set whether the switch is on or not (one store). */

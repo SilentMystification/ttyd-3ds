@@ -57,7 +57,14 @@
 int gx_rec_mode;
 __thread int gx_tls_translator;
 int gx_rec_direct;
+struct GxRecFast gx_rec_fast;
 GxState gx_game;
+
+/* game thread (the only one that changes what it reads, with its own gx_tls_translator) */
+void gx_rec_fast_update(void) {
+    int quiet = !gx_dl_recording() && !gx_prim_is_open();
+    gx_rec_fast.w = gx_rec_mode == 0 && quiet && !gx_tls_translator ? 0 : gx_rec_on() && quiet ? 1 : 2;
+}
 
 static __thread int t_game; /* the thread that called GXInit */
 
@@ -432,9 +439,15 @@ static void consume(u32 upto) {
     store_sc(&s_rd_pub, s_rd);
 }
 
+#define TR_STACK (256 * 1024)
+
 static void translator_main(void* arg) {
     (void)arg;
     gx_tls_translator = 1;
+    /* this thread's stack, for gx_on_translator: below the entry frame, plus a margin above it */
+    uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
+    gx_rec_fast.tr_lo = sp - TR_STACK;
+    gx_rec_fast.tr_len = TR_STACK + 4096;
     for (;;) {
         u32 w = load_sc(&s_wr_pub);
         if (w != s_rd) {
@@ -1579,8 +1592,10 @@ static void wait_translated(u32 upto) {
     } else if ((s32)(s_rd - upto) < 0) {
         s_lg_end = 0; /* the group is translated now */
         gx_tls_translator = 1;
+        gx_rec_fast_update();
         consume(upto);
         gx_tls_translator = 0;
+        gx_rec_fast_update();
     }
     /* verify: drop the reports no pending call can be read after */
     u32 k = 0;
@@ -1678,6 +1693,7 @@ static void frame_sync(u64 waited, u64 now) {
     s_lists_direct = 0;
     s_lists_rec = 0;
     gx_rec_direct = 1;
+    gx_rec_fast_update();
     if (s_switch_at == 0) {
         gx_rec_switch();
     }
@@ -1689,6 +1705,7 @@ void gx_rec_switch(void) {
     memcpy(&gx_game, &gx, sizeof(gx));
     gx_vdesc_ver[1]++;
     gx_rec_direct = 0;
+    gx_rec_fast_update();
     dd_forget();
 }
 
@@ -1704,6 +1721,7 @@ void gx_rec_excl_begin(int why) {
     }
     gx_rec_fence(why);
     gx_tls_translator = 1;
+    gx_rec_fast_update();
     s_excl = 1;
 }
 
@@ -1711,6 +1729,7 @@ void gx_rec_excl_end(void) {
     if (s_excl) {
         s_excl = 0;
         gx_tls_translator = 0;
+        gx_rec_fast_update();
         dd_forget();
     }
 }
@@ -2011,7 +2030,7 @@ void gx_rec_init(void) {
         PlatThread* t = NULL;
         if (s_ev_work != NULL && s_ev_done != NULL && plat_is_new3ds()) {
             /* below the render thread (0x2E), above the job worker (0x30) */
-            t = plat_thread_create(translator_main, NULL, 256 * 1024, 0x2F, 2, "gxtranslate");
+            t = plat_thread_create(translator_main, NULL, TR_STACK, 0x2F, 2, "gxtranslate");
         }
         if (t == NULL) {
             PLOG_W("gxthread=2: no translator thread on core 2: recording and translating on the game thread (1)");
@@ -2019,6 +2038,7 @@ void gx_rec_init(void) {
         }
     }
     gx_rec_mode = mode;
+    gx_rec_fast_update();
     plat_memstable_set_hook(mem_hook);
     PLOG_I("gxthread=%d: GX calls recorded into a %lu KB ring, translated %s%s", mode,
            (unsigned long)(words / 256u), mode == 2 ? "on core 2" : "on the game thread at each fence",

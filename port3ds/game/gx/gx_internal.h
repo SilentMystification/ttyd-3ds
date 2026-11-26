@@ -10,6 +10,8 @@
 #ifndef PORT3DS_GX_INTERNAL_H
 #define PORT3DS_GX_INTERNAL_H
 
+#include <stdint.h>
+
 #include <dolphin/gx.h>
 #include <dolphin/mtx.h>
 
@@ -302,6 +304,31 @@ extern __thread int gx_tls_translator; /* this thread translates (the translator
 /* gxthread=2: the game thread is translating its calls itself (the start of a frame, gx_rec.c's split) */
 extern int gx_rec_direct;
 static inline int gx_rec_on(void) { return gx_rec_mode != 0 && !gx_tls_translator && !gx_rec_direct; }
+/* The setters' test (gx_state.c's REC macros) in one word, in place of three tests and a TLS read. `w`:
+ *   0: nothing records (gxthread=0), no display list is being recorded and no primitive is open: every thread
+ *      applies the call (DD_APPLY);
+ *   1: the game thread records with no display list and no primitive open: gx_rec_call, on every thread but the
+ *      translator;
+ *   2: any other case: the full test.
+ * The translator thread (gx_tls_translator set) always applies; it is told apart by its stack [tr_lo, tr_lo +
+ * tr_len), set by that thread before it calls a setter (0, 0 without one). The game thread sets gx_tls_translator
+ * only while it translates itself, and then `w` is 2. So each case takes the branch the full test would take.
+ * No TLS read and no mrc (in Azahar about 0.1 us each). gx_rec_fast_update() sets `w` again after every change of
+ * gx_rec_mode, gx_rec_direct, the display list being recorded, gx_prim_open and the game thread's
+ * gx_tls_translator. */
+extern struct GxRecFast {
+    uintptr_t w, tr_lo, tr_len;
+} gx_rec_fast;
+void gx_rec_fast_update(void);
+static inline int gx_on_translator(void) {
+    uintptr_t sp;
+#if defined(__arm__)
+    __asm__("mov %0, sp" : "=r"(sp));
+#else
+    sp = (uintptr_t)__builtin_frame_address(0);
+#endif
+    return sp - gx_rec_fast.tr_lo < gx_rec_fast.tr_len;
+}
 void gx_rec_direct_list(void); /* a list translated directly: counts towards the split */
 void gx_rec_switch(void);
 extern GxState gx_game;
@@ -462,9 +489,10 @@ extern u16* gx_sdl_hint;
 extern int gx_prim_open;
 void gx_end_open_primitive(const void* caller);
 static inline int gx_prim_is_open(void) { return gx_prim_open && !gx_tls_translator; }
+/* gx_rec_fast.w first: 0 and 1 hold only with no primitive open. */
 #define GX_CLOSE_PRIMITIVE()                                     \
     do {                                                         \
-        if (gx_prim_is_open()) {                                 \
+        if (gx_rec_fast.w >= 2 && gx_prim_is_open()) {           \
             gx_end_open_primitive(__builtin_return_address(0)); \
         }                                                        \
     } while (0)

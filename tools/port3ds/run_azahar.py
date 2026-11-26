@@ -495,7 +495,7 @@ def main():
         for line in alog.read_text(errors="replace").splitlines():
             if any(p.search(line) for p in HW_FAULT_PATTERNS):
                 faults.append(line)
-    if faults and not args.allow_hw_faults:
+    if faults and not (args.allow_hw_faults or os.environ.get("TTYD_ALLOW_HW_FAULTS")):
         verdict = False
         reason = f"{len(faults)} hardware-fault line(s) in Azahar log, first: {faults[0].strip()}"
 

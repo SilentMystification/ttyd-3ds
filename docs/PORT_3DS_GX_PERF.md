@@ -830,6 +830,110 @@ Console command (owner-gated; not run): install the release CIA, set `gximmdirec
 
 **Not done:** `vsh_accept.py`, the other scenes of the ten, `gxthread=1` and `3` (only 0 and 2 ran), stereo on (the record is eye-independent: the draws are ordinary `CMD_VSH_DRAW`s; not run with the 3D slider), `gxdirect=0` with `gximmdirect=1` other than the 0-mismatch verify runs (those ran with `gxdirect=0`), any console run. Default stays 0.
 
+## Remaining acceptance gates for `gxdirty` and `gxdirect` (2026-11-26, test agent, no code change)
+
+Build: release CIA of port3ds `e34638af` (`TTYD_CCACHE=1 tools/port3ds/build.sh`), Azahar, `gxbatch=1 gxstatecache=1` (defaults). Every run reports `run_azahar: FAIL: 23 hardware-fault line(s) ... unmapped Write32 0xA5A5A5A5 @ 0x07FFFFA4 at PC 0x004B2010` at 2 to 3 s of Azahar time (rc 1), also with default switches; the runs go on and the shots are complete. Not investigated (boot, before the game starts). The tools were run with `TTYD_ALLOW_HW_FAULTS=1`, a new environment variable of `run_azahar.py` (same effect as `--allow-hw-faults`). `tools/port3ds/stereo_ab.py` is new (gate 5). The disc image of this worktree's profiles is a symlink to the main checkout's `build/azahar-profile/.../game.iso`.
+
+### Gate 1: `vsh_accept.py`, defaults against `gxdirty=1` and against `gxdirect=1`
+
+Method: `vsh_accept.py run` four times per scene (default twice = noise floor, `gxdirty=1`, `gxdirect=1`), 24 shots from presented frame 1140, then `report --ref def1 --noise def2 --test dirty --test direct`. The battle is `map=gon_02 story=30 battle=1 btlauto=perfect`. Results in `build/vsh-accept/<scene>/report.md`.
+
+Static pixels (colour and depth constant over the 24 shots of both runs), reference against test:
+
+| Scene | static px | `gxdirty=1`: colour max / depth max | `gxdirect=1`: colour max / depth max | seams (all runs) | flicker at ref-static px (dirty / direct) |
+|---|---|---|---|---|---|
+| gor_01 | 277 054 | 0 / 0 | 0 / 0 | 0 | 0 / 0 |
+| gon_02 | 285 055 | 0 / 0 | 0 / 0 | 0 | 0 / 0 |
+| aaa_00 | 291 840 | 0 / 0 | 0 / 0 | 0 | 0 / 0 |
+| tik_01 | 276 909 | 0 / 0 | 0 / 0 | 0 | **87 px (105 flips)** / 0 |
+| hei_01 | 256 218 | 1 / 0 | 2 / 0 | 0 | 0 / 0 |
+| jin_00 | 291 840 | 0 / 0 | 0 / 0 | 0 | 0 / 0 |
+| battle | 0 (camera moves) | no static pixels | no static pixels | 0 | 1 px / 0 |
+| eki_00 | 286 812 | 0 / 0 | 0 / 0 | 0 | 0 / 0 |
+| usu_00 | 281 537 | 0 / 0 | 0 / 0 | 0 | 0 / 0 |
+| pik_00 | 279 891 | 0 / 0 | 0 / 0 | 0 | 0 / 0 |
+
+Whole-frame depth comparison (pixels both runs drew, 24 shots): mean abs dz and "order flips" (colour > 32 at 1 <= dz <= 16), test against the noise floor (def1 against def2):
+
+| Scene | noise: mean / flips | `gxdirty=1`: mean / flips | `gxdirect=1`: mean / flips |
+|---|---|---|---|
+| gor_01 | 0.05 / 1 | 0.06 / 1 | 0.01 / 0 |
+| gon_02 | 0.18 / 337 | **2.22 / 4562** | 0.29 / 408 |
+| aaa_00 | 0 / 0 | 0 / 0 | 0 / 0 |
+| tik_01 | 7.88 / 47 | **101.51 / 1020** | 9.97 / 114 |
+| hei_01 | 0.04 / 25 | 0.01 / 1 | 0.25 / **900** |
+| jin_00 | 0 / 0 | 0 / 0 | 0 / 0 |
+| battle | 0.45 / 574 | **3.23 / 6760** | 1.03 / 1413 |
+| eki_00 | 0.07 / 182 | **0.13 / 607** | 0 / 0 |
+| usu_00 | 0.01 / 2 | 0.01 / 7 | 0 / 0 |
+| pik_00 | 0.01 / 12 | 0.01 / 8 | 0.01 / 8 |
+
+Frame times from `gxstats` (ms, default / `gxdirty=1` / `gxdirect=1`): gor_01 83.6 / 66.9 / 83.6, gon_02 about 44 / 34 / 47, aaa_00 50.2 / 33.4 / 50.2, usu_00 66.9 / 50.2 / 66.9, pik_00 100.3 / 83.6 / 100.3, battle about 45 / 36 / 45; eki_00, tik_01, hei_01, jin_00 33.4 in all.
+
+Reading:
+- **Pass:** every static pixel in every scene is identical in colour (max difference 0; hei_01 1 and 2, its own noise floor is 1) and in depth (0). No seam in any run. `gxdirect=1`: no flicker beyond the reference in any scene.
+- **Not within the noise floor, not resolved:** the whole-frame depth statistics are above the def1/def2 floor for `gxdirty=1` in gon_02, tik_01, battle and eki_00, and for `gxdirect=1` in hei_01 (900 flips, worst shot 109; its static pixels are identical and its frame time is the same 33.4 ms) and battle (1413 against 574). `gxdirty=1` in tik_01 also has 87 flicker pixels at pixels static in the reference. In gon_02 and the battle the `gxdirty=1` frame is shorter than the default (gon_02 34 against 44 ms, battle 36 against 45), so the run is at another phase of the game's animations at the same shot numbers, which this method cannot separate from a render difference. The byte-identical `determ` shots can: `gxdirty=1` against default was 36 of 36 in gon_02, tik_01, jin_00, eki_00, usu_00, pik_00 and 6 of 6 in gor_01 and the battle earlier in this document; `gxdirect=1` is identical in all ten scenes (gate 3 and the Stage 3 section, including hei_01). No shot was inspected by eye.
+
+### Gate 2: `gxcache=2` sweep (plan gate 4)
+
+`map_sweep.py --maps gor_01,tik_01,gor_01,hei_01,gon_02 --story 30 --frames 300 --switches "gxcache=2 gxstats=60 gxdirty=1"` and the same with `gxdirect=1`. `gxcache=2` and `gxbatch` exclude each other: with `gxcache=2` the batch is not used (the per-list path runs with the switch on); `gxbatch=2`, the batch's own check, was run in an earlier round. Each run: `map_sweep: 4 of 4 maps ok` (the fifth entry repeats gor_01), 25 `gxstats` windows, **max `mismatched` 0, max `stale` 0**, 4 564 590 hits verified (sum of the per-window `verified`). `gxdirty` verify counters read 0+0 checks (they count only at `gxdirty=2`). **Pass for both switches.** `gxdirty=2` and `gxdirect=2` were not combined with `gxcache=2`.
+
+### Gate 3: `gxdirect=1`, the six scenes not run before
+
+`determ_ab.py --a "" --b "gxdirect=1"`, shots 780 to 785: gon_02, tik_01, jin_00, eki_00, usu_00, pik_00 each **6 of 6 byte-identical (36 of 36)**; every shot has content (69 to 83% of pixels off the commonest colour, 10 500 to 78 300 colours). With gor_01, hei_01, aaa_00 and the battle from the Stage 3 section, `gxdirect=1` is identical in all ten scenes.
+
+`gx_perf_ab.py --a "" --b "gxdirect=1"` (windows ending at frames 722 to 841, one run per cell, ms per frame):
+
+| Scene | frame A -> B | core-0 busy A -> B | render A -> B |
+|---|---|---|---|
+| gon_02 | 38.7 -> 39.3 | 27.2 -> 27.1 | 7.1 -> **3.7** |
+| tik_01 | 19.0 -> 18.8 | 15.1 -> 15.2 | 4.6 -> **2.6** |
+| jin_00 | 33.4 -> 33.4 | 23.9 -> 23.7 | 6.4 -> **3.6** |
+| eki_00 | 19.8 -> 19.8 | 16.1 -> 16.1 | 6.1 -> **3.4** |
+| usu_00 | 50.2 -> 50.2 | 39.2 -> 39.3 | 13.1 -> **6.8** |
+| pik_00 | 66.9 -> 66.9 | 54.7 -> 54.6 | 16.0 -> **8.0** |
+
+Render work falls by 43 to 50% in all six; frame and core-0 times do not change (gon_02 frame +0.6 ms, within the run-to-run spread seen elsewhere). With the four scenes of the Stage 3 section, `gxdirect=1` is measured in all ten scenes.
+
+### Gate 4: `gxthread=2 gxpipeline=1` with today's defaults (lever 5)
+
+`determ_ab.py`, A = switch set, B = the same plus `gxthread=2 gxpipeline=1`, shots 780 to 785:
+
+| Switch set | gor_01 | battle | pik_00 |
+|---|---|---|---|
+| defaults | 6 of 6 identical | 6 of 6 | **0 of 6** |
+| + `gxdirty=1` | 6 of 6 | 6 of 6 | **0 of 6** |
+| + `gxdirect=1` | 6 of 6 | 6 of 6 | **0 of 6** |
+
+**pik_00 fails the identity gate in all three sets.** In the last set's shots (780 to 785): 6572 to 6797 pixels differ (2.2%), 1530 of them by more than 32, max 255; all lie in x 0 to 572, y 14 to 129 (the top of the EFB). Not investigated (GX code is owned by other agents).
+
+`gx_perf_ab.py`, A = `gxthread=0`, B = `gxthread=2 gxpipeline=1`, same extra switch in both (ms per frame; busy = core 0, transl = translator thread):
+
+| Extra | Scene | frame A -> B | busy A -> B | fence B | transl B | render A -> B |
+|---|---|---|---|---|---|---|
+| none | gor_01 | 50.5 -> 55.9 | 45.7 -> 24.5 | 20.8 | 45.9 | 16.5 -> 16.4 |
+| none | battle | 38.4 -> 39.5 | 27.3 -> 15.2 | 13.6 | 26.5 | 7.3 -> 7.4 |
+| none | pik_00 | 66.9 -> 61.9 | 54.7 -> 33.2 | 20.5 | 55.4 | 16.0 -> 15.7 |
+| `gxdirty=1` | gor_01 | 50.2 -> 43.6 | 35.4 -> 24.4 | 9.1 | 37.4 | 16.4 -> 16.5 |
+| `gxdirty=1` | battle | 29.1 -> 35.1 | 22.7 -> 15.5 | 12.6 | 26.3 | 7.3 -> 7.4 |
+| `gxdirty=1` | pik_00 | 50.2 -> 52.9 | 45.1 -> 33.2 | 8.3 | 48.1 | 16.0 -> 15.7 |
+| `gxdirect=1` | gor_01 | 50.5 -> 46.1 | 45.7 -> 24.5 | 11.3 | 40.7 | 7.9 -> 7.8 |
+| `gxdirect=1` | battle | 39.1 -> 40.7 | 27.2 -> 18.0 | 13.3 | 28.9 | 3.8 -> 3.7 |
+| `gxdirect=1` | pik_00 | 66.9 -> 53.5 | 54.7 -> 33.2 | 10.8 | 50.5 | 8.0 -> 7.7 |
+
+Reading: core-0 busy time drops 33 to 46%, but the translator (26 to 55 ms) is the new wall. The frame is faster in 4 of 9 cells (gor_01 with `gxdirty` and with `gxdirect`, pik_00 with none and with `gxdirect`, by 4 to 13 ms) and slower in 5 (the battle in all three sets, gor_01 with no extra switch, pik_00 with `gxdirty=1`). With `gxdirty=1`, `gxthread=0` is already as fast or faster in the battle and pik_00. So the pipelined layout does not win everywhere, and it is not image-identical in pik_00. One run per cell; no decision taken here.
+
+### Gate 5: stereo
+
+New `tools/port3ds/stereo_ab.py`: `determ` plus `stereoforce=1` (simulated 3D slider; the `stereo3d` option is on by default), shots 780 and 781, the EFB (`N.ppm`) and both eye targets (`N.L.ppm`, `N.R.ppm`, 400x240) compared byte for byte, defaults against `gxdirect=1`:
+
+- gor_01: `00780` and `00781`, EFB, L and R: **6 of 6 identical**; left differs from right in both shots (the shots are stereo).
+- battle: **6 of 6 identical**; left differs from right.
+
+### Not run (this round)
+
+`gxdirty=2` or `gxdirect=2` together with `gxcache=2`; `gw_diff.py` with `gxdirty` and `gxdirect` together; the combination `gxdirty=1 gxdirect=1`; more than one run per cell for the timing; stereo in the other eight scenes; any console run.
+
 ## Risks of the cache
 
 - **Hash collisions.** A 32-bit hash over the list bytes, and another over the array elements read. A changed list or array that happens to hash the same draws its old vertices (about 1 in 4 billion per change). `gxcache=2` checks by decoding again.

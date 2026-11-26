@@ -32,6 +32,7 @@
 #include "plat/hud.h"
 #include "plat/pmu.h"
 #include "pica_enc.h"
+#include "pica_model.h"
 #include "plat_internal.h"
 #include "stereo.h"
 
@@ -108,6 +109,13 @@ typedef struct {
     u32 oh_tail_draws, oh_tail_z; /* draws after that mark, and those of them writing depth (stereostats) */
     void* caps[256];           /* the CMD_OH_CAPTURE bodies the render thread fills (imported at reuse) */
     u32 ncaps;
+    /* gxchunk=2: the per-draw words beside each batch chunk (ckref), the chunks' places in ow and ckref, and per draw
+     * the end of its words in each (ckend: pairs) */
+    struct CkReg* ckr;
+    u32* ckref;
+    u32* ckend;
+    u32 nckr, nckref, nckend;
+    int ckover; /* a verify buffer overflowed: the record is not compared */
 } Record;
 
 /* GPU fence for the records (switch gpufence, default 1). The game thread refills a record's vertex and index
@@ -320,6 +328,10 @@ static void oh_log(void);
 static int oh_init(void);
 static int s_oh_state_pending; /* the state changed since the words last sent it (mirrors the replay's) */
 static int s_one; /* switch gxone (GX native step 2; the gxone section after oh_import) */
+static int s_chunk; /* switch gxchunk (GX native step 3; the gxchunk section after the gxone section) */
+static int s_ck_tier_linear = 1; /* the frame list is in linear memory (C3D_FrameEnd(0) flushes it) */
+static void ck_verify(Record* r);
+static void ck_log(u32 frames);
 static u32 s_one_cur[3];
 static void one_vfy(int c, const u32* key, const PlatGpuState* st, int key_sends);
 static int oh_state_one(const PlatGpuState* st);
@@ -417,6 +429,9 @@ static void submit(int present) {
         gpu_fence_wait(s_rec[s_cur].seq); /* the record refilled next is finished on the GPU */
     }
     if (s_onehop) {
+        if (s_chunk == 2) {
+            ck_verify(&s_rec[s_cur]); /* before the import: it reads the record's captures */
+        }
         oh_import(&s_rec[s_cur]); /* the render thread is done with it: its captured words go into the tables */
     }
     s_rec[s_cur].used = 0;
@@ -3052,6 +3067,7 @@ static void direct_log(void) {
 typedef struct {
     const u32* w;
     u32 n, draws;
+    u32 tail; /* gxchunk: the list end after the n words (pica_enc_list_end): the run is a GPU command list */
 } OhWords;
 typedef struct {
     s32 lit, lcount; /* -1: unchanged */
@@ -3166,9 +3182,19 @@ static void oh_close(void) {
         OhWords* c = s_onehop == 1 ? rec_put(CMD_OH_WORDS, sizeof(OhWords)) : side_put(CMD_OH_WORDS, sizeof(OhWords));
         r = oh_rec();
         if (c != NULL) {
-            *c = (OhWords){r->ow + s_om.chunk0, r->now - s_om.chunk0, s_om.chunk_draws};
+            u32 n = r->now - s_om.chunk0, tail = 0;
+            if (s_chunk) {
+                /* the run becomes a command list of its own: citro3d's split end after it (the words stay as they
+                 * are; the render thread copies only the n words when it cannot submit the list) */
+                tail = pica_enc_list_end(r->ow + r->now, n, s_om.chunk_draws != 0);
+                r->now += tail;
+            }
+            *c = (OhWords){r->ow + s_om.chunk0, n, s_om.chunk_draws, tail};
             s_ost.chunks++;
         }
+    }
+    if (s_chunk) {
+        r->now = (r->now + 3u) & ~3u; /* a list starts on a 16-byte boundary (the gap is never executed) */
     }
     s_om.chunk0 = r->now;
     s_om.chunk_draws = 0;
@@ -3200,6 +3226,8 @@ static void oh_record_start(void) {
     r->oh_split = -1;
     r->oh_tail_draws = r->oh_tail_z = 0;
     r->ncaps = 0;
+    r->nckr = r->nckref = r->nckend = 0;
+    r->ckover = 0;
     memset(&s_om, 0, sizeof(s_om));
     s_om.v_scales = 0xFFFFFFFFu;
     s_om.c3d = 1;
@@ -3221,7 +3249,9 @@ static int oh_class(const PlatGpuState* st) {
 }
 
 /* runs of the rows in mask (3 words), as direct_unif_run writes them */
-static u32* oh_rows(u32* w, const u32* mask) {
+static u32* oh_rows_u(u32* w, const u32* mask, const VUnif* u);
+static inline u32* oh_rows(u32* w, const u32* mask) { return oh_rows_u(w, mask, &s_vg); }
+static u32* oh_rows_u(u32* w, const u32* mask, const VUnif* u) {
     u32 i = 0;
     while (i < 96) {
         u32 wd = mask[i >> 5] >> (i & 31);
@@ -3238,7 +3268,7 @@ static u32* oh_rows(u32* w, const u32* mask) {
             j++;
         }
         w = enc_write(w, GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000u | i);
-        w = enc_add(w, GPUCMD_HEADER(0, 0xF, GPUREG_VSH_FLOATUNIFORM_DATA), &s_vg.val[i][0], (j - i) * 4);
+        w = enc_add(w, GPUCMD_HEADER(0, 0xF, GPUREG_VSH_FLOATUNIFORM_DATA), &u->val[i][0], (j - i) * 4);
         i = j;
     }
     return w;
@@ -3254,6 +3284,9 @@ static void oh_mark(void) {
         w = enc_add(w, GPUCMD_HEADER(0, 0xF, GPUREG_FOG_LUT_DATA0), s_om.fog, 128);
     }
     r->now = (u32)(w - r->ow);
+    if (s_chunk) {
+        r->now = (r->now + 3u) & ~3u; /* the next list starts on a 16-byte boundary */
+    }
     s_om.chunk0 = r->now; /* the mark's words are not part of the run */
     OhMark* m = oh_put(CMD_OH_MARK, sizeof(OhMark));
     r = oh_rec();
@@ -4171,6 +4204,497 @@ static int one_init(void) {
     return 1;
 }
 
+/* ---- switch gxchunk: batch chunks and the frame list (GX native step 3, docs/PORT_3DS_GX_NATIVE.md) ----
+ * Requires gxone=1 (so gxonehop=1: the game thread writes the shader path's words, the frame list).
+ *  - Batch chunks: a gxbatch batch (a run of DRAWP draws under one vertex state) gets one chunk, built once by
+ *    plat_gpu_chunk_build: per draw the attribute setup when it changes (the layout block's kept words), the four
+ *    scale rows when they change (the same 32-bit values vsh_scales_rows makes), the cull word (first draw), the draw
+ *    packet with the index address (offset from the attribute base) and count. 16-byte aligned and padded, in a
+ *    plat/memplace placement ("gx chunks", linear memory by default). An id is the store's generation and an index:
+ *    plat_gpu_chunk_draw checks it with one compare; a full store starts again (every id becomes invalid, each batch
+ *    builds again at its next use).
+ *  - Frame list: the record's word arena (the gxonehop words) is a placement too ("gx frame list", 2 x gxonehopkb,
+ *    linear memory by default; QTM only with place=gx_frame_list:qtm and qtmgpu, which needs the cb_qtm probe).
+ *    At a chunk use the game thread does what oh_draw does before the first draw (stereo mark, flush, the class
+ *    blocks whose ids the GPU does not hold), writes the pending uniform rows, then copies the chunk's words (COPY
+ *    mode; the last draw's count patched for a batch called in part). No gx_rec record for these draws.
+ *  - Each run of words ends with citro3d's split end (pica_enc_list_end): the render thread submits it as a command
+ *    list of its own (GX_ProcessCommandList into citro3d's GX queue, after citro3d's pending words as their own
+ *    list), and does only the citro3d work between runs. With the queue near full (20 of 32 entries) it copies the
+ *    run into citro3d's buffer as gxonehop=1 does.
+ *  - Flushes: C3D_FrameEnd(0) flushes the whole linear heap before the queue runs: that one flush per record covers
+ *    the frame list. Outside linear memory (place=) the render thread flushes the frame list once per record.
+ *  - GPU reset: every record starts with no held id (oh_record_start), the reset is applied at a record's start.
+ *  - gxchunk=2: at every chunk use the per-draw words (what gxchunk=0 would write) are built beside it, and when the
+ *    record comes back both word streams go through a register-file model (pica_model.c), compared at every draw. */
+#define CK_MAX_DRAWS 64u
+#define CK_DRAW_WORDS (OH_CAPW + 32u + 2u + 32u) /* a layout block, 4 scale rows (4 runs at most), cull, a packet */
+#define CK_VREG 4096u                            /* gxchunk=2: chunk uses per record */
+#define CK_VEND 16384u                           /* gxchunk=2: chunk draws per record */
+typedef struct CkReg {
+    u32 a0, b0, nd, e; /* start in ow and in ckref, draws, first pair in ckend */
+} CkReg;
+typedef struct {
+    u32 off;  /* word offset in s_ck.mem */
+    u32 cull; /* the GX cull mode the chunk's cull word is for */
+    u16 nd, d0;
+} CkHdr;
+typedef struct {
+    u16 end, cnt;  /* words up to the end of this draw's packet; the offset of its count word */
+    u32 nidx, cum; /* its indices (trimmed), those of the draws up to it */
+    const void* stream;
+    u32 layout, scales;
+    const u16* idx;
+} CkDraw;
+static struct {
+    u32* mem;
+    u32 cap, used; /* words */
+    CkHdr* h;
+    CkDraw* d;
+    u32 hcap, hused, dcap, dused, gen;
+    u32 smask[3]; /* the scale rows */
+} s_ck;
+static VUnif s_ck_vu, s_ck_rvu; /* scratch rows: the chunk's, gxchunk=2's per-draw words */
+static struct {
+    u32 built, notnow, never, resets, uses, stale, draws, words;
+    u32 subs, subcopy, splits; /* render thread */
+    u32 vchecks, vdiffer, vone, vunres, vover, logged;
+} s_ckst;
+static PicaModel *s_ck_ma, *s_ck_mb;
+
+int plat_gpu_chunk_active(void) { return s_chunk; }
+
+/* n less its remainder mod 3 (whole triangles), without a divide */
+static inline u32 trim3(u32 n) { return (u32)(((u64)n * 0xAAAAAAABull) >> 33) * 3u; }
+
+static void ck_reset(void) {
+    s_ck.used = s_ck.hused = s_ck.dused = 0;
+    s_ck.gen = (s_ck.gen + 1) & 0xFFFFu;
+    if (s_ck.gen == 0) {
+        s_ck.gen = 1;
+    }
+    s_ckst.resets++;
+}
+
+/* The kept layout block of (stream, layout); NULL while its capture is pending or not made yet. */
+static const u32* ck_lay(const void* stream, u32 layout, u32* n) {
+    DTab* t = &s_otab[DC_LAY];
+    u32 k[DK_LAY] = {(u32)(uintptr_t)stream, layout};
+    u32* e = dtab_find(t, k, dkey_hash(k, DK_LAY));
+    if (e == NULL || e[1] == OH_PENDING || e[1] == 0) {
+        return NULL;
+    }
+    *n = e[1];
+    return e + 3 + t->keyw;
+}
+
+/* All four scale rows of `scales`, as oh_rows writes rows */
+static u32* ck_scales(u32* w, u32 scales) {
+    vunif_reset_u(&s_ck_vu);
+    s_ck_vu.pend[0] = s_ck_vu.pend[1] = s_ck_vu.pend[2] = 0;
+    vsh_scales_rows(&s_ck_vu, scales);
+    return oh_rows_u(w, s_ck_vu.pend, &s_ck_vu);
+}
+
+/* C3D_DrawElements' packet for u16 triangles at idx */
+static u32* ck_packet(u32* w, const u16* idx, u32 count) {
+    memcpy(w, s_tpl, s_tpl_n * 4);
+    w[s_tpl_idx] = (osConvertVirtToPhys(idx) - s_oh_base) | (u32)C3D_UNSIGNED_SHORT << 31;
+    w[s_tpl_cnt] = count;
+    return w + s_tpl_n;
+}
+
+uint32_t plat_gpu_chunk_build(const PlatGpuChunkDraw* d, uint32_t n, uint32_t cull) {
+    if (!s_chunk || n == 0 || n > CK_MAX_DRAWS) {
+        s_ckst.never++;
+        return PLAT_GPU_CHUNK_NEVER;
+    }
+    for (u32 i = 0; i < n; i++) {
+        u32 c = trim3(d[i].nidx);
+        const u8* lo = (const u8*)d[i].idx;
+        if (d[i].stream == NULL || lo == NULL || c < 3 || PLAT_VSH_STRIDE(d[i].layout) == 0 ||
+            !ixpool_ok(d[i].idx, c) ||
+            osConvertVirtToPhys(d[i].idx) < s_oh_base) {
+            s_ckst.never++;
+            return PLAT_GPU_CHUNK_NEVER; /* a draw plat_gpu_vsh_drawp would skip: stays on the per-draw path */
+        }
+    }
+    if (s_ck.hused >= s_ck.hcap || s_ck.dused + n > s_ck.dcap || s_ck.used + n * CK_DRAW_WORDS + 4 > s_ck.cap) {
+        ck_reset();
+        if (s_ck.used + n * CK_DRAW_WORDS + 4 > s_ck.cap) {
+            s_ckst.never++;
+            return PLAT_GPU_CHUNK_NEVER;
+        }
+    }
+    u32* w0 = s_ck.mem + s_ck.used;
+    u32* w = w0;
+    CkDraw* cd = s_ck.d + s_ck.dused;
+    u32 cum = 0;
+    for (u32 i = 0; i < n; i++) {
+        if (i == 0 || d[i].stream != d[i - 1].stream || d[i].layout != d[i - 1].layout) {
+            u32 ln;
+            const u32* lw = ck_lay(d[i].stream, d[i].layout, &ln);
+            if (lw == NULL) {
+                s_ckst.notnow++;
+                return 0; /* the attribute setup is captured first (per-draw path), then the chunk is built */
+            }
+            memcpy(w, lw, ln * 4);
+            w += ln;
+        }
+        if (i == 0 || d[i].scales != d[i - 1].scales) {
+            w = ck_scales(w, d[i].scales);
+        }
+        if (i == 0) {
+            w = enc_write(w, GPUREG_FACECULLING_CONFIG, (u32)vsh_cull(cull) & 3);
+        }
+        u32 c = trim3(d[i].nidx);
+        cum += c;
+        u32 at = (u32)(w - w0);
+        w = ck_packet(w, d[i].idx, c);
+        cd[i] = (CkDraw){(u16)(w - w0), (u16)(at + s_tpl_cnt), c, cum, d[i].stream, d[i].layout, d[i].scales, d[i].idx};
+    }
+    u32 nw = (u32)(w - w0);
+    if (nw & 3u) { /* 16-byte padding: a write with byte mask 0 (does nothing) */
+        w = enc_write(w, GPUREG_FACECULLING_CONFIG, 0);
+        w[-1] &= ~0xF0000u;
+        nw += 2;
+    }
+    CkHdr* h = &s_ck.h[s_ck.hused];
+    *h = (CkHdr){s_ck.used, cull, (u16)n, (u16)s_ck.dused};
+    s_ck.used += nw;
+    s_ck.dused += n;
+    s_ckst.built++;
+    return s_ck.gen << 16 | ++s_ck.hused;
+}
+
+/* gxchunk=2: the per-draw words oh_draw would write for the chunk's draws from here (s_om and s_vg before the pending
+ * rows go out), into the record's ckref. The region (NULL: not compared). */
+static CkReg* ck_ref(Record* r, const CkDraw* d, u32 nd, u32 last, u32 cull, u32 a0) {
+    if (r->ckover || r->nckr >= CK_VREG || r->nckend + nd > CK_VEND ||
+        r->nckref + OH_DRAW_WORDS + nd * CK_DRAW_WORDS > s_oh_words) {
+        r->ckover = 1;
+        return NULL;
+    }
+    memcpy(&s_ck_rvu, &s_vg, sizeof(VUnif));
+    int lv = s_om.lay_valid;
+    const void* vs = s_om.v_stream;
+    u32 vl = s_om.v_layout, vsc = s_om.v_scales, vc = s_om.v_cull;
+    u32* w = r->ckref + r->nckref;
+    CkReg* g = (CkReg*)r->ckr + r->nckr;
+    *g = (CkReg){a0, r->nckref, nd, r->nckend};
+    for (u32 j = 0; j < nd; j++) {
+        if (!lv || d[j].stream != vs || d[j].layout != vl) {
+            u32 ln;
+            const u32* lw = ck_lay(d[j].stream, d[j].layout, &ln);
+            if (lw == NULL) {
+                s_ckst.vunres++;
+                return NULL; /* evicted since the build: this use is not compared */
+            }
+            memcpy(w, lw, ln * 4);
+            w += ln;
+            lv = 1;
+            vs = d[j].stream;
+            vl = d[j].layout;
+        }
+        if (d[j].scales != vsc) {
+            vsh_scales_rows(&s_ck_rvu, d[j].scales);
+            vsc = d[j].scales;
+        }
+        if (cull != vc) {
+            w = enc_write(w, GPUREG_FACECULLING_CONFIG, (u32)vsh_cull(cull) & 3);
+            vc = cull;
+        }
+        if ((s_ck_rvu.pend[0] | s_ck_rvu.pend[1] | s_ck_rvu.pend[2]) != 0) {
+            w = oh_rows_u(w, s_ck_rvu.pend, &s_ck_rvu);
+            s_ck_rvu.pend[0] = s_ck_rvu.pend[1] = s_ck_rvu.pend[2] = 0;
+        }
+        w = ck_packet(w, d[j].idx, j == nd - 1 ? last : d[j].nidx);
+        r->ckend[(g->e + j) * 2 + 1] = (u32)(w - r->ckref);
+    }
+    r->nckref = (u32)(w - r->ckref);
+    r->nckr++;
+    r->nckend += nd;
+    return g;
+}
+
+int plat_gpu_chunk_draw(uint32_t id, uint32_t cull, uint32_t nd, uint32_t last, uint32_t calls) {
+    u32 hi = (id & 0xFFFFu) - 1;
+    if (s_chunk == 0 || id >> 16 != s_ck.gen || hi >= s_ck.hused) {
+        s_ckst.stale++;
+        return 0;
+    }
+    const CkHdr* h = &s_ck.h[hi];
+    last = trim3(last);
+    const CkDraw* d = s_ck.d + h->d0;
+    if (h->cull != cull || nd == 0 || nd > h->nd || last < 3 || last > d[nd - 1].nidx) {
+        s_ckst.stale++;
+        return 0;
+    }
+    u32 nw = d[nd - 1].end;
+    /* plat_gpu_vsh_drawp's room checks, once for the whole chunk */
+    Record* r = oh_rec();
+    if (r->used + sizeof(CmdHead) + sizeof(VshDrawP) + 64 > RECORD_BYTES) {
+        flush_segment();
+    }
+    oh_need_room(0, nw + PICA_LIST_END_MAX + 4);
+    if (!s_last_vconst_valid) {
+        return 1;
+    }
+    s_stats_frame.vsh_calls += calls;
+    s_stats_frame.vsh_indices += (nd > 1 ? d[nd - 2].cum : 0) + last;
+    s_stats_frame.vsh_draws += nd;
+    s_ckst.uses++;
+    if (!s_last_state_valid) {
+        s_ost.skipped += nd;
+        return 1; /* oh_draw: the replay skips a draw before the record's first state */
+    }
+    /* what oh_draw does before the first draw (for the later draws of a batch it does nothing more) */
+    int cls = oh_class(&s_last_state);
+    if (cls != OHS_SCENE && s_om.after_scene) {
+        oh_mark();
+    }
+    if (!s_om.vsh_mode) {
+        s_om.vsh_mode = 1;
+        s_om.c3d = 1;
+        s_om.v_stream = NULL;
+    }
+    if (s_om.c3d) {
+        oh_put(CMD_OH_FLUSH, 0);
+        s_om.c3d = 0;
+        s_ost.flushes++;
+    }
+    if (s_oh_state_pending || s_om.gpu_valid != 7) {
+        if (oh_state_one(&s_last_state)) {
+            s_om.v_cull = 0;
+        }
+        s_oh_state_pending = 0;
+    }
+    if (!s_om.scissor_empty) {
+        r = oh_rec();
+        u32 a0 = r->now;
+        CkReg* g = s_chunk == 2 ? ck_ref(r, d, nd, last, cull, a0) : NULL;
+        oh_unif_flush();
+        u32* w = r->ow + r->now;
+        memcpy(w, s_ck.mem + h->off, nw * 4);
+        if (last != d[nd - 1].nidx) {
+            w[d[nd - 1].cnt] = last; /* the batch was called in part */
+        }
+        if (g != NULL) {
+            for (u32 j = 0; j < nd; j++) {
+                r->ckend[(g->e + j) * 2] = r->now + d[j].end;
+            }
+        }
+        r->now += nw;
+        s_om.chunk_draws += nd;
+        s_ost.draws += nd;
+        s_om.lay_valid = 1;
+        s_om.v_stream = d[nd - 1].stream;
+        s_om.v_layout = d[nd - 1].layout;
+        s_om.v_cull = cull;
+        /* the rows now as the chunk left them: the last scales, not pending */
+        vsh_scales_rows(&s_vg, d[nd - 1].scales);
+        s_om.v_scales = d[nd - 1].scales;
+        for (int k = 0; k < 3; k++) {
+            s_vg.pend[k] &= ~s_ck.smask[k];
+        }
+        s_ckst.words += nw;
+    }
+    s_om.gdraw += nd; /* gpudrawcut/gpudrawskip numbering (gxchunk is off with them) */
+    if (cls == OHS_SCENE) {
+        oh_stereo_after(cls, 0);
+    } else if (cls == OHS_LAYER) {
+        r = oh_rec();
+        r->oh_tail_draws += nd;
+        r->oh_tail_z += s_last_state.depth_write ? nd : 0;
+    }
+    s_om.packet = NULL;
+    s_last_vdraw = NULL;
+    s_ckst.draws += nd;
+    return 1;
+}
+
+/* Render thread: a run of words as a command list of its own (1), or 0 when the GX queue has no room for it (the
+ * caller copies the words into citro3d's buffer). citro3d's words since its last split go first. */
+static int ck_submit(const OhWords* c) {
+    /* the queue holds 32 and runs only at C3D_FrameEnd: 20 for the lists, the rest for the strip copies (which start
+     * a new frame past 24), the frame's last split, the present and the stereo transfers */
+    if (s_gx_entries + 2 > 20) {
+        s_ckst.subcopy++;
+        return 0;
+    }
+    if (gpuCmdBufOffset != 0) {
+        C3D_FrameSplit(0);
+        s_gx_entries++;
+        s_ckst.splits++;
+    }
+    GX_ProcessCommandList((u32*)c->w, (c->n + c->tail) * 4u, 0);
+    s_gx_entries++;
+    s_ckst.subs++;
+    return 1;
+}
+
+static void ck_feed2(const u32* w, u32 n) {
+    pica_model_feed(s_ck_ma, w, n);
+    pica_model_feed(s_ck_mb, w, n);
+}
+
+/* gxchunk=2, game thread, when the record comes back (its captures filled): both word streams through the model. */
+static void ck_verify(Record* r) {
+    if (r->ckover) {
+        s_ckst.vover++;
+        return;
+    }
+    if (r->nckr == 0) {
+        return;
+    }
+    pica_model_reset(s_ck_ma);
+    pica_model_reset(s_ck_mb);
+    const CkReg* g = r->ckr;
+    u32 ri = 0;
+    for (u8* p = r->data; p < r->data + r->used;) {
+        CmdHead* hd = (CmdHead*)p;
+        u8* body = p + sizeof(CmdHead);
+        p = body + hd->size;
+        if (hd->type == CMD_OH_CAPTURE) {
+            const OhCap* b = (const OhCap*)body;
+            const OhCap* src = b->ref != NULL && b->ref->n > 0 ? b->ref : b;
+            if (src->n > 0) {
+                ck_feed2(src->res, src->n);
+            } else {
+                pica_model_reset(s_ck_ma); /* words the model did not see: both start again */
+                pica_model_reset(s_ck_mb);
+            }
+            continue;
+        }
+        if (hd->type == CMD_OH_MARK) {
+            continue; /* mono: its words are not applied */
+        }
+        if (hd->type != CMD_OH_WORDS) {
+            /* citro3d writes registers here (its flush, setters, a clear, copy or CPU-path draw) that the model does
+             * not see: both start again (after it both word streams send every block again) */
+            pica_model_reset(s_ck_ma);
+            pica_model_reset(s_ck_mb);
+            continue;
+        }
+        const OhWords* c = (const OhWords*)body;
+        u32 o = (u32)(c->w - r->ow), end = o + c->n;
+        while (o < end) {
+            while (ri < r->nckr && g[ri].a0 < o) {
+                ri++;
+                s_ckst.vunres++; /* a region of words the record did not keep */
+            }
+            if (ri < r->nckr && g[ri].a0 == o) {
+                const u32* ends = r->ckend + g[ri].e * 2;
+                u32 b = g[ri].b0;
+                for (u32 j = 0; j < g[ri].nd; j++) {
+                    pica_model_feed(s_ck_ma, r->ow + o, ends[2 * j] - o);
+                    pica_model_feed(s_ck_mb, r->ckref + b, ends[2 * j + 1] - b);
+                    o = ends[2 * j];
+                    b = ends[2 * j + 1];
+                    PicaModelDiff df;
+                    pica_model_cmp(s_ck_ma, s_ck_mb, &df);
+                    s_ckst.vchecks++;
+                    s_ckst.vone += df.one_sided;
+                    if (df.differ != 0) {
+                        s_ckst.vdiffer++;
+                        if (s_ckst.logged < 16) {
+                            s_ckst.logged++;
+                            PLOG_W("gxchunk verify: frame %lu, chunk draw %lu of %lu: %lu differ, first %04lx: chunk "
+                                   "%08lx, per draw %08lx",
+                                   (unsigned long)r->frame, (unsigned long)j, (unsigned long)g[ri].nd,
+                                   (unsigned long)df.differ, (unsigned long)df.first_reg, (unsigned long)df.first_a,
+                                   (unsigned long)df.first_b);
+                        }
+                    }
+                    if (s_ck_ma->draws != s_ck_mb->draws && s_ckst.logged < 16) {
+                        s_ckst.logged++;
+                        PLOG_W("gxchunk verify: frame %lu, draw counts differ (%lu, %lu)", (unsigned long)r->frame,
+                               (unsigned long)s_ck_ma->draws, (unsigned long)s_ck_mb->draws);
+                    }
+                }
+                ri++;
+                continue;
+            }
+            u32 nx = ri < r->nckr && g[ri].a0 < end ? g[ri].a0 : end;
+            ck_feed2(r->ow + o, nx - o);
+            o = nx;
+        }
+    }
+    s_ckst.vunres += r->nckr - ri;
+}
+
+static void ck_log(u32 f) {
+    PLOG_I("gxchunk frame %lu: per frame chunk uses %lu (draws %lu, words %lu), built %lu, not yet %lu, never %lu, "
+           "stale %lu; store resets %lu (%lu of %lu words, %lu chunks)",
+           (unsigned long)s_frame_counter, (unsigned long)(s_ckst.uses / f), (unsigned long)(s_ckst.draws / f),
+           (unsigned long)(s_ckst.words / f), (unsigned long)(s_ckst.built / f), (unsigned long)(s_ckst.notnow / f),
+           (unsigned long)(s_ckst.never / f), (unsigned long)(s_ckst.stale / f), (unsigned long)s_ckst.resets,
+           (unsigned long)s_ck.used, (unsigned long)s_ck.cap, (unsigned long)s_ck.hused);
+    PLOG_I("gxchunk frame %lu: lists submitted %lu, citro3d splits %lu, copied %lu; verify draws %lu differ %lu "
+           "one-sided %lu not compared %lu records over %lu",
+           (unsigned long)s_frame_counter, (unsigned long)(s_ckst.subs / f), (unsigned long)(s_ckst.splits / f),
+           (unsigned long)(s_ckst.subcopy / f), (unsigned long)s_ckst.vchecks, (unsigned long)s_ckst.vdiffer,
+           (unsigned long)s_ckst.vone, (unsigned long)s_ckst.vunres, (unsigned long)s_ckst.vover);
+    u32 logged = s_ckst.logged;
+    memset(&s_ckst, 0, sizeof(s_ckst)); /* the render thread's counters: racy, for the log only */
+    s_ckst.logged = logged;
+}
+
+/* Start-up, after oh_init (the frame list): the chunk store, the scale rows, gxchunk=2's buffers. */
+static int ck_init(void) {
+    u32 kb = (u32)plat_switch_int("gxchunkkb", 256);
+    if (kb < 64 || kb > 2048) {
+        kb = 256;
+    }
+    int h = plat_place_register("gx chunks", kb << 10, 16, PLAT_PREFS(PLAT_TIER_LINEAR, PLAT_TIER_HEAP),
+                                PLAT_PF_GPU_READ);
+    const char* tier = "none";
+    s_ck.mem = h >= 0 ? plat_place_alloc(h, kb << 10, 16) : NULL;
+    if (h >= 0) {
+        plat_place_info(h, NULL, NULL, NULL, &tier);
+    }
+    s_ck.cap = kb << 8;
+    s_ck.hcap = 2048;
+    s_ck.dcap = 4096;
+    s_ck.h = malloc(s_ck.hcap * sizeof(CkHdr));
+    s_ck.d = malloc(s_ck.dcap * sizeof(CkDraw));
+    s_ck.gen = 1;
+    if (s_ck.mem == NULL || s_ck.h == NULL || s_ck.d == NULL) {
+        PLOG_W("gxchunk: no memory for the chunk store: off");
+        return 0;
+    }
+    s_ck_vu.direct = 1;
+    s_ck_rvu.direct = 1;
+    const int rows[4] = {s_uloc_vscale, s_uloc_texsel, s_uloc_texsel + 1, s_uloc_texsel + 2};
+    for (int i = 0; i < 4; i++) {
+        if (rows[i] < 0 || rows[i] >= 96) {
+            PLOG_W("gxchunk: scale row %d out of range: off", rows[i]);
+            return 0;
+        }
+        s_ck.smask[rows[i] >> 5] |= 1u << (rows[i] & 31);
+    }
+    if (s_chunk == 2) {
+        s_ck_ma = malloc(sizeof(PicaModel));
+        s_ck_mb = malloc(sizeof(PicaModel));
+        for (int i = 0; i < 2; i++) {
+            s_rec[i].ckr = malloc(CK_VREG * sizeof(CkReg));
+            s_rec[i].ckref = malloc(s_oh_words * 4);
+            s_rec[i].ckend = malloc(CK_VEND * 2 * 4);
+            if (s_rec[i].ckr == NULL || s_rec[i].ckref == NULL || s_rec[i].ckend == NULL) {
+                s_ck_ma = NULL;
+            }
+        }
+        if (s_ck_ma == NULL || s_ck_mb == NULL) {
+            PLOG_W("gxchunk=2: no memory for the verify buffers: off");
+            return 0;
+        }
+    }
+    PLOG_I("gxchunk=%d: batch chunks (%lu KB, %s), the frame list submitted as command lists (%s)%s", s_chunk,
+           (unsigned long)kb, tier, s_ck_tier_linear ? "linear memory" : "outside linear memory, flushed per record",
+           s_chunk == 2 ? ", per-draw words compared through the register model" : "");
+    return 1;
+}
+
 /* gxonehop=2, render thread after a mono record: the one-hop words (side list; a capture's words from the replay's
  * own table, also handed back to the recording thread) against the words the replay wrote itself. */
 static void ohv_compare(Record* r) {
@@ -4312,8 +4836,22 @@ static int oh_init(void) {
         kb = 512;
     }
     s_oh_words = kb * 256u;
+    int fl = -1; /* gxchunk: the frame list placement (the GPU reads the words) */
+    if (s_chunk) {
+        fl = plat_place_register("gx frame list", 2u * s_oh_words * 4u, 16, PLAT_PREFS(PLAT_TIER_LINEAR, PLAT_TIER_HEAP),
+                                 PLAT_PF_GPU_READ);
+        const char* tier = "none";
+        if (fl >= 0) {
+            plat_place_info(fl, NULL, NULL, NULL, &tier);
+        }
+        if (fl < 0 || strcmp(tier, "HEAP") == 0) {
+            PLOG_W("gxchunk: the frame list is not in memory the GPU reads (%s): off", tier);
+            s_chunk = 0;
+        }
+        s_ck_tier_linear = strcmp(tier, "LINEAR") == 0;
+    }
     for (int i = 0; i < 2; i++) {
-        s_rec[i].ow = memalign(16, s_oh_words * 4);
+        s_rec[i].ow = fl >= 0 ? plat_place_alloc(fl, s_oh_words * 4, 16) : memalign(16, s_oh_words * 4);
         s_rec[i].side = s_onehop == 2 ? malloc(OH_SIDE_BYTES) : NULL;
         if (s_rec[i].ow == NULL || (s_onehop == 2 && s_rec[i].side == NULL)) {
             PLOG_W("gxonehop: no memory for two %lu KB word arenas: off", (unsigned long)kb);
@@ -4355,6 +4893,9 @@ static void oh_log(void) {
            (unsigned long)s_orst.cmp_words);
     if (s_one) {
         one_log(f);
+    }
+    if (s_chunk) {
+        ck_log(f);
     }
     memset(&s_ost, 0, sizeof(s_ost));
     u32 logged = s_orst.logged;
@@ -4464,6 +5005,13 @@ static void render_record(Record* r) {
     if (r->nidx > 0) {
         GSPGPU_FlushDataCache(r->idx, r->nidx * sizeof(u16));
         s_dst.fl_bytes += r->nidx * 2u;
+    }
+    if (s_chunk && !s_ck_tier_linear && r->now > 0) {
+        /* gxchunk: the frame list outside linear memory (place=): its one flush. In linear memory C3D_FrameEnd(0)
+         * flushes the whole linear heap before the queue runs, which covers it. */
+        GSPGPU_FlushDataCache(r->ow, r->now * 4u);
+        s_dst.fl_calls++;
+        s_dst.fl_bytes += r->now * 4u;
     }
     /* shader path: vsh is on from a CMD_VSH_DRAW until the next other draw */
     static C3D_AttrInfo vai;
@@ -4731,11 +5279,17 @@ eye_again:
         case CMD_OH_WORDS: {
             const OhWords* c = (const OhWords*)body;
             RPHASE(9);
-            cmd_put(c->w, c->n);
-            if (c->draws) {
-                C3DX_FLAGS |= C3DXF_DRAWUSED;
+            if (c->tail != 0 && ck_submit(c)) {
+                /* gxchunk: submitted as a command list of its own (its end flushes the framebuffer after draws) */
                 n_draw += c->draws;
-                after_last_draw = 0;
+                after_last_draw = c->draws ? 0 : after_last_draw;
+            } else {
+                cmd_put(c->w, c->n);
+                if (c->draws) {
+                    C3DX_FLAGS |= C3DXF_DRAWUSED;
+                    n_draw += c->draws;
+                    after_last_draw = 0;
+                }
             }
             s_shadow_stale = 1;
             s_orst.chunks++;
@@ -5466,6 +6020,14 @@ void plat_gpu_init(void) {
             s_one = 0;
         }
     }
+    s_chunk = plat_switch_int("gxchunk", 0);
+    if (s_chunk < 0 || s_chunk > 2) {
+        s_chunk = 0;
+    }
+    if (s_chunk && (s_one != 1 || !s_gpu_fence || plat_switch_has("gpudrawcut") || plat_switch_has("gpudrawskip"))) {
+        PLOG_W("gxchunk: off (it needs gxone=1 and gpufence=1, and no gpudrawcut/gpudrawskip)");
+        s_chunk = 0;
+    }
     if (s_onehop) {
         s_direct = 1; /* gxonehop implies gxdirect=1 (its verify mode is gxonehop=2) */
     }
@@ -5481,6 +6043,9 @@ void plat_gpu_init(void) {
     if (!s_onehop && s_one) {
         PLOG_W("gxone: off (gxonehop could not start)");
         s_one = 0;
+    }
+    if (s_chunk && (!s_one || !ck_init())) {
+        s_chunk = 0;
     }
     s_vr.direct = s_direct != 0;
     s_vg.direct = 1;

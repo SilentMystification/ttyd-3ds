@@ -1019,6 +1019,8 @@ Rows for the switch table:
 | `gxdirty=0/1/2` | 0 (default): every state version change rebuilds the whole PICA state. 1: setters return early when their values are in force, others mark their class dirty; only dirty classes are rebuilt and sent (`plat_gpu_set_state_dirty`), and the uniform block by parts. 2: as 1, plus a full rebuild compared at every switch-off rebuild (`gxdirty verify` warnings, `gxdirty frame N:` line with `gxthreadstats`) |
 | `gxone=0/1/2` | GX native step 2 (docs/PORT_3DS_GX_NATIVE.md, "Step 2 as built"). 0 (default) off. 1: the dirty state classes (TEV with fog, textures, pixel with scissor/viewport) are interned at the draw boundary by their GX bytes; each id owns a PICA block built once by the port's own encoders (`plat/pica_enc.c`); the back end compares only ids and copies the blocks into the record. Implies `gxdirty`, `gxonehop=1`, `gximmdirect=1`, `gxthread=0`. 2: as `gxonehop=1` (keys and citro3d captures write the record) with every id block compared to the key path's words, the send decisions and the regions checked, and `gxdirty=2`; `gxone frame N:` lines with `gxthreadstats=N` |
 | `gxchunk=0/1/2` | GX native step 3 (docs/PORT_3DS_GX_NATIVE.md, "Step 3 as built"). Needs `gxone=1` (off with `gxone=2`, `gpufence=0`, `gpudrawcut`, `gpudrawskip`). 0 (default) off. 1: each gxbatch batch gets one prebuilt chunk of PICA words (attribute setup, scale rows, cull, draw packets) that the game thread copies into the frame list at a use; every word run of the frame list (placement `gx frame list`, linear memory) is submitted by the render thread as a command list of its own (`GX_ProcessCommandList`) instead of being copied into citro3d's buffer. 2: as 1, and the per-draw words of every chunk use are built beside it; when the record comes back both go through a PICA register-file model, compared at every chunk draw (`gxchunk verify` warnings). `gxchunkkb=N`: the chunk store (placement `gx chunks`, default 256). With `gxthreadstats=N`: a `gxchunk frame N:` line (chunk uses, draws, words, builds, store resets, lists submitted, citro3d splits, runs copied; verify draws compared, differ, one-sided, not compared) |
+| `gximmfl=0/1/2` | GX native step 4 (docs/PORT_3DS_GX_NATIVE.md, "Step 4 as built"). Needs `gxchunk=1` or `2` (so `gxone=1`, `gxthread=0`). 0 (default) off. 1: `GXEnd` routes an immediate primitive with the eligibility bits of its classes (vertex class plan, uniform block parts), converts it into the ring chunk and writes the draw into the frame list in one pass; the triangle indices go straight into the record's index arena. The pass-group route and the K hysteresis are unchanged (same words as 0). 2: as 1, and each immediate draw's old route bits and index list are compared on the game thread, its words (the old path's, built beside) through the register-file model (`gximmfl verify` and `gxchunk verify` warnings). With `gxthreadstats=N`: a `gximmfl frame N:` line (draws, merged, none; front-end checks, route differ, index differ) |
+| `gximmnow=0/1` | 0 (default). 1: a new immediate draw's pass-group record starts with the streak K (its group takes the shader path in its first frame when nothing in it is ineligible). **Not identical** to 0: up to K frames after a load, immediate draws that 0 keeps on the CPU path take the shader. Owner question open |
 | `gxfogcache=0/1` | 1 (default): the fog LUT is recomputed only when the fog parameters change and goes to the back end with an id instead of being hashed; 0 recomputes and hashes it on every rebuild (A/B) |
 | `gxunlit=0/1` | 1 (default): unlit colour channels skip `channel_color` and the eye-space normal; 0 the general path (A/B) |
 | `gxmerge=0/1` | 1 (default): consecutive draws with nothing recorded between them extend one draw command (`plat/gpu.c`); 0 one command per draw (A/B). `gxstats` shows `gpu draws N (of M calls)` |
@@ -1378,3 +1380,41 @@ Build the release CIA first: `TTYD_CCACHE=1 tools/port3ds/build.sh`. C1 = `gxdir
 2. One `GX_ProcessCommandList` per run (a handful per frame) instead of one list per record: GSP and P3D interrupt cost per list.
 3. The framebuffer flush at the end of every run with draws (more flushes than citro3d's one per split).
 4. QTM for the frame list (`place=gx_frame_list:qtm qtmgpu`): only after `cb_qtm` passes; GSP's address check of a QTM command list is unknown.
+
+## Step 4 of the native plan: `gximmfl` (2026-11-27)
+
+Design and files: docs/PORT_3DS_GX_NATIVE.md, "Step 4 as built". Switch rows: "For PORT_3DS_TESTING.md" above. Default 0. Built on `gxchunk` (step 3, `f1d66a5d`).
+
+### What changes per immediate draw (C1 + `gxone=1 gxchunk=1 gximmfl=1`)
+
+| Per immediate draw (pik_00: about 1 150 per frame) | `gxchunk=1` | `+ gximmfl=1` |
+|---|---|---|
+| route bits | `gx_vsh_imm_reasons` (8-attribute loop, `tri_count` with divides) | the vertex class plan's bits (computed once per plan) + the primitive's bit (shifts and a multiply) |
+| plan | looked up in `gx_imm_convert`, after the route | looked up once, before the route, and given to the conversion |
+| pass-group route | `gx_vsh_route` | the same call (K hysteresis, decal links unchanged) |
+| index list | `emit_tris` into a static buffer, `memcpy` into the record's index arena | `emit_tris` straight into the index arena |
+| hand-over | `gx_vsh_imm_done` (a `GxVshImm`), `plat_gpu_vsh_light`, `plat_gpu_vsh_const`, `plat_gpu_vsh_draw`, `oh_draw` (with its pool and DRAWP tests) | `plat_gpu_imm_begin` (light and block by id, room), `plat_gpu_imm_end` (merge test, `oh_draw`'s words for a draw from the arena) |
+| index address | `osConvertVirtToPhys` per draw | the arena's physical base, once per record (linear memory; a heap placement converts per draw) |
+
+Not removed (needed for the same words): the pass-group key and record probe (`group_for`, `rec_for`, `touch`), `vsh_state` (gxdirty parts), the uniform block compare by id, the room checks, the class blocks by id (`oh_state_one`), the uniform row diff (`vsh_const_rows`).
+
+### Checks done without the emulator
+
+- Builds: dev and release (`--no-cia`) clean, no new warnings in the changed files; no `src/` change, so the GameCube matching build is unchanged.
+- Host: `gx_vsh_imm_nidx` against `tri_count` x 3 and against `emit_tris`' count, every primitive type, n = 0..65535: 0 mismatches (scratch test). `pica_model_test` on the two gpuhang/gpudump lists: ok, 0 differ (585 and 559 draws).
+- Hot sizes (release, LTO, `nm -S`, this build against a release build of `f1d66a5d` made the same way): no `GXSet*`, `GXLoad*`, `GXBegin`, `GXCallDisplayList`, `gx_rec_call`, `gx_rec_list`, `bat_open`, `vsh_prepare` changed size. Changed: `GXInit` +168 (start-up: the switch), `gx_rec_frame` +52 (the verify note in the gxthreadstats log), `rec_for` +100 (`gximmnow`), `gx_imm_convert` 5784 -> 3136 with `imm_plan_build` (2680) now out of line (it is built on a plan miss only, about 4 a frame in pik_00; it is shared with `gx_imm_plan`), `draw_from_reader` 1440 -> 5120 (`gx_draw_imm_fl` with the conversion inlined), `plat_gpu_imm_end` 2356 and `plat_gpu_imm_begin` 268 new, `plat_gpu_vsh_const` -4, `capture_efb` renamed by LTO (same size -16).
+
+### Gates (to run; Azahar was busy)
+
+Build the release CIA first: `TTYD_CCACHE=1 tools/port3ds/build.sh`. C1 = `gxdirty=1 gxdirect=1 gximmdirect=1 texfast=1 texasync=1`; C3 = C1 + `gxthread=2 gxpipeline=1 gxsdl=1 gxrecfuse=1 gxreclgroup=1`; G = C1 + `gxone=1`; K = G + `gxchunk=1`; I = K + `gximmfl=1`; IV = K + `gximmfl=2`.
+
+1. Verify mode, 4 scenes: `run_azahar.py --build build/3ds/game/ttyd.cia --frames 841 --switches "<scene> IV gxthreadstats=60"` for gor_01 (`map=gor_01 story=30`), pik_00 (`map=pik_00 story=30`), usu_00 (`map=usu_00 story=30`), battle (`map=gon_02 story=30 battle=1 btlauto=perfect`). Pass: start line `gximmfl=2: immediate draws straight into the frame list, ...`; every `gximmfl frame N:` line with draws above 0 (pik_00 about 1 150 with merged), `route differ 0 index differ 0`; the `gxchunk frame N:` line (with `gxchunk=1` its verify counts are the immediate draws' alone) `verify draws` above 0, `differ 0`, `records over 0`, "not compared" small; no `gximmfl verify` or `gxchunk verify` warning.
+2. Sweeps: `map_sweep.py --area tik --story 30 --switches "IV gxthreadstats=60"` and `--area jin`: every map ok, the same log conditions in every map's log.
+3. `determ_ab.py --a "C1" --b "I" --scenes gor_01,pik_00,usu_00,battle` (shots 780-785, 6 of 6 per scene), then `--a "C3" --b "I"` and `--a "K" --b "I"`.
+4. `gw_diff.py` 1600-frame padscript in gor_01 (`map=gor_01 story=30 determ gwdump=10` and the A2 padscript), A = C1, B = I: 160 records equal.
+5. Stereo: `stereo_ab.py --a "C1 stereoforce=1" --b "I stereoforce=1" --scenes gor_01 --count 3`: EFB, left, right identical.
+6. GPU hang: `run_azahar.py --build build/3ds/game/ttyd.cia --frames 840 --switches "map=gor_01 story=30 I gpuhangtest=700 gpuhangrecover=1 shots=1 shotfrom=820 shotmax=1"`: `reset #1 done`, the shot has content.
+7. Timings per thread: `gx_perf_ab.py --repeat 2 --scenes gor_01,pik_00,usu_00,battle --a "K" --b "I"`, `--a "C1" --b "I"`, `--a "C3" --b "I"`, and `--a "K gpucore=1" --b "I gpucore=1"` (`--allow-hw-faults` if the release build's boot fault lines appear). Report frame, core-0 busy, render. Expected (not measured): core 0 less by the per-draw hand-over and index copy only; the route and uniform work stay.
+8. Optional, not identical by design: `gximmnow=1` (`determ_ab.py --a "I" --b "I gximmnow=1"`): differences expected only in the first K (30) frames after a map load; shots 780-785 should be identical once the scene is steady.
+
+**Console-test items** (owner-gated): the index arena's physical base taken once per record (linear memory is physically contiguous: the packet's index address must equal `osConvertVirtToPhys` of the draw's indices; `gximmfl=2` compares exactly that on Azahar).

@@ -27,6 +27,18 @@ Rules at each draw trigger (see rule_checks), tagged in the output:
   [probe]       rules confirmed on the New 3DS by the gpuprobe (docs/PORT_3DS_GPU_RULES.md). None yet: see
                 PROBE_RULES and TEX_ALIGN_PROBE.
 
+Memory dump (gpudump.c writes <stem>.mem and <stem>.txt beside <stem>.bin; both are found automatically, or named
+with --mem / --txt): with it every draw is also checked against the bytes the GPU reads.
+  [data]   a vertex index (or first + count of a DRAWARRAYS) that reaches past the end of an attribute buffer (stride x
+           vertices over the vertex arena size, or the linearGetSize of a stream segment), an attribute or index
+           buffer in no dumped region, a vertex layout wider than its stride, NUMVERTICES not a multiple of 3 for a
+           triangle draw.
+  [limit]  texture size below 8 or above 1024, not a power of two, a texture (all its mip levels) that runs past the
+           end of the linear heap or VRAM.
+  [guess]  texture base not 128-byte aligned (any format; the real rule is unknown until the probe says).
+--draws prints one line per draw trigger: its number (0-based; gpudrawcut and gpudrawskip use the same number), the
+vertex count, the index range, each attribute buffer's span against its allocation, and the textures bound.
+
 Findings flagged as invalid: unknown register, register span past the register file, byte mask 0, nonzero
 padding word, list ends inside a command, an address outside linear memory (0x20000000-0x30000000 physical)
 and VRAM (0x18000000-0x18600000), a misaligned buffer address (attribute buffers 16 bytes, others 8), an
@@ -34,6 +46,7 @@ index or attribute offset that leaves the buffer region, texture dimension 0 or 
 """
 import argparse
 import difflib
+import os
 import struct
 import sys
 
@@ -364,6 +377,164 @@ def comp_str(m):
     return "".join(c for i, c in enumerate("xyzw") if m >> i & 1) or "none"
 
 
+class Mem:
+    """The regions of a <stem>.mem file (gpudump.c): phys, virt, len (bytes dumped), alloc (the allocation size when
+    known, else 0), kind (0 vertex arena, 1 index arena, 2 other buffer, 3 texture sample), data."""
+
+    def __init__(self, path, txt=None):
+        d = open(path, "rb").read()
+        magic, n = struct.unpack_from("<II", d, 0)
+        if magic != 0x314D454D:
+            raise ValueError("%s: not a MEM1 file" % path)
+        self.regions = []
+        off = 8 + 20 * n
+        for i in range(n):
+            phys, virt, ln, alloc, kind = struct.unpack_from("<5I", d, 8 + 20 * i)
+            self.regions.append((phys, virt, ln, alloc, kind, d[off : off + ln]))
+            off += ln
+        self.txt = {}
+        if txt:
+            for line in open(txt):
+                if "=" in line:
+                    k, v = line.strip().split("=", 1)
+                    self.txt[k] = v
+        lin = int(self.txt.get("linear_phys", "20000000"), 16)
+        if "linear" in self.txt:
+            a, b = (int(x, 16) for x in self.txt["linear"].split("-"))
+            self.linear = (lin, lin + b - a)
+        else:
+            self.linear = (lin, lin + 0x2000000)
+
+    def find(self, phys):
+        """The region holding phys, or None: one that starts exactly there wins, then a buffer region over a texture
+        sample."""
+        best = None
+        for r in self.regions:
+            if r[0] == phys and r[4] != 3:
+                return r
+            if r[0] <= phys < r[0] + r[2]:
+                if best is None or (best[4] == 3 and r[4] != 3):
+                    best = r
+        return best
+
+    def read(self, phys, n):
+        r = self.find(phys)
+        if r is None or phys + n > r[0] + r[2]:
+            return None
+        return r[5][phys - r[0] : phys - r[0] + n]
+
+
+ATTR_TYPE_SIZE = (1, 1, 2, 4)  # byte, ubyte, short, float
+PAD_BYTES = {12: 4, 13: 8, 14: 12, 15: 16}
+TEX_BPP = {"RGBA8": 32, "RGB8": 24, "RGB5A1": 16, "RGB565": 16, "RGBA4": 16, "LA8": 16, "HILO8": 16, "L8": 8, "A8": 8,
+           "LA4": 8, "L4": 4, "A4": 4, "ETC1": 4, "ETC1A4": 8}
+TEX_REGS = [(0x82, 0x84), (0x92, 0x94), (0x9A, 0x9C)]  # (DIM, LOD) of units 0-2; ADDR and TYPE are in TEX_UNITS
+
+
+def attr_buffers(state):
+    """[(buffer number, start phys, stride, extent in bytes of one vertex's attributes)] for the buffers a draw reads
+    (ATTRIBBUFFERS_FORMAT_LOW/HIGH: 4 bits per attribute, type in bits 0-1 and components-1 in bits 2-3;
+    ATTRIBBUFFERk_CONFIG1/2: 4-bit permutation entries, 12-15 are 4/8/12/16 bytes of padding, stride in bits 16-23 and
+    the entry count in bits 28-31 of CONFIG2)."""
+    base = (state.get(0x200, 0) << 3) & 0xFFFFFFFF
+    lo, hi = state.get(0x201, 0), state.get(0x202, 0)
+    fmts = []
+    for a in range(12):
+        v = (lo >> 4 * a if a < 8 else hi >> 4 * (a - 8)) & 0xF
+        fmts.append(ATTR_TYPE_SIZE[v & 3] * ((v >> 2) + 1))
+    out = []
+    for b in range(12):
+        c2 = state.get(0x205 + 3 * b, 0)
+        count = c2 >> 28
+        if count == 0:
+            continue
+        perm = state.get(0x204 + 3 * b, 0) | (c2 & 0xFFFF) << 32
+        extent = sum(PAD_BYTES[n] if n >= 12 else fmts[n] for n in (perm >> 4 * k & 0xF for k in range(count)))
+        out.append((b, (base + state.get(0x203 + 3 * b, 0)) & 0xFFFFFFFF, (c2 >> 16) & 0xFF, extent))
+    return out
+
+
+def tex_info(state, unit):
+    ra, rt = TEX_UNITS[unit]
+    rd, rl = TEX_REGS[unit]
+    if ra not in state:
+        return None
+    dim = state.get(rd, 0)
+    w, h = dim >> 16 & 0x7FF, dim & 0x7FF
+    fmt = TEX_FORMATS.get(state.get(rt, 0) & 0xF, "format %d" % (state.get(rt, 0) & 0xF))
+    levels = (state.get(rl, 0) >> 16 & 0xF) + 1  # LOD register bits 16-19: highest level
+    size = sum(max(w >> lv, 1) * max(h >> lv, 1) * TEX_BPP.get(fmt, 32) // 8 for lv in range(levels))
+    return {"unit": unit, "addr": (state[ra] << 3) & 0xFFFFFFFF, "w": w, "h": h, "fmt": fmt, "levels": levels, "size": size}
+
+
+def draw_analysis(state, mem, n, pos, elements, info=None):
+    """Data-dependent checks at draw n (a DRAWARRAYS or DRAWELEMENTS trigger). mem: Mem or None. info: a dict filled
+    for --draws. Returns [(pos, message)]."""
+    out = []
+    nv = state.get(R_NUMVERTICES, 0)
+    first = state.get(0x22A, 0)
+    bufs = attr_buffers(state)
+    D = "draw %d: " % n
+    prim = (state.get(0x25E, 0) >> 8) & 3
+    if info is not None:
+        info.update(n=n, elements=elements, nv=nv, first=first, imin=None, imax=None, spans=[], tex=[])
+    if nv and prim == 0 and nv % 3:
+        out.append((pos, "[data] %sNUMVERTICES %d is not a multiple of 3 for a triangle draw" % (D, nv)))
+    hi = first + nv - 1 if nv else None  # highest vertex fetched
+    if elements:
+        cfg = state.get(0x227, 0)
+        u16 = cfg >> 31
+        ib = ((state.get(0x200, 0) << 3) + (cfg & 0x0FFFFFFF)) & 0xFFFFFFFF
+        hi = None
+        if mem is not None and nv:
+            data = mem.read(ib, nv * (2 if u16 else 1))
+            if data is None:
+                out.append((pos, "[data] %sindex buffer %08X (%d x %d bytes) is in no dumped region" % (D, ib, nv, 2 if u16 else 1)))
+            else:
+                idxs = struct.unpack("<%d%s" % (nv, "H" if u16 else "B"), data)
+                info and info.update(imin=min(idxs), imax=max(idxs))
+                hi = first + max(idxs)
+    elif info is not None:
+        info.update(imin=first, imax=first + nv - 1)
+    for b, start, stride, extent in bufs:
+        if stride < extent:
+            out.append((pos, "[data] %sbuffer %d: stride %d is smaller than its attributes (%d bytes)" % (D, b, stride, extent)))
+        need = start + hi * stride + extent if hi is not None else start
+        r = mem.find(start) if mem is not None else None
+        if mem is not None and r is None:
+            out.append((pos, "[data] %sbuffer %d at %08X is in no dumped region" % (D, b, start)))
+        # where the buffer really ends: the arenas have their size; a stream segment has its linearGetSize when the
+        # buffer starts at the allocation start; otherwise unknown
+        end = r[0] + r[3] if r is not None and r[3] else None
+        avail = None if end is None or stride == 0 else (end - start) // stride
+        if info is not None:
+            info["spans"].append((b, start, stride, extent, need, end, avail))
+        if hi is not None and end is not None and need > end:
+            out.append((pos, "[data] %sbuffer %d (%08X, stride %d, %s): vertex %d needs bytes up to %08X but the allocation ends at %08X (%d vertices available)"
+                        % (D, b, start, stride, "vertex arena" if r[4] == 0 else "stream", hi, need, end, avail)))
+    cfg = state.get(R_TEX_CONFIG, 0)
+    lin_a, lin_b = mem.linear if mem is not None else (0x20000000, 0x30000000)
+    for unit in range(3):
+        if not cfg >> unit & 1:
+            continue
+        t = tex_info(state, unit)
+        if t is None or t["addr"] == 0:
+            continue
+        if info is not None:
+            info["tex"].append(t)
+        if not 8 <= t["w"] <= 1024 or not 8 <= t["h"] <= 1024:
+            out.append((pos, "[limit] %stexture unit %d: %dx%d is outside 8..1024" % (D, unit, t["w"], t["h"])))
+        if t["w"] & (t["w"] - 1) or t["h"] & (t["h"] - 1):
+            out.append((pos, "[limit] %stexture unit %d: %dx%d is not a power of two" % (D, unit, t["w"], t["h"])))
+        a, e = t["addr"], t["addr"] + t["size"]
+        if not (lin_a <= a and e <= lin_b) and not (VRAM[0] <= a and e <= VRAM[1]):
+            out.append((pos, "[limit] %stexture unit %d (%s %dx%d, %d levels): %08X..%08X is outside the linear heap %08X-%08X and VRAM"
+                        % (D, unit, t["fmt"], t["w"], t["h"], t["levels"], a, e, lin_a, lin_b)))
+        if a % 128:
+            out.append((pos, "[guess] %stexture unit %d (%s) base %08X is not 128-byte aligned" % (D, unit, t["fmt"], a)))
+    return out
+
+
 def rule_checks(state, shader, pos, tag_prefix=""):
     """Checks at a draw trigger. state: register id -> last value written. shader: dict with the vertex shader's
     uploaded code and operand descriptors. Returns [(pos, message)]."""
@@ -439,13 +610,13 @@ def collect_shader(cmds):
     return shader
 
 
-def check(cmds, shader=None, collect_only=False):
+def check(cmds, shader=None, collect_only=False, mem=None, draws=None, data=True):
     findings = []
     attr_base = None  # ATTRIBBUFFERS_LOC as a physical address
     state = {}
     if shader is None:
         shader = {"code": [], "opdescs": []}
-    code_idx = opd_idx = 0
+    code_idx = opd_idx = ndraw = 0
     for c in cmds:
         if c.reg < 0:
             findings.extend((c.pos, b) for b in c.bad)
@@ -475,7 +646,13 @@ def check(cmds, shader=None, collect_only=False):
         if collect_only:
             continue
         if c.reg in (R_DRAWARRAYS, R_DRAWELEMENTS):
-            findings.extend(rule_checks(state, shader, c.pos))
+            findings.extend((p, "%s  (draw %d)" % (m, ndraw)) for p, m in rule_checks(state, shader, c.pos))
+            info = {} if draws is not None else None
+            if data:
+                findings.extend(draw_analysis(state, mem, ndraw, c.pos, c.reg == R_DRAWELEMENTS, info))
+            if draws is not None:
+                draws.append(info)
+            ndraw += 1
         for b in c.bad:
             findings.append((c.pos, b))
         if c.mask == 0:
@@ -550,7 +727,7 @@ def self_test():
     N = REG
     draw = enc(N["DRAWARRAYS"], [1])
     nv = lambda n: enc(N["NUMVERTICES"], [n])
-    f = lambda words: [m for _, m in check(decode(words))]
+    f = lambda words: [m for _, m in check(decode(words), data=False)]
     n_fail = 0
 
     def expect(name, words, needle):
@@ -609,12 +786,25 @@ def probe_dir(path):
     return rc
 
 
+def print_draws(draws):
+    """One line per draw trigger (--draws)."""
+    for d in draws:
+        sp = " ".join("b%d@%08X s%d %s" % (b, st, sd, "%d vtx avail" % avail if avail is not None else "avail ?")
+                      for b, st, sd, ex, need, end, avail in d["spans"])
+        tx = " ".join("t%d %s %dx%d@%08X" % (t["unit"], t["fmt"], t["w"], t["h"], t["addr"]) for t in d["tex"])
+        rng = "" if d["imax"] is None else " idx %d..%d" % (d["imin"], d["imax"])
+        print("   draw %4d %s n=%d first=%d%s | %s | %s" % (d["n"], "E" if d["elements"] else "A", d["nv"], d["first"], rng, sp, tx))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("a", nargs="?")
     ap.add_argument("b", nargs="?")
     ap.add_argument("--self-test", action="store_true", help="test the rules on built lists")
     ap.add_argument("--probe-dir", help="check every list saved by the gpuprobe in this folder")
+    ap.add_argument("--mem", help="the <stem>.mem memory dump (default: beside the list)")
+    ap.add_argument("--txt", help="the <stem>.txt of the list (default: beside the list)")
+    ap.add_argument("--draws", action="store_true", help="print one line per draw trigger")
     ap.add_argument("--shader", help="a list that uploads the vertex shader (citro3d uploads it once, so a hang dump "
                                      "has no code); the shader output rule reads the code from it")
     ap.add_argument("-n", type=int, default=20, help="differences to print")
@@ -635,7 +825,19 @@ def main():
         cmds = decode(words)
         lists.append((path, cmds))
         print("== %s: %d words, %s" % (path, len(words), summary(cmds)))
-        fs = check(cmds, copy_shader(shader_src))
+        stem = path[:-4] if path.endswith(".bin") else path
+        mem_path = args.mem if args.mem and len(lists) == 1 else stem + ".mem"
+        txt_path = args.txt if args.txt and len(lists) == 1 else stem + ".txt"
+        mem = None
+        if os.path.exists(mem_path):
+            mem = Mem(mem_path, txt_path if os.path.exists(txt_path) else None)
+            print("   memory dump %s: %d regions, %d bytes" % (mem_path, len(mem.regions), sum(r[2] for r in mem.regions)))
+        else:
+            print("   no memory dump (%s): index/attribute/texture data checks are skipped" % mem_path)
+        draws = []
+        fs = check(cmds, copy_shader(shader_src), mem=mem, draws=draws)
+        if args.draws:
+            print_draws(draws)
         if fs:
             rc = 1
             print("   %d suspicious writes:" % len(fs))

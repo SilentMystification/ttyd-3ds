@@ -127,6 +127,7 @@ void plat_gpudump_init(void);
 void plat_gpudump_record(u32 seq, u32 frame, const void* verts, u32 vert_bytes, const void* idx, u32 idx_bytes);
 void plat_gpudump_hang(u32 seq, u32 done, u32 game_frame, const char* phase_line);
 int plat_gpudump_test_hang(u32 frame);
+int plat_gpudump_draw_filter(u32 frame, u32 seq, u32 idx); /* switches gpudrawcut / gpudrawskip: 0 drops the draw */
 static void gpudump_note(void);
 
 static volatile int s_fence_overdue; /* a fence wait passed its first 2 s timeout and is still waiting */
@@ -2342,6 +2343,7 @@ static void render_record(Record* r) {
      * GX state and the frame's vertex buffer back. */
     const PlatGpuState* cur_state = NULL;
     int restore = 0;
+    u32 gdraw = 0; /* draw calls made or dropped by the gpudrawcut/gpudrawskip filter, in list order */
     u32 n_draw = 0, n_clear = 0, n_copy = 0, n_skip = 0, after_last_draw = 0; /* for the screenshot log */
     /* stereo: the state in force at the 2D tail's start, for the second eye's replay */
     const void *fog_now = NULL, *split_fog = NULL;
@@ -2428,7 +2430,9 @@ eye_again:
                     scissor_skip_log();
                     break;
                 }
-                C3D_DrawArrays(GPU_TRIANGLES, (int)d[0], (int)(d[1] - d[1] % 3));
+                if (plat_gpudump_draw_filter(r->frame, r->seq, gdraw++)) {
+                    C3D_DrawArrays(GPU_TRIANGLES, (int)d[0], (int)(d[1] - d[1] % 3));
+                }
                 n_draw++;
                 after_last_draw = 0;
             }
@@ -2541,7 +2545,9 @@ eye_again:
                 C3D_CullFace(vsh_cull(d->cull));
                 v_cull = d->cull;
             }
-            C3D_DrawElements(GPU_TRIANGLES, (int)d_count, C3D_UNSIGNED_SHORT, d_idx);
+            if (plat_gpudump_draw_filter(r->frame, r->seq, gdraw++)) {
+                C3D_DrawElements(GPU_TRIANGLES, (int)d_count, C3D_UNSIGNED_SHORT, d_idx);
+            }
             n_draw++;
             after_last_draw = 0;
             break;

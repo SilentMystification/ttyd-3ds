@@ -138,6 +138,9 @@ static u32 s_arena_lo, s_arena_hi;
 static unsigned s_st_hashes, s_st_bytes, s_st_lookups, s_st_checks, s_st_mism, s_st_uploads, s_st_frames;
 static unsigned s_st_tot_hashes, s_st_tot_bytes, s_st_tot_lookups, s_st_tot_mism, s_st_tot_frames;
 static u32 s_dbg_tlut_hash[CACHE_SIZE];
+static int s_compact;
+static unsigned s_cv_n[16], s_cv_bad[16], s_cv_texels[16], s_cv_old_bad[16], s_cv_saved;
+
 
 typedef struct {
     const void* image;
@@ -228,6 +231,12 @@ static void stat_mismatch(const CacheEntry* e, const GxTexObj* t, u32 bytes, int
 
 static void stat_frame_end(void) {
     s_st_frames++;
+    if (s_compact == 2 && s_st_tot_frames % 120 == 119) {
+        PLOG_I("texcompact: verify (new fmt: textures/texels/mismatched texels) L4 %u/%u/%u LA4 %u/%u/%u L8 %u/%u/%u RGBA4 %u/%u/%u; "
+               "bytes saved at upload %u; baseline lossy textures (old fmt LA8 %u RGB565 %u 5551 %u)",
+               s_cv_n[10], s_cv_texels[10], s_cv_bad[10], s_cv_n[9], s_cv_texels[9], s_cv_bad[9], s_cv_n[7], s_cv_texels[7],
+               s_cv_bad[7], s_cv_n[4], s_cv_texels[4], s_cv_bad[4], s_cv_saved, s_cv_old_bad[5], s_cv_old_bad[3], s_cv_old_bad[2]);
+    }
     s_st_tot_frames++;
     if (s_stats_every && s_st_frames >= (u32)s_stats_every) {
         unsigned f = s_st_frames;
@@ -579,21 +588,57 @@ static u32 morton8(u32 x, u32 y) {
     return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3);
 }
 
-/* Level 0 of a texture in this PICA format: gray, opaque, one-bit alpha or full. */
-static u32 pick_format(const u8* px, u32 w, u32 h) {
-    int gray = 1, opaque = 1, binary = 1;
+/* ---- texcompact (switch, default 0): smaller PICA formats where the texels are exactly representable ----
+ * 0: the formats above (LA8 / RGB565 / RGBA5551 / RGBA8). 1: also L8 for an opaque grey texture (L8 reads as
+ * L,L,L,255, the same as LA8 with alpha 255), LA4 / L4 for grey texels that are all multiples of 17 (the PICA
+ * widens a nibble n to n*17, GX's I4/IA4 decode gives n*17 too) and RGBA4 where RGBA8 would be used and every
+ * channel is a multiple of 17. 4-bit formats only without a mip chain (a filtered level is not a multiple of 17).
+ * 2: as 1, and every upload is checked: both formats are put in tiled form and decoded as the sampler does; the
+ * mismatches are counted per format ("texcompact: verify ..." in the log, must be 0). */
+
+static u32 fmt_bits(u32 fmt) {
+    switch (fmt) {
+    case PLAT_TEXFMT_RGBA8: return 32;
+    case PLAT_TEXFMT_L4: return 4;
+    case PLAT_TEXFMT_L8:
+    case PLAT_TEXFMT_LA4: return 8;
+    default: return 16;
+    }
+}
+
+/* Level 0 of a texture in this PICA format: gray, opaque, one-bit alpha or full. `mips`: 0 no chain, 1 a chain
+ * made by box filter, 2 a chain taken from the game's own levels. */
+static u32 pick_format_ex(const u8* px, u32 w, u32 h, int compact, int mips) {
+    int gray = 1, opaque = 1, binary = 1, n17 = 1;
     for (u32 i = 0; i < w * h; i++) {
         const u8* p = px + i * 4;
         gray &= p[0] == p[1] && p[1] == p[2];
         opaque &= p[3] == 255;
         binary &= p[3] == 0 || p[3] == 255;
+        n17 &= p[0] % 17 == 0 && p[1] % 17 == 0 && p[2] % 17 == 0 && p[3] % 17 == 0;
     }
-    return gray ? PLAT_TEXFMT_LA8 : opaque ? PLAT_TEXFMT_RGB565 : binary ? PLAT_TEXFMT_RGBA5551 : PLAT_TEXFMT_RGBA8;
+    if (compact) {
+        if (gray && n17 && mips == 0) {
+            return opaque ? PLAT_TEXFMT_L4 : PLAT_TEXFMT_LA4;
+        }
+        if (gray && opaque && mips != 2) {
+            return PLAT_TEXFMT_L8;
+        }
+    }
+    u32 f = gray ? PLAT_TEXFMT_LA8 : opaque ? PLAT_TEXFMT_RGB565 : binary ? PLAT_TEXFMT_RGBA5551 : PLAT_TEXFMT_RGBA8;
+    if (compact && f == PLAT_TEXFMT_RGBA8 && n17 && mips == 0) {
+        f = PLAT_TEXFMT_RGBA4;
+    }
+    return f;
 }
+static u32 pick_format(const u8* px, u32 w, u32 h) { return pick_format_ex(px, w, h, s_compact, 0); }
 
 /* RGBA8 rows (row 0 = GX t 0), w x h, resampled (nearest) to pw x ph and Morton tiled into `out`. */
 static void tile_level(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u32 fmt, u8* out) {
     u32 tiles_w = pw >> 3;
+    if (fmt == PLAT_TEXFMT_L4) {
+        memset(out, 0, (size_t)pw * ph / 2); /* nibbles are OR-ed in */
+    }
     for (u32 my = 0; my < ph; my++) {
         /* PICA samples t = 0 at the last row in memory */
         const u8* row = px + (size_t)(((ph - 1 - my) * h / ph) * w) * 4;
@@ -604,6 +649,12 @@ static void tile_level(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u32 fmt, u8* 
             case PLAT_TEXFMT_LA8:
                 out[idx * 2] = p[3];
                 out[idx * 2 + 1] = p[0];
+                break;
+            case PLAT_TEXFMT_L8: out[idx] = p[0]; break;
+            case PLAT_TEXFMT_LA4: out[idx] = (u8)((p[0] / 17) << 4 | (p[3] / 17)); break;
+            case PLAT_TEXFMT_L4: out[idx >> 1] |= (u8)((p[0] / 17) << ((idx & 1) * 4)); break;
+            case PLAT_TEXFMT_RGBA4:
+                ((u16*)out)[idx] = (u16)((p[0] / 17) << 12 | (p[1] / 17) << 8 | (p[2] / 17) << 4 | (p[3] / 17));
                 break;
             case PLAT_TEXFMT_RGB565:
                 ((u16*)out)[idx] = (u16)(((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3));
@@ -618,7 +669,7 @@ static void tile_level(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u32 fmt, u8* 
     }
 }
 
-static u32 level_bytes(u32 fmt, u32 pw, u32 ph) { return pw * ph * (fmt == PLAT_TEXFMT_RGBA8 ? 4 : 2); }
+static u32 level_bytes(u32 fmt, u32 pw, u32 ph) { return pw * ph * fmt_bits(fmt) / 8; }
 
 /* Box filter of a 2x2 block, colour weighted by alpha (so a transparent texel's colour does not bleed in). */
 static inline void box4(const u8* a, const u8* b, const u8* c, const u8* d, u8* o) {
@@ -683,16 +734,87 @@ static int mip_scratch(void) {
     return 1;
 }
 
+/* What the sampler returns for texel `idx` of a tiled level in PICA format `fmt` (the PICA widens n-bit fields by
+ * bit replication; L4/LA4 nibble order as citro3d: LA4 L high, A low; L4 even texel in the low nibble). */
+static void sample_tiled(const u8* t, u32 fmt, u32 idx, u8* c) {
+    switch (fmt) {
+    case PLAT_TEXFMT_RGBA8: {
+        u32 v = ((const u32*)t)[idx];
+        c[0] = (u8)(v >> 24); c[1] = (u8)(v >> 16); c[2] = (u8)(v >> 8); c[3] = (u8)v;
+        break;
+    }
+    case PLAT_TEXFMT_L8: c[0] = c[1] = c[2] = t[idx]; c[3] = 255; break;
+    case PLAT_TEXFMT_LA8: c[0] = c[1] = c[2] = t[idx * 2 + 1]; c[3] = t[idx * 2]; break;
+    case PLAT_TEXFMT_LA4: c[0] = c[1] = c[2] = (u8)((t[idx] >> 4) * 17); c[3] = (u8)((t[idx] & 15) * 17); break;
+    case PLAT_TEXFMT_L4: c[0] = c[1] = c[2] = (u8)((t[idx >> 1] >> ((idx & 1) * 4) & 15) * 17); c[3] = 255; break;
+    case PLAT_TEXFMT_RGBA4: {
+        u16 v = ((const u16*)t)[idx];
+        c[0] = (u8)((v >> 12) * 17); c[1] = (u8)((v >> 8 & 15) * 17); c[2] = (u8)((v >> 4 & 15) * 17); c[3] = (u8)((v & 15) * 17);
+        break;
+    }
+    case PLAT_TEXFMT_RGB565: {
+        u16 v = ((const u16*)t)[idx];
+        u32 r = v >> 11, g = v >> 5 & 63, b = v & 31;
+        c[0] = (u8)(r << 3 | r >> 2); c[1] = (u8)(g << 2 | g >> 4); c[2] = (u8)(b << 3 | b >> 2); c[3] = 255;
+        break;
+    }
+    default: {
+        u16 v = ((const u16*)t)[idx];
+        u32 r = v >> 11, g = v >> 6 & 31, b = v >> 1 & 31;
+        c[0] = (u8)(r << 3 | r >> 2); c[1] = (u8)(g << 3 | g >> 2); c[2] = (u8)(b << 3 | b >> 2); c[3] = (v & 1) ? 255 : 0;
+        break;
+    }
+    }
+}
+
+/* texcompact=2: the level-0 texels the sampler gets from `nf` against those from `of` (today's choice), and
+ * today's choice against the decoded RGBA8 (information: how lossy the baseline already is). */
+static void compact_verify(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u32 nf, u32 of) {
+    u32 nb = level_bytes(nf, pw, ph), ob = level_bytes(of, pw, ph);
+    u8* a = malloc(nb + 4);
+    u8* b = malloc(ob + 4);
+    if (a != NULL && b != NULL) {
+        tile_level(px, w, h, pw, ph, nf, a);
+        tile_level(px, w, h, pw, ph, of, b);
+        u32 bad = 0, oldbad = 0;
+        for (u32 my = 0; my < ph; my++) {
+            const u8* row = px + (size_t)(((ph - 1 - my) * h / ph) * w) * 4;
+            for (u32 mx = 0; mx < pw; mx++) {
+                const u8* e = row + (size_t)(pw == w ? mx : mx * w / pw) * 4;
+                u32 idx = ((my >> 3) * (pw >> 3) + (mx >> 3)) * 64 + morton8(mx & 7, my & 7);
+                u8 cn[4], co[4];
+                sample_tiled(a, nf, idx, cn);
+                sample_tiled(b, of, idx, co);
+                bad += memcmp(cn, co, 4) != 0;
+                oldbad += memcmp(co, e, 4) != 0;
+            }
+        }
+        s_cv_n[nf & 15]++;
+        s_cv_texels[nf & 15] += (unsigned)(pw * ph);
+        s_cv_bad[nf & 15] += (unsigned)bad;
+        s_cv_old_bad[of & 15] += oldbad != 0;
+        s_cv_saved += (unsigned)(ob - nb);
+        if (bad != 0) {
+            PLOG_W("texcompact: verify MISMATCH %u texels of %ux%u, new fmt %u old fmt %u", (unsigned)bad, (unsigned)pw, (unsigned)ph, (unsigned)nf, (unsigned)of);
+        }
+    }
+    free(a);
+    free(b);
+}
+
 /* RGBA8 rows (row 0 = GX t 0) -> PICA texture. Returns the handle. `gxt` is the GX texture when the mip
  * chain may use the game's own levels (its data at gxt->image); `want_mips` asks for a chain at all. */
 static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h, const GxTexObj* gxt, const GxTlutObj* tl,
                         int want_mips, u8* out_levels, u32* out_bytes0, u32* out_mip_bytes) {
-    u32 fmt = pick_format(px, w, h);
-    u32 bpp = fmt == PLAT_TEXFMT_RGBA8 ? 4 : 2;
+    int mipk = want_mips ? (gxt != NULL && gxt->mipmap ? 2 : 1) : 0;
+    u32 fmt = pick_format_ex(px, w, h, s_compact, mipk);
     u32 pw = pow2(w), ph = pow2(h);
+    if (s_compact == 2) {
+        compact_verify(px, w, h, pw, ph, fmt, pick_format_ex(px, w, h, 0, mipk));
+    }
     *out_levels = 0;
     *out_mip_bytes = 0;
-    *out_bytes0 = pw * ph * bpp;
+    *out_bytes0 = level_bytes(fmt, pw, ph);
     *out_w = (u16)pw;
     *out_h = (u16)ph;
     s_uploads++;
@@ -705,7 +827,7 @@ static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h, cons
     if (levels == 0) {
         tile_level(px, w, h, pw, ph, fmt, s_tiled);
         u64 tc = TF_T();
-        u32 hd = plat_gpu_tex_create(pw, ph, fmt, s_tiled, pw * ph * bpp);
+        u32 hd = plat_gpu_tex_create(pw, ph, fmt, s_tiled, level_bytes(fmt, pw, ph));
         s_tf.t_create += s_tf_on ? plat_ticks() - tc : 0;
         return hd;
     }
@@ -738,7 +860,7 @@ static u32 upload_rgba8(const u8* px, u32 w, u32 h, u16* out_w, u16* out_h, cons
     *out_mip_bytes = off;
     s_mip_extra_made++;
     u64 tc = TF_T();
-    u32 hd = plat_gpu_tex_create_mip(pw, ph, fmt, s_tiled, pw * ph * bpp, s_mip_out, off, levels);
+    u32 hd = plat_gpu_tex_create_mip(pw, ph, fmt, s_tiled, level_bytes(fmt, pw, ph), s_mip_out, off, levels);
     s_tf.t_create += s_tf_on ? plat_ticks() - tc : 0;
     return hd;
 }
@@ -891,7 +1013,7 @@ static void pre_decode(PreTex* p) {
     gx_tex_decode_rgba8(p->image, p->w, p->h, p->fmt, NULL, 0, rgba);
     u32 fmt = pick_format(rgba, p->w, p->h);
     u32 pw = pow2(p->w), ph = pow2(p->h);
-    u32 bytes = pw * ph * (fmt == PLAT_TEXFMT_RGBA8 ? 4 : 2);
+    u32 bytes = level_bytes(fmt, pw, ph);
     u8* out = malloc(bytes);
     if (out != NULL) {
         tile_level(rgba, p->w, p->h, pw, ph, fmt, out);
@@ -1696,6 +1818,10 @@ u32 gx_tex_copy_target(const void* addr, u16 w, u16 h, u8 fmt) {
 void gx_tex_init(void) {
     s_stats_every = plat_switch_int("texstats", 0);
     s_trust_on = plat_switch_int("textrust", 1) != 0;
+    s_compact = plat_switch_int("texcompact", 0);
+    if (s_compact) {
+        PLOG_I("texcompact: %d", s_compact);
+    }
     s_verify = plat_switch_int("texverify", 0) != 0;
     s_copy_evict = plat_switch_int("copyevict", 1) != 0;
     s_tf_on = plat_switch_int("texframe", 0) != 0;

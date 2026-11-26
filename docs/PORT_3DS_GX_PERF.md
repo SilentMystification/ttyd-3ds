@@ -1029,3 +1029,23 @@ Rows for the switch table:
 | `gxdepthshot` | Each shot (`shots=N`) also saves the EFB depth buffer as `shots/NNNNN.dep` (`DEP1 608 480`, one little-endian D24S8 word per pixel). Debug only |
 | `gxclearrgb=RRGGBB` | Test only: the frame clear uses this colour instead of the game's (the seam test clears to `FF00FF`) |
 | `shotfrom=N` | The first presented frame a shot may be. With `shots=1 shotmax=K`, K consecutive frames (the flicker test) |
+
+## Cross-check of all switches, 2026-11-26
+
+Build `bff86be7` (port3ds after the visual round 2 merge), dev build, Azahar. `determ`, one default run per scene against each switch set, 4 consecutive shots, byte for byte (script: `determ_ab.run` with a cached default run per scene; all runs with `nodevupdate`). Scenes: gor_01 shots 780-783, effects battle (`map=gon_02 story=30 battle=1 btlauto=perfect`) 900-903, pik_00 780-783, fog `storyjump=STG1_16` (gon_11) 700-703, Grotto water `storyjump=STG5_19_01` (dou_00) 1100-1103, pause menu 780-783.
+
+Sets: S1 `gxdirty=1`; S2 `gxdirect=1`; S3 `gxdirect=1 gximmdirect=1`; S4 `gxonehop=1`; S5 `gxdirty=1 gxdirect=1 gximmdirect=1`; S6 `gxonehop=1 gxdirty=1`; S7 `texasync=1 texfast=1 texcompact=1`; S8 `gxdirty=1 gxonehop=1 texasync=1 texfast=1 texcompact=1`.
+
+| Scene (content: % pixels off commonest colour / colours) | S1 | S2 | S3 | S4 | S5 | S6 | S7 | S8 |
+|---|---|---|---|---|---|---|---|---|
+| gor_01 (91.6 / 36 569) | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 |
+| effects battle (98.2 / 47 498) | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 |
+| pik_00 (72.9 / 21 841) | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 |
+| fog, gon_11 (80.6 / 19 997) | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 |
+| Grotto water, dou_00 (27.3 / 2 259) | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 |
+| pause menu (77.0 / 18 973) | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 |
+
+All 192 comparisons identical; no differing pixels. The water shots have low content (27%, 2 259 colours) but are not blank.
+
+- **Stereo** (`stereo_ab.py`, `stereoforce=1`, gor_01 780-783, default against S8): 12 of 12 identical (EFB, left and right screens); left differs from right in every shot, so the shots are stereo.
+- **GPU hang recovery** (S8 + `gpuhangtest=700 gpuhangrecover=1`, gor_01): log shows the fence-wait hang at record 752 (frame 699), dump written, `reset #1 done`, citro3d state marked dirty, one 2306 ms slow frame at 703, then the run reached frame 900. Shots 720-725 after recovery have content (91.4% off the commonest colour, about 36 150 colours).

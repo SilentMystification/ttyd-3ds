@@ -196,7 +196,7 @@ static void init(void) {
     s_budget = (u32)plat_switch_int("gxcachekb", 8192) * 1024u;
     s_trust = plat_switch_int("gxtrust", 1) != 0;
     s_scribble_at = (u32)plat_switch_int("gxscribble", 0);
-    s_spread = (u32)plat_switch_int("dlspread", 0);
+    s_spread = (u32)plat_switch_int("dlspread", 1500);
     s_lobj = s_enabled > 0 && gx_lobj_switch();
     if (s_lobj) {
         _Static_assert((1u << (LOBJ_BITS - 1)) >= DLC_ENTRIES, "the ListObj index holds a key per entry");

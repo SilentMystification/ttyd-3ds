@@ -190,7 +190,7 @@ static void init(void) {
     s_budget = (u32)plat_switch_int("gxcachekb", 8192) * 1024u;
     s_trust = plat_switch_int("gxtrust", 1) != 0;
     s_scribble_at = (u32)plat_switch_int("gxscribble", 0);
-    s_spread = (u32)plat_switch_int("dlspread", 0);
+    s_spread = (u32)plat_switch_int("dlspread", 1500);
     for (int i = 0; i < DLC_ENTRIES; i++) {
         s_e[i].next = (u16)(i + 2 <= DLC_ENTRIES ? i + 2 : 0);
     }

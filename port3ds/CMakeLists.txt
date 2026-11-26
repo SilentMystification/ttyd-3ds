@@ -343,7 +343,7 @@ target_link_options(ttyd PRIVATE -Wl,--gc-sections -Wl,--wrap=svcBreak -Wl,--wra
 if(TTYD_LTO)
     target_link_options(ttyd PRIVATE -flto=auto -O2)
 endif()
-target_link_libraries(ttyd PRIVATE ttyd_gx_shader_bin ctrdk_devupdate ctrdk_crash ctrdk_perf citro3d ctru z m)
+target_link_libraries(ttyd PRIVATE ttyd_gx_shader_bin ctrdk_devupdate ctrdk_crash ctrdk_perf ctrdk_supervisor_client citro3d ctru z m)
 # The image must end below 0x01000000 (PORT_IS_ADDR, sound-id flag bits): fail the build, not the boot.
 add_custom_command(TARGET ttyd POST_BUILD
     COMMAND "${Python3_EXECUTABLE}" -I "${TTYD_REPO_DIR}/tools/port3ds/check_image_end.py"

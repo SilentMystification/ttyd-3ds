@@ -1,0 +1,121 @@
+# makerom resource spec for the ctr-devkit supervisor system module (development only).
+# Modelled on Luma3DS's own system modules (sysmodules/pm/pm.rsf, sysmodules/rosalina/rosalina.rsf).
+#
+# Title ID 0004013000FD8A02: Category Base gives 00040130; UniqueId 0xFD8A and Version 2 give the
+# low word 00FD8A02 (pm.rsf: UniqueId 0x12, Version 2 -> 0004013000001202). The low byte must be
+# 02: PM panics when NATIVE_FIRM launches a 00040130 title with another one (Luma3DS pm launch.c).
+
+BasicInfo:
+  Title                   : ctrdksv
+  CompanyCode             : "00"
+  ProductCode             : CTR-N-CDKS
+  ContentType             : Application
+  Logo                    : None
+
+TitleInfo:
+  UniqueId                : 0xFD8A
+  Category                : Base
+  Version                 : 2
+
+Option:
+  UseOnSD                 : false
+  FreeProductCode         : true
+  MediaFootPadding        : false
+  EnableCrypt             : false
+  EnableCompress          : true
+
+AccessControlInfo:
+  # The system core: the app's main thread stays alone on core 0.
+  IdealProcessor                : 1
+  AffinityMask                  : 2
+  # Below the system services (pm 20, rosalina 25, most modules 0x18-0x30).
+  Priority                      : 48
+
+  DisableDebug                  : false
+  EnableForceDebug              : false
+  CanWriteSharedPage            : false
+  CanUsePrivilegedPriority      : false
+  CanUseNonAlphabetAndNumber    : false
+  PermitMainFunctionArgument    : false
+  CanShareDeviceMemory          : false
+  # Not runnable in sleep: it holds no sleep lock and replies to no sleep query.
+  RunnableOnSleep               : false
+  SpecialMemoryArrange          : false
+  ResourceLimitCategory         : Other
+
+  CoreVersion                   : 2
+  DescVersion                   : 2
+
+  # System region, where Rosalina puts its own soc:U context (minisoc.c, MEMOP_REGION_SYSTEM).
+  MemoryType                    : System
+  HandleTableSize               : 0x80
+
+  SystemCallAccess:
+    ControlMemory: 1
+    QueryMemory: 2
+    ExitProcess: 3
+    CreateThread: 8
+    ExitThread: 9
+    SleepThread: 10
+    GetThreadPriority: 11
+    SetThreadPriority: 12
+    GetCurrentProcessorNumber: 17
+    CreateMutex: 19
+    ReleaseMutex: 20
+    CreateSemaphore: 21
+    ReleaseSemaphore: 22
+    CreateEvent: 23
+    SignalEvent: 24
+    ClearEvent: 25
+    CreateTimer: 26
+    SetTimer: 27
+    CancelTimer: 28
+    ClearTimer: 29
+    CreateMemoryBlock: 30
+    MapMemoryBlock: 31
+    UnmapMemoryBlock: 32
+    CreateAddressArbiter: 33
+    ArbitrateAddress: 34
+    CloseHandle: 35
+    WaitSynchronization1: 36
+    WaitSynchronizationN: 37
+    DuplicateHandle: 39
+    GetSystemTick: 40
+    GetHandleInfo: 41
+    GetSystemInfo: 42
+    GetProcessInfo: 43
+    GetThreadInfo: 44
+    ConnectToPort: 45
+    SendSyncRequest: 50
+    OpenProcess: 51
+    GetProcessId: 53
+    GetProcessIdOfThread: 54
+    GetThreadId: 55
+    GetResourceLimit: 56
+    GetResourceLimitLimitValues: 57
+    GetResourceLimitCurrentValues: 58
+    Break: 60
+    OutputDebugString: 61
+    GetProcessList: 101
+
+  ServiceAccessControl:
+    # Luma3DS's sm does not check this list (sm processes.c); it is listed for makerom and for clarity.
+    - fs:USER
+    - soc:U
+    - ac:u
+    - am:net
+    - pm:app
+    - ns:s
+    - ptm:sysm
+    - gsp::Gpu
+    - APT:A
+
+  FileSystemAccess:
+    - DirectSdmc
+    - DirectSdmcWrite
+
+SystemControlInfo:
+  SaveDataSize: 0KB
+  RemasterVersion: 0
+  StackSize: 0x2000
+  # No dependencies: PM must never refuse to start it (or anything that lists it) for a missing module.

@@ -22,6 +22,7 @@
 #include "plat/memstable.h"
 #include "plat/options.h"
 #include "plat/plat.h"
+#include "gx_div.h"
 
 _Static_assert(sizeof(GxTexObj) <= sizeof(GXTexObj), "GxTexObj must fit GXTexObj");
 _Static_assert(sizeof(GxTlutObj) <= sizeof(GXTlutObj), "GxTlutObj must fit GXTlutObj");
@@ -637,6 +638,8 @@ static u32 pick_format(const u8* px, u32 w, u32 h) { return pick_format_ex(px, w
 /* RGBA8 rows (row 0 = GX t 0), w x h, resampled (nearest) to pw x ph and Morton tiled into `out`. */
 static void tile_level(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u32 fmt, u8* out) {
     u32 tiles_w = pw >> 3;
+    u16 cols[GX_COLS_MAX];
+    int have_cols = pw != w && gx_build_cols(cols, w, pw);
     if (fmt == PLAT_TEXFMT_L4) {
         memset(out, 0, (size_t)pw * ph / 2); /* nibbles are OR-ed in */
     }
@@ -644,7 +647,7 @@ static void tile_level(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u32 fmt, u8* 
         /* PICA samples t = 0 at the last row in memory */
         const u8* row = px + (size_t)(((ph - 1 - my) * h / ph) * w) * 4;
         for (u32 mx = 0; mx < pw; mx++) {
-            const u8* p = row + (size_t)(pw == w ? mx : mx * w / pw) * 4;
+            const u8* p = row + (size_t)(pw == w ? mx : have_cols ? cols[mx] : mx * w / pw) * 4;
             u32 idx = ((my >> 3) * tiles_w + (mx >> 3)) * 64 + morton8(mx & 7, my & 7);
             switch (fmt) {
             case PLAT_TEXFMT_LA8:
@@ -676,7 +679,7 @@ static u32 level_bytes(u32 fmt, u32 pw, u32 ph) { return pw * ph * fmt_bits(fmt)
 static inline void box4(const u8* a, const u8* b, const u8* c, const u8* d, u8* o) {
     u32 wa = a[3], wb = b[3], wc = c[3], wd = d[3], sw = wa + wb + wc + wd;
     for (int k = 0; k < 3; k++) {
-        o[k] = (u8)(sw != 0 ? (a[k] * wa + b[k] * wb + c[k] * wc + d[k] * wd + sw / 2) / sw
+        o[k] = (u8)(sw != 0 ? port_div_alpha(a[k] * wa + b[k] * wb + c[k] * wc + d[k] * wd + sw / 2, sw)
                             : (u32)(a[k] + b[k] + c[k] + d[k] + 2) >> 2);
     }
     o[3] = (u8)((sw + 2) >> 2);
@@ -685,11 +688,13 @@ static inline void box4(const u8* a, const u8* b, const u8* c, const u8* d, u8* 
 /* Level 1 from level 0 (w x h, resampled as tile_level does to pw x ph): (pw/2) x (ph/2) rows into dst. */
 static void box_first(const u8* px, u32 w, u32 h, u32 pw, u32 ph, u8* dst) {
     u32 qw = pw >> 1, qh = ph >> 1;
+    u16 cols[GX_COLS_MAX];
+    int have_cols = gx_build_cols(cols, w, pw);
     for (u32 y = 0; y < qh; y++) {
         const u8* r0 = px + (size_t)(((2 * y) * h / ph) * w) * 4;
         const u8* r1 = px + (size_t)(((2 * y + 1) * h / ph) * w) * 4;
         for (u32 x = 0; x < qw; x++) {
-            u32 x0 = (2 * x) * w / pw, x1 = (2 * x + 1) * w / pw;
+            u32 x0 = have_cols ? cols[2 * x] : (2 * x) * w / pw, x1 = have_cols ? cols[2 * x + 1] : (2 * x + 1) * w / pw;
             box4(r0 + x0 * 4, r0 + x1 * 4, r1 + x0 * 4, r1 + x1 * 4, dst + ((size_t)y * qw + x) * 4);
         }
     }

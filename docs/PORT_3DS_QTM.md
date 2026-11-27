@@ -26,10 +26,7 @@ The CIA's ExHeader maps `1e800000-1e9fffff` read/write (`port3ds/rsf/ttyd.rsf`).
 |---|---|---|---|---|
 | `gx record` | 1024 KiB | 2 x 512 KiB (`plat/gpu.c`, `RECORD_BYTES`) | the game thread (core 0) writes one record per frame, the render thread (core 2) reads it; 170 KiB of it per frame in gor_01 (build #484; 409 KiB before state deltas) | the largest per-frame CPU-to-CPU stream; the plan's first candidate |
 | `log` | 320 KiB | the log slots (`plat/log.c`) | every thread writes, the writer on core 1 reads | shared by all cores; cold in a normal run (25 lines per 420 frames) |
-| `gx state` | 128 KiB | **0: nothing allocates from it** | | reserved for the GX state tracker, which is static data in the image |
-| `audio state` | 128 KiB | **0: nothing allocates from it** | | reserved for MusyX state, which is static data and game heap |
-
-So 1344 KiB are in use by two buffers, 256 KiB are dead reservations and 448 KiB are free. The two reservations stay for now (no default changes); `place=gx_state:heap,audio_state:heap` returns their room for an experiment.
+So 1344 KiB are in use by two buffers and 704 KiB are free. The `gx state` and `audio state` reservations (128 KiB each, nothing allocated from them) were removed on 2026-11-27 (branch `qtmplace`); `place=gx_state:...` and `place=audio_state:...` now only log "no such placement yet". The GX-native placements (section 11) stay off QTM unless `place=` asks.
 
 In the data samples below, QTM gets 0 to 1.8% of the sampled accesses (the record, written by `memcpy` and read by `render_record`).
 
@@ -260,7 +257,7 @@ No default changes now. The split this plan would move to, each line conditional
 |---|---|---|
 | `gx record` | 1024 | stays if `place=gx_record:heap` is not faster |
 | `log` | 320 | cold; first to leave if room is needed |
-| `gx state`, `audio state` | 0 (256 returned) | drop the reservations when something else needs the room |
+| `gx state`, `audio state` | 0 (removed 2026-11-27) | |
 | `gx index` | 768 | only if the PICA reads QTM and the A/B gains |
 | `gx ring` | up to 512 with a small `gxthreadkb` | only with `gxthread=2`, if its A/B gains |
 | hot code | 256 | only if section 5's two conditions hold |
@@ -275,6 +272,7 @@ With the GX rework the record shrinks and the ring may go away; redo this table 
 | `gx index` placement (the records' index arenas) | `plat/memplace.c`, `plat/gpu.c` (one allocation line) | linear, as before |
 | `gx ring` placement (the `gxthread` record ring) | `game/gx/gx_rec.c` (one allocation line) | heap, as before |
 | `place=` accepts a placement registered after boot | `plat/memplace.c` | |
+| GX-native placements (frame list, immediate ring, class and layout blocks, ListObj index, class intern tables), `PLAT_PF_QTM_ASK`, `plat_place_forced`, switch `qtmlistgsp` | `plat/memplace.c`, `plat/gpu.c`, `game/gx/gx_vsh.c`, `gx_draw.c`, `gx_lobj.c`, `gx_bigmem.h` (section 11) | today's tiers |
 | `plat_place_info`, `[MEMMAP] place_<name>` lines, and `datasample.py` naming them | `plat/memplace.c`, `game/memmap_dump.c`, `tools/port3ds/datasample.py` | |
 | VRAM texture tier | `plat/vramtex.c`, four `--wrap`s in `port3ds/CMakeLists.txt` | off (`vramtex=1`) |
 | Texture and command-buffer census | `vramstats=N` | off |
@@ -298,7 +296,7 @@ Run these **after the benchmark CIA**, and skip what its numbers already rule ou
 | 5 | Textures in VRAM | `vramtex=1` | render and GPU time; the `vramstats` line (bound KB from VRAM against linear, pressure 0); the picture |
 | 6 | Tier size | `vramtex=1 vramtexreserve=256`, `vramtex=1 vramtexmax=512` | as 5 |
 | 7 | Copy targets under the tier | `vramtex=1` with `fx=indirect` and the START menu in `gor_01` | no `gpu: no VRAM` line after the first; `target pressure` count |
-| 8 | Index arenas in QTM (only if test 0 says the PICA reads QTM) | `qtmgpu place=log:heap,gx_state:heap,audio_state:heap,gx_index:qtm` | the picture first, then busy and render |
+| 8 | Index arenas in QTM (only if test 0 says the PICA reads QTM) | `qtmgpu place=log:heap,gx_index:qtm` | the picture first, then busy and render |
 | 9 | The GX ring in QTM | `gxthread=2 gxthreadkb=256` against the same with `place=gx_ring:qtm` | busy, translator time |
 | 10 | Data sampling with real addresses | `memmap`, and `pc_sample.py --pid <PID> --port 4000 --data --memmap <log> --interval 20 --duration 60` (Rosalina) | the ranking of section 2 at 50 Hz instead of 2 Hz |
 
@@ -315,7 +313,7 @@ Each run: the CIA in Azahar, `determ shots=1 shotfrom=900 shotmax=3 vramstats=60
 | VRAM tier | `vramtex=1`, battle | 3/3 identical; 654 KB of 1852 from VRAM at frame 900 |
 | VRAM tier | `vramtex=1`, aaa_00 | 3/3 identical (a still scene: the three frames are equal) |
 | Ring in QTM | `gxthread=2 gxthreadkb=256 place=gx_ring:qtm`, gor_01 | `placed gx ring 262144 bytes in QTM (forced)`; 3/3 identical to the default; the same with the ring in the heap |
-| Index arenas in QTM | `qtmgpu place=log:heap,gx_state:heap,audio_state:heap,gx_index:qtm`, gor_01 | placed as asked; 3/3 identical (Azahar's GPU reads indices from QTM) |
+| Index arenas in QTM | `qtmgpu place=log:heap,gx_state:heap,audio_state:heap,gx_index:qtm` (before the reservations were removed; now `qtmgpu place=log:heap,gx_index:qtm`), gor_01 | placed as asked; 3/3 identical (Azahar's GPU reads indices from QTM) |
 | Record in the heap | `place=gx_record:heap`, gor_01 | 3/3 identical |
 | Memory map | `memmap` | `[MEMMAP] place_gx_record 0x1e800000 0x1e900000` and the other placements |
 | Probe | `ttyd_probe.cia` | runs to `PROBE DONE`; `exec` lines as in section 5 |
@@ -323,3 +321,32 @@ Each run: the CIA in Azahar, `determ shots=1 shotfrom=900 shotmax=3 vramstats=60
 Counted in these runs: citro3d's command buffer is 151/1000 of its 1 MiB half per record in gor_01, about 155 KB (census row 6).
 
 **Not exercised:** the tier's pressure path (a copy target failing to get VRAM). `fx=indirect` made no EFB copy in the frames shot (`0 copies`, `target pressure 0`), so eviction of everything and the pause are untested; console test 7 or an Azahar run of a scene with a large copy target covers it. No timing in these runs means anything.
+
+## 11. GX-native placements (PORT_3DS_GX_NATIVE.md section 4b), prepared for the console
+
+Branch `qtmplace` (2026-11-27). Every row of section 4b is a `plat/memplace.c` placement. The defaults stay on today's tiers: a placement with the flag `PLAT_PF_QTM_ASK` is put in QTM only when `place=<name>:qtm` names it; a placement the GPU reads also needs `qtmgpu`. Without the switches the placements take the tier the memory had before, so the defaults do not change.
+
+| 4b row | Placement (`place=` name) | Bytes | Tiers (first allowed wins) | Exists when | Today's tier (default) | Who reads it |
+|---|---|---|---|---|---|---|
+| 1 | `gx_frame_list` | 2 x `gxonehopkb` KiB (default 2 x 512; use `gxonehopkb=128` for QTM: 2 x 128) | QTM (asked + `qtmgpu`), linear, heap (heap turns `gxchunk` off) | `gxchunk=1/2` | linear | PICA command processor |
+| 2 | `gx_imm_ring` | `gximmringkb` (default 768 KiB: 3 chunks of 256 KiB) | QTM (asked + `qtmgpu`), linear | only when `place=gx_imm_ring:<tier>` names it | (not made: linear stream chunks of 16384 vertices, on first use) | PICA vertex loader |
+| 3a | `gx_class_blocks` | 312 KiB (tev 512 x 44, tex 1024 x 32, pix 512 x 48 words) | QTM (asked), linear, heap | `gxone=1/2` | linear | CPU (copied into the frame list; the GPU does not read them yet) |
+| 3b | `gx_layout_blocks` | 324 KiB (1024 x 81 words) | QTM (asked), heap | `gxonehop` / `gxone` | heap | CPU |
+| 4a | `gxlobj_index` (and `gxlobj_game_index` with `gxthread`) | 256 KiB (128 KiB) | QTM (asked), heap | `gxlobj=1/2` | heap | CPU, core 0 |
+| 4b | `gx_class_intern` | the sum of the four `gxone` intern tables (the `[MEM] placed` line gives it) | QTM (asked), heap | `gxone=1/2` | heap | CPU, core 0 |
+
+Not identical to the default, by design: `gx_imm_ring` (any tier) has smaller chunks, so a draw that does not fit at a chunk end starts a new chunk and the merges at chunk ends differ; the picture does not. `place=gx_imm_ring:linear` is its A/B partner (same chunks, linear memory): compare QTM against it, not against the default. The placed chunks are tried first; the other five chunk slots stay as linear overflow of 16384 vertices.
+
+Rows 3a, 3b, 4a and 4b are CPU-only: `place=<name>:qtm` puts them in QTM without `qtmgpu`.
+
+QTM room: `gx record` (1024 KiB) and `log` (320 KiB) are packed first and leave 704 KiB. Rows 1 and 2 together (1024 KiB) need `place=gx_record:heap` (CPU-only; QTM.md test 3 measures that move alone). A placement with no room in QTM takes its next tier and logs `[MEM] <name>: QTM has no room`. Check the `[MEM] placed ... in QTM (forced)` line of every run.
+
+### GPU addresses and flushes for QTM
+
+- Physical address: libctru's `osConvertVirtToPhys` maps 0x1E800000-0x1EBFFFFF to 0x1F000000 + offset (checked in the disassembly of `libctru.a`, `os.o`). Every GPU address in the GX path is made with it (index packets, `BufInfo_Add`, the gxone layout blocks, textures) and the PICA registers take `pa >> 3` (0x1F000000 >> 3 = 0x03E00000). citro3d's attribute base is 0x18000000, so a QTM buffer has offset 0x07000000 + n (in range of the 28-bit field). The record index arenas (`gx_index`) and the immediate path use the arena's physical base once per record (QTM is physically contiguous).
+- Frame list in QTM: GSP's `GX_ProcessCommandList` gets a virtual address; it is not known whether GSP accepts a QTM one. Switch `qtmlistgsp` (default 0): 0 sends each run as a 32-byte list in linear memory that writes `CMDBUF_SIZE0`, `CMDBUF_ADDR0` (`pa >> 3`) and `CMDBUF_JUMP0`; the run in QTM ends with its own FINALIZE (probe cases `cb_jump0` and `cb_qtm`). 1 hands the QTM address to GSP as it is. Log: `gxchunk: frame list in QTM (physical 1f0.....), runs reached by a jump from linear memory` and, per stats window, `gxchunk frame N: QTM frame list, J jumps made, B runs not aligned` (B must be 0).
+- Flushes: C3D_FrameEnd(0) flushes only the linear heap. A frame list outside linear memory is flushed once per record with `GSPGPU_FlushDataCache(ow, now * 4)` (the `s_ck_tier_linear` path in `plat/gpu.c`). The immediate ring's written ranges go through `plat_gpu_stream_commit`, whose dirty ranges are flushed with `GSPGPU_FlushDataCache` before each record is drawn, for any tier. Whether `GSPGPU_FlushDataCache` cleans a QTM range is the `cb_qtm` / `vb_qtm` probe question ("CPU written, GSP flush").
+
+### Azahar
+
+Azahar's GPU access to QTM is no evidence (its TextureCopy to and from QTM fails; it did read indices from QTM, section 10). Runs for the integration build (not run here; owner rule of 2026-11-28: one compile check, the measurement agent runs them): see PORT_3DS_CONSOLE_RUNBOOK.md step G, "Azahar pre-check".

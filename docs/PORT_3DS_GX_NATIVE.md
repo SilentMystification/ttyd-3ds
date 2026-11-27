@@ -143,7 +143,7 @@ The redesign removes the `gx record` (QTM 1 MiB) and the `gx ring` (heap 4 MiB) 
 | 5 | Event ring core 0 to core 2 (option B only; else static batch chunks ~220 KB) | 256 | core 0 / core 2 | ~20 KB | CPU bandwidth and coherence on QTM | heap |
 | 6 | Log slots (unchanged) | 320 | all / core 1 | cold | none | - |
 
-Priority when room is short: rows 1-2, then 3, then batch chunks, then 4. Console facts first: probes `cb_qtm`, `vb_qtm`, `ib_qtm` (each GPU unit fetches separately; also check `GSPGPU_FlushDataCache` on QTM ranges and the physical address encoding 0x1F000000>>3), calib QTM latency/bandwidth and cache attributes, and the QTM benchmark's `contend` test. Azahar decides nothing here (its TextureCopy to/from QTM fails). Step 0 adds these probes; step 3 registers rows 1-3 as placements on linear FCRAM by default.
+Priority when room is short: rows 1-2, then 3, then batch chunks, then 4. Console facts first: probes `cb_qtm`, `vb_qtm`, `ib_qtm` (each GPU unit fetches separately; also check `GSPGPU_FlushDataCache` on QTM ranges and the physical address encoding 0x1F000000>>3), calib QTM latency/bandwidth and cache attributes, and the QTM benchmark's `contend` test. Azahar decides nothing here (its TextureCopy to/from QTM fails). Step 0 adds these probes; step 3 registers rows 1-3 as placements on linear FCRAM by default. Built (branch `qtmplace`): rows 1-4 are placements on today's tiers, QTM by `place=` (and `qtmgpu` for rows 1-2); names, sizes, address and flush handling in PORT_3DS_QTM.md section 11, console list in PORT_3DS_CONSOLE_RUNBOOK.md G2. Row 5 does not exist yet (option B).
 
 ## 5. Obsolete when done
 

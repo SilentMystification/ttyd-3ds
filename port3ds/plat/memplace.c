@@ -150,6 +150,9 @@ static int tier_allowed(const Placement* p, int tier) {
         if ((p->flags & (PLAT_PF_GPU_READ | PLAT_PF_GPU_WRITE)) && !s_qtmgpu) {
             return 0;
         }
+        if ((p->flags & PLAT_PF_QTM_ASK) && p->forced != PLAT_TIER_QTM) {
+            return 0; /* QTM only when place= asks for it: the defaults stay on today's tiers */
+        }
     }
     return 1;
 }
@@ -267,12 +270,9 @@ void plat_memplace_init(void) {
         u8 prefs[3];
     } k_own[PLAT_PLACE_COUNT] = {
         [PLAT_PLACE_GX_RECORD] = {"gx record", 1u << 20, PLAT_PF_CPU_SHARED, {PLAT_TIER_QTM, PLAT_TIER_HEAP, PLAT_TIER_NONE}},
-        /* gx state and audio state are reservations nothing allocates from yet (docs/PORT_3DS_QTM.md) */
-        [PLAT_PLACE_GX_STATE] = {"gx state", 128u << 10, PLAT_PF_CPU_SHARED, {PLAT_TIER_QTM, PLAT_TIER_HEAP, PLAT_TIER_NONE}},
-        [PLAT_PLACE_AUDIO_STATE] = {"audio state", 128u << 10, PLAT_PF_CPU_SHARED, {PLAT_TIER_QTM, PLAT_TIER_HEAP, PLAT_TIER_NONE}},
         [PLAT_PLACE_LOG] = {"log", 320u << 10, PLAT_PF_CPU_SHARED, {PLAT_TIER_QTM, PLAT_TIER_HEAP, PLAT_TIER_NONE}},
         /* 2 x 192 K u16 indices. Linear: the GPU reads them. In QTM only by place=gx_index:qtm with qtmgpu, and
-         * only when room was made (place=log:heap,gx_state:heap,audio_state:heap). */
+         * only when room was made (1024 + 320 + 768 KiB is over 2 MiB: add place=log:heap). */
         [PLAT_PLACE_GX_INDEX] = {"gx index", 768u << 10, PLAT_PF_GPU_READ, {PLAT_TIER_LINEAR, PLAT_TIER_NONE, PLAT_TIER_NONE}},
     };
     for (int i = 0; i < PLAT_PLACE_COUNT; i++) {
@@ -311,6 +311,16 @@ void plat_memplace_init(void) {
     } else {
         PLOG_W("[MEM] QTM unavailable, using FCRAM");
     }
+}
+
+int plat_place_forced(const char* name) {
+    int tier = -1;
+    for (int i = 0; i < s_force_count; i++) {
+        if (name_eq(s_force[i].name, name)) {
+            tier = s_force[i].tier;
+        }
+    }
+    return tier;
 }
 
 void* plat_place_alloc(int id, size_t size, size_t align) {

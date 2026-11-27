@@ -19,4 +19,21 @@ static inline void* gx_big_alloc(const char* what, unsigned long bytes) {
     return p;
 }
 
+/* As gx_big_alloc, as a plat/memplace placement named `what` for a CPU-only hot table: the heap as before, QTM
+ * only by place=<what>:qtm (docs/PORT_3DS_QTM.md). Zeroed. */
+static inline void* gx_big_place(const char* what, unsigned long bytes) {
+    int h = plat_place_register(what, bytes, 64, PLAT_PREFS(PLAT_TIER_QTM, PLAT_TIER_HEAP), PLAT_PF_QTM_ASK);
+    void* p = h >= 0 ? plat_place_alloc(h, bytes, 64) : NULL;
+    if (p == NULL) {
+        return gx_big_alloc(what, bytes);
+    }
+    memset(p, 0, bytes);
+    const char* tier = NULL;
+    plat_place_info(h, NULL, NULL, NULL, &tier);
+    if (tier != NULL && tier[0] == 'H') {
+        plat_heap_note(what, bytes);
+    }
+    return p;
+}
+
 #endif

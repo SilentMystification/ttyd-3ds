@@ -1023,6 +1023,7 @@ Rows for the switch table:
 | `gxlcall=0/1/2` | Revised native plan step 5 (docs/PORT_3DS_GX_NATIVE.md, "Revised steps 5 and 4 as built"). Needs `gxbatch=1`. 0 (default) off. 1: `GXCallDisplayList` (mode word 0: C1, K) and `gx_call_list` (the translator under `gxthread`) test the open batch's next member (list, size, state/xf/vertex versions, no bounding box, empty pipe) before the per-list path; a hit only advances the batch. Off while `gxstats` counts (the per-list counters). 2: every call takes the per-list path; the test's decision is compared with it (`gxlcall verify` warnings). With `gxthreadstats=N`: a `gxlcall frame N:` line (members by the inline test per frame; verify checks, differ) |
 | `gxbopen=0/1/2` | Revised native plan step 4 (same section). Needs `gxbatch=1`. 0 (default) off. 1: a batch open checks one world generation (sum of cache epoch, memory-trust generation, decision epoch) in place of the three loops; batches with equal vertex-state records share a content id, so a batch opened at the vertex version another batch of its id matched at skips the compare; the route tries the batch's pass group of its last open before the group key's hash and probe. 2: the full checks run too, and each shortcut is compared with them (`gxbopen verify` warnings). With `gxthreadstats=N`: a `gxbopen frame N:` line (opens with the generations skipped, vertex-state compares skipped, groups by the hint per frame; verify checks, differ) |
 | `gxbopenxf=0/1` | With `gxbopen` (default 1 then; 0 leaves gxbopen as before). Per-slot change ticks for the position, normal and texture matrices, projection and viewport (`gx_xft`, gx_state.c). A batch open skips the description/format compare when `gx_vdesc_ver` did not move (the current-matrix indices and arrays are still compared); `group_for` keeps its last group when the key's slots did not change; the uniform block drops GXD_CLIP / GXD_TEXROW when the slots it reads did not change. `gxbopen=2` verifies each (full compare, `key_is_state`, full `vsh_prepare`). Line `gxbopenxf frame N:` with `gxthreadstats=N`. PORT_3DS_GX_NATIVE.md, "Revised steps 5 and 4 as built" |
+| `gxstereo=0/1/2` | GX native step 6 (docs/PORT_3DS_GX_NATIVE.md, "Step 6 as built"). Needs `gxonehop=1` (so `gxone=1`, `gxchunk`, `gximmfl`). 0 (default): a stereo mark at every scene-to-layer boundary of every record. 1: the game thread asks `stereo_maybe()` (the `stereo3d` option, `stereoforce` or the 3D slider) at each record's start; a record started with 3D off writes no mark (no mark words, no full state sent again after it, no citro3d flush and no list split there). A record started in mono is drawn in mono even when the render thread sees 3D on (the frame after the slider goes up). 2: marks as 0, and counts what 1 leaves out. Every 600 presented frames a `gxstereo=N, 600 frames:` line (stereo frames, of them from records started in mono, 3D on but mono, records started in mono, marks written and left out) |
 | `gximmnow=0/1` | 0 (default). 1: a new immediate draw's pass-group record starts with the streak K (its group takes the shader path in its first frame when nothing in it is ineligible). **Not identical** to 0: up to K frames after a load, immediate draws that 0 keeps on the CPU path take the shader. Owner question open |
 | `gxfogcache=0/1` | 1 (default): the fog LUT is recomputed only when the fog parameters change and goes to the back end with an id instead of being hashed; 0 recomputes and hashes it on every rebuild (A/B) |
 | `gxunlit=0/1` | 1 (default): unlit colour channels skip `channel_color` and the eye-space normal; 0 the general path (A/B) |
@@ -1484,6 +1485,41 @@ Release CIA; verify runs `--long 200`, `--allow-hw-faults`.
 | battle | 31.7 / 24.3 / 0.9 | 32.0 / 23.8 / 0.9 | 33.4 / 15.6 / 20.8 / 3.8 (fence 12.4) |
 
   `gximmfl=1` takes 0.2-1.1 ms of core-0 busy off K (pik_00 most: 1 150 immediate draws a frame); the frame does not change. C3 stays the faster config (busy 15.6-27.2 ms).
+
+## Step 6 of the native plan: stereo with the frame list (`gxstereo`, 2026-11-28)
+
+Design and files: docs/PORT_3DS_GX_NATIVE.md, "Step 6 as built". Switch row: "For PORT_3DS_TESTING.md" above. Default 0.
+
+### How stereo works under K and I (audit, no change)
+
+- `stereoforce=1` (or the 3D slider) is read only on the render thread, in `render_record` (`stereo_wanted`). The words in the frame list do not depend on it (gxstereo=0).
+- The game thread writes a mark (`oh_mark`) at each boundary from scene draws to a screen-layer draw, a draw with no colour and depth write, a clear, a CPU-path draw, or the record's end. Chunk uses (`plat_gpu_chunk_draw`) and immediate draws (`plat_gpu_imm_end`) make the same test as `oh_draw` before their first draw, and count their draws for the tail. A mark closes the run, writes all uniform rows set in the record and the last fog LUT (mark words, at most 640), and clears the model: the next draw sends a citro3d flush (`CMD_OH_FLUSH`), its three class blocks and its layout. The last mark is the split (`r->oh_split`).
+- Stereo frame on the render thread: the 3D part up to the split once; snapshot and left warp (citro3d); the mark's `lit`/light count and its words (copied into citro3d's buffer); the tail's commands (each run submitted as its own command list); present left; right warp; the tail again from the split (the same runs submitted again, the same mark words copied again); present right.
+- So the tail is already a set of prebuilt lists that both eyes submit. Its rows per eye are the mono rows: the C1 reference replays the same tail with the same rows for both eyes (`rot_uniforms` restored after each warp), and so does K. A composed eye offset x' = x + b w with b = 0 is not byte-identical (-0 + 0 = +0), so no row is composed and the two eye lists share their words.
+- Duplicate work found: in a mono frame every mark is written and then ignored (mark words, the full state sent again after it, the citro3d flush, the list split). gor_01 has 2 marks a frame (Stage 5 counters).
+
+### What `gxstereo=1` changes
+
+At a record's start the game thread asks `stereo_maybe()` (no side effects; the render thread keeps `stereo_wanted`). With 3D off the record writes no mark: the run continues, the model keeps what the GPU holds. The register values at every draw are unchanged (a mark only made the next draw send again what the GPU held, and in mono the render thread did nothing at a mark), so mono pictures are identical; the word stream is shorter. With 3D on nothing changes (the same words as 0). The record started in mono is drawn in mono if 3D comes on before it is drawn (one frame).
+
+### Stereostats per eye (all `gxstereo` values)
+
+`stereostats=N` adds a `stereostats per eye:` line: render-thread us per stereo frame for the split (snapshot and left warp), the left tail, the right warp with its state restore, the right tail, and the tail's record commands per frame (runs, flushes, uniform ops, marks, other).
+
+### Checks done without the emulator
+
+Dev build (`--dev --no-cia`) clean. No `src/` change. No GX setter touched.
+
+### Gates (to run; owner rule 2026-11-28: no Azahar for this agent)
+
+Release CIA. C1 = `gxdirty=1 gxdirect=1 gximmdirect=1 texfast=1 texasync=1`; K = C1 + `gxone=1 gxchunk=1`; I = K + `gximmfl=1`; KS = K + `gxstereo=1`; IS = I + `gxstereo=1`.
+
+1. Stereo identity: `stereo_ab.py --a "C1" --b "K" --scenes gor_01,pik_00,battle --count 3`, then `--b "I"`, `--b "KS"`, `--b "IS"` (stereo_ab adds `stereoforce=1`). Pass: EFB, L and R byte-identical in every shot (9 of 9 per scene), left differs from right.
+2. Mono identity: `determ_ab.py --a "K" --b "KS" --scenes gor_01,pik_00,usu_00,battle` and `--a "I" --b "IS"`: 6 of 6 per scene.
+3. Verify counts: `run_azahar.py --frames 841 --switches "map=gor_01 story=30 I gxstereo=2 gxthreadstats=60"` (mono) and the same with `stereoforce=1`: the `gxstereo=2, 600 frames:` line. Mono: `marks written` about 2 a frame, `left out by gxstereo=1` equal to it, `stereo 0`. Stereo: `left out 0`, `from records started in mono 0`.
+4. Chunk verify with the switch: `run_azahar.py --long 200 --frames 841 --switches "map=gor_01 story=30 C1 gxone=1 gxchunk=2 gximmfl=2 gxstereo=1 gxthreadstats=60"`: `differ 0`, `records over 0`, gximmfl `route differ 0 index differ 0`.
+5. Cost per eye: `run_azahar.py --frames 841 --switches "<scene> <cfg> stereoforce=1 stereostats=60"` for cfg C1, K, I in gor_01, pik_00 and the battle: the `stereostats` and `stereostats per eye` lines at frame 840 (render, gpu, split, tail L, right warp, tail R, tail commands).
+6. Timing, mono: `gx_perf_ab.py --repeat 2 --scenes gor_01,pik_00,usu_00,battle --a "I" --b "IS"` (frame, core-0 busy, render; expected: busy and render a little lower, by the marks' words and the lists they split).
 
 ## Heap margin (2026-11-27)
 

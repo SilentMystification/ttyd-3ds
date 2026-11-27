@@ -760,6 +760,11 @@ typedef struct {
     u32 ix_first, ix_count; /* its range of the index pool (the copied draws' indices only) */
     u32 chunk;      /* gxchunk: the batch's chunk id (0: none yet, PLAT_GPU_CHUNK_NEVER: per draw for good) */
     u32 chunk_tg;   /* the memory-trust generation the chunk was built in */
+    u32 world;      /* gxbopen: s_dlc_epoch + memory-trust generation + gx_vsh_dec_epoch at the last open that
+                       passed those three checks (0: none) */
+    u32 vs_id;      /* gxbopen: the vertex state's content id (batches with equal vertex-state records share it) */
+    u32 vs_hash;
+    void* ghint;    /* gxbopen: the pass group of the last open (gx_vsh.c checks it before use) */
 } Batch;
 
 int gx_batch_pending;
@@ -782,6 +787,14 @@ static Batch* s_act;
 static u32 s_act_pos, s_act_ver, s_act_xfv, s_act_vtxv, s_act_cull;
 static void* s_act_group;
 static Batch* s_bat_prev;  /* the batch drawn or formed last (for .succ) */
+/* gxbopen (GX native step 4; 0 off, 1 on, 2 verify), gx_internal.h. The vertex state last seen equal to the
+ * state in force: content id s_vs_id at gx_vtx_version s_vs_ver. Ids are handed out in order and never reused. */
+int gx_opt_bopen;
+static u32 s_vs_ver, s_vs_id, s_vs_next;
+#define VS_TAB 1024
+static u16 s_vs_tab[VS_TAB]; /* vertex-state hash -> a batch that had it (index + 1), a hint checked on use */
+/* gxlcall (gx_internal.h): the open batch's next member for the test before gx_call_list */
+struct GxLcall gx_lcall = {&gx_lcall, 0, 0, 0, 0, 0};
 /* the run being collected */
 typedef struct {
     const void* stream;
@@ -806,6 +819,8 @@ static struct {
 enum { OF_EPOCH, OF_TRUST, OF_STATE, OF_DECISION, OF_BEGIN, OF_COUNT };
 static struct {
     u32 opens, members, partial, formed, refreshed, killed, form_fail, open_fail[OF_COUNT], evicted, bad;
+    u32 lfast, lchecks, ldiffer; /* gxlcall: members taken by the inline test; verify checks and differences */
+    u32 bworld, bvs, bchecks, bdiffer; /* gxbopen: epoch checks skipped, vertex-state compares skipped; verify */
 } s_bst, s_bsum;
 
 static inline Batch* B(u32 i) { return i ? &s_bat[i - 1] : NULL; }
@@ -813,6 +828,17 @@ static inline u32 BIDX(const Batch* b) { return (u32)(b - s_bat) + 1; }
 static inline BatMember* b_members(const Batch* b) { return (BatMember*)b->blob; }
 static inline BatDraw* b_draws(const Batch* b) { return (BatDraw*)(b_members(b) + b->n); }
 static inline GxAttrFmt* b_vat(const Batch* b) { return (GxAttrFmt*)(b_draws(b) + b->ndraws); }
+static inline void lcall_set(void) {
+    const Batch* b = s_act;
+    /* gxstats counts each list call on the per-list path (gx_call_list): mode 1 then leaves it alone */
+    if (gx_lcall.mode != 0 && b != NULL && s_act_pos < b->n && (gx_lcall.mode == 2 || gx_perf_on <= 0)) {
+        const BatMember* m = &b_members(b)[s_act_pos];
+        gx_lcall.list = m->list;
+        gx_lcall.nbytes = m->nbytes;
+    } else {
+        gx_lcall.list = &gx_lcall;
+    }
+}
 
 static void bat_init(void) {
     s_bat_on = plat_switch_int("gxbatch", 1);
@@ -843,6 +869,21 @@ static void bat_init(void) {
     s_bat_free = 1;
     s_bat_log_every = (u32)plat_switch_int("gxthreadstats", plat_switch_int("gxstats", 0));
     s_chunk_on = plat_gpu_chunk_active() != 0;
+    {
+        /* gxlcall needs gxbatch=1: gxbatch=2 checks every member on the per-list path */
+        int bo = plat_switch_int("gxbopen", 0);
+        gx_opt_bopen = s_bat_on == 1 && bo >= 1 && bo <= 2 ? bo : 0;
+        if (gx_opt_bopen != 0) {
+            PLOG_I("gxbopen: %s: one world generation, vertex-state ids, pass-group hint at a batch open",
+                   gx_opt_bopen == 2 ? "verify" : "on");
+        }
+        int lc = plat_switch_int("gxlcall", 0);
+        gx_lcall.mode = s_bat_on == 1 && lc >= 1 && lc <= 2 ? (u32)lc : 0;
+        if (gx_lcall.mode != 0) {
+            PLOG_I("gxlcall: %s: the open batch's next member tested before gx_call_list",
+                   gx_lcall.mode == 2 ? "verify" : "on");
+        }
+    }
     PLOG_I("gxbatch: %s, %d slots, %lu KB of indices in linear memory%s", s_bat_on == 2 ? "verify" : "on", BAT_SLOTS,
            (unsigned long)kb, s_chunk_on ? ", batch chunks (gxchunk)" : "");
 }
@@ -1030,6 +1071,7 @@ static void bat_kill_chain(DlcEntry* e) {
         Batch* b = B(e->bat_head);
         if (b == s_act) {
             s_act = NULL; /* never: entries change on the per-list path, after the open batch ended */
+            lcall_set();
         }
         bat_kill(b);
     }
@@ -1051,10 +1093,47 @@ static void bat_evict_old(u32 want) {
 
 /* ---- validation and use ---- */
 
+static int bat_same_state_full(Batch* b);
+static void bopen_differ(const Batch* b, const char* what) {
+    static u32 s_logged;
+    s_bst.bdiffer++;
+    if (s_logged++ < 8) {
+        PLOG_W("gxbopen verify: frame %lu batch %lu: %s", (unsigned long)gx_perf_frame_no(), (unsigned long)BIDX(b),
+               what);
+    }
+}
+
 static int bat_same_state(Batch* b) {
     if (b->vs_ok == gx_vtx_version) {
+        if (gx_opt_bopen != 0) {
+            s_vs_ver = gx_vtx_version;
+            s_vs_id = b->vs_id;
+        }
         return 1;
     }
+    if (gx_opt_bopen != 0 && b->vs_id != 0 && b->vs_id == s_vs_id && s_vs_ver == gx_vtx_version) {
+        /* gxbopen: a batch with the same vertex-state record matched the state in force, which has not changed */
+        if (gx_opt_bopen == 1) {
+            b->vs_ok = gx_vtx_version;
+            s_bst.bvs++;
+            return 1;
+        }
+        s_bst.bchecks++;
+        int ok = bat_same_state_full(b);
+        if (!ok) {
+            bopen_differ(b, "vertex state of an equal record does not match");
+        }
+        return ok;
+    }
+    int ok = bat_same_state_full(b);
+    if (ok && gx_opt_bopen != 0) {
+        s_vs_ver = gx_vtx_version;
+        s_vs_id = b->vs_id;
+    }
+    return ok;
+}
+
+static int bat_same_state_full(Batch* b) {
     if (!gx_mem_equal(b->vtx_desc, gx.vtx_desc, sizeof(b->vtx_desc)) || b->cur_pnmtx != (u8)gx.cur_pnmtx ||
         !gx_mem_equal(b->cur_texmtx, gx.cur_texmtx, sizeof(b->cur_texmtx))) {
         return 0;
@@ -1089,6 +1168,25 @@ static int bat_open(Batch* b) {
 static inline __attribute__((always_inline)) int bat_open_body(Batch* b) {
     BatMember* m = b_members(b);
     u32 fail;
+    u32 tg = plat_memstable_gen();
+    /* gxbopen: the three generations as one (each only grows, so an equal sum means all three are equal; a wrap
+     * of the sum needs 2^32 bumps) */
+    const u32 world = s_dlc_epoch + tg + gx_vsh_dec_epoch;
+    if (gx_opt_bopen != 0 && b->world == world && world != 0) {
+        if (gx_opt_bopen == 1) {
+            s_bst.bworld++;
+            if (!bat_same_state(b)) {
+                fail = OF_STATE;
+                goto no;
+            }
+            goto begin;
+        }
+        s_bst.bchecks++;
+        if (b->dlc_epoch != s_dlc_epoch || b->trust_gen != tg || b->dec_epoch != gx_vsh_dec_epoch ||
+            (b->chunk != 0 && b->chunk != PLAT_GPU_CHUNK_NEVER && b->chunk_tg != tg)) {
+            bopen_differ(b, "world generation equal, a generation differs");
+        }
+    }
     if (b->dlc_epoch != s_dlc_epoch) {
         for (u32 i = 0; i < b->n; i++) {
             const DlcEntry* e = &s_e[m[i].eidx];
@@ -1100,7 +1198,6 @@ static inline __attribute__((always_inline)) int bat_open_body(Batch* b) {
         }
         b->dlc_epoch = s_dlc_epoch;
     }
-    u32 tg = plat_memstable_gen();
     if (b->trust_gen != tg) {
         for (u32 i = 0; i < b->n; i++) {
             if (s_e[m[i].eidx].trust_gen != tg) {
@@ -1127,8 +1224,12 @@ static inline __attribute__((always_inline)) int bat_open_body(Batch* b) {
         }
         b->dec_epoch = gx_vsh_dec_epoch;
     }
+    if (gx_opt_bopen != 0) {
+        b->world = world;
+    }
+begin:
     if (!gx_draw_batch_begin(b->unit_attr, BIDX(b), m[0].list, m[0].nbytes, &s_e[m[0].eidx].vsh_rec, &s_act_group,
-                             &s_act_cull)) {
+                             &s_act_cull, gx_opt_bopen != 0 ? &b->ghint : NULL)) {
         fail = OF_BEGIN;
         goto no;
     }
@@ -1140,6 +1241,10 @@ static inline __attribute__((always_inline)) int bat_open_body(Batch* b) {
     s_act_ver = gx.version;
     s_act_xfv = gx_xf_version;
     s_act_vtxv = gx_vtx_version;
+    gx_lcall.ver = s_act_ver;
+    gx_lcall.xfv = s_act_xfv;
+    gx_lcall.vtxv = s_act_vtxv;
+    lcall_set();
     gx_batch_pending = 1;
     s_bst.opens++;
     return 1;
@@ -1210,6 +1315,7 @@ static inline __attribute__((always_inline)) void bat_close_body(void) {
     }
     u32 p = s_act_pos;
     s_act = NULL;
+    lcall_set();
     const BatMember* m = b_members(b);
     const BatDraw* d = b_draws(b);
     u32 idx_end = m[p - 1].idx_end;
@@ -1255,6 +1361,44 @@ static inline __attribute__((always_inline)) void bat_close_body(void) {
     } else {
         s_bat_prev = NULL;
         s_bst.partial++;
+    }
+}
+
+/* gxbopen: what bat_same_state_full compares, of two batches */
+static int bat_vs_equal(const Batch* a, const Batch* b) {
+    if (a->fmt_mask != b->fmt_mask || a->cur_pnmtx != b->cur_pnmtx || a->narr != b->narr ||
+        !gx_mem_equal(a->vtx_desc, b->vtx_desc, sizeof(a->vtx_desc)) ||
+        !gx_mem_equal(a->cur_texmtx, b->cur_texmtx, sizeof(a->cur_texmtx)) ||
+        !gx_mem_equal(b_vat(a), b_vat(b), (u32)__builtin_popcount(a->fmt_mask) * sizeof(GxAttrFmt) * GX_VA_MAX_ATTR)) {
+        return 0;
+    }
+    for (u32 i = 0; i < a->narr; i++) {
+        if (a->arr_attr[i] != b->arr_attr[i] || a->arr_base[i] != b->arr_base[i] || a->arr_stride[i] != b->arr_stride[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* gxbopen: the new batch's vertex-state content id (once, when it is formed) */
+static void bat_vs_intern(Batch* b) {
+    u32 h = gx_hash32(b->vtx_desc, sizeof(b->vtx_desc), b->fmt_mask | (u32)b->cur_pnmtx << 8 | (u32)b->narr << 16);
+    h = gx_hash32(b->cur_texmtx, sizeof(b->cur_texmtx), h);
+    h = gx_hash32(b_vat(b), (u32)__builtin_popcount(b->fmt_mask) * sizeof(GxAttrFmt) * GX_VA_MAX_ATTR, h);
+    h = gx_hash32(b->arr_base, b->narr * sizeof(b->arr_base[0]), h);
+    h = gx_hash32(b->arr_attr, b->narr, h);
+    h = gx_hash32(b->arr_stride, b->narr, h);
+    b->vs_hash = h;
+    u16* slot = &s_vs_tab[h & (VS_TAB - 1)];
+    const Batch* c = B(*slot);
+    if (c != NULL && c != b && c->live && c->vs_id != 0 && c->vs_hash == h && bat_vs_equal(c, b)) {
+        b->vs_id = c->vs_id;
+    } else {
+        if (++s_vs_next == 0) {
+            s_vs_next = 1;
+        }
+        b->vs_id = s_vs_next;
+        *slot = (u16)BIDX(b);
     }
 }
 
@@ -1322,6 +1466,7 @@ static inline __attribute__((always_inline)) void form_end_body(void) {
         if (same) {
             b->trust_gen = s_form.trust_gen;
             b->dlc_epoch = s_dlc_epoch;
+            b->world = 0;
             b->last_frame = gx_perf_frame_no();
             if (s_bat_prev != NULL && s_bat_prev != b) {
                 s_bat_prev->succ = (u16)BIDX(b);
@@ -1453,6 +1598,9 @@ static inline __attribute__((always_inline)) void form_end_body(void) {
             b->narr++;
         }
     }
+    if (gx_opt_bopen != 0) {
+        bat_vs_intern(b);
+    }
     b->next_head = e0->bat_head;
     e0->bat_head = (u16)BIDX(b);
     if (s_bat_prev != NULL) {
@@ -1542,6 +1690,7 @@ int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
                     bat_verify_member(st, b, s_act_pos, list, nbytes);
                 }
                 s_act_pos++;
+                lcall_set();
                 s_st.calls++;
                 return 1;
             }
@@ -1580,6 +1729,33 @@ int gx_dlcache_call(const GxState* st, const void* list, u32 nbytes) {
         }
     }
     return r != CALL_MISS;
+}
+
+/* gxlcall=1: the call is the open batch's next member (gx_lcall_hit held): what gx_dlcache_call does then */
+void gx_dlcache_lcall_take(void) {
+    s_act_pos++;
+    lcall_set();
+    s_st.calls++;
+    s_bst.lfast++;
+}
+
+/* gxlcall=2: the open batch and its position (0: none), before the per-list path runs the call */
+u32 gx_dlcache_lcall_token(void) { return s_act != NULL ? BIDX(s_act) << 16 | s_act_pos : 0; }
+
+/* gxlcall=2: after the per-list path ran the call: it took the open batch's next member iff the test held */
+void gx_dlcache_lcall_verify(int hit, u32 token_before) {
+    static u32 s_logged;
+    u32 now = gx_dlcache_lcall_token();
+    int took = token_before != 0 && now == token_before + 1;
+    s_bst.lchecks++;
+    if (took != (hit != 0)) {
+        s_bst.ldiffer++;
+        if (s_logged++ < 8) {
+            PLOG_W("gxlcall verify: inline test %d, per-list path took the member %d (batch %lu pos %lu -> %lu)", hit,
+                   took, (unsigned long)(token_before >> 16), (unsigned long)(token_before & 0xFFFFu),
+                   (unsigned long)(now & 0xFFFFu));
+        }
+    }
 }
 
 /* ---- Capture (gx_pipe.c draw_from_reader) ---- */
@@ -1932,6 +2108,19 @@ static void bat_log(u32 frames) {
            (unsigned long)a->open_fail[OF_BEGIN], (unsigned long)a->bad, (unsigned long)live,
            (unsigned long)((s_ix_cap - free_ix) * sizeof(u16) / 1024), (unsigned long)(s_ix_cap * sizeof(u16) / 1024),
            (unsigned long)s_ix_npending);
+    if (gx_opt_bopen != 0) {
+        PLOG_I("gxbopen frame %lu: per frame %lu opens with the generations skipped, %lu vertex-state compares "
+               "skipped, %lu pass groups by the hint | verify checks %lu+%lu differ %lu+%lu",
+               (unsigned long)gx_perf_frame_no(), (unsigned long)(a->bworld / f), (unsigned long)(a->bvs / f),
+               (unsigned long)(gx_vsh_bopen.hits / f), (unsigned long)a->bchecks, (unsigned long)gx_vsh_bopen.checks,
+               (unsigned long)a->bdiffer, (unsigned long)gx_vsh_bopen.differ);
+        memset(&gx_vsh_bopen, 0, sizeof(gx_vsh_bopen));
+    }
+    if (gx_lcall.mode != 0) {
+        PLOG_I("gxlcall frame %lu: per frame %lu members by the inline test | verify checks %lu differ %lu",
+               (unsigned long)gx_perf_frame_no(), (unsigned long)(a->lfast / f), (unsigned long)a->lchecks,
+               (unsigned long)a->ldiffer);
+    }
     memset(&s_bsum, 0, sizeof(s_bsum));
 }
 

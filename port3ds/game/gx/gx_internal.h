@@ -589,6 +589,24 @@ static inline void gx_dlc_track(int attr, u32 idx) {
 }
 void gx_dlcache_frame(void);
 void gx_dlcache_log(u32 frames);
+/* Switch gxlcall (GX native step 5; 0 off, 1 on, 2 verify): the open gxbatch batch's next member, tested by
+ * GXCallDisplayList (mode word 0) and gx_call_list before the per-list path. `list` is &gx_lcall (never a display
+ * list) when there is no next member or the switch is off. `mode` 1: a hit only advances the batch
+ * (gx_dlcache_lcall_take); 2: every call takes the per-list path and its decision is compared with the test's. */
+extern struct GxLcall {
+    const void* list;
+    u32 nbytes, ver, xfv, vtxv;
+    u32 mode;
+} gx_lcall;
+extern u32 gx_xf_version;
+/* The conditions of gx_dlcache_call's open-batch member test, in the same order of effect. */
+static inline int gx_lcall_hit(const void* list, u32 nbytes) {
+    return list == gx_lcall.list && nbytes == gx_lcall.nbytes && gx.version == gx_lcall.ver &&
+           gx_xf_version == gx_lcall.xfv && gx_vtx_version == gx_lcall.vtxv && !gx_bbox_active;
+}
+void gx_dlcache_lcall_take(void);
+u32 gx_dlcache_lcall_token(void);
+void gx_dlcache_lcall_verify(int hit, u32 token_before);
 #include "plat/memstable.h"
 u32 gx_dlcache_spans(const void* list, u32 nbytes, PlatMemSpan* sp, u32 max);
 
@@ -740,7 +758,15 @@ int gx_batch_member(u32 bat, u32 k, const void** list, u32* nbytes, u32** hint);
 /* gx_vsh.c */
 extern u32 gx_vsh_dec_epoch;
 int gx_vsh_rec_decided(u32* hint, const void* list, u32 nbytes, u32 bat);
-void* gx_vsh_batch_route(u32 pnmtx, u32 bat, const void* list0, u32 nbytes0, u32* hint0);
+/* ghint (gxbopen, NULL without): the batch's pass group of its last open, tried before the group key's hash and
+ * probe (taken only when it is a group of this frame with the state's key: the group the lookup finds); set to the
+ * group used. */
+void* gx_vsh_batch_route(u32 pnmtx, u32 bat, const void* list0, u32 nbytes0, u32* hint0, void** ghint);
+/* gxbopen (switch, gx_dlcache.c; 0 off, 1 on, 2 verify) and gx_vsh.c's counters of the pass-group hint */
+extern int gx_opt_bopen;
+extern struct GxVshBopen {
+    u32 hits, checks, differ;
+} gx_vsh_bopen;
 void gx_vsh_batch_count(void* group, u32 n, u32 verts, u32 idx);
 /* gx_draw.c: what the last gx_draw_vsh recorded (ok 0: it drew nothing through the shader path) */
 typedef struct {
@@ -753,7 +779,7 @@ extern GxVshLast gx_vsh_last;
 /* The state part of gx_draw_vsh for a whole batch: PICA state, uniforms, the group's route. 1: the batch may
  * draw (its uniform block is recorded, *group and *cull are set); 0: draw the members one by one. */
 int gx_draw_batch_begin(const u8 unit_attr[3], u32 bat, const void* list0, u32 nbytes0, u32* hint0, void** group,
-                        u32* cull);
+                        u32* cull, void** ghint);
 void gx_draw_batch_end(void* group, u32 n, u32 verts, u32 idx);
 
 #endif

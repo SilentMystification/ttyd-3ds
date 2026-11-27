@@ -1231,8 +1231,38 @@ int gx_vsh_rec_decided(u32* hint, const void* list, u32 nbytes, u32 bat) {
  * the group when its path this frame is the shader, and then the group is committed (its first record, the
  * batch's touch); NULL when the members must be routed one by one (nothing was changed that the per-list route
  * would not change too). */
-void* gx_vsh_batch_route(u32 pnmtx, u32 bat, const void* list0, u32 nbytes0, u32* hint0) {
+struct GxVshBopen gx_vsh_bopen;
+
+/* gxbopen: the group group_for(pnmtx) returns, with the batch's group of its last open tried first. A group is in
+ * use only in the frame that made it (gx_vsh_frame clears every group of s_order), and a frame's groups have
+ * distinct keys found by every probe (none is freed within the frame), so a hint in use with the state's key is
+ * the group the lookup would find. group_for's s_last_* cache is left as it is (it only skips work). */
+static Group* group_for_hint(u32 pnmtx, void** ghint) {
+    if (s_last_g != NULL && s_last_ver == gx.version && s_last_xfv == gx_xf_version && s_last_pn == pnmtx) {
+        return *ghint = s_last_g; /* group_for's first test */
+    }
+    Group* h = *ghint;
+    const f32* mtx = &gx.pos_mtx[pnmtx % GX_POS_MTX_COUNT][0][0];
+    int ok = h != NULL && h->used && key_is_state(h->key, mtx);
+    if (ok && gx_opt_bopen == 1) {
+        gx_vsh_bopen.hits++;
+        return h;
+    }
     Group* g = group_for(pnmtx);
+    if (ok) {
+        gx_vsh_bopen.checks++;
+        static u32 s_logged;
+        if (g != h && (gx_vsh_bopen.differ++, s_logged++ < 8)) {
+            PLOG_W("gxbopen verify: frame %lu: the pass-group hint %p is not the group found (%p)",
+                   (unsigned long)gx_perf_frame_no(), (void*)h, (void*)g);
+        }
+    }
+    *ghint = g;
+    return g;
+}
+
+void* gx_vsh_batch_route(u32 pnmtx, u32 bat, const void* list0, u32 nbytes0, u32* hint0, void** ghint) {
+    Group* g = ghint != NULL ? group_for_hint(pnmtx, ghint) : group_for(pnmtx);
     if (g == NULL || s_nbtouch == BTOUCH_MAX) {
         return NULL;
     }

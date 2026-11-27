@@ -2710,7 +2710,7 @@ int gx_draw_imm_fl(u8 prim, u8 fmt, const PPCWGPipe* sl, u32 n) {
 
 
 int gx_draw_batch_begin(const u8 unit_attr[3], u32 bat, const void* list0, u32 nbytes0, u32* hint0, void** group,
-                        u32* cull) {
+                        u32* cull, void** ghint) {
     ensure_state();
     if (empty_target()) {
         return 0;
@@ -2720,7 +2720,7 @@ int gx_draw_batch_begin(const u8 unit_attr[3], u32 bat, const void* list0, u32 n
         unit_attr[0] != s_vsh_unit_attr[0] || unit_attr[1] != s_vsh_unit_attr[1] || unit_attr[2] != s_vsh_unit_attr[2]) {
         return 0;
     }
-    void* g = gx_vsh_batch_route(gx.cur_pnmtx, bat, list0, nbytes0, hint0);
+    void* g = gx_vsh_batch_route(gx.cur_pnmtx, bat, list0, nbytes0, hint0, ghint);
     if (g == NULL) {
         return 0;
     }

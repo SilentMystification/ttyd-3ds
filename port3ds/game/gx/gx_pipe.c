@@ -1462,6 +1462,15 @@ void gx_pipe_reset(void) {
 }
 
 void GXCallDisplayList(void* list, u32 nbytes) {
+    if (gx_rec_fast.w == 0 && gx_lcall.mode == 1 && port_gx_wg_ptr == s_pipe && gx_lcall_hit(list, nbytes)) {
+        /* gxlcall: nothing records, no primitive is open, no display list is recorded, the pipe is empty (the tests
+         * below pass through) and the call is the open batch's next member: gx_call_list would only advance it */
+        gx_dlcache_lcall_take();
+        if (gx_rec_direct) {
+            gx_rec_direct_list();
+        }
+        return;
+    }
     if (__builtin_expect(gx_rec_fast.w == 1, 1) && !gx_on_translator()) {
         /* the game thread records with no primitive open and no display list: the tests below end in
          * gx_rec_list (run_pending_raw takes its own fast case) */
@@ -1486,7 +1495,25 @@ void GXCallDisplayList(void* list, u32 nbytes) {
     }
 }
 
+static void gx_call_list_full(const void* list, u32 nbytes, const void* caller);
+
 void gx_call_list(const void* list, u32 nbytes, const void* caller) {
+    if (gx_lcall.mode == 1 && gx_lcall_hit(list, nbytes)) {
+        gx_dlcache_lcall_take(); /* gxlcall: the open batch's next member (the translator's calls under gxthread) */
+        return;
+    }
+    if (gx_lcall.mode == 2) {
+        /* gxlcall=2: the per-list path decides; the inline test's decision is compared with it */
+        int hit = gx_lcall_hit(list, nbytes);
+        u32 tok = gx_dlcache_lcall_token();
+        gx_call_list_full(list, nbytes, caller);
+        gx_dlcache_lcall_verify(hit, tok);
+        return;
+    }
+    gx_call_list_full(list, nbytes, caller);
+}
+
+static __attribute__((noinline)) void gx_call_list_full(const void* list, u32 nbytes, const void* caller) {
     Reader r = {NULL, (const u8*)list, (const u8*)list + nbytes};
     s_list_caller = (void*)caller;
     s_list_start = (const u8*)list;

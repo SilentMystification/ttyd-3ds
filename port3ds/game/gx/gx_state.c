@@ -151,6 +151,9 @@ static inline void touch(u32 cls) {
  * transform reads them per vertex), so the PICA state is not rebuilt for them
  * (switch gxstatever=0: they bump the state version as every setter does). */
 u32 gx_xf_version;
+/* gxbopen's slot ticks (gx_internal.h): one store per changed slot, written whatever the switch */
+GxXfTicks gx_xft;
+static inline void xft_bump(u32* slot) { *slot = ++gx_xft.tick; }
 
 static inline void touch_xf(u32 cls) {
     if (gx_prim_is_open()) {
@@ -533,6 +536,7 @@ static FIFO_COLD void load_pos_mtx_old(const f32 mtx[3][4], u32 id) {
     u32 i = id / 3;
     if (i < GX_POS_MTX_COUNT) {
         memcpy(gx.pos_mtx[i], mtx, sizeof(gx.pos_mtx[i]));
+        xft_bump(&gx_xft.pos[i]);
         touch_xf(GXD_CLIP);
     }
 }
@@ -550,6 +554,7 @@ static inline void load_pos_mtx_fast(const f32 mtx[3][4], u32 id) {
         return;
     }
     memcpy(gx.pos_mtx[i], mtx, sizeof(gx.pos_mtx[i]));
+    xft_bump(&gx_xft.pos[i]);
     fifo_touch_xf(GXD_CLIP);
 }
 FIFO_VER(load_pos_mtx, (const f32 mtx[3][4], u32 id), (mtx, id), id / 3 < GX_POS_MTX_COUNT ? gx.pos_mtx[id / 3] : NULL,
@@ -569,6 +574,7 @@ static FIFO_COLD void load_nrm_mtx_old(const f32 mtx[3][4], u32 id) {
                 gx.nrm_mtx[i][r][c] = mtx[r][c];
             }
         }
+        xft_bump(&gx_xft.nrm[i]);
         touch_xf(GXD_CLIP);
     }
 }
@@ -582,6 +588,7 @@ static inline void load_nrm_mtx_fast(const f32 mtx[3][4], u32 id) {
     for (int r = 0; r < 3; r++) {
         memcpy(gx.nrm_mtx[i][r], mtx[r], sizeof(gx.nrm_mtx[i][r]));
     }
+    xft_bump(&gx_xft.nrm[i]);
     fifo_touch_xf(GXD_CLIP);
 }
 FIFO_VER(load_nrm_mtx, (const f32 mtx[3][4], u32 id), (mtx, id), id / 3 < GX_POS_MTX_COUNT ? gx.nrm_mtx[id / 3] : NULL,
@@ -611,6 +618,7 @@ static FIFO_COLD void load_tex_mtx_old(const f32 mtx[][4], u32 id, GXTexMtxType 
         }
         dst = gx.tex_mtx[i];
         gx.tex_mtx_is_3x4[i] = type == GX_MTX3x4;
+        xft_bump(&gx_xft.tex[i]);
     } else {
         return;
     }
@@ -651,6 +659,7 @@ static inline void load_tex_mtx_fast(const f32 mtx[][4], u32 id, GXTexMtxType ty
     }
     if (is3x4 != NULL) {
         *is3x4 = (u8)three;
+        xft_bump(&gx_xft.tex[is3x4 - gx.tex_mtx_is_3x4]); /* a texture matrix (not a post-transform one) */
     }
     memcpy(dst, mtx, sizeof(f32) * 8);
     memcpy(dst[2], three ? mtx[2] : (const f32*)(const void*)row2, sizeof(f32) * 4);
@@ -713,6 +722,7 @@ void GXSetProjection(const f32 mtx[4][4], GXProjectionType type) {
     REC(SetProjection, F2U(p[0]), F2U(p[1]), F2U(p[2]), F2U(p[3]), F2U(p[4]), F2U(p[5]), F2U(p[6]));
     SAME(gx_mem_equal(gx.proj, p, sizeof(gx.proj)));
     memcpy(gx.proj, p, sizeof(gx.proj));
+    xft_bump(&gx_xft.proj);
     touch_xf(GXD_CLIP);
 }
 
@@ -721,6 +731,7 @@ void GXSetProjectionv(const f32* ptr) {
     RECT(SetProjection, F2U(ptr[0]), F2U(ptr[1]), F2U(ptr[2]), F2U(ptr[3]), F2U(ptr[4]), F2U(ptr[5]), F2U(ptr[6]));
     SAME(gx_mem_equal(gx.proj, ptr, sizeof(gx.proj)));
     memcpy(gx.proj, ptr, sizeof(gx.proj));
+    xft_bump(&gx_xft.proj);
     touch_xf(GXD_CLIP);
 }
 
@@ -741,6 +752,7 @@ void GXSetViewport(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {
     gx.vp[3] = ht;
     gx.vp[4] = nearz;
     gx.vp[5] = farz;
+    xft_bump(&gx_xft.vp);
     touch(GXD_SCI);
 }
 

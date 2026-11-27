@@ -772,7 +772,26 @@ void* gx_vsh_batch_route(u32 pnmtx, u32 bat, const void* list0, u32 nbytes0, u32
 extern int gx_opt_bopen;
 extern struct GxVshBopen {
     u32 hits, checks, differ;
+    u32 thits, tchecks, tdiffer; /* gxbopenxf: the last group kept by the slot ticks; verify checks, differ */
+    u32 vskips, vchecks, vdiffer; /* gxbopenxf: uniform-block parts not rebuilt (slots unchanged); verify */
 } gx_vsh_bopen;
+/* gxbopenxf (default 1 under gxbopen; 0 leaves gxbopen as it was): the slot ticks below key the vertex-state check
+ * (desc + formats by gx_vdesc_ver), the uniform block's matrix parts and the last pass group, in place of the global
+ * gx.version / gx_xf_version / gx_vtx_version. Set by gx_dlcache.c with gxbopen. */
+extern int gx_opt_bopen_xf;
+/* Per-slot change ticks (gx_state.c). `tick` counts the stores that changed a matrix, the projection or the viewport
+ * (gxfifo: only a store that changed a byte; gxfifo=0 and the verify bodies: every store); a slot holds the tick of
+ * its last change. "Slot unchanged since tick t" is (s32)(slot - t) <= 0: no wrap problem while fewer than 2^31
+ * changes separate the two. Written only by the thread that applies the setters to `gx`. */
+typedef struct {
+    u32 tick;
+    u32 proj, vp;
+    u32 pos[GX_POS_MTX_COUNT];
+    u32 nrm[GX_POS_MTX_COUNT];
+    u32 tex[GX_TEX_MTX_COUNT];
+} GxXfTicks;
+extern GxXfTicks gx_xft;
+static inline int gx_xft_since(u32 slot, u32 t) { return (s32)(slot - t) > 0; } /* changed after tick t */
 void gx_vsh_batch_count(void* group, u32 n, u32 verts, u32 idx);
 /* gx_draw.c: what the last gx_draw_vsh recorded (ok 0: it drew nothing through the shader path) */
 typedef struct {

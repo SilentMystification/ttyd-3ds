@@ -764,6 +764,7 @@ typedef struct {
                        passed those three checks (0: none) */
     u32 vs_id;      /* gxbopen: the vertex state's content id (batches with equal vertex-state records share it) */
     u32 vs_hash;
+    u32 vs_vdesc;   /* gxbopenxf: gx_vdesc_ver[0] (low word) when the full compare last matched (0: none) */
     void* ghint;    /* gxbopen: the pass group of the last open (gx_vsh.c checks it before use) */
 } Batch;
 
@@ -790,6 +791,7 @@ static Batch* s_bat_prev;  /* the batch drawn or formed last (for .succ) */
 /* gxbopen (GX native step 4; 0 off, 1 on, 2 verify), gx_internal.h. The vertex state last seen equal to the
  * state in force: content id s_vs_id at gx_vtx_version s_vs_ver. Ids are handed out in order and never reused. */
 int gx_opt_bopen;
+int gx_opt_bopen_xf;
 static u32 s_vs_ver, s_vs_id, s_vs_next;
 #define VS_TAB 1024
 static u16 s_vs_tab[VS_TAB]; /* vertex-state hash -> a batch that had it (index + 1), a hint checked on use */
@@ -821,6 +823,7 @@ static struct {
     u32 opens, members, partial, formed, refreshed, killed, form_fail, open_fail[OF_COUNT], evicted, bad;
     u32 lfast, lchecks, ldiffer; /* gxlcall: members taken by the inline test; verify checks and differences */
     u32 bworld, bvs, bchecks, bdiffer; /* gxbopen: epoch checks skipped, vertex-state compares skipped; verify */
+    u32 bvdesc;                        /* gxbopenxf: desc + format compares skipped by gx_vdesc_ver */
 } s_bst, s_bsum;
 
 static inline Batch* B(u32 i) { return i ? &s_bat[i - 1] : NULL; }
@@ -873,9 +876,10 @@ static void bat_init(void) {
         /* gxlcall needs gxbatch=1: gxbatch=2 checks every member on the per-list path */
         int bo = plat_switch_int("gxbopen", 0);
         gx_opt_bopen = s_bat_on == 1 && bo >= 1 && bo <= 2 ? bo : 0;
+        gx_opt_bopen_xf = gx_opt_bopen != 0 && plat_switch_int("gxbopenxf", 1) != 0;
         if (gx_opt_bopen != 0) {
-            PLOG_I("gxbopen: %s: one world generation, vertex-state ids, pass-group hint at a batch open",
-                   gx_opt_bopen == 2 ? "verify" : "on");
+            PLOG_I("gxbopen: %s: one world generation, vertex-state ids, pass-group hint at a batch open%s",
+                   gx_opt_bopen == 2 ? "verify" : "on", gx_opt_bopen_xf ? "; slot ticks (gxbopenxf)" : "");
         }
         int lc = plat_switch_int("gxlcall", 0);
         gx_lcall.mode = s_bat_on == 1 && lc >= 1 && lc <= 2 ? (u32)lc : 0;
@@ -1094,6 +1098,7 @@ static void bat_evict_old(u32 want) {
 /* ---- validation and use ---- */
 
 static int bat_same_state_full(Batch* b);
+static int bat_same_state_rest(const Batch* b);
 static void bopen_differ(const Batch* b, const char* what) {
     static u32 s_logged;
     s_bst.bdiffer++;
@@ -1125,12 +1130,48 @@ static int bat_same_state(Batch* b) {
         }
         return ok;
     }
+    if (gx_opt_bopen_xf && b->vs_vdesc != 0 && b->vs_vdesc == (u32)gx_vdesc_ver[0]) {
+        /* gxbopenxf: no description or format byte changed since the batch last matched (gx_vdesc_ver counts every
+         * such change): only the current matrices and the arrays are compared */
+        int ok = bat_same_state_rest(b);
+        if (gx_opt_bopen == 2) {
+            s_bst.bchecks++;
+            int full = bat_same_state_full(b);
+            if (full != ok) {
+                bopen_differ(b, "vertex state: description/format generation equal, the full compare differs");
+            }
+            ok = full;
+        } else {
+            s_bst.bvdesc++;
+            if (ok) {
+                b->vs_ok = gx_vtx_version;
+            }
+        }
+        if (ok) {
+            s_vs_ver = gx_vtx_version;
+            s_vs_id = b->vs_id;
+        }
+        return ok;
+    }
     int ok = bat_same_state_full(b);
     if (ok && gx_opt_bopen != 0) {
         s_vs_ver = gx_vtx_version;
         s_vs_id = b->vs_id;
     }
     return ok;
+}
+
+/* the part of bat_same_state_full that gx_vdesc_ver does not cover */
+static int bat_same_state_rest(const Batch* b) {
+    if (b->cur_pnmtx != (u8)gx.cur_pnmtx || !gx_mem_equal(b->cur_texmtx, gx.cur_texmtx, sizeof(b->cur_texmtx))) {
+        return 0;
+    }
+    for (u32 i = 0; i < b->narr; i++) {
+        if (gx.array_base[b->arr_attr[i]] != b->arr_base[i] || gx.array_stride[b->arr_attr[i]] != b->arr_stride[i]) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static int bat_same_state_full(Batch* b) {
@@ -1153,6 +1194,7 @@ static int bat_same_state_full(Batch* b) {
         }
     }
     b->vs_ok = gx_vtx_version;
+    b->vs_vdesc = (u32)gx_vdesc_ver[0];
     return 1;
 }
 
@@ -2114,6 +2156,15 @@ static void bat_log(u32 frames) {
                (unsigned long)gx_perf_frame_no(), (unsigned long)(a->bworld / f), (unsigned long)(a->bvs / f),
                (unsigned long)(gx_vsh_bopen.hits / f), (unsigned long)a->bchecks, (unsigned long)gx_vsh_bopen.checks,
                (unsigned long)a->bdiffer, (unsigned long)gx_vsh_bopen.differ);
+        if (gx_opt_bopen_xf) {
+            PLOG_I("gxbopenxf frame %lu: per frame %lu desc/format compares skipped, %lu last pass groups by the "
+                   "slot ticks, %lu uniform-block rebuilds skipped | verify checks %lu+%lu+%lu differ %lu+%lu",
+                   (unsigned long)gx_perf_frame_no(), (unsigned long)(a->bvdesc / f),
+                   (unsigned long)(gx_vsh_bopen.thits / f), (unsigned long)(gx_vsh_bopen.vskips / f),
+                   (unsigned long)a->bchecks, (unsigned long)gx_vsh_bopen.tchecks,
+                   (unsigned long)gx_vsh_bopen.vchecks, (unsigned long)gx_vsh_bopen.tdiffer,
+                   (unsigned long)gx_vsh_bopen.vdiffer);
+        }
         memset(&gx_vsh_bopen, 0, sizeof(gx_vsh_bopen));
     }
     if (gx_lcall.mode != 0) {

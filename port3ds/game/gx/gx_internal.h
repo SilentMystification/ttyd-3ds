@@ -450,6 +450,9 @@ void gx_opts_init(void);
 u32 gx_tex_handle_for(int map, u16* out_w, u16* out_h);
 /* Fills the filter fields of a texture unit for the texture gx_tex_handle_for just returned for `map`. */
 void gx_tex_unit_sampler(PlatGpuTexUnit* tu, const GxTexObj* t, int map);
+/* gxtexkey: the maps an indirect TEV stage samples (bit per map), as far as gx_tex_unit_sampler reads them; 0 when
+ * it does not */
+u32 gx_tex_ind_maps(void);
 void gx_tex_invalidate_all(void);
 void gx_tex_frame_end(void);
 u32 gx_tex_uploads_this_frame(void);

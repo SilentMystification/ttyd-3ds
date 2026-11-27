@@ -1790,6 +1790,21 @@ static int map_is_indirect(int map) {
     return 0;
 }
 
+u32 gx_tex_ind_maps(void) {
+    if (s_mode == TF_GAME && !s_census_every) {
+        return 0;
+    }
+    u32 m = 0;
+    int num = gx.num_tev ? gx.num_tev : 1;
+    for (int s = 0; s < num && s < GX_MAX_TEV; s++) {
+        if (gx.tev[s].ind_enabled && gx.tev[s].ind_stage < 4) {
+            u32 map = gx.ind[gx.tev[s].ind_stage].map;
+            m |= map < GX_MAX_TEXMAP ? 1u << map : 0; /* map_is_indirect is asked for maps 0-7 only */
+        }
+    }
+    return m;
+}
+
 static void census_sample(const GxTexObj* t, int copy, int ind, int tiny) {
     u32 mn = t->min_filter < 6 ? t->min_filter : 0, mg = t->mag_filter < 2 ? t->mag_filter : 2;
     s_cen->use[mn][mg][t->mipmap != 0]++;

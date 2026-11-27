@@ -1783,7 +1783,7 @@ int gpuprobe_run(const GpuProbeConfig* cfg, GpuProbeSummary* out) {
             j->code = R_SKIP;
             j->done = true;
             snprintf(j->note, sizeof(j->note), "danger 3 skipped by request");
-            journal_append("R %s SKIP 0 %s", c->id, j->note);
+            /* Not journaled: a later run without probesafe (probe=qtm, or the rest of danger 3) must run it. */
             continue;
         }
         journal_append("B %s", c->id);

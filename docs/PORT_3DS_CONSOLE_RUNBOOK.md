@@ -27,25 +27,8 @@ tools/port3ds/build.sh libs/ctr-devkit/supervisor   # build/3ds/supervisor/ctrdk
 ```
 
 - Dev builds have LTO and `-O3` off: they are for the probe, calib, the hang tests and the updater/supervisor checks. **All timing (baseline, A/B, heap, retail) is taken with the release CIA.**
-- Once, for the A/B steps, add these configs to the `CONFIGS` dict of `tools/port3ds/hw_baseline.py` (one dict, no other change; the table, window parsing and run ids then work for every pair below). Commit it with the results.
-
-```python
-CONFIGS.update({
-    "old":   "gxdirty=0 gxdirect=0 gximmdirect=0 gxsdl=0 gxrecfuse=0 gxreclgroup=0 texasync=0 texfast=0 dlspread=0 tex16=1",
-    "c3":    "gxthread=2 gxpipeline=1",
-    "k":     "gxone=1 gxchunk=1",
-    "i":     "gxone=1 gxchunk=1 gximmfl=1",
-    "c3g1":  "gxthread=2 gxpipeline=1 gpucore=1",
-    "kg1":   "gxone=1 gxchunk=1 gpucore=1",
-    "c3j":   "gxthread=2 gxpipeline=1 jobw1=1 mapnameidx=1 mapdispjob=1",
-    "c3jg1": "gxthread=2 gxpipeline=1 jobw1=1 mapnameidx=1 mapdispjob=1 gpucore=1",
-    "noqtm": "noqtm",
-    "recheap": "place=gx_record:heap",
-    "vramtex": "vramtex=1 vramstats=60",
-})
-```
-
-- Config names: **D** = the defaults (`gxdirty gxdirect gximmdirect gxsdl gxrecfuse gxreclgroup texasync texfast` on, `dlspread=1500`, `tex16=0` exact textures; `gxthread=0`). **C3** = D + `gxthread=2 gxpipeline=1`. **K** = D + `gxone=1 gxchunk=1`. **I** = K + `gximmfl=1`. If the planner flips `gxthread=2 gxpipeline=1` to the default before the session (owner-questions 15), D already is C3: then the "D vs C3" pair becomes `gxthread=0 gxpipeline=0` against the default.
+- The A/B configs are built into `tools/port3ds/hw_baseline.py` (`--configs list` prints the switches of each; names are case-insensitive; no edit needed): `D`, `C3`, `K`, `I`, `gpucore1`, `kg1`, `par`, `all`, `old`, `noqtm`, `recheap`, `vramtex`. The old names `default`, `gxdirty`, `gxdirect` are aliases of `D`.
+- Config meaning: **D** = the defaults (`gxdirty gxdirect gximmdirect gxsdl gxrecfuse gxreclgroup texasync texfast` on, `dlspread=1500`, `tex16=0` exact textures; `gxthread=0`). **C3** = D + `gxthread=2 gxpipeline=1`. **K** = D + `gxone=1 gxchunk=1`. **I** = K + `gximmfl=1`. **gpucore1** = C3 + `gpucore=1`; **kg1** = K + `gpucore=1`; **par** = C3 + `jobw1=1 mapnameidx=1 mapdispjob=1`; **all** = gpucore1 + par; **old** = the explicit switch set from before the default flip (D2). If the planner flips `gxthread=2 gxpipeline=1` to the default before the session (owner-questions 15), D already is C3: then the "D vs C3" pair becomes `gxthread=0 gxpipeline=0` against the default.
 - Also on the PC before the session: `tools/port3ds/hw_baseline.py --dry-run` to see the exact commands, and `$D --help` for flags.
 - Check on the console once: `sdmc:/3ds/ttyd/game.iso`, `sdmc:/3ds/dspfirm.cdc`, and `devupdate` in `sdmc:/3ds/ttyd/debug3ds.txt` (so a HOME start of the release CIA has the server).
 
@@ -81,7 +64,7 @@ $D files ls @/gpuprobe                       # get every <case>.bin (and ctl_rec
 python3 tools/port3ds/gpu_cmd_diff.py --probe-dir build/gpuprobe_hw
 ```
 
-If `livelog` does not work in probe mode, drop it and read `$D log` once after the stated time. If a run does not end (freeze or no `GPUPROBE DONE`): hold POWER, start the dev CIA from HOME, `$D restart "gpuprobe"` (no `probefresh`: the journal marks the dead case FAULT and goes on). If step 1 shows the new `cb_*`, `dt_*`, `cp_thru` rows as skipped or missing, run `$D restart "gpuprobe probe=cmdlist,thru,dt"` (no `probefresh`).
+`probesafe` skips the danger-3 cases (`SKIP`, note "danger 3 skipped by request") and, since the fix in `libs/ctr-devkit/gpuprobe/gpuprobe.c` made with this runbook, does not write them to the journal (before it the journal held them as done, so steps 2 and 3 would have run nothing; a dev CIA built before that fix needs one `files put` of a journal without the `SKIP 0 danger 3` lines, or `probefresh` with `probe=qtm`). `livelog` works in probe mode (checked in the code: `boot.c` opens the log port from the `livelog` switch before the probe or calib mode is entered, and the probe mode logs through the same queue; the probe's `GPUPROBE DONE` line goes there). If a run does not end (freeze or no `GPUPROBE DONE`): hold POWER, start the dev CIA from HOME, `$D restart "gpuprobe"` (no `probefresh`: the journal marks the dead case FAULT and goes on). If step 1 shows the new `cb_*`, `dt_*`, `cp_thru` rows as skipped or missing, run `$D restart "gpuprobe probe=cmdlist,thru,dt"` (no `probefresh`).
 
 What to look for, per row (result OK / WRONG / HANG / FAULT / ERR / SKIP):
 
@@ -119,11 +102,11 @@ Switch to the release CIA first. The `devupdate` switch keeps the server in this
 
 ```sh
 $D push build/3ds/game/ttyd.cia --switches "devupdate" --wait 120
-tools/port3ds/hw_baseline.py --scenes gor_01,hei_01 --configs default      # 4 runs, check the table first
-tools/port3ds/hw_baseline.py --configs default                             # the ten scenes: gor_01 gon_02 aaa_00 tik_01 hei_01 jin_00 battle eki_00 usu_00 pik_00
+tools/port3ds/hw_baseline.py --scenes gor_01,hei_01 --configs D      # 4 runs, check the table first
+tools/port3ds/hw_baseline.py --configs D                             # the ten scenes: gor_01 gon_02 aaa_00 tik_01 hei_01 jin_00 battle eki_00 usu_00 pik_00
 ```
 
-The tool restarts with the scene switches, `gxthreadstats=60 fastboot livelog hwb=<id>`, follows the live log and counts the first three windows that end at frame 781 or later (781, 841, 901; the warp is at about 595). Output `build/hw-baseline/baseline.md`, `results.json`, one log per run. The three stock configs (`default`, `gxdirty`, `gxdirect`) are now identical (those switches are default on), so run `--configs default` only: 10 runs, about 17-20 min. Pass: a row per scene with frame ms, core-0 busy ms, render ms (minus vblank wait). Compare with the Azahar columns in PORT_3DS_GX_PERF.md ("Timing" tables) and the Azahar-to-console ratio from A3. The headline question: how far from 16.7 ms is each scene (frame ms is a whole number of vblanks: 16.7, 33.3, 50, 66.7).
+The tool restarts with the scene switches, `gxthreadstats=60 fastboot livelog hwb=<id>`, follows the live log and counts the first three windows that end at frame 781 or later (781, 841, 901; the warp is at about 595). Output `build/hw-baseline/baseline.md`, `results.json`, one log per run. The old stock configs (`default`, `gxdirty`, `gxdirect`) are now identical (those switches are default on; they are aliases of `D`), so run `--configs D` only: 10 runs, about 17-20 min. Pass: a row per scene with frame ms, core-0 busy ms, render ms (minus vblank wait). Compare with the Azahar columns in PORT_3DS_GX_PERF.md ("Timing" tables) and the Azahar-to-console ratio from A3. The headline question: how far from 16.7 ms is each scene (frame ms is a whole number of vblanks: 16.7, 33.3, 50, 66.7).
 
 Fill: copy `baseline.md` into **PORT_3DS_GX_PERF.md** next to the Azahar numbers (section "Gate results of steps 0-2", and the "Defaults on" section), and the ratios into **PORT_3DS_60FPS.md** section 2c.
 
@@ -149,7 +132,7 @@ Fill: **PORT_3DS_TESTING.md** "GPU hang survival" (add a "Console, <date>" parag
 
 ## C. The gor_01 hang bisect (about 20-35 min, release CIA)
 
-The hang: after a gor_01 warp the log repeats `gpu: fence wait for seq N ...` (PORT_3DS_TESTING.md "GPU hang (PICA stuck)"). Draws are numbered from 0 in the dumped record (`gpu_cmd_diff.py` prints the same index). `gpudrawcut=K` makes only draws 0..K-1; `gpudrawskip=A-B` leaves out draws A..B (inclusive). Both apply only to the records of game frame `gpudump=N`. **First check the frame number in an earlier hang's file name** (`$D files ls @/gpuhang`, `hang_f<N>_r<seq>.bin`); the notes say 887 with the base switches below. The base switches are fixed (batching and state cache off, so the draw order matches the dump): `gxbatch=0 gxstatecache=0`. `gxone/gxchunk` stay off (they turn themselves off with `gpudrawcut`).
+The hang: after a gor_01 warp the log repeats `gpu: fence wait for seq N ...` (PORT_3DS_TESTING.md "GPU hang (PICA stuck)"). Draws are numbered from 0 in the dumped record (`gpu_cmd_diff.py` prints the same index). `gpudrawcut=K` makes only draws 0..K-1; `gpudrawskip=A-B` leaves out draws A..B (inclusive). Both apply only to the records of game frame `gpudump=N`. **First check the frame number in an earlier hang's file name** (`$D files ls @/gpuhang`, `hang_f<N>_r<seq>.bin`). Frame 887 comes only from owner-questions 4b: no repo doc records the repro frame (PORT_3DS_TESTING.md "GPU hang (PICA stuck)" gives the log pattern, no frame), so treat 887 as unconfirmed; if `gpuhang/` is empty, C1 below is also the check: with `gpudump=887` and no hang, the run still dumps frame 887, and a hang later shows its own frame in the `hang_f<N>` name (then set `gpudump=N`). The base switches are fixed (batching and state cache off, so the draw order matches the dump): `gxbatch=0 gxstatecache=0`. `gxone/gxchunk` stay off (they turn themselves off with `gpudrawcut`).
 
 ```sh
 BASE="fastboot map=gor_01 story=30 gxbatch=0 gxstatecache=0 gxthreadstats=60 gpudump=887 livelog"
@@ -170,26 +153,26 @@ Fill: **PORT_3DS_TESTING.md** "GPU hang" section (the culprit draw, its vertex/i
 
 ## D. New defaults, A/B pairs, retail, heap (about 2 h 15 min, release CIA)
 
-Release CIA is on the console from A4 (push it again if the dev CIA was started in between). All pairs use `hw_baseline.py` with the configs added in step 0. Scenes: `gor_01,pik_00,usu_00,battle` (core 2 is the limit in gor_01 and pik_00; usu_00 is light; battle is the regression case: C3 frame was 25 ms before the D2 change and the fence wait 5.4 ms). Windows end at 781, 841, 901; Azahar windows were 722-841: same steady state. Run-to-run spread of one config was 0.3-0.5 ms in Azahar; on the console the first pair of identical runs gives the noise: **repeat the `default` config once at the start** (run the command twice; each run has its own id). Take the same table row for each config; a difference below the noise is "none".
+Release CIA is on the console from A4 (push it again if the dev CIA was started in between). All pairs use `hw_baseline.py` with the configs built into the tool. Scenes: `gor_01,pik_00,usu_00,battle` (core 2 is the limit in gor_01 and pik_00; usu_00 is light; battle is the regression case: C3 frame was 25 ms before the D2 change and the fence wait 5.4 ms). Windows end at 781, 841, 901; Azahar windows were 722-841: same steady state. Run-to-run spread of one config was 0.3-0.5 ms in Azahar; on the console the first pair of identical runs gives the noise: **repeat the `D` config once at the start** (run the command twice; each run has its own id). Take the same table row for each config; a difference below the noise is "none".
 
-### D1. One pass over all configs (28 runs, about 50 min)
+### D1. One pass over all configs (32 runs, about 55 min)
 
 ```sh
 S=gor_01,pik_00,usu_00,battle
-tools/port3ds/hw_baseline.py --scenes $S --configs default,c3,k,i,c3g1,kg1,c3j,c3jg1
+tools/port3ds/hw_baseline.py --scenes $S --configs D,C3,K,I,gpucore1,kg1,par,all
 ```
 
 (Three further configs, 12 runs, about 20 min, in D2.) Read each pair as `B - A` in frame, core-0 busy, translator, render (ms), and whether the frame stays at the same vblank count:
 
 | Pair | A | B | Question and Azahar result | Fill |
 |---|---|---|---|---|
-| 1 | `default` | `c3` (`gxthread=2 gxpipeline=1`) | does the translator thread on core 2 pay on the console (Azahar: gor_01 50 -> 33.5, pik_00 50 -> 33.4, battle 27 -> 25) and is core 2 the limit; fence times | PORT_3DS_GX_PERF.md gate tables; owner-questions 15 (flip `gxthread=2` as default) |
-| 2 | `c3` | `k` (`gxone=1 gxchunk=1`) | Azahar: no gain (K core 0 35.7 vs C3 game 22.5): does one `GX_ProcessCommandList` per run and the frame list written on core 0 pay on the real command processor; item list below | PORT_3DS_GX_PERF.md "Gate results of step 3" timing table (add a console row) |
-| 3 | `k` | `i` (`+ gximmfl=1`) | Azahar: core 0 -0.2..-1.1 ms, frame unchanged | "Gate results of steps 3 and 4" table |
-| 4 | `c3` | `c3g1` (`gpucore=1`) | render thread on core 1 (Azahar: render 7.4 -> 10.9, suspect because core 1 shares the log thread and GSP completions go to core 0 only); look at core-1 load (sd, log, wdog threads): the budget is about 80 % | PORT_3DS_GAMEPAR.md "Timing" table; owner-questions 6 |
-| 5 | `k` | `kg1` | same for K | same table |
-| 6 | `c3` | `c3j` (`jobw1=1 mapnameidx=1 mapdispjob=1`) | Azahar: about 0 (name index -0.25..-0.4 ms, mapDisp net 0); job worker 1 on core 1 round trip (`jobprobe=1 jobstats=60 gamecnt=120` in one extra run: mean us per wake) | PORT_3DS_GAMEPAR.md "Timing" table and job round trip line |
-| 7 | `c3g1` | `c3jg1` | the three together with the render thread on core 1 | same table |
+| 1 | `D` | `C3` (`gxthread=2 gxpipeline=1`) | does the translator thread on core 2 pay on the console (Azahar: gor_01 50 -> 33.5, pik_00 50 -> 33.4, battle 27 -> 25) and is core 2 the limit; fence times | PORT_3DS_GX_PERF.md gate tables; owner-questions 15 (flip `gxthread=2` as default) |
+| 2 | `C3` | `K` (`gxone=1 gxchunk=1`) | Azahar: no gain (K core 0 35.7 vs C3 game 22.5): does one `GX_ProcessCommandList` per run and the frame list written on core 0 pay on the real command processor; item list below | PORT_3DS_GX_PERF.md "Gate results of step 3" timing table (add a console row) |
+| 3 | `K` | `I` (`+ gximmfl=1`) | Azahar: core 0 -0.2..-1.1 ms, frame unchanged | "Gate results of steps 3 and 4" table |
+| 4 | `C3` | `gpucore1` (`gpucore=1`) | render thread on core 1 (Azahar: render 7.4 -> 10.9, suspect because core 1 shares the log thread and GSP completions go to core 0 only); look at core-1 load (sd, log, wdog threads): the budget is about 80 % | PORT_3DS_GAMEPAR.md "Timing" table; owner-questions 6 |
+| 5 | `K` | `kg1` | same for K | same table |
+| 6 | `C3` | `par` (`jobw1=1 mapnameidx=1 mapdispjob=1`) | Azahar: about 0 (name index -0.25..-0.4 ms, mapDisp net 0); job worker 1 on core 1 round trip (`jobprobe=1 jobstats=60 gamecnt=120` in one extra run: mean us per wake) | PORT_3DS_GAMEPAR.md "Timing" table and job round trip line |
+| 7 | `gpucore1` | `all` | the three together with the render thread on core 1 | same table |
 
 Pairs 2 and 3 console-test items (GX_PERF.md, steps 3 and 4; Azahar proves none): (1) the frame list is written on core 0 and flushed by `C3D_FrameEnd(0)` on the render thread's core: a stale word shows as a wrong state or a GPU hang (gpudump does not contain these runs); (2) GSP and P3D interrupt cost of a handful of lists per frame; (3) the framebuffer flush at the end of every run with draws; (4) `gximmfl`: the index arena's physical base taken once per record: `gximmfl=2` compares exactly that. Run the verify modes (`gxchunk=2`, `gximmfl=2`) in gor_01 once on the console: `restart "fastboot map=gor_01 story=30 gxone=1 gxchunk=2 gximmfl=2 gxthreadstats=60 livelog"` until `gxthread 0 frame 901:`; pass: `differ 0 records over 0`, `mismatches 0 missed 0 stale 0`, no `verify` warning, no hang.
 
@@ -197,10 +180,10 @@ Pairs 2 and 3 console-test items (GX_PERF.md, steps 3 and 4; Azahar proves none)
 
 ```sh
 tools/port3ds/hw_baseline.py --scenes gor_01,pik_00,usu_00,battle --configs old,noqtm,recheap     # 12 runs
-tools/port3ds/hw_baseline.py --configs c3                                                          # 10 scenes with gxthread=2 gxpipeline=1
+tools/port3ds/hw_baseline.py --configs C3                                                          # 10 scenes with gxthread=2 gxpipeline=1
 ```
 
-`old` = `gxdirty gxdirect gximmdirect gxsdl gxrecfuse gxreclgroup texasync texfast dlspread` off and `tex16=1`: against `default` it shows what the new defaults and exact textures (`tex16=0`, +40-50 % texture memory) cost or gain on the console. Check for `tex16=0` memory trouble: no `out of memory` or heap line near zero in the logs (the pik_00 heap check is D4). `noqtm` and `recheap` are QTM questions 2 and 3 (step G); take them here to save a pass. Fill: PORT_3DS_GX_PERF.md "Defaults on, exact textures"; PORT_3DS_QTM.md section 9 (rows 2 and 3).
+`old` = `gxdirty gxdirect gximmdirect gxsdl gxrecfuse gxreclgroup texasync texfast dlspread` off and `tex16=1`: against `D` it shows what the new defaults and exact textures (`tex16=0`, +40-50 % texture memory) cost or gain on the console. Check for `tex16=0` memory trouble: no `out of memory` or heap line near zero in the logs (the pik_00 heap check is D4). `noqtm` and `recheap` are QTM questions 2 and 3 (step G); take them here to save a pass. Fill: PORT_3DS_GX_PERF.md "Defaults on, exact textures"; PORT_3DS_QTM.md section 9 (rows 2 and 3).
 
 ### D3. `texdt` (about 20 min)
 
@@ -211,7 +194,7 @@ python3 tools/port3ds/run_hw.py --no-send --until "texdt: made" --timeout 300
 #   repeat with map=pik_00, map=usu_00, map=gon_02 battle=1 btlauto=perfect (BAD must stay 0 in all)
 # engine on: map-load frame cost, texdt=0 against texdt=1 (texasync stays 1)
 $D restart "fastboot map=gor_01 story=30 texdt=0 texframe=1 loadprof gxthreadstats=60 livelog"   # about 90 s, then the same with texdt=1
-python3 tools/port3ds/hw_baseline.py --scenes gor_01,pik_00 --configs default     # steady state does not change; shown for completeness
+python3 tools/port3ds/hw_baseline.py --scenes gor_01,pik_00 --configs D     # steady state does not change; shown for completeness
 ```
 
 Pass: `BAD 0`. If every size is BAD: run once with `texdtflip=0` (the flip convention; the `dt_tile_*` probe from A2 shows the right one). The warp is at about frame 595: compare the `[LOADPROF]` line, the worst frame time after the warp and the `texframe` conv/create columns for `texdt=0` against `texdt=1`. Azahar: about -10 ms per big map-load frame, barely used with texasync (`reserve_half`). Also `texdt=1` once in each of the four scenes with a shot compared by eye, or `determ` (`texdt=0` against `texdt=1` must be identical; `determ` shots go to `shots/`, `$D files get @/shots/...`). Fill: PORT_3DS_GX_PERF.md "`texdt`" measurement plan item 4 (add "Console results"); decides whether `texdt` becomes default.
@@ -248,7 +231,7 @@ Do cell 3 last in the whole session block (retail has no server on a HOME start)
 
 ### D6. Efb608, vramtex (optional, only with time; about 10 min)
 
-`efb608` stays off until a console test: `restart "fastboot map=gor_01 story=30 efb608 gxthreadstats=60 shots=300 shotmax=2"`, then `files get @/shots/*.ppm` and compare with a run without it (QTM.md test items: sampling the 608-row target through the 1024-row view stays in VRAM bounds). `vramtex`: config `vramtex` in `hw_baseline.py` (QTM.md tests 5-7, step G).
+`efb608` stays off until a console test: `restart "fastboot map=gor_01 story=30 efb608 gxthreadstats=60 shots=300 shotmax=2"`, then `files get @/shots/*.ppm` and compare with a run without it (QTM.md test items: sampling the 608-row target through the 1024-row view stays in VRAM bounds). `vramtex`: config `vramtex` of `hw_baseline.py` (QTM.md tests 5-7, step G).
 
 ## E. Updater screen, deterministic CIA install, supervisor (about 1 h 15 min)
 

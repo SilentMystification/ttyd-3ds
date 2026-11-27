@@ -254,7 +254,7 @@ Rows: integer ALU, multiply, 32 and 64-bit divide; float dependent and independe
 
 `calibpmu` adds a second pass with the ARM11 counters through `ctrdk_perf` (cycles, data-cache read misses, instruction-cache misses per operation, `calib_pmu.txt`). It needs the SVC or backdoor the ExHeader allows; when the way in is missing the run logs `CALIB pmu: not available` and goes on (Azahar: not available). It is a separate switch because the first call into the kernel may fail on a console.
 
-Azahar, build #580, `calib` in the dev CIA (QTM mapped). Azahar's CPU is a JIT with no cache or memory model: every size of the read and chase rows is flat, the sorted and random branch rows are equal, and heap, linear and QTM copy at the same speed. Where the console differs, the ratio column shows how much of Azahar's time in that kind of work to believe. The "New 3DS" columns are for the owner session; the ratio is console ns / Azahar ns (above 1: the console is slower).
+The 11 `exact-math` rows at the end of the table (read them as pairs, second faster on the console) were added after that run: their Azahar column is empty until a calib run on a build that has them (`calibonly=exact`; 3 Azahar instances were running when this was written, so none was started). Azahar, build #580, `calib` in the dev CIA (QTM mapped). Azahar's CPU is a JIT with no cache or memory model: every size of the read and chase rows is flat, the sorted and random branch rows are equal, and heap, linear and QTM copy at the same speed. Where the console differs, the ratio column shows how much of Azahar's time in that kind of work to believe. The "New 3DS" columns are for the owner session; the ratio is console ns / Azahar ns (above 1: the console is slower).
 
 | group | benchmark | Azahar ns/op | Azahar MB/s | New 3DS ns/op | New 3DS MB/s | ratio (console / Azahar) |
 |---|---|---|---|---|---|---|
@@ -304,6 +304,17 @@ Azahar, build #580, `calib` in the dev CIA (QTM mapped). Azahar's CPU is a JIT w
 | pointer chase (op = hop) | `chase_branchy_256K` | 33.69 |  | | | |
 | branch (op = element) | `branch_random_16K` | 18.72 |  | | | |
 | branch (op = element) | `branch_sorted_16K` | 18.72 |  | | | |
+| exact-math | `ldexpf_var` | | | | | |
+| exact-math | `ldexpf_bits` | | | | | |
+| exact-math | `fmod360_lib` | | | | | |
+| exact-math | `fmod360_wrap` | | | | | |
+| exact-math | `ticks2ms_div64` | | | | | |
+| exact-math | `ticks2ms_mulhi` | | | | | |
+| exact-math | `vdiv_f64` | | | | | |
+| exact-math | `vsqrt_f64` | | | | | |
+| exact-math | `vcmp_vmrs` | | | | | |
+| exact-math | `texbufsize_old` | | | | | |
+| exact-math | `texbufsize_new` | | | | | |
 
 ### 2b. `tools/port3ds/hw_baseline.py`: the ten scenes, three configurations
 

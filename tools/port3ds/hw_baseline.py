@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Hardware baseline for the 60 fps work (docs/PORT_3DS_60FPS.md, Step 2): the ten scenes of
-PORT_3DS_GX_PERF.md under today's defaults, gxdirty=1 and gxdirect=1, in one owner session.
+PORT_3DS_GX_PERF.md under today's defaults (config D) or the A/B configs of the console runbook, in one owner session.
 
     N3DS_IP=192.168.8.221 tools/port3ds/hw_baseline.py --dry-run          # print the commands only
     N3DS_IP=192.168.8.221 tools/port3ds/hw_baseline.py                    # the full run (30 runs)
-    tools/port3ds/hw_baseline.py --scenes gor_01,hei_01 --configs default # a part of it
+    tools/port3ds/hw_baseline.py --scenes gor_01,hei_01 --configs D       # a part of it
+    tools/port3ds/hw_baseline.py --configs D,C3,K,I,gpucore1,par,all,old,noqtm,recheap   # --configs list: the switches
     tools/port3ds/hw_baseline.py --ip 127.0.0.1 --port 5060 ...           # an Azahar azahar-session
 
 This script talks to the console only when it is run without --dry-run (the planner, with the owner's
@@ -42,7 +43,26 @@ DEVUPDATE = ROOT / "libs/ctr-devkit/devupdate/devupdate.py"
 RUN_HW = HERE / "run_hw.py"
 HW_LAST = ROOT / "build/hw-last/log.txt"  # run_hw.py always writes here
 OUT = ROOT / "build/hw-baseline"
-CONFIGS = {"default": "", "gxdirty": "gxdirty=1", "gxdirect": "gxdirect=1"}
+C3 = "gxthread=2 gxpipeline=1"
+PAR = "jobw1=1 mapnameidx=1 mapdispjob=1"
+# The A/B configurations of docs/PORT_3DS_CONSOLE_RUNBOOK.md (step D). D is today's defaults: the switches that
+# were once explicit (gxdirty, gxdirect, gximmdirect, gxsdl, gxrecfuse, gxreclgroup, texasync, texfast, dlspread)
+# are default on; "old" turns them all off again. Names are case-insensitive on the command line.
+CONFIGS = {
+    "D": "",                                   # the defaults (gxthread=0)
+    "C3": C3,                                  # D + translator thread on core 2
+    "K": "gxone=1 gxchunk=1",                  # D + one GX_ProcessCommandList per run
+    "I": "gxone=1 gxchunk=1 gximmfl=1",        # K + index arena physical base once per record
+    "gpucore1": f"{C3} gpucore=1",             # C3 + render thread on core 1
+    "kg1": "gxone=1 gxchunk=1 gpucore=1",      # K + render thread on core 1
+    "par": f"{C3} {PAR}",                      # C3 + job worker 1, map name index, mapDisp job
+    "all": f"{C3} gpucore=1 {PAR}",            # C3 + gpucore=1 + par
+    "old": "gxdirty=0 gxdirect=0 gximmdirect=0 gxsdl=0 gxrecfuse=0 gxreclgroup=0 texasync=0 texfast=0 dlspread=0 tex16=1",
+    "noqtm": "noqtm",                          # QTM question 2 (PORT_3DS_QTM.md section 9)
+    "recheap": "place=gx_record:heap",         # QTM question 3
+    "vramtex": "vramtex=1 vramstats=60",       # QTM tests 5-7
+}
+ALIASES = {"default": "D", "gxdirty": "D", "gxdirect": "D"}  # the old names: now all the defaults
 WINDOW = 60
 DEFAULT_SETTLE = 781
 
@@ -152,7 +172,8 @@ def main():
     ap.add_argument("--ip", default=os.environ.get("N3DS_IP"), help="console (or 127.0.0.1) address; default $N3DS_IP")
     ap.add_argument("--port", type=int, default=None, help="devupdate port (default 5050; an azahar-session gives its own)")
     ap.add_argument("--scenes", default=TEN, help=f"comma list from: {', '.join(SCENES)} (default: the ten)")
-    ap.add_argument("--configs", default=",".join(CONFIGS), help=f"comma list from: {', '.join(CONFIGS)}")
+    ap.add_argument("--configs", default="D", help=f"comma list from: {', '.join(CONFIGS)} (default D; 'list' prints "
+                    "the switches of every config)")
     ap.add_argument("--settle", type=int, default=DEFAULT_SETTLE, help="first game frame a counted window may end at")
     ap.add_argument("--windows", type=int, default=3, help="windows counted per run")
     ap.add_argument("--timeout", type=float, default=300, help="seconds per run for the windows (after the connection)")
@@ -162,8 +183,14 @@ def main():
     ap.add_argument("--out", type=Path, default=OUT, help="folder for the table, the JSON and the logs")
     ap.add_argument("--dry-run", action="store_true", help="print the commands; touch nothing")
     args = ap.parse_args()
+    if args.configs == "list":
+        for name, sw in CONFIGS.items():
+            print(f"{name:9} {sw or '(defaults)'}")
+        return 0
+    by_lower = {k.lower(): k for k in CONFIGS}
+    by_lower.update(ALIASES)
     scenes = args.scenes.split(",")
-    configs = args.configs.split(",")
+    configs = [by_lower.get(c.lower(), c) for c in args.configs.split(",")]
     bad = [s for s in scenes if s not in SCENES] + [c for c in configs if c not in CONFIGS]
     if bad:
         print(f"hw_baseline: unknown: {', '.join(bad)}", file=sys.stderr)

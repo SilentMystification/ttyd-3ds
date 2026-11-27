@@ -96,7 +96,10 @@ static struct {
     u16 seg;
     u32 start, len, frame;
 } s_pending[PENDING_MAX];
-static u32 s_npending;
+/* Held ranges [s_phead, s_npending): appended in present order (frame never decreases), so the expired ones are
+ * always a prefix and a reap pops them from the head. Scanning the whole list at every seg_alloc (two a build since
+ * the index segments, with twice the entries) cost 6 ms a frame in the battle (about 42 builds a frame). */
+static u32 s_phead, s_npending;
 
 static void seg_release(Seg* sg, u32 start, u32 len) {
     if (start + len == sg->bump) {
@@ -134,15 +137,16 @@ static void seg_release(Seg* sg, u32 start, u32 len) {
 }
 
 static void pending_reap(void) {
-    u32 now = plat_gpu_present_count(), k = 0;
-    for (u32 i = 0; i < s_npending; i++) {
-        if ((s32)(now - s_pending[i].frame) >= 0) {
-            seg_release(&s_seg[s_pending[i].seg], s_pending[i].start, s_pending[i].len);
-        } else {
-            s_pending[k++] = s_pending[i];
-        }
+    u32 now = plat_gpu_present_count(), h = s_phead;
+    while (h < s_npending && (s32)(now - s_pending[h].frame) >= 0) {
+        seg_release(&s_seg[s_pending[h].seg], s_pending[h].start, s_pending[h].len);
+        h++;
     }
-    s_npending = k;
+    if (h == s_npending) {
+        s_phead = s_npending = 0;
+    } else {
+        s_phead = h;
+    }
 }
 
 /* n vertices of `stride` bytes (stride 2: n u16 indices of an index segment): segment and first unit, or -1. */
@@ -811,6 +815,11 @@ void gx_vsh_stream_free(GxVshStream* s) {
     if (s == NULL) {
         return;
     }
+    if (s_npending + 2 > PENDING_MAX && s_phead != 0) {
+        s_npending -= s_phead; /* room at the end: move the held ranges to the front */
+        memmove(s_pending, s_pending + s_phead, s_npending * sizeof(s_pending[0]));
+        s_phead = 0;
+    }
     if (s_npending + 2 > PENDING_MAX) {
         plat_gpu_sync(); /* nothing in flight reads any of them now */
         u32 now = plat_gpu_present_count();
@@ -1463,7 +1472,7 @@ void gx_vsh_log(u32 frames) {
            "streams %lu KB, frees pending %lu | records full %lu groups full %lu | why (draws/frame / builds):%s",
            (unsigned long)a->built, (unsigned long)a->built_verts, (unsigned long)a->built_s16_pos,
            (unsigned long)a->build_fail, (unsigned long)s_nseg, (unsigned long)(s_seg_bytes / 1024),
-           (unsigned long)gs.stream_kb, (unsigned long)s_npending, (unsigned long)a->rec_full,
+           (unsigned long)gs.stream_kb, (unsigned long)(s_npending - s_phead), (unsigned long)a->rec_full,
            (unsigned long)a->group_full, why);
     /* since boot: CPU-path draws by reason (a census over a sweep: which features the game uses at all) */
     static u64 total[GXV_R_COUNT];

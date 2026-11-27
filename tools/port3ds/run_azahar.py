@@ -149,12 +149,12 @@ def set_slot_info(**fields):
 
 def acquire_slot(kind="run", wait_s=None):
     """Machine-wide limit on Azahar instances: one flock'd slot file per instance, held until this
-    process ends (the OS drops the lock if it dies). AZAHAR_MAX (default 3) is the number of slots.
+    process ends (the OS drops the lock if it dies). AZAHAR_MAX (default 6) is the number of slots.
     A busy slot whose run is past its limit (or whose owner is gone, or whose game log is quiet) is reaped:
     its emulator is stopped and the slot is taken (see emu_usage.reap_slot). kind "session" (devupdate's
     azahar-session) is never reaped. Returns True once the slot is taken; with wait_s, False after that many seconds."""
     global _slot_fd, _slot_index, _slot_path, _slot_info
-    n = int(os.environ.get("AZAHAR_MAX", "3"))
+    n = int(os.environ.get("AZAHAR_MAX", "6"))
     run = os.environ.get("XDG_RUNTIME_DIR")
     d = Path(run) / "ttyd-azahar" if run and os.access(run, os.W_OK) else Path(f"/tmp/ttyd-azahar-{os.getuid()}")
     d.mkdir(parents=True, exist_ok=True)

@@ -315,6 +315,17 @@ void plat_gpu_vsh_light(const PlatGpuVshLight* l, uint32_t id);
  * `id` names its contents: the same nonzero id always means the same block,
  * so an unchanged id is skipped without comparing; 0 compares the bytes. */
 void plat_gpu_vsh_const(const PlatGpuVshConst* c, uint32_t id);
+/* Switch gxrows (revised plan step 6, docs/PORT_3DS_GX_NATIVE.md; needs gxone, so gxonehop=1): the uniform block given
+ * by rows. Bit i of `rows` (i < PLAT_VSH_ROWS: clip 0-3, tex 4-12, tgsrc 13-15, clrmix 16, matclr 17;
+ * PLAT_VSH_ROW_FLAGS: flags) is set when that row of `c` differs from the block at the previous call (the front end
+ * compares each rebuilt row once); 0: nothing changed, nothing is sent. Sends what plat_gpu_vsh_const(c, a new id)
+ * sends: only the rows the GPU does not hold already, compared row by row against them. With it on,
+ * plat_gpu_imm_begin's `cid` is this `rows` word. */
+#define PLAT_VSH_ROWS 18
+#define PLAT_VSH_ROW_FLAGS (1u << PLAT_VSH_ROWS)
+#define PLAT_VSH_ROWS_ALL ((PLAT_VSH_ROW_FLAGS << 1) - 1u)
+int plat_gpu_rows_active(void); /* 0 off, 1 on, 2 verify */
+void plat_gpu_vsh_rows(const PlatGpuVshConst* c, uint32_t rows);
 /* Triangles of a stream: `nidx` u16 indices (copied) into the stream at `stream`.
  * cull: 0 none, 1 GX front faces, 2 GX back faces (GX's front is clockwise on screen). */
 void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, const uint16_t* idx,
@@ -363,7 +374,7 @@ int plat_gpu_chunk_draw(uint32_t id, uint32_t cull, uint32_t ndraws, uint32_t la
  * number of triangles, at least 3. */
 int plat_gpu_immfl_active(void); /* 0 off, 1 on, 2 verify */
 uint16_t* plat_gpu_imm_begin(const PlatGpuVshConst* c, uint32_t cid, const PlatGpuVshLight* l, uint32_t lid,
-                             uint32_t layout, uint32_t nidx);
+                             uint32_t layout, uint32_t nidx); /* gxrows: cid is plat_gpu_vsh_rows' rows word */
 void plat_gpu_imm_end(const void* stream, uint32_t layout, uint32_t scales, uint32_t cull, uint32_t nidx);
 /* gximmfl=2: the front end's own checks (route and indices), for the `gximmfl frame` line. */
 void plat_gpu_immfl_note(uint32_t checks, uint32_t route_differ, uint32_t idx_differ);

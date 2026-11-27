@@ -101,6 +101,7 @@ int gx_opt_statever = 0, gx_opt_fogcache = 1, gx_opt_unlit = 1;
 
 static void out_alloc(void); /* s_out, below */
 static void one_init(void);  /* switch gxone, below */
+static int gx_opt_rows;      /* switch gxrows (the back end's plat_gpu_rows_active; vsh_state_dirty) */
 static void one_log(u32 frames);
 static void gx_bbx_init(void); /* switch gxbbox, below */
 
@@ -137,8 +138,9 @@ void gx_opts_init(void) {
         }
     }
     gx_opt_immfl = gx_opt_one == 1 ? plat_gpu_immfl_active() : 0; /* gximmfl: the back end took it (gxchunk on) */
-    PLOG_I("gx: statever %d fogcache %d unlit %d dirty %d immdirect %d one %d immfl %d", gx_opt_statever,
-           gx_opt_fogcache, gx_opt_unlit, gx_opt_dirty, gx_opt_immdirect, gx_opt_one, gx_opt_immfl);
+    gx_opt_rows = gx_opt_one && gx_opt_dirty ? plat_gpu_rows_active() : 0; /* the back end takes it with gxone only */
+    PLOG_I("gx: statever %d fogcache %d unlit %d dirty %d immdirect %d one %d immfl %d rows %d", gx_opt_statever,
+           gx_opt_fogcache, gx_opt_unlit, gx_opt_dirty, gx_opt_immdirect, gx_opt_one, gx_opt_immfl, gx_opt_rows);
     gx_vsh_init();
 }
 
@@ -2291,6 +2293,30 @@ static void vsh_prepare(void) {
 static PlatGpuVshConst s_vw;        /* the block being kept */
 static u32 s_vw_why_c, s_vw_why_t;
 static int s_vw_has_nrm = -1, s_vw_tex_pos;
+/* switch gxrows (revised plan step 6): the parts are built into a scratch block and each rebuilt row is compared
+ * with s_vw's once (a changed row is stored and marked in s_vrows); the block is sent by rows
+ * (plat_gpu_vsh_rows: only the marked rows are compared against what the GPU holds). No block compare, no copy
+ * into s_vsh_const, no id. gxrows=2 keeps the id path too and checks at every send that "rows marked" is "the id
+ * changed since the last send" and that s_vw is s_vsh_const. */
+static u32 s_vrows = PLAT_VSH_ROWS_ALL; /* rows of s_vw changed since the last send (PLAT_VSH_ROWS_ALL at start) */
+static struct {
+    u32 sent_id, checks, bad, logged;
+} s_rv;
+
+/* rows [first, first + n) of t into s_vw: the bits of the rows that differ (word compare, as gx_mem_equal) */
+static u32 vsh_rows_merge(const PlatGpuVshConst* t, u32 first, u32 n) {
+    u32 m = 0;
+    for (u32 i = first; i < first + n; i++) {
+        u32 a[4], b[4];
+        __builtin_memcpy(a, (const u8*)t + i * 16u, 16);
+        __builtin_memcpy(b, (const u8*)&s_vw + i * 16u, 16);
+        if (((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2]) | (a[3] ^ b[3])) != 0) {
+            __builtin_memcpy((u8*)&s_vw + i * 16u, a, 16);
+            m |= 1u << i;
+        }
+    }
+    return m;
+}
 
 static void vsh_part_color(PlatGpuVshConst* c, u32* why) {
     *why = 0;
@@ -2409,23 +2435,42 @@ static void vsh_state_dirty(void) {
     s_vsh_pn = gx.cur_pnmtx;
     s_vw_has_nrm = has_nrm;
     PlatGpuVshConst* c = &s_vw;
+    PlatGpuVshConst tb;                    /* gxrows: the rebuilt parts, merged row by row below */
+    PlatGpuVshConst* t = gx_opt_rows ? &tb : c;
     int part_c = (d & (GXD_TEV | GXD_CHAN)) || (s_vsh_lit && ((d & GXD_CLIP) || nrm_changed));
     int part_t = (d & (GXD_TEV | GXD_CHAN | GXD_TEXROW)) || nrm_changed || (s_vw_tex_pos && (d & GXD_CLIP));
     int part_p = (d & GXD_CLIP) != 0;
     if (part_c) {
-        vsh_part_color(c, &s_vw_why_c);
+        vsh_part_color(t, &s_vw_why_c);
     }
     if (part_t) {
-        vsh_part_tex(c, &s_vw_why_t, has_nrm);
+        vsh_part_tex(t, &s_vw_why_t, has_nrm);
     }
     if (part_p) {
-        vsh_part_clip(c);
+        vsh_part_clip(t);
     }
     if (part_c || part_p) {
-        c->flags = (gx.proj[0] == (f32)GX_PERSPECTIVE ? 0u : PLAT_VSH_ORTHO) | (s_vsh_lit ? PLAT_VSH_LIT : 0u);
+        u32 f = (gx.proj[0] == (f32)GX_PERSPECTIVE ? 0u : PLAT_VSH_ORTHO) | (s_vsh_lit ? PLAT_VSH_LIT : 0u);
+        if (gx_opt_rows && f != c->flags) {
+            s_vrows |= PLAT_VSH_ROW_FLAGS;
+        }
+        c->flags = f;
+    }
+    if (gx_opt_rows) {
+        u32 m = 0;
+        if (part_p) {
+            m |= vsh_rows_merge(t, 0, 4); /* clip */
+        }
+        if (part_t) {
+            m |= vsh_rows_merge(t, 4, 12); /* tex, tgsrc */
+        }
+        if (part_c) {
+            m |= vsh_rows_merge(t, 16, 2); /* clrmix, matclr */
+        }
+        s_vrows |= m;
     }
     s_vsh_reasons = s_vw_why_c | s_vw_why_t;
-    if (part_c || part_t || part_p) {
+    if ((part_c || part_t || part_p) && gx_opt_rows != 1) {
         if (s_vsh_const_id == 0 || !gx_mem_equal(c, &s_vsh_const, sizeof(*c))) {
             s_vsh_const = *c;
             if (++s_vsh_const_id == 0) {
@@ -2462,7 +2507,7 @@ static void vsh_verify(void) {
     PlatGpuVshLight kl = s_vsh_light;
     vsh_prepare();
     u32 bad = 0;
-    if (!gx_mem_equal(&kept, &s_vsh_const, sizeof(kept))) {
+    if (!gx_mem_equal(gx_opt_rows ? &s_vw : &kept, &s_vsh_const, sizeof(kept))) {
         bad |= 1;
     }
     if (reasons != s_vsh_reasons) {
@@ -2517,9 +2562,41 @@ void gx_dirty_log(u32 frames) {
     if (gx_opt_immfl == 2) {
         plat_gpu_immfl_note(s_ifv.checks, s_ifv.route, s_ifv.idx + s_ifv.skipped); /* totals, the gximmfl line */
     }
+    if (gx_opt_rows == 2) {
+        PLOG_I("gxrows frame %lu: front end checks %lu mismatches %lu (total)", (unsigned long)gx_perf_frame_no(),
+               (unsigned long)s_rv.checks, (unsigned long)s_rv.bad);
+    }
 }
 
 static u32 vsh_cull(void) { return gx.cull == GX_CULL_FRONT ? 1u : gx.cull == GX_CULL_BACK ? 2u : 0u; }
+
+/* gxrows=2, at a send: the rows marked must say what the id path says (a new id since the last send) */
+static void vsh_rows_check(void) {
+    s_rv.checks++;
+    int id_new = s_vsh_const_id != s_rv.sent_id;
+    if ((s_vrows != 0) != id_new || !gx_mem_equal(&s_vw, &s_vsh_const, sizeof(s_vw))) {
+        s_rv.bad++;
+        if (s_rv.logged < 8) {
+            s_rv.logged++;
+            PLOG_W("gxrows verify: frame %lu, rows %05lx but the block id %s, or the block is not the id path's",
+                   (unsigned long)gx_perf_frame_no(), (unsigned long)s_vrows, id_new ? "changed" : "did not change");
+        }
+    }
+    s_rv.sent_id = s_vsh_const_id;
+}
+
+/* The uniform block for the next shader draw: by id (plat_gpu_vsh_const), or with gxrows by its changed rows. */
+static inline void vsh_send(void) {
+    if (!gx_opt_rows) {
+        plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
+        return;
+    }
+    if (gx_opt_rows == 2) {
+        vsh_rows_check();
+    }
+    plat_gpu_vsh_rows(&s_vw, s_vrows);
+    s_vrows = 0;
+}
 
 int gx_vsh_imm_on = 1; /* switch gxvshimm (default 1): immediate-mode draws may take the shader path */
 
@@ -2560,7 +2637,7 @@ static int draw_vsh_imm(u8 prim, const GxVertex* v, u32 n, const void* ident, u3
     if (s_vsh_lit) {
         plat_gpu_vsh_light(&s_vsh_light, s_vsh_light_id);
     }
-    plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
+    vsh_send();
     plat_gpu_vsh_draw(im->base, im->layout, scales, vsh_cull(), im->idx, im->nidx);
     gx_vsh_count_shader(n, im->nidx);
     gx_stat_draws++;
@@ -2612,7 +2689,7 @@ void gx_draw_imm_shader(const GxVshImm* im, u32 n) {
     if (s_vsh_lit) {
         plat_gpu_vsh_light(&s_vsh_light, s_vsh_light_id);
     }
-    plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
+    vsh_send();
     plat_gpu_vsh_draw(im->base, im->layout, scales, vsh_cull(), im->idx, im->nidx);
     gx_vsh_count_shader(n, im->nidx);
     gx_stat_draws++;
@@ -2681,8 +2758,17 @@ int gx_draw_imm_fl(u8 prim, u8 fmt, const PPCWGPipe* sl, u32 n) {
         u32 slot = a < 8 ? attr_slot[a] : 0xFF;
         scales |= (slot < 3 ? PLAT_VSH_UNIT(slot, 0) : PLAT_VSH_UNIT(3, 0)) << (8 + 8 * u);
     }
-    u16* ix = plat_gpu_imm_begin(&s_vsh_const, s_vsh_const_id, s_vsh_lit ? &s_vsh_light : NULL, s_vsh_light_id,
-                                 layout, nidx);
+    u16* ix;
+    if (gx_opt_rows) {
+        if (gx_opt_rows == 2) {
+            vsh_rows_check();
+        }
+        ix = plat_gpu_imm_begin(&s_vw, s_vrows, s_vsh_lit ? &s_vsh_light : NULL, s_vsh_light_id, layout, nidx);
+        s_vrows = 0;
+    } else {
+        ix = plat_gpu_imm_begin(&s_vsh_const, s_vsh_const_id, s_vsh_lit ? &s_vsh_light : NULL, s_vsh_light_id,
+                                layout, nidx);
+    }
     if (ix != NULL) {
         gx_vsh_imm_emit(prim, first, n, ix);
         if (gx_opt_immfl == 2 && s_ifv_idx == NULL) {
@@ -2727,7 +2813,7 @@ int gx_draw_batch_begin(const u8 unit_attr[3], u32 bat, const void* list0, u32 n
     if (s_vsh_lit) {
         plat_gpu_vsh_light(&s_vsh_light, s_vsh_light_id);
     }
-    plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
+    vsh_send();
     *group = g;
     *cull = vsh_cull();
     return 1;
@@ -2780,7 +2866,7 @@ int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nb
     if (s_vsh_lit) {
         plat_gpu_vsh_light(&s_vsh_light, s_vsh_light_id);
     }
-    plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
+    vsh_send();
     if (s->lidx != NULL) {
         plat_gpu_vsh_drawl(gx_vsh_stream_base(s), s->layout, scales, vsh_cull(), s->lidx, s->nidx); /* drawn in place */
     } else {

@@ -82,6 +82,8 @@ int plat_voice_start(int ch, const PlatVoiceSample* smp, const PlatVoiceMix* mix
 /* New rate, gains or filter for a playing channel. */
 void plat_voice_mix(int ch, const PlatVoiceMix* mix);
 void plat_voice_stop(int ch);
+/* A write into ARAM (aramgen=1): called before and after the copy. */
+void plat_aram_write(uint32_t addr, uint32_t len);
 /* A counter line for the log (switch ndspstats=N: every N seconds). */
 void plat_voice_note(uint32_t software, uint32_t ndsp, uint32_t aux, uint32_t overflow, uint32_t aux_late);
 

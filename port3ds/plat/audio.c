@@ -209,6 +209,7 @@ typedef struct CacheEntry {
     uint16_t users;        /* channels playing it, and start events queued */
     uint32_t last_use;     /* LRU */
     uint32_t want_end, want_loop; /* the request's end and loop start (part of the identity) */
+    uint32_t vgen;         /* aramgen: the write sequence when the copy was last known equal to ARAM */
 } CacheEntry;
 
 typedef struct VoiceEvent {
@@ -282,6 +283,45 @@ static struct {
     uint32_t sw, ndsp, aux, overflow, aux_late;
 } s_vstat;
 static int s_vstats_every;
+
+/* ARAM write generations (switch aramgen=1; 2 also compares and counts disagreements). Every write into ARAM
+ * (ARQPostRequest, aramUploadData; plat_aram_write) is announced before and after its copy; it takes the next number
+ * of a sequence and stamps the 8 KB blocks it touches with it. A cached sample is known equal to ARAM when no block
+ * of its range has a stamp newer than the sequence value read before its last compare, so a start skips the memcmp.
+ * The table is heap (the port's static data is near its limit). */
+#define ARAMGEN_SHIFT 13
+#define ARAMGEN_BLOCKS (((16u << 20) >> ARAMGEN_SHIFT) + 1)
+static int s_aramgen;
+static uint32_t* s_aramgen_tab;
+static uint32_t s_aramseq = 1;
+static uint32_t s_gen_skipped, s_gen_bad;
+
+void plat_aram_write(uint32_t addr, uint32_t len) {
+    if (s_aramgen_tab == NULL || len == 0) {
+        return;
+    }
+    uint32_t g = __atomic_add_fetch(&s_aramseq, 1, __ATOMIC_SEQ_CST);
+    uint32_t last = (addr + len - 1) >> ARAMGEN_SHIFT;
+    if (last >= ARAMGEN_BLOCKS) {
+        last = ARAMGEN_BLOCKS - 1;
+    }
+    for (uint32_t b = addr >> ARAMGEN_SHIFT; b <= last; b++) {
+        __atomic_store_n(&s_aramgen_tab[b], g, __ATOMIC_SEQ_CST);
+    }
+}
+
+/* Newest stamp over [addr, addr + len). */
+static uint32_t aramgen_newest(uint32_t addr, uint32_t len) {
+    uint32_t last = (addr + len - 1) >> ARAMGEN_SHIFT, m = 0;
+    if (last >= ARAMGEN_BLOCKS) {
+        last = ARAMGEN_BLOCKS - 1;
+    }
+    for (uint32_t b = addr >> ARAMGEN_SHIFT; b <= last; b++) {
+        uint32_t v = __atomic_load_n(&s_aramgen_tab[b], __ATOMIC_SEQ_CST);
+        m = v > m ? v : m;
+    }
+    return m;
+}
 static int s_batch = 1;
 static uint32_t s_flushes, s_flush_bytes, s_blocks;
 static uint64_t s_flush_ticks;
@@ -503,7 +543,22 @@ static int cache_get(const PlatVoiceSample* smp) {
             e->looping == smp->looping && e->src_bytes == src_bytes) {
             /* The re-encoded frames differ from the source: compare the frames before them. */
             uint32_t cmp = e->realigned ? (smp->end / 14) * 8 : src_bytes;
-            if (memcmp(e->lin, smp->adpcm, cmp) == 0) {
+            uint32_t s0 = s_aramgen ? __atomic_load_n(&s_aramseq, __ATOMIC_SEQ_CST) : 0;
+            int same;
+            if (s_aramgen && aramgen_newest(e->key, src_bytes) <= e->vgen) {
+                same = 1; /* no write since the last compare */
+                s_gen_skipped++;
+                if (s_aramgen == 2 && memcmp(e->lin, smp->adpcm, cmp) != 0) {
+                    s_gen_bad++;
+                    same = 0;
+                }
+            } else {
+                same = memcmp(e->lin, smp->adpcm, cmp) == 0;
+                if (same) {
+                    e->vgen = s0;
+                }
+            }
+            if (same) {
                 s_vstat.hits++;
                 e->last_use = s_cache_clock;
                 return i;
@@ -543,6 +598,7 @@ static int cache_get(const PlatVoiceSample* smp) {
     }
     e->lin_bytes = bytes;
     s_cache_bytes += bytes;
+    e->vgen = s_aramgen ? __atomic_load_n(&s_aramseq, __ATOMIC_SEQ_CST) : 0;
     memcpy(e->lin, smp->adpcm, src_bytes);
     memset(e->lin + src_bytes, 0, bytes - src_bytes);
     e->key = smp->key;
@@ -1013,6 +1069,10 @@ static void voices_log(void) {
            (unsigned long)s_vstat.refused, (unsigned long)s_vstat.hits, (unsigned long)s_vstat.misses,
            (unsigned long)s_vstat.realigned, (unsigned long)s_vstat.evicted, (unsigned long)(s_cache_bytes / 1024),
            (unsigned long)s_vstat.late, (unsigned long)s_vstat.dropped_events);
+    if (s_aramgen) {
+        PLOG_I("[NDSPV] aramgen %d: compares skipped %lu, disagreements %lu, ARAM writes %lu", s_aramgen,
+               (unsigned long)s_gen_skipped, (unsigned long)s_gen_bad, (unsigned long)(s_aramseq - 1));
+    }
     PLOG_I("[NDSPV] flush ticks %lu (us %lu)", (unsigned long)(s_flush_ticks / 1000),
            (unsigned long)(s_flush_ticks * 1000 / (SYSCLOCK_ARM11 / 1000)));
     PLOG_I("[NDSPV] channel 0: %lu blocks, %lu flushes (%lu KB) | streams %s: starts %lu refills %lu (%lu B) "
@@ -1025,6 +1085,13 @@ static void voices_log(void) {
 
 static void voices_init(void) {
     int on = plat_switch_int("ndspvoices", 0) != 0;
+    s_aramgen = on ? plat_switch_int("aramgen", 0) : 0;
+    if (s_aramgen) {
+        s_aramgen_tab = calloc(ARAMGEN_BLOCKS, sizeof(uint32_t));
+        if (s_aramgen_tab == NULL) {
+            s_aramgen = 0;
+        }
+    }
     s_vstats_every = plat_switch_int("ndspstats", on ? 10 : 0);
     for (int ch = 0; ch <= VOICE_CHANNELS; ch++) {
         s_vch[ch].cache = -1;

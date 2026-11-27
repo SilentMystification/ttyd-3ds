@@ -481,6 +481,7 @@ void aramFreeStreamBuffer(unsigned char id) {
  */
 #include <string.h>
 u8* portAramPtr(u32 aramAddr);
+void portAramWrite(u32 aramAddr, u32 len);
 u32 ARGetSize(void);
 
 #define ARAM_ZERO_BYTES (sizeof(s16) * 640)
@@ -504,7 +505,9 @@ void aramUploadData(void* mram, u32 aram, u32 len, u32 highPrio, void (*callback
                     u32 user) {
   u8* dst = portAramPtr(aram);
   if (dst != NULL && mram != NULL) {
+    portAramWrite(aram, len);
     memcpy(dst, mram, len);
+    portAramWrite(aram, len);
   }
 #ifdef TARGET_PORT
   if (highPrio != 0 && salPcStreamUploadHook != NULL) {
@@ -527,7 +530,9 @@ u32 aramPcStreamBase(void) { return aramStream != 0 ? aramStream : 0xFFFFFFFF; }
 
 void aramInit(u32 length) {
   MUSY_ASSERT_MSG(length > ARAM_ZERO_BYTES, "ARAM size is too small");
+  portAramWrite(ARAM_BASE, ARAM_ZERO_BYTES);
   memset(portAramPtr(ARAM_BASE), 0, ARAM_ZERO_BYTES);
+  portAramWrite(ARAM_BASE, ARAM_ZERO_BYTES);
   aramTop = ARAM_BASE + length;
   if (aramTop > ARGetSize()) {
     aramTop = ARGetSize();

@@ -49,6 +49,7 @@ static __thread BOOL s_old_state;
 
 /* The mixer's view of ARAM (hw_pcmixer.c, hw_aramdma.c). */
 u8* portAramPtr(u32 aramAddr) { return port_aram_ptr(aramAddr); }
+void portAramWrite(u32 aramAddr, u32 len) { plat_aram_write(aramAddr, len); } /* before and after a write */
 
 /* Two speakers (snd_synthapi.c asks: more would make MusyX mix surround). */
 int salPcSpeakers(void) { return 2; }

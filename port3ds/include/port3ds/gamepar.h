@@ -17,6 +17,11 @@
  * applies the outcomes in object order. mapdispjob=2 also runs the original loop and compares its dispEntry
  * records and screen rectangles with the parallel pass ([MAPDISPJOB] lines).
  *
+ * Step 5, switch mapmtxjob=1 (src/driver/mapdrv.c, TARGET_PORT): mapReCalcMatrix computes the roots' own matrices,
+ * then the child chain of each root in segments of mapmtxseg (default 8) siblings, with their subtrees, in
+ * parallel (plat_job_pfor_dyn). mapmtxjob=2 also runs the serial walk from the same state and compares every
+ * modelWorldMtx and the flags ([MAPMTXJOB] lines).
+ *
  * Every switch is off by default. None of this exists in the GameCube build. */
 #ifndef PORT3DS_GAMEPAR_H
 #define PORT3DS_GAMEPAR_H
@@ -60,5 +65,8 @@ void port_nameidx_frame(u32 frame);
 /* ---- Step 3: mapDisp in phases (src/driver/mapdrv.c) ---- */
 void portMapDispJobFrame(u32 frame); /* [MAPDISPJOB] totals every 120 frames */
 void portSortJobFrame(u32 frame);    /* [SORTJOB] totals every 120 frames (src/system.c, step 4) */
+
+/* ---- Step 5: mapReCalcMatrix subtrees in parallel (src/driver/mapdrv.c) ---- */
+void portMapMtxJobFrame(u32 frame); /* [MAPMTXJOB] totals every 120 frames */
 
 #endif

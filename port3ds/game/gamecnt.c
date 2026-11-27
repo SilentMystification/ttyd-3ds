@@ -161,6 +161,7 @@ void port_gamepar_frame(u32 frame) {
     port_nameidx_frame(frame);
     portMapDispJobFrame(frame);
     portSortJobFrame(frame);
+    portMapMtxJobFrame(frame);
     if (!port_gamecnt_on()) {
         return;
     }

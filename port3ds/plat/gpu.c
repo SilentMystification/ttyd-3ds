@@ -2578,8 +2578,21 @@ static struct {
     u32 draws, copied[DC_N], captured[DC_N], uncached, flushes, runs, degenerate;
     u32 checks, mismatches;
     u32 maxw[DC_N];
+    u32 nf_skip, nf_skip_bytes; /* gxnoflush: ranges the heap flush covers (skipped with =1) */
     u32 fl_calls, fl_bytes, fl_ranges; /* GSPGPU_FlushDataCache calls, bytes, and stream ranges among them (render thread) */
 } s_dst;
+extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
+static int s_noflush; /* gxnoflush: 0 off, 1 skip the flushes C3D_FrameEnd(0) covers, 2 flush all and count the covered */
+/* 1: the range needs its explicit flush (outside the linear heap, which C3D_FrameEnd(0) flushes whole). */
+static int nf_flush(const void* p, u32 n) {
+    uintptr_t a = (uintptr_t)p;
+    if (a < __ctru_linear_heap || a + n > (uintptr_t)__ctru_linear_heap + __ctru_linear_heap_size) {
+        return 1;
+    }
+    s_dst.nf_skip++;
+    s_dst.nf_skip_bytes += n;
+    return s_noflush != 1;
+}
 static u32 s_dlog_every, s_dlog_n;
 
 static u32 dkey_hash(const u32* k, u32 n) {
@@ -3034,9 +3047,10 @@ static void direct_log(void) {
            (unsigned long)s_dst.mismatches, (unsigned long)s_dst.uncached, (unsigned long)s_dst.degenerate,
            (unsigned long)s_dst.maxw[0], (unsigned long)s_dst.maxw[1], (unsigned long)s_dst.maxw[2],
            (unsigned long)s_dst.maxw[3]);
-    PLOG_I("gxdirect frame %lu: GSP data-cache flushes per frame %lu calls (%lu stream ranges), %lu bytes",
+    PLOG_I("gxdirect frame %lu: GSP data-cache flushes per frame %lu calls (%lu stream ranges), %lu bytes, gxnoflush %d: %lu ranges (%lu bytes) covered by the heap flush",
            (unsigned long)s_frame_counter, (unsigned long)(s_dst.fl_calls / n), (unsigned long)(s_dst.fl_ranges / n),
-           (unsigned long)(s_dst.fl_bytes / n));
+           (unsigned long)(s_dst.fl_bytes / n), s_noflush, (unsigned long)(s_dst.nf_skip / n),
+           (unsigned long)(s_dst.nf_skip_bytes / n));
     memset(&s_dst, 0, sizeof(s_dst));
 }
 
@@ -5200,17 +5214,28 @@ static void render_record(Record* r) {
     BufInfo_Init(&bi);
     BufInfo_Add(&bi, r->verts, sizeof(PlatGpuVertex), 5, 0x43210);
     C3D_SetBufInfo(&bi);
+    /* gxnoflush: ranges inside the linear heap are flushed by C3D_FrameEnd(0) (the whole heap, before the GX queue
+     * runs; libcitro3d 1.7.1 renderqueue.o: GSPGPU_FlushDataCache(__ctru_linear_heap, __ctru_linear_heap_size)):
+     * the explicit flush is skipped for them. QTM and heap ranges keep theirs. =2: flush all as before, and count
+     * the ranges the heap flush covers. */
     for (u32 i = 0; i < r->ndirty; i++) {
-        GSPGPU_FlushDataCache((const void*)r->dirty[i].lo, (u32)(r->dirty[i].hi - r->dirty[i].lo));
-        s_dst.fl_bytes += (u32)(r->dirty[i].hi - r->dirty[i].lo);
+        u32 n = (u32)(r->dirty[i].hi - r->dirty[i].lo);
+        if (nf_flush((const void*)r->dirty[i].lo, n)) {
+            GSPGPU_FlushDataCache((const void*)r->dirty[i].lo, n);
+            s_dst.fl_calls++;
+            s_dst.fl_bytes += n;
+        }
     }
-    s_dst.fl_calls += r->ndirty + 1 + (r->nidx > 0);
     s_dst.fl_ranges += r->ndirty;
     r->ndirty = 0;
-    GSPGPU_FlushDataCache(r->verts, r->nverts * sizeof(PlatGpuVertex));
-    s_dst.fl_bytes += r->nverts * (u32)sizeof(PlatGpuVertex);
-    if (r->nidx > 0) {
+    if (nf_flush(r->verts, r->nverts * (u32)sizeof(PlatGpuVertex))) {
+        GSPGPU_FlushDataCache(r->verts, r->nverts * sizeof(PlatGpuVertex));
+        s_dst.fl_calls++;
+        s_dst.fl_bytes += r->nverts * (u32)sizeof(PlatGpuVertex);
+    }
+    if (r->nidx > 0 && nf_flush(r->idx, r->nidx * 2u)) {
         GSPGPU_FlushDataCache(r->idx, r->nidx * sizeof(u16));
+        s_dst.fl_calls++;
         s_dst.fl_bytes += r->nidx * 2u;
     }
     if (s_chunk && !s_ck_tier_linear && r->now > 0) {
@@ -6225,6 +6250,7 @@ void plat_gpu_init(void) {
     }
     s_threaded = !plat_switch_has("gxsync");
     s_flush_on_render = plat_switch_int("gxflushrender", 1) != 0;
+    s_noflush = plat_switch_int("gxnoflush", 0);
     s_state_delta = plat_switch_int("gxstatedelta", 1) != 0;
     s_urow = plat_switch_int("gxurow", 1) != 0;
     s_sync_all = plat_switch_int("gpusyncall", 0) != 0;

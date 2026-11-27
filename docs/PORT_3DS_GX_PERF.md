@@ -477,6 +477,27 @@ Planner's round-2 brief: put immediate-mode draws on the shader path too, so cha
 
 **What the eki_00 row is.** Over the 24 shots, 2064 pixels differ by more than 8, and **every one of them has a bit-identical depth** in both runs: no second surface is involved, so this is not z-fighting, not a decal and not a pass-group split (the "order flips" count of `vsh_accept.py` counts colour > 32 at dz <= 16, which includes dz = 0). At x = 550 the rows 388-389 change colour with the depth unchanged (16743543 and 16743443 in both runs): the same wall face samples the neighbouring texel row. Since the positions (and so the depth) agree, the difference must be in the texture coordinate: most likely the shader's 24-bit texture-matrix product against the CPU's 32-bit product rounded once to 24 bits (the stream's coordinates themselves are exact s16 values; not yet confirmed per draw), and this wall has a texel boundary that falls on pixel centres along a whole screen row, so the last-bit difference picks the other row for every pixel of it. It is a texel choice at an exact tie, not a geometric seam. Fixing it to bit-identity would need the CPU's rounding of the texture coordinate (the product computed before the 24-bit rounding); options for the planner: compute the texture coordinates of such draws on the CPU (a per-group texgen fallback, at a cost), or accept texel ties as a precision class separate from the seam and z-fighting rules.
 
+## Round 4: lit alpha, channel 1, specular, post-transform matrices, the matrix palette (2026-11-28)
+
+Three switches, default 0, each with a verify mode 2. Built and compiled (dev build); **not measured yet** (owner rule 2026-11-28: one integration build, one measurement agent).
+
+- `gxvshlit2=1`: besides `gxvshlit`'s case, colour channel 1 (material and ambient from the register: the stream carries colour 0), lit alpha (with the colour's light mask, diffuse and attenuation functions when both are lit; one light loop over RGBA, the light colour's alpha in `lcol.w`), ambient from the vertex colour (channel 0; `ambmix`) and specular attenuation (`GX_AF_SPEC`: c = n . dir where n . l >= 0, the denominator on c, as `light_channel`). `lsel` (x specular, y colour lit, z alpha lit) chooses per component; a plain `gxvshlit` block has `lsel` = (0, 1, 0, 0) and gives the old values.
+- `gxvshpost=1`: post-transform matrices (dual texgen) in the shader: (s, t, q) optionally normalised, the 3 rows on (s, t, q, 1), then the divide by the new q (q = 0 left undivided). 9 rows `post` + `postf` (per unit normalise weight; w: the rows apply). Unit 0 divides per pixel, so a non-`MTX3x4` unit 0 takes it only when its new q is exactly 1 (no normalise, q row (0, 0, 1, 0)); else `TGPOST` as before. Without a post matrix the shader skips the rows (`ifc` on `postf.w`), and the back end does not upload them.
+- `gxvshpal=1`: per-vertex position matrices (`PNMTXIDX`) of unlit ring draws (immediate mode and decoded lists; win_00's `himo.c` draws). The light block carries the rows of matrices 0-9 (30 rows over `lpos[0]`..`lka[5]`; `lsel.w` = 1, count 8; `gpu.c` checks at start that the light arrays are contiguous), the uniform block the projection alone as its clip rows; the ring's normal slot carries 3 x the matrix index, read with `mova`. Clip = projection . (matrix rows . position): two 24-bit steps where the CPU makes one 32-bit product per vertex. The draw takes the shader only when the groups of all its matrices do; when they disagree in a frame, those on the shader take the rest of the frame on the CPU. Lit draws, the fog ramp (a row of the current matrix) and texgen from the normal (its slot holds the index) stay on the CPU (`P`).
+- **Verify (`=2` on any of the three):** `vsh_emu` runs the shader path's arithmetic in 32-bit float from the blocks the draw sends (light, post and palette rows as packed) on every shader draw with assembled vertices (immediate draws are decoded for it: `gximmdirect`/`gximmfl` give way), compares with `transform()` (position 1e-4 relative, colour 1 step, texture coordinates 1e-3) and logs `gxstats   vsh emu` (totals; "new": draws using a moved feature) and the first 16 mismatching vertices. The draws themselves still take the shader.
+- **Shader:** 202 instructions (limit 512), 85 float uniforms + 2 constants (limit 96), 2 bools; `check_vsh.py` passes. With the three switches off every shader-path value is computed by the same operations as before (the lit result taken per `lsel`, post rows behind a branch, specular behind a branch).
+- **Uniform blocks:** `PlatGpuVshConst` + 160 bytes (`post`, `postf`), `PlatGpuVshLight` + 32 bytes (`ambmix`, `lsel`); every light-row `w` is now uploaded as stored (0 in a light block, so unchanged).
+
+**Measurement (ready; one agent, the integration build, release for times):**
+
+| Run | Switches | Pass condition |
+|---|---|---|
+| census before/after | `gxstats=60` defaults, then `gxvshlit2=1 gxvshpost=1 gxvshpal=1`; gor_01, pik_00, win_00, battle gon_02, `map_sweep --area tik` | `vsh census since boot` per reason: `L`, `p`, `P` draws drop where present; no other reason rises |
+| verify | `gxvshlit2=2 gxvshpost=2 gxvshpal=2 gxstats=60`, same scenes | `vsh emu` off position/colour/texcoord 0 (or only rounding-sized; the log lines show) |
+| identity of the off state | `determ`, defaults, this build vs the base: gor_01, usu_00 (lit), pik_00 | every pixel of 24 shots identical (`vsh_accept.py report`) |
+| acceptance per switch | `vsh_accept.py`, `determ`, switch 0 vs 1: win_00 (`gxvshpal`), any scene the census shows with `L`/`p` (`gxvshlit2`/`gxvshpost`) | static colour/depth max within the shader path's floor (round 3: <= 2 / 4), seams and flicker not above the CPU run, 0 steady-state switches |
+| timing | release, `gx_perf_ab` defaults, win_00 `gxvshpal` 0 vs 1 | no frame slower |
+
 ## Texture trust (`textrust`, `texverify`)
 
 Every cached texture used to be hashed on its first use in each frame (gor_01: 181 textures, 666 KB a frame, `hash_span` about 6% of the game thread) with 0 mismatches. `gx_tex.c` now uses the same content-stable registry as the display-list cache (`port3ds/plat/memstable.c`).
@@ -1031,6 +1052,9 @@ Rows for the switch table:
 | `gxvsh_check=N` | Logs every pass group of game frame N (`gxvsh census`): path, eligibility, streak, draws per path, the reasons for CPU draws, decal links, first list, depth range, translation, projection type |
 | `gxvshs16=0/1` | 1 (default): stream positions and texture coordinates as s16 with a power-of-two scale where that is exact; 0 always floats (A/B) |
 | `gxvshkb=N` | Linear memory for the stream segments in KB (default 6144) |
+| `gxvshlit2=0/1/2` | 0 (default). 1: also channel 1, lit alpha, ambient from the vertex and specular attenuation in the shader (round 4). 2: 1 plus the `vsh_emu` check |
+| `gxvshpost=0/1/2` | 0 (default). 1: post-transform texture matrices in the shader. 2: 1 plus `vsh_emu` |
+| `gxvshpal=0/1/2` | 0 (default). 1: per-vertex position matrices (`PNMTXIDX`) of unlit ring draws in the shader (matrix palette over the light block). 2: 1 plus `vsh_emu` |
 | `gxdepthshot` | Each shot (`shots=N`) also saves the EFB depth buffer as `shots/NNNNN.dep` (`DEP1 608 480`, one little-endian D24S8 word per pixel). Debug only |
 | `gxclearrgb=RRGGBB` | Test only: the frame clear uses this colour instead of the game's (the seam test clears to `FF00FF`) |
 | `shotfrom=N` | The first presented frame a shot may be. With `shots=1 shotmax=K`, K consecutive frames (the flicker test) |

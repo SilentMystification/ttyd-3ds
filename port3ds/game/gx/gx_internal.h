@@ -322,8 +322,14 @@ static inline int gx_rec_on(void) { return gx_rec_mode != 0 && !gx_tls_translato
  * gx_tls_translator. */
 extern struct GxRecFast {
     uintptr_t w, tr_lo, tr_len;
+    /* switch gxfifo (gx_state.c): the hot setters' one word. 0: their fast body (gxfifo=1, `w` 0, gxdirty on, no
+     * gxstatededup); 2: gxfifo=2's check (same conditions); 1: the old body */
+    uintptr_t fifo;
 } gx_rec_fast;
 void gx_rec_fast_update(void);
+/* Switch gxfifo (default 0; docs/PORT_3DS_GX_NATIVE.md, revised plan step 2): 1 FIFO-cheap setters, 2 verify. */
+extern int gx_opt_fifo;
+void gx_fifo_log(u32 frames);
 static inline int gx_on_translator(void) {
     uintptr_t sp;
 #if defined(__arm__)

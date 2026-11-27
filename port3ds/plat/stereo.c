@@ -82,6 +82,7 @@ static float s_slider;
 static u32 s_n_st, s_n_mono, s_prep_us_sum;
 static u64 s_render_st, s_render_mono, s_gpu_st, s_gpu_mono, s_tail_sum, s_tailz_sum;
 static u32 s_prep_us;
+static u64 s_split_t, s_tail_t[2], s_warp1_t, s_kinds[STC_N];
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 
@@ -118,6 +119,13 @@ int stereo_wanted(void) {
     }
     s_slider = s_force >= 0.0f ? s_force : osGet3DSliderState();
     return s_slider > 0.0f && s_sep_px > 0.0f;
+}
+
+int stereo_maybe(void) {
+    if (s_failed || !opt_get_stereo3d() || s_sep_px <= 0.0f) {
+        return 0;
+    }
+    return (s_force >= 0.0f ? s_force : osGet3DSliderState()) > 0.0f;
 }
 
 static int make_resources(void) {
@@ -385,6 +393,19 @@ void stereo_relink(void) {
 
 C3D_RenderTarget* stereo_eye_target(int eye) { return eye == 0 ? s_in.screen : s_right; }
 
+void stereo_tail_cost(const StereoTailCost* c) {
+    if (!s_stats_every) {
+        return;
+    }
+    s_split_t += c->split_ticks;
+    s_tail_t[0] += c->tail_ticks[0];
+    s_tail_t[1] += c->tail_ticks[1];
+    s_warp1_t += c->warp1_ticks;
+    for (int k = 0; k < STC_N; k++) {
+        s_kinds[k] += c->kinds[k];
+    }
+}
+
 void stereo_frame_done(int stereo, u32 render_us, u32 gpu_us, u32 tail_cmds, u32 tail_zwrites) {
     if (!s_stats_every) {
         return;
@@ -410,6 +431,16 @@ void stereo_frame_done(int stereo, u32 render_us, u32 gpu_us, u32 tail_cmds, u32
            (unsigned long)s_n_st, (unsigned long)(s_render_st / ns), (unsigned long)(s_gpu_st / ns),
            (unsigned long)(s_prep_us_sum / ns), (unsigned long)(s_tail_sum / ns), (unsigned long)(s_tailz_sum / ns),
            (unsigned long)s_n_mono, (unsigned long)(s_render_mono / nm), (unsigned long)(s_gpu_mono / nm), (double)s_dc);
+    const u64 tus = SYSCLOCK_ARM11 / 1000000u;
+    PLOG_I("stereostats per eye: split (snapshot, left warp) %lu us, tail L %lu us, right warp %lu us, tail R %lu us; "
+           "tail commands: runs %lu flush %lu unif %lu mark %lu other %lu",
+           (unsigned long)(s_split_t / tus / ns), (unsigned long)(s_tail_t[0] / tus / ns),
+           (unsigned long)(s_warp1_t / tus / ns), (unsigned long)(s_tail_t[1] / tus / ns),
+           (unsigned long)(s_kinds[STC_WORDS] / ns), (unsigned long)(s_kinds[STC_FLUSH] / ns),
+           (unsigned long)(s_kinds[STC_UNIF] / ns), (unsigned long)(s_kinds[STC_MARK] / ns),
+           (unsigned long)(s_kinds[STC_OTHER] / ns));
+    s_split_t = s_tail_t[0] = s_tail_t[1] = s_warp1_t = 0;
+    memset(s_kinds, 0, sizeof(s_kinds));
     s_n_st = s_n_mono = s_prep_us_sum = 0;
     s_render_st = s_render_mono = s_gpu_st = s_gpu_mono = s_tail_sum = s_tailz_sum = 0;
 }

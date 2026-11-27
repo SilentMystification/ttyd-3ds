@@ -65,6 +65,29 @@ void plat_memory_log(const char* when) {
            (unsigned long)(mi.uordblks >> 10), (unsigned long)(__ctru_heap_size >> 10), (unsigned long)(mi.arena >> 10),
            (unsigned long)(lin_free >> 10), (unsigned long)(__ctru_linear_heap_size >> 10), (unsigned long)us);
 }
+/* Switch bgreport=N (vi.c): what this launch has running, in every mode (plat_log_always), to compare Debug mode
+ * off and on. threads: the kernel's list for this process (-1 when the call fails); created: threads made through
+ * threadCreate since boot (plat/sdio.c wrap; exited ones count); the heap figures are mallinfo's (a heap walk:
+ * once, on request); process: svcGetProcessInfo type 0 (heap, code, data and linear pages of the process). */
+int plat_sd_threads_created(void); /* plat/sdio.c */
+void plat_bg_report(void) {
+    s32 n = -1;
+    u32 ids[64];
+    if (R_FAILED(svcGetThreadList(&n, ids, 64, CUR_PROCESS_HANDLE))) {
+        n = -1;
+    }
+    s64 used = -1;
+    if (R_FAILED(svcGetProcessInfo(&used, CUR_PROCESS_HANDLE, 0))) {
+        used = -1;
+    }
+    struct mallinfo mi = mallinfo();
+    plat_log_always("bgreport: debug %d threads %ld created %d heap in use %lu KiB arena %lu KiB linear free %lu KiB "
+                    "process %lld KiB",
+                    plat_debug(), (long)n, plat_sd_threads_created(), (unsigned long)(mi.uordblks >> 10),
+                    (unsigned long)(mi.arena >> 10), (unsigned long)(linearSpaceFree() >> 10),
+                    used < 0 ? -1LL : (long long)(used >> 10));
+}
+
 /* The heap's extent without a walk: newlib's malloc takes all of its memory with sbrk and gives the top back
  * once more than the trim threshold (128 KiB) is free there, so the arena (`sbrked_mem`, the mallinfo arena)
  * is the memory in use plus free holes plus at most 128 KiB, and newlib keeps its high-water mark
@@ -105,13 +128,13 @@ int plat_is_dev_build(void) {
     return s_dev;
 }
 
-/* The ctr-devkit supervisor link (boot ensure, the heartbeat thread): development builds, and in retail mode
- * only with the update server asked for (switch or setting devupdate). Decided once: a heartbeat that stops
- * would look like a hang to the supervisor. */
+/* The ctr-devkit supervisor link (boot ensure, the heartbeat thread): part of Debug mode, with the update
+ * server (the unattended console session needs both; Debug mode off has neither, see plat_devupdate_enabled).
+ * Decided once: a heartbeat that stops would look like a hang to the supervisor. */
 static int supervisor_wanted(void) {
     static int s_on = -1;
     if (s_on < 0) {
-        s_on = plat_is_dev_build() && (!plat_retail() || plat_devupdate_enabled());
+        s_on = plat_devupdate_enabled();
     }
     return s_on;
 }

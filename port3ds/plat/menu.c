@@ -11,9 +11,8 @@
  * Two menus share the menu area:
  *  - the player Options menu (plat/options_menu.c), opened with SELECT or by
  *    touching the HUD rows. The game is paused while it is open.
- *  - this file's developer Select menu, with the switch "devmenu", the Options
- *    "Debug mode" setting (on, or auto in a development build), see
- *    dev_menu_enabled(): ZL+SELECT opens and closes it. L/R change
+ *  - this file's developer Select menu, while Debug mode is on (plat.h
+ *    plat_debug), see dev_menu_enabled(): ZL+SELECT opens and closes it. L/R change
  *    tab, Up/Down move, Left/Right/A change a value or run an action, B
  *    closes. While it is open the game sees no input but keeps running.
  *
@@ -292,21 +291,9 @@ void plat_updater_draw(const char* title, const char* build, const char* line, i
 void plat_console_row(int row, const char* text) { at(row, text); }
 int plat_console_ready(void) { return s_console_up; }
 
-/* The developer menu: the "devmenu" switch, or the Options "Debug mode" setting
- * (on always, off never, auto = on in development builds only). Players get Options. */
-static int dev_menu_enabled(void) {
-    if (plat_switch_has("devmenu")) {
-        return 1;
-    }
-    int mode = plat_opt_get(PLAT_OPT_KEY_DEBUGMODE, PLAT_OPT_DEBUG_AUTO);
-    if (mode == PLAT_OPT_DEBUG_ON) {
-        return 1;
-    }
-    if (mode == PLAT_OPT_DEBUG_OFF) {
-        return 0;
-    }
-    return plat_is_dev_build();
-}
+/* The developer menu: Debug mode on (live: turning it off closes the way in at once). The Options menu's Debug
+ * page keeps the Debug mode row in every mode, so Debug mode can always be turned back on. */
+static int dev_menu_enabled(void) { return plat_debug(); }
 
 int plat_reset_requested(void) {
     if (s_reset_request) {
@@ -403,10 +390,13 @@ static void draw_menu(void) {
                 break;
             }
             case 4: {
-                /* Retail mode (all debugging off): logging stops at once; the rest at the next launch */
-                int want = plat_retail_setting();
-                snprintf(line, sizeof(line), "%s Retail mode: %s%s", cur, want ? "on" : "off",
-                         PLAT_RETAIL_BUILD ? " (retail build)" : want != plat_retail_booted() ? " (after relaunch)" : "");
+                /* Debug mode (off = all debugging off): logging stops at once; the threads at the next launch */
+                int want = plat_debug_wanted();
+                snprintf(line, sizeof(line), "%s Debug mode: %s%s", cur, want ? "on" : "off",
+                         PLAT_RETAIL_BUILD     ? " (retail build)"
+                         : plat_debug_forced() ? " (switch)"
+                         : want == plat_retail_booted() ? " (after relaunch)"
+                                                        : "");
                 break;
             }
             default: break;
@@ -476,7 +466,7 @@ static void activate(int dir) {
                 supervisor_toggle();
             }
             break;
-        case 4: plat_retail_set(!plat_retail_setting()); break;
+        case 4: plat_debug_set(!plat_debug_wanted()); break;
         default: break;
         }
     }

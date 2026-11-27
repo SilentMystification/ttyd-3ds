@@ -1,8 +1,6 @@
 /* TTYD's glue to the ctr-devkit updater (libs/ctr-devkit/devupdate/).
- * On in development builds (PORT3DS_VERSION contains "-dev") unless the switch
- * nodevupdate is given or the option "devupdate" (Select menu, options.txt) is off.
- * Release builds are off unless the switch devupdate is given, the option is on,
- * or this launch is a devupdate relaunch.
+ * Part of Debug mode (plat.h plat_debug): off when Debug mode is off (no thread, no soc buffer), on when it is on
+ * unless the switch nodevupdate is given or the option "devupdate" (Select menu, options.txt) is off.
  *
  *   devupdate             start the server at boot (TCP 5050)
  *   devupdateport=N       another port
@@ -47,32 +45,36 @@ static char s_build_line[64];
 #define PAUSE_WAIT_MS 2000 /* the longest on_begin waits for the game thread's next frame boundary */
 
 void plat_set_save_busy(int (*fn)(void)) { s_save_busy = fn; }
-/* On when this launch is a devupdate relaunch (which keeps the server on even
- * when the restart gave no switches), or the switch devupdate is given, or
- * this is a development build and the switch nodevupdate is not given. */
+/* Debug mode off (plat.h plat_debug): never (no thread, no soc buffer), unless the test escape
+ * retailkeep=devupdate names it. Debug mode on: on unless the switch nodevupdate is given or the option is off;
+ * a devupdate relaunch (which keeps the server on even when the restart gave no switches) or the switch
+ * devupdate turn it on over the option. */
 int plat_devupdate_enabled(void) {
     static int s_enabled = -1; /* decided once, at boot (the option is read from options.txt then) */
     if (s_enabled >= 0) {
         return s_enabled;
     }
     int opt = plat_opt_get(PLAT_OPT_KEY_DEVUPDATE, -1); /* -1: the player never set it */
-    if (devupdate_launched() || plat_switch_has("devupdate") || opt == 1) {
+    if (plat_retail() && !plat_retail_keeps("devupdate")) {
+        s_enabled = 0; /* Debug mode off: nothing in the background */
+    } else if (devupdate_launched() || plat_switch_has("devupdate") || opt == 1) {
         s_enabled = 1;
-    } else if (plat_retail()) {
-        s_enabled = 0; /* retail mode: only when asked for (the lines above) */
     } else {
-        s_enabled = plat_is_dev_build() && !plat_switch_has("nodevupdate") && opt != 0;
+        s_enabled = !plat_retail() && !plat_switch_has("nodevupdate") && opt != 0;
     }
     return s_enabled;
 }
 
-/* The option's value as the Select menu shows it: what the next launch will do. */
+/* The option's value as the Select menu shows it: what the next launch will do (Debug mode on). */
 int plat_devupdate_wanted(void) {
+    if (!plat_debug_wanted()) {
+        return 0;
+    }
     int opt = plat_opt_get(PLAT_OPT_KEY_DEVUPDATE, -1);
     if (opt >= 0) {
         return opt;
     }
-    return !plat_retail() && plat_is_dev_build() && !plat_switch_has("nodevupdate");
+    return !plat_switch_has("nodevupdate");
 }
 
 /* "192.168.1.20:5050" while the server runs and the console has an address, else "". */

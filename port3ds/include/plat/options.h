@@ -77,8 +77,10 @@ void plat_options_save(void);
 #define PLAT_OPT_KEY_STEREO3D "stereo3d"
 #define PLAT_OPT_KEY_HUD "hud"
 #define PLAT_OPT_KEY_DEVUPDATE "devupdate" /* developer Select menu: update server on(1)/off(0); unset = the build default */
-/* Debug mode (Options, Debug page): the developer Select menu. PLAT_OPT_DEBUG_*: auto (default) is on in
- * development builds only, on always, off never (the switch devmenu still opens it). */
+/* Debug mode (Options, Debug page): the master switch of every debug and background facility (the developer
+ * Select menu, log, update server, supervisor heartbeat, watchdog, debug switches; plat.h plat_debug).
+ * PLAT_OPT_DEBUG_*: auto (default) is on in development builds and off in tagged releases, on always, off never.
+ * The switch debug=0/1 (or retail=1) wins over the setting. */
 #define PLAT_OPT_KEY_DEBUGMODE "debugmode"
 #define PLAT_OPT_DEBUG_AUTO 0
 #define PLAT_OPT_DEBUG_ON 1
@@ -87,7 +89,7 @@ void plat_options_save(void);
 #define PLAT_OPT_KEY_QUALITY "quality"
 #define PLAT_OPT_KEY_LANGUAGE "language"
 #define PLAT_OPT_KEY_TEXFILTER "texfilter"
-#define PLAT_OPT_KEY_RETAIL "retail" /* developer Select menu: retail mode (1) for the next launch; unset = off */
+#define PLAT_OPT_KEY_RETAIL "retail" /* old key (retail mode = Debug mode off): 1 reads as off under auto */
 
 /* 1 when the player wants stereoscopic 3D (default 1; the 3D slider still
  * decides the depth). */

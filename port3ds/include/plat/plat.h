@@ -43,15 +43,21 @@ int plat_log_level(void);
  * appended to latest.log by the SD worker. */
 void plat_log_always(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
-/* ---- Retail mode (plat/switches.c; docs/PORT_3DS_TESTING.md "Retail mode") ----
- * All debugging off: no log, no stats, counters, verify modes, dumps or test hooks, no update server or
- * supervisor heartbeat (unless the devupdate switch or setting asks), the HUD at most fps. Decided at boot:
- * switch retail=1/retail=0, else the Select menu setting, else off; always on in a TTYD_RETAIL build. */
+/* ---- Debug mode (plat/switches.c; docs/PORT_3DS_TESTING.md "Debug mode") ----
+ * One master setting for every debug and background facility. Debug mode off ("retail mode", the same thing):
+ * no log, no stats, counters, verify modes, dumps or test hooks, no update server, supervisor heartbeat,
+ * watchdog or guard thread, the HUD at most fps; only the crash handler stays (no cost until a fault). Decided
+ * at boot: switch debug=0/1 (retail=1 is debug=0), else the Options "Debug mode" setting (auto = on in a
+ * development build, off in a tagged release); always off in a TTYD_RETAIL build.
+ * plat_retail() is true when Debug mode is off. */
 extern int plat_retail_on;
 static inline int plat_retail(void) { return PLAT_RETAIL_BUILD || plat_retail_on; }
-int plat_retail_booted(void);  /* the mode this launch booted in */
-int plat_retail_setting(void); /* the stored setting: what the next launch does */
-void plat_retail_set(int on);  /* the Select menu; see switches.c for what changes at once */
+static inline int plat_debug(void) { return !plat_retail(); }
+int plat_retail_booted(void); /* 1: this launch booted with Debug mode off */
+int plat_debug_wanted(void);  /* what the next launch does (a debug=/retail= switch, else the setting) */
+int plat_debug_forced(void);  /* 1: a debug=/retail= switch decides, the setting does not */
+void plat_debug_set(int on);  /* the menus: stores Debug mode on/off; see switches.c for what changes at once */
+void plat_debug_option_changed(void); /* plat/options.c: the "debugmode" option changed */
 
 /* ---- Debug switches (plat/switches.c) ----
  * Words from sdmc:/3ds/ttyd/debug3ds.txt and the 3dslink arguments, for

@@ -151,5 +151,13 @@ void plat_crash_setup(void) {
     crash_add_shutdown_hook(CRASH_STAGE_EXIT, hook_log, NULL, 10);
 }
 
-/* The watchdog thread on core 1, then a boot crash test if one is set. */
-void plat_crash_init(void) { crash_start(); }
+/* The watchdog and guard threads on core 1, then a boot crash test if one is set: Debug mode only (the owner's
+ * rule: with Debug mode off nothing runs in the background). With Debug mode off the exception handlers, the
+ * fatal/svcBreak path, the crash screen and crash.txt still work (no cost until a fault); what is lost is the
+ * hang detection (a game thread stuck for wdog seconds ends in a report instead of a frozen picture) and the
+ * time limits on a crash report and on the chainload exit (a report that itself hangs is not ended). */
+void plat_crash_init(void) {
+    if (plat_debug()) {
+        crash_start();
+    }
+}

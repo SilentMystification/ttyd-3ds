@@ -4,11 +4,13 @@
  * cached (a test run has a switch string; real play has none and returns at
  * once).
  *
- * Retail mode (docs/PORT_3DS_TESTING.md, "Retail mode") is decided here, at boot: the switch retail=1/retail=0,
- * else the Select menu's setting (options.txt key "retail"), else off; a TTYD_RETAIL build is always in it. In
- * retail mode every switch reads as absent (the caller's default applies) except retail, retailkeep, bench and
- * the explicit devupdate switches, and the names listed in retailkeep=a,b,c (a name ending in '*' is a prefix:
- * retailkeep=map,story,gx*). One rule in one place, no log line. */
+ * Debug mode (docs/PORT_3DS_TESTING.md, "Debug mode") is decided here, at boot: the switch debug=0/1 (retail=1
+ * is the old name for debug=0; a bare "debug" is debug=1, a bare "retail" is debug=0), else the Options setting
+ * "debugmode" (on, off, or auto: on in a development build, off in a tagged release; the old Select-menu key
+ * "retail=1" reads as off under auto); a TTYD_RETAIL build is always off. Debug mode off is "retail mode": every
+ * switch reads as absent (the caller's default applies) except debug, retail and retailkeep, and the names listed
+ * in retailkeep=a,b,c (a name ending in '*' is a prefix: retailkeep=map,story,gx*), the escape for tests that
+ * measure Debug mode off. One rule in one place, no log line. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,8 +30,9 @@ typedef struct {
 } CacheEntry;
 static CacheEntry s_cache[64];
 
-int plat_retail_on = PLAT_RETAIL_BUILD; /* live: the switch filter and the log read it */
+int plat_retail_on = PLAT_RETAIL_BUILD; /* live, 1 = Debug mode off: the switch filter and the log read it */
 static int s_retail_boot = PLAT_RETAIL_BUILD; /* the mode this launch booted in */
+static int s_forced = -1;                     /* a debug=/retail= switch: the Debug mode it asks for, else -1 */
 static char s_keep[256];                      /* retailkeep=..., commas and all */
 
 static int scan(const char* word, const char** where) {
@@ -51,8 +54,7 @@ static int scan(const char* word, const char** where) {
 
 /* Retail mode: is this switch still read? */
 static __attribute__((noinline, cold)) int retail_allows(const char* word) {
-    static const char* const k_always[] = {"retail", "retailkeep", "bench", "devupdate", "devupdateport",
-                                           "devupdatetoken", NULL};
+    static const char* const k_always[] = {"debug", "retail", "retailkeep", NULL};
     for (int i = 0; k_always[i] != NULL; i++) {
         if (strcmp(word, k_always[i]) == 0) {
             return 1;
@@ -135,47 +137,77 @@ int plat_switch_int(const char* key, int fallback) {
     return end == v ? fallback : (int)r;
 }
 
-/* At boot, once the text is read: the switch first, then the Select menu's stored setting. */
+/* The stored setting (Options, Debug page): what a launch without a debug=/retail= switch does. */
+static int setting_debug(void) {
+    if (PLAT_RETAIL_BUILD) {
+        return 0;
+    }
+    int mode = plat_opt_get(PLAT_OPT_KEY_DEBUGMODE, PLAT_OPT_DEBUG_AUTO);
+    if (mode == PLAT_OPT_DEBUG_ON) {
+        return 1;
+    }
+    if (mode == PLAT_OPT_DEBUG_OFF) {
+        return 0;
+    }
+    if (plat_opt_get(PLAT_OPT_KEY_RETAIL, 0) != 0) {
+        return 0; /* the old Select-menu "Retail mode: on" */
+    }
+    return plat_is_dev_build();
+}
+
+/* At boot, once the text is read: the switch first, then the stored setting. */
 static void retail_decide(void) {
-    int on = PLAT_RETAIL_BUILD;
-    if (!on) {
+    s_forced = -1;
+    if (!PLAT_RETAIL_BUILD) {
         char v[8];
-        if (raw_value("retail", v, sizeof(v))) {
-            on = atoi(v) != 0;
+        if (raw_value("debug", v, sizeof(v))) {
+            s_forced = atoi(v) != 0;
+        } else if (scan("debug", NULL)) {
+            s_forced = 1;
+        } else if (raw_value("retail", v, sizeof(v))) {
+            s_forced = atoi(v) == 0;
         } else if (scan("retail", NULL)) {
-            on = 1;
-        } else {
-            on = plat_opt_get(PLAT_OPT_KEY_RETAIL, 0) != 0;
+            s_forced = 0;
         }
     }
+    int debug = s_forced >= 0 ? s_forced : setting_debug();
     s_keep[0] = '\0';
     raw_value("retailkeep", s_keep, sizeof(s_keep));
-    s_retail_boot = on;
-    plat_retail_on = on;
+    s_retail_boot = !debug;
+    plat_retail_on = !debug;
 }
 
 int plat_retail_booted(void) { return s_retail_boot; }
 int plat_retail_keeps(const char* name) { return retail_allows(name); }
-int plat_retail_setting(void) { return PLAT_RETAIL_BUILD || plat_opt_get(PLAT_OPT_KEY_RETAIL, s_retail_boot) != 0; }
+int plat_debug_forced(void) { return !PLAT_RETAIL_BUILD && s_forced >= 0; }
+int plat_debug_wanted(void) { return PLAT_RETAIL_BUILD ? 0 : s_forced >= 0 ? s_forced : setting_debug(); }
 
-/* The Select menu. On: logging stops at once (plat_log_retail_now), every later switch lookup is filtered;
- * what already runs (a stats switch's counters, the update server, the supervisor heartbeat, the log writer
- * thread) stays until the next launch. Off: from the next launch, unless this launch booted with retail off
- * (then the log comes back at once). */
-void plat_retail_set(int on) {
+/* What changes at once when the setting changes (either menu). Off: logging stops (nothing is formatted or
+ * queued), every later switch lookup is filtered, the HUD drops to fps and the memory log stops; the threads that
+ * already run (log writer, update server, supervisor heartbeat, watchdog, guard) and a stats switch's counters
+ * (callers cache their switch at first use) stay until the next launch. On: the same at once when this launch
+ * booted with Debug mode on, else at the next launch (no log file, queue or writer exists yet). */
+void plat_debug_option_changed(void) {
     if (PLAT_RETAIL_BUILD) {
         return;
     }
-    on = on != 0;
-    plat_opt_set(PLAT_OPT_KEY_RETAIL, on);
-    plat_options_save();
-    if (on) {
+    if (!plat_debug_wanted()) {
         plat_retail_on = 1;
         plat_log_retail_now(1);
     } else if (!s_retail_boot) {
         plat_retail_on = 0;
         plat_log_retail_now(0);
     }
+}
+
+/* The Select menu's Debug tab row: stores on or off (not auto); plat_opt_set calls plat_debug_option_changed. */
+void plat_debug_set(int on) {
+    if (PLAT_RETAIL_BUILD) {
+        return;
+    }
+    plat_opt_set(PLAT_OPT_KEY_RETAIL, 0); /* the old key: the new setting replaces it */
+    plat_opt_set(PLAT_OPT_KEY_DEBUGMODE, on ? PLAT_OPT_DEBUG_ON : PLAT_OPT_DEBUG_OFF);
+    plat_options_save();
 }
 
 void plat_switches_load(int argc, char** argv) {

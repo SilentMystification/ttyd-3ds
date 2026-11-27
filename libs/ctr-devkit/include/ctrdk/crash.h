@@ -103,7 +103,9 @@ void crash_init(const CrashConfig* cfg);
  * threads are started. Safe to call before the app's log exists if the sink
  * copes with that. */
 void crash_setup(const CrashConfig* cfg);
-/* Starts the watchdog thread and runs a boot self test if one is set. */
+/* Starts the watchdog and guard threads and runs a boot self test if one is set. Optional: without it the
+ * handlers, fatals, the crash screen and the report file still work, but there is no hang detection and no
+ * time limit on a report or on the crash exit (an app's "nothing in the background" mode may skip it). */
 void crash_start(void);
 
 /* Call at each thread's entry (including main). stack_bytes is the thread's

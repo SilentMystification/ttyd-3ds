@@ -216,6 +216,9 @@ void plat_opt_set(const char* key, int value) {
         s_dirty = 1;
     }
     unlock();
+    if (changed && strcmp(key, PLAT_OPT_KEY_DEBUGMODE) == 0) {
+        plat_debug_option_changed(); /* Debug mode: what can change at once does (plat/switches.c) */
+    }
     if (changed && s_menu != NULL && s_menu->on_change != NULL) {
         s_menu->on_change(key, value);
     }

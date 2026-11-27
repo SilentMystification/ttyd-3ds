@@ -99,6 +99,8 @@ Thread __wrap_threadCreate(ThreadFunc entrypoint, void* arg, size_t stack_size, 
     return th;
 }
 
+int plat_sd_threads_created(void) { return (int)__atomic_load_n(&s_tab_n, __ATOMIC_ACQUIRE); }
+
 int plat_sd_core(void) {
     Thread me = threadGetCurrent();
     if (me != NULL) {

@@ -477,7 +477,7 @@ OSTime port_game_time_take(OSTime want) {
 void port_debug_frame(u32 frame);
 void port_card_frame(u32 frame);
 void plat_memory_log(const char* when);
-int plat_is_dev_build(void);
+void plat_bg_report(void);
 
 /* The heap's low-water for the period since the last line (plat_heap_peak_take: two loads, no walk): at
  * each map change (the period holds the map's load and its play) and, with switch heaplog=N, every N frames. */
@@ -546,8 +546,8 @@ static void frame_hooks(void) {
     }
     port_gamepar_frame(s_frames); /* gamecnt, mapnameidx, mapdispjob lines */
     fastboot_frame(s_sweep_state > 1 || s_warp_switch_done);
-    /* log output only; mallinfo walks the whole heap (452 us in Azahar, gor_01), a hitch on the game thread: not in release builds */
-    if (s_frames % 1800 == 0 && !plat_retail() && plat_is_dev_build()) {
+    /* log output only; mallinfo walks the whole heap (452 us in Azahar, gor_01), a hitch on the game thread: Debug mode only */
+    if (s_frames % 1800 == 0 && plat_debug()) {
         plat_memory_log("now");
     }
     PlatHudStats st;
@@ -579,6 +579,15 @@ static void frame_hooks(void) {
     if (s_framemark > 0 && s_frames == (u32)s_framemark) {
         PLOG_I("frame %u reached", (unsigned)s_frames);
     }
+    /* Switch bgreport=N (Debug mode off: with retailkeep=bgreport): at frame N one line of the threads and memory
+     * in use, written in every mode (plat_bg_report), to compare Debug mode off and on. */
+    static int s_bgreport = -1;
+    if (s_bgreport < 0) {
+        s_bgreport = plat_switch_int("bgreport", 0);
+    }
+    if (s_bgreport > 0 && s_frames == (u32)s_bgreport) {
+        plat_bg_report();
+    }
     /* Switch heartbeat=N (run_azahar.py passes it by default): "hb F" every N game frames, a cheap sign of
      * progress for the runner's stall check, through the boot screens as well. */
     static int s_heartbeat = -1; /* -1 unread, 0 off */
@@ -590,7 +599,7 @@ static void frame_hooks(void) {
     }
 }
 
-/* Switch bench=F,T (read in every mode and build, retail too): from game frame F to T, one tick pair per frame,
+/* Switch bench=F,T (every build; with Debug mode off only through retailkeep=bench): from game frame F to T, one tick pair per frame,
  * then one line "bench F-T: frame <us> busy <us> render <us> frames N vblanks V" (per game frame: wall time, the
  * game thread's time outside VIWaitForRetrace's wait, the render thread's last record), written even with the
  * log off (plat_log_always). The measurement for retail runs, where gxthreadstats and the other counters are off. */

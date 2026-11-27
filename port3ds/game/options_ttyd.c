@@ -5,8 +5,9 @@
  *
  * Pages: Controls (GameCube button remap, C-stick source), Display (3D, bottom
  * screen HUD, texture filter), Audio (master volume), Performance (quality: stored only),
- * Language (PAL builds only: stored only), Debug (debug mode: the developer Select
- * menu on, auto (development builds only) or off).
+ * Language (PAL builds only: stored only), Debug (Debug mode: every debug and background
+ * facility, the developer Select menu included, on, auto (development builds only) or off;
+ * the platform acts on it, plat.h plat_debug).
  *
  * The settings that only other code reads (3D, quality, language) have their
  * getters in include/plat/options.h (opt_get_stereo3d and friends). */

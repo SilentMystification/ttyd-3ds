@@ -108,6 +108,14 @@ static void draw(const PlatOptMenu* m) {
         if (it->kind == PLAT_OPT_CHOICE) {
             int v = plat_opt_get(it->key, it->def);
             snprintf(val, sizeof(val), "< %s >", it->names[v]);
+            if (strcmp(it->key, PLAT_OPT_KEY_DEBUGMODE) == 0) {
+                /* Debug mode: what is off stops at once, the debug threads stop or start at the next launch */
+                const char* note = PLAT_RETAIL_BUILD             ? " build"
+                                   : plat_debug_forced()         ? " switch"
+                                   : plat_debug_wanted() == plat_retail_booted() ? " relaunch"
+                                                                                 : "";
+                snprintf(val + strlen(val), sizeof(val) - strlen(val), "%s", note);
+            }
         } else if (it->kind == PLAT_OPT_RANGE) {
             snprintf(val, sizeof(val), "< %d%s >", plat_opt_get(it->key, it->def), it->suffix ? it->suffix : "");
         } else {

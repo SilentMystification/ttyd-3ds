@@ -576,7 +576,9 @@ static void build_full(PlatGpuState* st) {
     build_sci(st);
 }
 
+static int s_tk_valid; /* gxtexkey (build_one): s_state.tex is the units of the key kept there */
 static void build_state(void) {
+    s_tk_valid = 0;
     build_full(&s_state);
     plat_gpu_set_state(&s_state);
     s_built_version = gx.version;
@@ -991,6 +993,30 @@ _Static_assert(offsetof(PlatGpuState, cull) - offsetof(PlatGpuState, alpha_test_
 _Static_assert(sizeof(PlatGpuState) - offsetof(PlatGpuState, scissor_x0) == 32, "scissor and viewport words");
 _Static_assert(offsetof(PlatGpuState, tex) % 4 == 0 && sizeof(((PlatGpuState*)0)->tex) % 4 == 0, "TEV and TEX words");
 
+/* ---- switch gxtexkey (default 0; 2 verifies): TEX kept over a TEV change that leaves the unit inputs as they were
+ * build_tex_units reads, besides the GX texture maps and TLUTs (GXD_TEX, which always rebuilds), only: the unit count,
+ * the fog unit and its texture, the map of each unit, unit 0's projective flag (its texgen) and the maps indirect
+ * stages sample (gx_tex_unit_sampler). With these as at the last build, the handle lookups give the same handles
+ * (they hash a texture's memory once per frame; every frame starts with GXD_ALL) and the units come out the same:
+ * st->tex and the TEX id stay. */
+static int s_texkey;
+static u32 s_tk[3];
+static u32 s_tk_skip, s_tk_build, s_tk_bad;
+
+static void tex_key(u32 k[3]) {
+    u32 m = 0xFFFFFFu; /* 8 bits per unit: its map (0xFF: none or the fog unit) */
+    for (int u = 0; u < s_units; u++) {
+        if (u != s_fog_unit) {
+            m &= ~(0xFFu << 8 * u);
+            m |= (u32)s_unit_map[u] << 8 * u;
+        }
+    }
+    int proj = s_units > 0 && s_fog_unit != 0 && gx.texgen[s_unit_coord[0]].func == GX_TG_MTX3x4;
+    k[0] = (u32)s_units | (u32)(s_fog_unit + 1) << 4 | (u32)proj << 8 | gx_tex_ind_maps() << 16;
+    k[1] = m;
+    k[2] = s_fog_unit >= 0 ? s_fog_tex : 0;
+}
+
 /* build_dirty with ids: the same parts in the same order; a class found by its GX bytes is copied, not built */
 static void build_one(u32 d) {
     PlatGpuState* st = &s_state;
@@ -1004,10 +1030,40 @@ static void build_one(u32 d) {
         regions |= PLAT_GPU_R_TEV;
     }
     if (d & (GXD_TEV | GXD_TEX)) {
-        memset(st->tex, 0, sizeof(st->tex));
-        build_tex_units(st);
-        one_tex(st);
-        regions |= PLAT_GPU_R_TEX;
+        int same = 0, built = 0;
+        u32 k[3] = {0, 0, 0};
+        if (s_texkey) {
+            tex_key(k);
+            same = !(d & GXD_TEX) && s_tk_valid && k[0] == s_tk[0] && k[1] == s_tk[1] && k[2] == s_tk[2];
+        }
+        if (same && s_texkey == 2) {
+            PlatGpuTexUnit kept[3];
+            memcpy(kept, st->tex, sizeof(kept));
+            memset(st->tex, 0, sizeof(st->tex));
+            build_tex_units(st);
+            built = 1;
+            if (memcmp(kept, st->tex, sizeof(kept)) != 0) {
+                if (s_tk_bad++ < 8) {
+                    PLOG_W("gxtexkey verify: frame %lu, the units differ from the kept ones (key %08lx %08lx %08lx)",
+                           (unsigned long)gx_perf_frame_no(), (unsigned long)k[0], (unsigned long)k[1],
+                           (unsigned long)k[2]);
+                }
+                same = 0; /* the full build's units go on */
+            }
+        }
+        if (same) {
+            s_tk_skip++;
+        } else {
+            if (!built) {
+                memset(st->tex, 0, sizeof(st->tex));
+                build_tex_units(st);
+            }
+            one_tex(st);
+            regions |= PLAT_GPU_R_TEX;
+            s_tk_build++;
+            memcpy(s_tk, k, sizeof(s_tk));
+            s_tk_valid = s_texkey != 0;
+        }
     }
     if (d & (GXD_TEV | GXD_CHAN)) {
         build_chan_flags();
@@ -1031,6 +1087,8 @@ static void build_one(u32 d) {
 /* switch gxone (gx_opts_init): needs the back end's, gxdirty and the tables */
 static void one_init(void) {
     gx_opt_one = plat_gpu_one_active();
+    s_texkey = gx_opt_one ? plat_switch_int("gxtexkey", 0) : 0;
+    s_texkey = s_texkey >= 0 && s_texkey <= 2 ? s_texkey : 0;
     if (!gx_opt_one || s_ot[OT_TEV].slot != NULL) {
         return;
     }
@@ -1060,6 +1118,12 @@ static void one_log(u32 frames) {
                (unsigned long)(t->misses / frames), (unsigned long)t->n, (unsigned long)t->cap, (unsigned long)t->resets);
         t->hits = t->misses = 0;
     }
+    if (s_texkey) {
+        PLOG_I("gxtexkey frame %lu: per frame %lu kept %lu built, %lu verify mismatches (total)",
+               (unsigned long)gx_perf_frame_no(), (unsigned long)(s_tk_skip / frames),
+               (unsigned long)(s_tk_build / frames), (unsigned long)s_tk_bad);
+    }
+    s_tk_skip = s_tk_build = 0;
 }
 
 /* ---- Lighting ---- */

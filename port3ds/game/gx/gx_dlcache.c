@@ -81,6 +81,7 @@ typedef struct {
     u8 changes;    /* times the content was found changed */
     u8 fmt_mask;   /* vertex formats the list uses */
     u8 nranges;
+    u8 cstride;    /* dlcblob: bytes of one compact vertex (0: GxVertex as is) */
     u16 ndraws;
     u32 nverts;
     u32 last_frame;
@@ -117,6 +118,9 @@ static int s_trust;         /* switch gxtrust (default 1): skip the hashes of en
 static u32 s_scribble_at;   /* switch gxscribble=N: at frame N, change a byte of a trusted array without telling the registry */
 static const DlcEntry* s_scribbled;
 static u32 s_budget;
+static int s_blob; /* switch dlcblob: 1 compact vertices in the entry blobs, 2 also checks every expansion */
+static GxVertex* s_exp;
+static u32 s_exp_cap, s_blob_err, s_blob_built, s_blob_full_bytes, s_blob_comp_bytes;
 static u32 s_spread; /* switch dlspread=N (default 0: off): at most N new entries are built per frame; the other lists draw uncached that frame */
 static u32 s_used_bytes, s_live;
 
@@ -195,6 +199,10 @@ static void init(void) {
     s_cap_v = gx_big_alloc("gxcache capture", sizeof(GxVertex) * DLC_CAP_VERTS);
     s_budget = (u32)plat_switch_int("gxcachekb", 8192) * 1024u;
     s_trust = plat_switch_int("gxtrust", 1) != 0;
+    s_blob = plat_switch_int("dlcblob", 0);
+    if (s_blob < 0 || s_blob > 2) {
+        s_blob = 0;
+    }
     s_scribble_at = (u32)plat_switch_int("gxscribble", 0);
     s_spread = (u32)plat_switch_int("dlspread", 0);
     s_lobj = s_enabled > 0 && gx_lobj_switch();
@@ -372,11 +380,127 @@ static DlcEntry* entry_new(const void* list, u32 nbytes) {
 static inline DlcDraw* e_draws(const DlcEntry* e) { return (DlcDraw*)e->blob; }
 static inline DlcRange* e_ranges(const DlcEntry* e) { return (DlcRange*)(e_draws(e) + e->ndraws); }
 static inline GxAttrFmt* e_vat(const DlcEntry* e) { return (GxAttrFmt*)(e_ranges(e) + e->nranges); }
-static inline GxVertex* e_verts(const DlcEntry* e) {
+static inline u8* e_vbase(const DlcEntry* e) {
     uintptr_t p = (uintptr_t)(e_vat(e) + (u32)__builtin_popcount(e->fmt_mask) * GX_VA_MAX_ATTR);
-    return (GxVertex*)((p + 7) & ~(uintptr_t)7);
+    return (u8*)((p + 7) & ~(uintptr_t)7);
 }
-static inline u16* e_idx(const DlcEntry* e) { return (u16*)(e_verts(e) + e->nverts); }
+static inline u16* e_idx(const DlcEntry* e) {
+    return (u16*)(e_vbase(e) + e->nverts * (e->cstride ? (u32)e->cstride : (u32)sizeof(GxVertex)));
+}
+
+/* ---- Compact vertices (switch dlcblob=1) ----
+ * Only the attributes the vertex description has, as the exact decoded values; the rest of a GxVertex is
+ * what read_vertex gives an absent attribute (zero tex, white colour, the entry's matrix indices), so the
+ * expansion equals the decode. Order: pos f32[3], nrm f32[3], tex f32[2] per present coordinate, colour (4)
+ * per present colour, pnmtx, texmtx per present index, padded to 4 bytes. */
+
+typedef struct {
+    u8 nrm, pn;
+    s8 tex[8], clr[2], tm[8];
+    u8 o_nrm, o_pn;
+    u8 o_tex[8], o_clr[2], o_tm[8];
+    u8 stride;
+} CvLay;
+
+static void cv_layout(const u8* desc, CvLay* L) {
+    u32 off = 12;
+    L->nrm = desc[GX_VA_NRM] != GX_NONE || desc[GX_VA_NBT] != GX_NONE;
+    L->o_nrm = (u8)off;
+    off += L->nrm ? 12 : 0;
+    for (int t = 0; t < 8; t++) {
+        L->tex[t] = desc[GX_VA_TEX0 + t] != GX_NONE;
+        L->o_tex[t] = (u8)off;
+        off += L->tex[t] ? 8 : 0;
+    }
+    for (int c = 0; c < 2; c++) {
+        L->clr[c] = desc[GX_VA_CLR0 + c] != GX_NONE;
+        L->o_clr[c] = (u8)off;
+        off += L->clr[c] ? 4 : 0;
+    }
+    L->pn = desc[GX_VA_PNMTXIDX] != GX_NONE;
+    L->o_pn = (u8)off;
+    off += L->pn;
+    for (int t = 0; t < 8; t++) {
+        L->tm[t] = desc[GX_VA_TEX0MTXIDX + t] != GX_NONE;
+        L->o_tm[t] = (u8)off;
+        off += L->tm[t];
+    }
+    L->stride = (u8)((off + 3) & ~3u);
+}
+
+static void cv_pack(const CvLay* L, const GxVertex* v, u32 n, u8* out) {
+    for (u32 i = 0; i < n; i++, v++, out += L->stride) {
+        memcpy(out, v->pos, 12);
+        if (L->nrm) {
+            memcpy(out + L->o_nrm, v->nrm, 12);
+        }
+        for (int t = 0; t < 8; t++) {
+            if (L->tex[t]) {
+                memcpy(out + L->o_tex[t], v->tex[t], 8);
+            }
+        }
+        for (int c = 0; c < 2; c++) {
+            if (L->clr[c]) {
+                memcpy(out + L->o_clr[c], &v->clr[c], 4);
+            }
+        }
+        if (L->pn) {
+            out[L->o_pn] = v->pnmtx;
+        }
+        for (int t = 0; t < 8; t++) {
+            if (L->tm[t]) {
+                out[L->o_tm[t]] = v->texmtx[t];
+            }
+        }
+    }
+}
+
+/* The entry's vertices as GxVertex, in a scratch buffer valid until the next call. */
+static const GxVertex* e_verts(const DlcEntry* e) {
+    if (e->cstride == 0) {
+        return (const GxVertex*)e_vbase(e);
+    }
+    if (e->nverts > s_exp_cap) {
+        free(s_exp);
+        s_exp_cap = (e->nverts + 255) & ~255u;
+        s_exp = malloc(sizeof(GxVertex) * s_exp_cap);
+        if (s_exp == NULL) {
+            s_exp_cap = 0;
+            PLOG_E("gxcache: dlcblob scratch alloc failed");
+            return NULL;
+        }
+    }
+    CvLay L;
+    cv_layout(e->vtx_desc, &L);
+    const u8* in = e_vbase(e);
+    GxVertex* o = s_exp;
+    for (u32 i = 0; i < e->nverts; i++, o++, in += L.stride) {
+        memcpy(o->pos, in, 12);
+        if (L.nrm) {
+            memcpy(o->nrm, in + L.o_nrm, 12);
+        } else {
+            memset(o->nrm, 0, 12);
+        }
+        o->has_nrm = L.nrm;
+        o->pnmtx = L.pn ? in[L.o_pn] : e->cur_pnmtx;
+        for (int t = 0; t < 8; t++) {
+            o->texmtx[t] = L.tm[t] ? in[L.o_tm[t]] : e->cur_texmtx[t];
+            if (L.tex[t]) {
+                memcpy(o->tex[t], in + L.o_tex[t], 8);
+            } else {
+                o->tex[t][0] = o->tex[t][1] = 0.0f;
+            }
+        }
+        for (int c = 0; c < 2; c++) {
+            if (L.clr[c]) {
+                memcpy(&o->clr[c], in + L.o_clr[c], 4);
+            } else {
+                o->clr[c] = (GXColor){255, 255, 255, 255};
+            }
+        }
+    }
+    return s_exp;
+}
 
 /* Hash of the array elements the list reads: for each vertex, each indexed
  * attribute's element at its recorded index. Only what the decode read is
@@ -620,7 +744,9 @@ static inline __attribute__((always_inline)) int call_slow_body(const GxState* s
                 /* the pass group decides: the shader draws the stream, or the CPU replays as before */
                 gx_vsh_rec_hint = &e->vsh_rec;
                 gx_bbx_hint = &e->bbx;
-                if (gx_draw_vsh(e->vsh, e->vsh_reason, e->list, e->nbytes, e->nverts, e_verts(e), e_draws(e), e->ndraws)) {
+                /* the vertices are read only for a bounding-box query; a compact entry expands them then */
+                const GxVertex* ev = e->cstride == 0 || gx_bbox_active || gx_opt_vshbbox == 2 ? e_verts(e) : NULL;
+                if (gx_draw_vsh(e->vsh, e->vsh_reason, e->list, e->nbytes, e->nverts, ev, e_draws(e), e->ndraws)) {
                     if (gx_perf_on > 0) {
                         gx_perf.dl_verts += e->nverts;
                     }
@@ -1818,7 +1944,15 @@ void gx_dlc_cap_finish(const GxState* st, u32 kind) {
     u32 nfmt = (u32)__builtin_popcount(s_cap_fmt_mask);
     u32 head = s_cap_nd * sizeof(DlcDraw) + nr * sizeof(DlcRange) + nfmt * sizeof(st->vat[0]);
     head = (head + 7) & ~7u;
-    u32 total = head + s_cap_nv * sizeof(GxVertex) + s_cap_nv * nr * sizeof(u16) + 8;
+    CvLay lay;
+    u32 vbytes = sizeof(GxVertex);
+    if (s_blob) {
+        cv_layout(st->vtx_desc, &lay);
+        vbytes = lay.stride;
+    }
+    u32 total = head + s_cap_nv * vbytes + s_cap_nv * nr * sizeof(u16) + 8;
+    s_blob_full_bytes += s_cap_nv * (u32)sizeof(GxVertex);
+    s_blob_comp_bytes += s_cap_nv * vbytes;
     if (total > s_budget / 4) {
         s_st.too_big++;
         if (e != NULL) {
@@ -1878,7 +2012,24 @@ void gx_dlc_cap_finish(const GxState* st, u32 kind) {
             v += GX_VA_MAX_ATTR;
         }
     }
-    memcpy(e_verts(e), s_cap_v, s_cap_nv * sizeof(GxVertex));
+    e->cstride = s_blob ? lay.stride : 0;
+    if (s_blob) {
+        cv_pack(&lay, s_cap_v, s_cap_nv, e_vbase(e));
+        s_blob_built++;
+        if (s_blob == 2) {
+            const GxVertex* x = e_verts(e);
+            for (u32 i = 0; x != NULL && i < s_cap_nv; i++) {
+                if (!same_vertex(&x[i], &s_cap_v[i])) {
+                    if (s_blob_err++ == 0) {
+                        PLOG_W("gxcache: dlcblob vertex %lu of list %p expands differently", (unsigned long)i, e->list);
+                    }
+                    break;
+                }
+            }
+        }
+    } else {
+        memcpy(e_vbase(e), s_cap_v, s_cap_nv * sizeof(GxVertex));
+    }
     memcpy(e_idx(e), gx_dlc_idx, s_cap_nv * nr * sizeof(u16));
     e->arr_hash = nr ? gather_hash(ranges, nr, gx_dlc_idx, s_cap_nv) : 0;
     lru_unlink(e);
@@ -1892,14 +2043,14 @@ void gx_dlc_cap_finish(const GxState* st, u32 kind) {
     e->vsh = NULL;
     e->vsh_reason = 0;
     if (gx_vsh_on) {
-        e->vsh = gx_vsh_stream_build(e_verts(e), e->nverts, e_draws(e), e->ndraws, st->vtx_desc,
+        e->vsh = gx_vsh_stream_build(s_cap_v, e->nverts, e_draws(e), e->ndraws, st->vtx_desc,
                                      (const GxAttrFmt(*)[GX_VA_MAX_ATTR])e_vat(e), e->fmt_mask, &e->vsh_reason);
         if (e->vsh != NULL) {
             s_used_bytes += e->vsh->bytes;
         }
     }
     if (gx_perf_on > 0 && sizeof(GxVertex) % sizeof(f32) == 0) {
-        exactness(e_verts(e), e->nverts, st->vtx_desc[GX_VA_TEX0] != GX_NONE);
+        exactness(s_cap_v, e->nverts, st->vtx_desc[GX_VA_TEX0] != GX_NONE);
     }
 out:
     if (gx_perf_on > 0) {
@@ -2054,6 +2205,11 @@ void gx_dlcache_log(u32 frames) {
            (unsigned long)(a->relinks / f), (unsigned long)(a->deferred / f),
            (unsigned long)s_live, (unsigned long)(s_used_bytes / 1024),
            (unsigned long)(s_budget / 1024));
+    if (s_blob) {
+        PLOG_I("gxstats   dlcblob=%d: %lu entries built compact, vertices %lu KB instead of %lu KB, %lu expansion errors",
+               s_blob, (unsigned long)s_blob_built, (unsigned long)(s_blob_comp_bytes / 1024),
+               (unsigned long)(s_blob_full_bytes / 1024), (unsigned long)s_blob_err);
+    }
     PlatMemStableStats ms;
     plat_memstable_stats(&ms);
     PLOG_I("gxstats   trust: %lu hits unhashed (%lu%%), grants %lu, stale %lu | registry: %lu ranges %lu KB, per frame "

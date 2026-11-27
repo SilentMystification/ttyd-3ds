@@ -236,7 +236,11 @@ static u32 s_tex_seen[MAX_TEX / 32]; /* slots that held a texture before (under 
 static C3D_Tex s_blank_tex;
 static LightLock s_tex_lock;
 static u32 s_frame_counter;
-static PlatGpuState s_last_state;
+static PlatGpuState s_last_state_own;
+/* gxkold=1 (with gxone=1): s_last_state is the front end's own state (plat_gpu_set_state_one's st, which it changes only
+ * through set_state_one calls) instead of a copy of its regions; otherwise this record's copy */
+static PlatGpuState* s_lsp = &s_last_state_own;
+#define s_last_state (*s_lsp)
 static int s_last_state_valid; /* s_last_state was recorded in the current record */
 static u32 s_last_fog_hash;
 static u32 s_last_fog_id; /* PlatGpuState.fog_lut_id of the last LUT sent (0: s_last_fog_hash is) */
@@ -253,6 +257,23 @@ static VshDrawP* s_last_vdrawp;       /* body of the last command when it is a C
 static PlatGpuVshConst s_last_vconst;
 static int s_last_vconst_valid;       /* s_last_vconst was recorded in the current record */
 static u32 s_last_vconst_id;
+static int s_rows;              /* switch gxrows (revised plan step 6; the gxrows section after oh_light) */
+static int s_last_vrows;        /* gxrows: the last block of this record came through plat_gpu_vsh_rows */
+static void rows_seg_save(void);    /* gxrows: end_segment keeps the rows the GPU holds ... */
+static void rows_seg_restore(void); /* ... and gives them again in the next record */
+static int s_kold;              /* switch gxkold (revised plan step 9; the gxkold section after plat_gpu_set_state_one) */
+static struct {
+    u32 checks, differ, logged;
+} s_kst;
+static const PlatGpuState* s_kold_fe; /* gxkold=2: the front end's state, compared with the copy */
+static void kold_check_do(const char* where);
+static inline void kold_check(const char* where) {
+    if (__builtin_expect(s_kold == 2, 0)) {
+        kold_check_do(where);
+    }
+}
+static void kold_log(u32 frames);
+static void rows_log(u32 frames);
 static struct {
     void* p;
     u32 frame;
@@ -449,6 +470,7 @@ static void submit(int present) {
     s_last_vconst_valid = 0;
     s_last_vlight_id = 0;
     s_last_alloc = NULL;
+    s_lsp = &s_last_state_own; /* gxkold: not the front end's state (it is overwritten here) */
     memset(&s_last_state, 0xFF, sizeof(s_last_state));
     s_last_state_valid = 0;
     s_last_fog_hash = 0;
@@ -469,7 +491,11 @@ static void end_segment(void) {
     PlatGpuVshConst keep_v = s_last_vconst;
     u32 keep_vid = s_last_vconst_id;
     int have_v = s_last_vconst_valid;
+    int keep_rows = s_last_vrows;
     u32 keep_lid = s_last_vlight_id;
+    if (have_v && keep_rows) {
+        rows_seg_save();
+    }
     if (s_onehop) {
         oh_record_end(0);
     }
@@ -481,7 +507,9 @@ static void end_segment(void) {
     if (have_state) {
         plat_gpu_set_state(&keep);
     }
-    if (have_v) {
+    if (have_v && keep_rows) {
+        rows_seg_restore();
+    } else if (have_v) {
         plat_gpu_vsh_const(&keep_v, keep_vid);
     }
 }
@@ -529,6 +557,11 @@ static int s_state_delta = 1; /* switch gxstatedelta (default 1): CMD_STATE_DELT
 static PlatGpuState s_rstate; /* render thread: the state the record's last CMD_STATE and deltas give */
 
 void plat_gpu_set_state(const PlatGpuState* state) {
+    if (s_lsp != &s_last_state_own) {
+        /* gxkold: the state was the front end's; from here this record's copy again */
+        s_last_state_own = *s_lsp;
+        s_lsp = &s_last_state_own;
+    }
     if (state->fog_enable) {
         /* the front end's LUT id when it gives one (no hashing), else a hash of the LUT */
         u32 id = state->fog_lut_id;
@@ -850,6 +883,7 @@ void plat_gpu_vsh_const(const PlatGpuVshConst* c, uint32_t id) {
         s_last_vconst = *c;
         s_last_vconst_id = id;
         s_last_vconst_valid = 1;
+        s_last_vrows = 0;
         s_stats_frame.vsh_consts++;
         oh_const(c);
         return;
@@ -896,7 +930,8 @@ void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uin
     }
     nidx -= nidx % 3;
     Record* r = &s_rec[s_cur];
-    if (r->nidx + nidx > INDEX_ARENA || r->used + sizeof(CmdHead) + sizeof(VshDraw) + 64 > RECORD_BYTES) {
+    if (r->nidx + nidx > INDEX_ARENA ||
+        (!s_kold && r->used + sizeof(CmdHead) + sizeof(VshDraw) + 64 > RECORD_BYTES)) { /* gxkold: oh_need_room's */
         flush_segment();
         r = &s_rec[s_cur];
     }
@@ -912,19 +947,21 @@ void plat_gpu_vsh_draw(const void* stream, uint32_t layout, uint32_t scales, uin
         memcpy(r->idx + first, idx, nidx * sizeof(u16));
     }
     r->nidx += nidx;
-    s_stats_frame.vsh_calls++;
-    s_stats_frame.vsh_indices += nidx;
     if (s_onehop == 1) {
         /* the merge test of the record below, on what the words hold */
         VshDraw* l = s_last_vdraw;
         int merged = s_merge && l != NULL && l->stream == stream && l->layout == layout && l->scales == scales &&
                      l->cull == cull && s_oh_idx_end == r->idx + first;
-        if (!merged) {
-            s_stats_frame.vsh_draws++;
+        if (!s_kold) {
+            s_stats_frame.vsh_calls++;
+            s_stats_frame.vsh_indices += nidx;
+            s_stats_frame.vsh_draws += !merged;
         }
         oh_draw(stream, layout, scales, cull, r->idx + first, nidx, 0, merged);
         return;
     }
+    s_stats_frame.vsh_calls++;
+    s_stats_frame.vsh_indices += nidx;
     VshDraw* l = s_last_vdraw;
     if (s_merge && l != NULL && l->stream == stream && l->layout == layout && l->scales == scales && l->cull == cull &&
         l->first + l->count == first) {
@@ -993,7 +1030,7 @@ void plat_gpu_vsh_drawp(const void* stream, uint32_t layout, uint32_t scales, ui
         return;
     }
     Record* r = &s_rec[s_cur];
-    if (r->used + sizeof(CmdHead) + sizeof(VshDrawP) + 64 > RECORD_BYTES) {
+    if (!s_kold && r->used + sizeof(CmdHead) + sizeof(VshDrawP) + 64 > RECORD_BYTES) { /* gxkold: oh_need_room's */
         flush_segment();
     }
     if (s_onehop) {
@@ -1002,12 +1039,14 @@ void plat_gpu_vsh_drawp(const void* stream, uint32_t layout, uint32_t scales, ui
     if (!s_last_vconst_valid) {
         return; /* no uniform block in this record (cannot happen: end_segment puts it back) */
     }
-    s_stats_frame.vsh_calls += calls;
-    s_stats_frame.vsh_indices += nidx;
+    if (!s_kold) {
+        s_stats_frame.vsh_calls += calls;
+        s_stats_frame.vsh_indices += nidx;
+    }
     if (s_onehop) {
         oh_draw(stream, layout, scales, cull, idx, nidx, 1, 0);
         if (s_onehop == 1) {
-            s_stats_frame.vsh_draws++;
+            s_stats_frame.vsh_draws += !s_kold;
             return;
         }
     }
@@ -1025,7 +1064,7 @@ void plat_gpu_vsh_drawl(const void* stream, uint32_t layout, uint32_t scales, ui
         return;
     }
     Record* r = &s_rec[s_cur];
-    if (r->used + sizeof(CmdHead) + sizeof(VshDrawP) + 64 > RECORD_BYTES) {
+    if (!s_kold && r->used + sizeof(CmdHead) + sizeof(VshDrawP) + 64 > RECORD_BYTES) { /* gxkold: oh_need_room's */
         flush_segment();
     }
     if (s_onehop) {
@@ -1034,18 +1073,20 @@ void plat_gpu_vsh_drawl(const void* stream, uint32_t layout, uint32_t scales, ui
     if (!s_last_vconst_valid) {
         return; /* no uniform block in this record (cannot happen: end_segment puts it back) */
     }
-    s_stats_frame.vsh_calls++;
-    s_stats_frame.vsh_indices += nidx;
     if (s_onehop == 1) {
         VshDraw* l = s_last_vdraw;
         int merged = s_merge && l != NULL && l->stream == stream && l->layout == layout && l->scales == scales &&
                      l->cull == cull && s_oh_idx_end == idx;
-        if (!merged) {
-            s_stats_frame.vsh_draws++;
+        if (!s_kold) {
+            s_stats_frame.vsh_calls++;
+            s_stats_frame.vsh_indices += nidx;
+            s_stats_frame.vsh_draws += !merged;
         }
         oh_draw(stream, layout, scales, cull, idx, nidx, 2, merged);
         return;
     }
+    s_stats_frame.vsh_calls++;
+    s_stats_frame.vsh_indices += nidx;
     VshDrawP* l = s_last_vdrawp;
     if (s_merge && l != NULL && l->stream == stream && l->layout == layout && l->scales == scales && l->cull == cull &&
         l->idx + l->count == idx) {
@@ -2247,7 +2288,8 @@ static inline void vunif_u(VUnif* u, int id, float x, float y, float z, float w)
  * rows hold only 0 and +-1, so composing them on the CPU is exact (a row is
  * picked and maybe negated). A second eye pass would compose its clip-space
  * offset here too, from the same record. */
-static void vsh_const_rows(VUnif* u, const PlatGpuVshConst* c);
+static void vsh_const_rows_m(VUnif* u, const PlatGpuVshConst* c, u32 m);
+static void vsh_const_rows(VUnif* u, const PlatGpuVshConst* c) { vsh_const_rows_m(u, c, PLAT_VSH_ROWS_ALL); }
 static void vsh_apply_const(const PlatGpuVshConst* c) {
     vsh_const_rows(&s_vr, c);
     if (s_uloc_lit >= 0) {
@@ -2260,7 +2302,8 @@ static void vsh_apply_const(const PlatGpuVshConst* c) {
     }
 }
 
-static void vsh_const_rows(VUnif* u, const PlatGpuVshConst* c) {
+/* m: the block's rows to set (bit i: row i of PlatGpuVshConst, as plat_gpu_vsh_rows' rows); PLAT_VSH_ROWS_ALL all */
+static void vsh_const_rows_m(VUnif* u, const PlatGpuVshConst* c, u32 m) {
     /* each rotation row holds one +-1 and zeros (rot_rows): the row is 0.0f + (+-1 * a clip row), which the
      * general sum below the old loop made, term for term */
     static int s_rr_rot = -1, s_rr_i[2];
@@ -2279,6 +2322,9 @@ static void vsh_const_rows(VUnif* u, const PlatGpuVshConst* c) {
         s_rr_rot = s_rot;
     }
     for (int k = 0; k < 2; k++) {
+        if (!(m >> s_rr_i[k] & 1)) {
+            continue; /* clip uniform k is made from block row s_rr_i[k] */
+        }
         const float* src = c->clip[s_rr_i[k]];
         float sg = s_rr_s[k];
         float row[4];
@@ -2287,18 +2333,33 @@ static void vsh_const_rows(VUnif* u, const PlatGpuVshConst* c) {
         }
         vunif(s_uloc_clip + k, row[0], row[1], row[2], row[3]);
     }
-    vunif(s_uloc_clip + 2, c->clip[2][0], c->clip[2][1], c->clip[2][2], c->clip[2][3]);
-    vunif(s_uloc_clip + 3, c->clip[3][0], c->clip[3][1], c->clip[3][2], c->clip[3][3]);
+    if (m & 4u) {
+        vunif(s_uloc_clip + 2, c->clip[2][0], c->clip[2][1], c->clip[2][2], c->clip[2][3]);
+    }
+    if (m & 8u) {
+        vunif(s_uloc_clip + 3, c->clip[3][0], c->clip[3][1], c->clip[3][2], c->clip[3][3]);
+    }
     for (int i = 0; i < 9; i++) {
-        vunif(s_uloc_texrow + i, c->tex[i][0], c->tex[i][1], c->tex[i][2], c->tex[i][3]);
+        if (m >> (4 + i) & 1) {
+            vunif(s_uloc_texrow + i, c->tex[i][0], c->tex[i][1], c->tex[i][2], c->tex[i][3]);
+        }
     }
     for (int i = 0; i < 3; i++) {
-        vunif(s_uloc_tgsrc + i, c->tgsrc[i][0], c->tgsrc[i][1], c->tgsrc[i][2],
-                      c->tgsrc[i][3]);
+        if (m >> (13 + i) & 1) {
+            vunif(s_uloc_tgsrc + i, c->tgsrc[i][0], c->tgsrc[i][1], c->tgsrc[i][2], c->tgsrc[i][3]);
+        }
     }
-    vunif(s_uloc_clrmix, c->clrmix[0], c->clrmix[1], c->clrmix[2], c->clrmix[3]);
-    vunif(s_uloc_matclr, c->matclr[0], c->matclr[1], c->matclr[2], c->matclr[3]);
+    if (m >> 16 & 1) {
+        vunif(s_uloc_clrmix, c->clrmix[0], c->clrmix[1], c->clrmix[2], c->clrmix[3]);
+    }
+    if (m >> 17 & 1) {
+        vunif(s_uloc_matclr, c->matclr[0], c->matclr[1], c->matclr[2], c->matclr[3]);
+    }
 }
+_Static_assert(offsetof(PlatGpuVshConst, tex) == 4 * 16 && offsetof(PlatGpuVshConst, tgsrc) == 13 * 16 &&
+                   offsetof(PlatGpuVshConst, clrmix) == 16 * 16 && offsetof(PlatGpuVshConst, matclr) == 17 * 16 &&
+                   offsetof(PlatGpuVshConst, flags) == PLAT_VSH_ROWS * 16,
+               "PlatGpuVshConst: 18 rows of 4 floats, then flags (plat_gpu_vsh_rows' bit numbers)");
 
 /* The light block's rows; returns the light count's int uniform x (n - 1, 0 with none). */
 static int vsh_light_rows(VUnif* u, const PlatGpuVshLight* l);
@@ -3352,6 +3413,7 @@ static void oh_record_end(int present) {
 }
 
 static void oh_c3d_cmd(int what) {
+    kold_check("c3d command");
     if (what == OHC_DRAW0 || what == OHC_DRAW) {
         if (s_last_state_valid && oh_class(&s_last_state) != OHS_SCENE && s_om.after_scene) {
             oh_mark();
@@ -3372,6 +3434,7 @@ static void oh_c3d_cmd(int what) {
 }
 
 static void oh_after_c3d(int what) {
+    kold_check("after c3d command");
     if (what == OHC_DRAW0 || what == OHC_DRAW) {
         if (s_last_state_valid) {
             oh_stereo_after(oh_class(&s_last_state), s_last_state.depth_write);
@@ -3471,6 +3534,121 @@ static void oh_light(const PlatGpuVshLight* l) {
         oh_op(-1, x);
         s_om.lcount = x;
     }
+}
+
+/* ---- switch gxrows (revised plan step 6, docs/PORT_3DS_GX_NATIVE.md; needs gxone, so gxonehop=1) ----
+ * The front end keeps one uniform block (gx_draw.c's s_vw) and gives, per send, the rows that changed since its last
+ * send (it compares each row it rebuilds once, as it builds it). Here only those rows go through vsh_const_rows'
+ * row compare against what the GPU holds (s_vg): no block id, no block compare, no copy of the block. A send with
+ * rows 0 is skipped as an unchanged id is; the record's first send sets every row (the rows held were reset).
+ * Before a segment, the rows held are kept (they are the last block's, as vsh_const_rows made them) and set again in
+ * the next record, with the same lit op, as plat_gpu_vsh_const(the kept block) does there.
+ * gxrows=2: at every send the rows are also made from the whole block (vsh_const_rows) on a copy of s_vg before the
+ * send; both results must be the same bytes ("gxrows frame" line, verify differ 0). */
+static struct {
+    u32 sends, skipped, checks, differ, logged;
+} s_rst;
+static VUnif s_rows_vu;      /* gxrows=2: the whole-block rows */
+static u32 s_rows_flags;     /* the flags of the last block sent */
+static u32 s_rows_keep[PLAT_VSH_ROWS][4]; /* end_segment: the rows held (bit patterns, x y z w) */
+static u32 s_rows_keep_flags;
+
+int plat_gpu_rows_active(void) { return s_rows; }
+
+static void rows_lit(u32 flags) {
+    if (s_uloc_lit >= 0) {
+        s32 lit = (flags & PLAT_VSH_LIT) != 0;
+        if (lit != s_om.lit) {
+            oh_op(lit, -1);
+            s_om.lit = lit;
+        }
+    }
+    s_rows_flags = flags;
+}
+
+void plat_gpu_vsh_rows(const PlatGpuVshConst* c, uint32_t rows) {
+    if (s_last_vconst_valid) {
+        if (rows == 0) {
+            if (s_rows == 2) {
+                /* nothing changed: the whole block gives no row to send */
+                memcpy(&s_rows_vu, &s_vg, sizeof(VUnif));
+                vsh_const_rows(&s_rows_vu, c);
+                s_rst.checks++;
+                if (memcmp(&s_rows_vu, &s_vg, sizeof(VUnif)) != 0 || c->flags != s_rows_flags) {
+                    s_rst.differ++;
+                    if (s_rst.logged++ < 8) {
+                        PLOG_W("gxrows verify: frame %lu, a send without rows, but the block differs from the rows held",
+                               (unsigned long)s_frame_counter);
+                    }
+                }
+            }
+            s_rst.skipped++;
+            return;
+        }
+    } else {
+        rows = PLAT_VSH_ROWS_ALL; /* the record's first block: the rows held were reset */
+    }
+    s_last_vconst_valid = 1;
+    s_last_vrows = 1;
+    s_stats_frame.vsh_consts++;
+    s_rst.sends++;
+    oh_event();
+    if (s_rows == 2) {
+        memcpy(&s_rows_vu, &s_vg, sizeof(VUnif));
+        vsh_const_rows(&s_rows_vu, c);
+    }
+    vsh_const_rows_m(&s_vg, c, rows);
+    if (s_rows == 2) {
+        s_rst.checks++;
+        if (memcmp(&s_rows_vu, &s_vg, sizeof(VUnif)) != 0) {
+            s_rst.differ++;
+            if (s_rst.logged++ < 8) {
+                PLOG_W("gxrows verify: frame %lu, rows %05lx: the rows set differ from the whole block's",
+                       (unsigned long)s_frame_counter, (unsigned long)rows);
+            }
+        }
+    }
+    rows_lit(c->flags);
+}
+
+/* the uniform location of block row i (-1: the shader has none) */
+static int rows_loc(int i) {
+    int loc = i < 4 ? s_uloc_clip + i : i < 13 ? s_uloc_texrow + (i - 4) : i < 16 ? s_uloc_tgsrc + (i - 13)
+              : i == 16 ? s_uloc_clrmix : s_uloc_matclr;
+    return loc >= 0 && loc < 96 ? loc : -1;
+}
+
+static void rows_seg_save(void) {
+    for (int i = 0; i < PLAT_VSH_ROWS; i++) {
+        int loc = rows_loc(i);
+        if (loc >= 0) {
+            memcpy(s_rows_keep[i], s_vg.unif[loc], 16);
+        }
+    }
+    s_rows_keep_flags = s_rows_flags;
+}
+
+static void rows_seg_restore(void) {
+    s_last_vconst_valid = 1;
+    s_last_vrows = 1;
+    s_stats_frame.vsh_consts++;
+    oh_event();
+    for (int i = 0; i < PLAT_VSH_ROWS; i++) {
+        int loc = rows_loc(i);
+        if (loc >= 0) {
+            float f[4];
+            memcpy(f, s_rows_keep[i], 16);
+            vunif_u(&s_vg, loc, f[0], f[1], f[2], f[3]);
+        }
+    }
+    rows_lit(s_rows_keep_flags);
+}
+
+static void rows_log(u32 f) {
+    PLOG_I("gxrows frame %lu: per frame sends %lu skipped %lu; verify checks %lu differ %lu (total)",
+           (unsigned long)s_frame_counter, (unsigned long)(s_rst.sends / f), (unsigned long)(s_rst.skipped / f),
+           (unsigned long)s_rst.checks, (unsigned long)s_rst.differ);
+    s_rst.sends = s_rst.skipped = 0;
 }
 
 /* A pending entry: the capture body that will hold the words, and the record (seq) it is in. */
@@ -3617,6 +3795,7 @@ static void oh_draw(const void* stream, u32 layout, u32 scales, u32 cull, const 
         s_ost.skipped++;
         return; /* the replay skips a draw before the record's first state */
     }
+    kold_check("draw");
     int cls = oh_class(&s_last_state);
     if (drawp && !ixpool_ok(idx, count)) {
         if (cls != OHS_SCENE && s_om.after_scene) {
@@ -4100,11 +4279,18 @@ void plat_gpu_set_state_one(const PlatGpuState* st, uint32_t regions, const uint
         plat_gpu_set_state_dirty(st, regions);
         return;
     }
+    if (s_kold == 2) {
+        s_kold_fe = st;
+    }
     if (!s_last_state_valid) {
         plat_gpu_set_state(st); /* the record's first state goes whole */
         memcpy(s_one_cur, ids, sizeof(s_one_cur));
+        if (s_kold == 1 && s_one == 1) {
+            s_lsp = (PlatGpuState*)st; /* gxkold: equal to the copy just made; read in place from here */
+        }
         return;
     }
+    int alias = s_lsp == st; /* gxkold=1: the regions are the front end's already, nothing to copy */
     if ((regions & PLAT_GPU_R_PIX) && st->fog_enable) { /* the LUT as plat_gpu_set_state_dirty sends it */
         u32 id = st->fog_lut_id;
         u32 h = id != 0 ? 0 : fog_hash(st);
@@ -4113,7 +4299,7 @@ void plat_gpu_set_state_one(const PlatGpuState* st, uint32_t regions, const uint
             s_last_fog_hash = h;
             s_last_fog_id = id;
         }
-        if (st->fog_lut_id == 0 || st->fog_lut_id != s_last_state.fog_lut_id) {
+        if (!alias && (st->fog_lut_id == 0 || st->fog_lut_id != s_last_state.fog_lut_id)) {
             memcpy(&s_last_state.fog_lut_id, &st->fog_lut_id, ONE_OFF_SCI - ONE_OFF_LUT);
         }
     }
@@ -4135,10 +4321,15 @@ void plat_gpu_set_state_one(const PlatGpuState* st, uint32_t regions, const uint
             }
             s_one_cur[c] = ids[c];
         } else if (ids[c] != s_one_cur[c] || ids[c] == 0) {
-            one_rg_copy(c, st);
+            if (!alias) {
+                one_rg_copy(c, st);
+            }
             s_one_cur[c] = ids[c];
             changed = 1;
         }
+    }
+    if (s_kold == 1 && s_one == 1) {
+        s_lsp = (PlatGpuState*)st; /* the copy equals st in every region now (ids name the regions' bytes) */
     }
     if (changed) {
         oh_event();
@@ -4146,6 +4337,44 @@ void plat_gpu_set_state_one(const PlatGpuState* st, uint32_t regions, const uint
         s_stats_frame.state_changes++;
         s_onec.changes++;
     }
+    kold_check("set_state_one");
+}
+
+/* ---- switch gxkold (revised plan step 9, docs/PORT_3DS_GX_NATIVE.md; with gxone=1 and gxonehop=1) ----
+ * Leftover Record bookkeeping on the shader path's hot calls is skipped:
+ *   - s_last_state is the front end's PlatGpuState itself (plat_gpu_set_state_one's st): no region copies (up to
+ *     ~700 bytes per state change). The front end changes it only inside build_one, which ends in set_state_one; the
+ *     record's first state and end_segment's state stay copies (plat_gpu_set_state takes the copy back first).
+ *   - plat_gpu_vsh_draw/drawp/drawl, plat_gpu_chunk_draw and plat_gpu_imm_begin: no record-room test of their own
+ *     (oh_need_room tests more room right after it, with the same flush_segment, under gxonehop).
+ *   - the vsh_calls/vsh_indices/vsh_draws counters of plat_gpu_stats are not counted (the gx_vsh stats line shows 0).
+ * gxkold=2: the copies are made as before (nothing aliased) and, at every read of the state on the shader path and at
+ * every set_state_one, the copy is compared with the front end's state byte for byte ("gxkold frame" line). */
+static void kold_check_do(const char* where) {
+    if (s_kold_fe == NULL || !s_last_state_valid) {
+        return;
+    }
+    s_kst.checks++;
+    if (memcmp(&s_last_state_own, s_kold_fe, sizeof(PlatGpuState)) != 0) {
+        s_kst.differ++;
+        if (s_kst.logged < 16) {
+            s_kst.logged++;
+            const u8 *a = (const u8*)&s_last_state_own, *b = (const u8*)s_kold_fe;
+            u32 k = 0;
+            while (k < sizeof(PlatGpuState) && a[k] == b[k]) {
+                k++;
+            }
+            PLOG_W("gxkold verify: frame %lu, %s: the state copy differs from the front end's at byte %lu (of %lu)",
+                   (unsigned long)s_frame_counter, where, (unsigned long)k, (unsigned long)sizeof(PlatGpuState));
+        }
+    }
+}
+
+static void kold_log(u32 f) {
+    PLOG_I("gxkold frame %lu: in %lu frames verify checks %lu differ %lu (state %s)", (unsigned long)s_frame_counter,
+           (unsigned long)f, (unsigned long)s_kst.checks, (unsigned long)s_kst.differ,
+           s_kold == 1 ? "read in place" : "copied, compared");
+    s_kst.checks = s_kst.differ = 0;
 }
 
 static void one_log(u32 f) {
@@ -4452,23 +4681,26 @@ int plat_gpu_chunk_draw(uint32_t id, uint32_t cull, uint32_t nd, uint32_t last, 
         return 0;
     }
     u32 nw = d[nd - 1].end;
-    /* plat_gpu_vsh_drawp's room checks, once for the whole chunk */
+    /* plat_gpu_vsh_drawp's room checks, once for the whole chunk (gxkold: oh_need_room's alone) */
     Record* r = oh_rec();
-    if (r->used + sizeof(CmdHead) + sizeof(VshDrawP) + 64 > RECORD_BYTES) {
+    if (!s_kold && r->used + sizeof(CmdHead) + sizeof(VshDrawP) + 64 > RECORD_BYTES) {
         flush_segment();
     }
     oh_need_room(0, nw + PICA_LIST_END_MAX + 4);
     if (!s_last_vconst_valid) {
         return 1;
     }
-    s_stats_frame.vsh_calls += calls;
-    s_stats_frame.vsh_indices += (nd > 1 ? d[nd - 2].cum : 0) + last;
-    s_stats_frame.vsh_draws += nd;
+    if (!s_kold) {
+        s_stats_frame.vsh_calls += calls;
+        s_stats_frame.vsh_indices += (nd > 1 ? d[nd - 2].cum : 0) + last;
+        s_stats_frame.vsh_draws += nd;
+    }
     s_ckst.uses++;
     if (!s_last_state_valid) {
         s_ost.skipped += nd;
         return 1; /* oh_draw: the replay skips a draw before the record's first state */
     }
+    kold_check("chunk");
     /* what oh_draw does before the first draw (for the later draws of a batch it does nothing more) */
     int cls = oh_class(&s_last_state);
     if (cls != OHS_SCENE && s_om.after_scene) {
@@ -4567,14 +4799,19 @@ uint16_t* plat_gpu_imm_begin(const PlatGpuVshConst* c, uint32_t cid, const PlatG
     if (l != NULL) {
         plat_gpu_vsh_light(l, lid);
     }
-    plat_gpu_vsh_const(c, cid);
+    if (s_rows) {
+        plat_gpu_vsh_rows(c, cid);
+    } else {
+        plat_gpu_vsh_const(c, cid);
+    }
     /* plat_gpu_vsh_draw's checks, in its order */
     if (nidx < 3 || nidx > INDEX_ARENA || PLAT_VSH_STRIDE(layout) == 0) {
         s_imst.none++;
         return NULL;
     }
     Record* r = &s_rec[s_cur];
-    if (r->nidx + nidx > INDEX_ARENA || r->used + sizeof(CmdHead) + sizeof(VshDraw) + 64 > RECORD_BYTES) {
+    if (r->nidx + nidx > INDEX_ARENA ||
+        (!s_kold && r->used + sizeof(CmdHead) + sizeof(VshDraw) + 64 > RECORD_BYTES)) { /* gxkold: oh_need_room's */
         flush_segment();
     }
     oh_need_room(0, 0);
@@ -4624,8 +4861,10 @@ void plat_gpu_imm_end(const void* stream, uint32_t layout, uint32_t scales, uint
     u32 first = r->nidx;
     const u16* idx = r->idx + first;
     r->nidx += nidx;
-    s_stats_frame.vsh_calls++;
-    s_stats_frame.vsh_indices += nidx;
+    if (!s_kold) {
+        s_stats_frame.vsh_calls++;
+        s_stats_frame.vsh_indices += nidx;
+    }
     /* plat_gpu_vsh_draw's merge test (gxonehop=1), on what the words hold */
     VshDraw* l = s_last_vdraw;
     if (s_merge && l != NULL && l->stream == stream && l->layout == layout && l->scales == scales && l->cull == cull &&
@@ -4645,11 +4884,12 @@ void plat_gpu_imm_end(const void* stream, uint32_t layout, uint32_t scales, uint
         s_imst.merged++;
         return;
     }
-    s_stats_frame.vsh_draws++;
+    s_stats_frame.vsh_draws += !s_kold;
     if (!s_last_state_valid) {
         s_ost.skipped++;
         return; /* the replay skips a draw before the record's first state */
     }
+    kold_check("immediate draw");
     /* oh_draw, a draw from the index arena (drawp 0) */
     int cls = oh_class(&s_last_state);
     if (cls != OHS_SCENE && s_om.after_scene) {
@@ -5117,6 +5357,12 @@ static void oh_log(void) {
     }
     if (s_chunk) {
         ck_log(f);
+    }
+    if (s_rows) {
+        rows_log(f);
+    }
+    if (s_kold) {
+        kold_log(f);
     }
     memset(&s_ost, 0, sizeof(s_ost));
     u32 logged = s_orst.logged;
@@ -6306,6 +6552,27 @@ void plat_gpu_init(void) {
     if (s_chunk && (!s_one || !ck_init())) {
         s_chunk = 0;
         s_immfl = 0;
+    }
+    s_rows = plat_switch_int("gxrows", 0);
+    if (s_rows < 0 || s_rows > 2) {
+        s_rows = 0;
+    }
+    if (s_rows && (s_onehop != 1 || !s_one)) {
+        PLOG_W("gxrows: off (it needs gxone)");
+        s_rows = 0;
+    }
+    s_kold = plat_switch_int("gxkold", 0);
+    if (s_kold < 0 || s_kold > 2) {
+        s_kold = 0;
+    }
+    if (s_kold && (s_onehop != 1 || !s_one)) {
+        PLOG_W("gxkold: off (it needs gxone)");
+        s_kold = 0;
+    }
+    if (s_rows || s_kold) {
+        PLOG_I("gxrows=%d gxkold=%d: uniform rows by row%s; the state read in place%s", s_rows, s_kold,
+               s_rows == 2 ? " (compared with the whole block's)" : "",
+               s_kold == 2 ? " (copied and compared)" : s_kold == 1 && s_one != 1 ? " (not with gxone=2)" : "");
     }
     if (s_immfl) {
         PLOG_I("gximmfl=%d: immediate draws straight into the frame list%s", s_immfl,

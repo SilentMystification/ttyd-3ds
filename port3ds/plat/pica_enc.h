@@ -73,6 +73,34 @@ uint32_t pica_enc_pix(uint32_t* out, const PicaPixIn* in, const PicaEncFixed* f)
 #define PICA_LIST_END_MAX 10u
 uint32_t pica_enc_list_end(uint32_t* out, uint32_t n_before, int fb_flush);
 
+/* Command-buffer calls (GX native step 5, switch gxcall; docs/PORT_3DS_GPU_RULES.md, cases cb_call*). The command
+ * processor fetches SIZEn * 8 bytes at physical ADDRn * 8 when CMDBUF_JUMPn is written; it has no return stack. A call
+ * writes CMDBUF_SIZE1/ADDR1 (the chunk), CMDBUF_SIZE0/ADDR0 (the continuation: from the word after the call to the
+ * end of the calling list) and CMDBUF_JUMP1, in the order of the gpuprobe cases; the chunk ends with CMDBUF_JUMP0.
+ * Every jump write is the last command of a 16-byte block, so chunks and continuations start 16-byte aligned and
+ * their sizes are multiples of 16 bytes. Pads are FACECULLING_CONFIG writes with byte mask 0 (they write nothing). */
+#define PICA_CALL_WORDS_MAX 12u
+#define PICA_RET_WORDS 4u
+/* At out (physical out_phys, 8-byte aligned): a call of chunk_bytes at chunk_phys. ADDR0 is the word after the call
+ * (16-byte aligned), SIZE0 is 0 until pica_enc_call_patch; *size0 gets the index of the SIZE0 value word. Returns the
+ * words (10 or 12). */
+uint32_t pica_enc_call(uint32_t* out, uint32_t out_phys, uint32_t chunk_phys, uint32_t chunk_bytes, uint32_t* size0);
+/* The continuation's size: bytes from the end of the call to the end of the list (a multiple of 16) */
+static inline void pica_enc_call_patch(uint32_t* size0_word, uint32_t bytes) { *size0_word = bytes >> 3; }
+/* A chunk's return at out (16-byte aligned): a pad, then CMDBUF_JUMP0. PICA_RET_WORDS words. */
+uint32_t pica_enc_ret(uint32_t* out);
+
+typedef struct {
+    uint32_t size[2], addr[2]; /* the CMDBUF values written (bytes >> 3) */
+    uint32_t set;              /* bits 0-3: size0, size1, addr0, addr1 written */
+} PicaCall;
+/* Parses a call at w (n words at most): single CMDBUF size/address writes and pads, ending with the CMDBUF_JUMP1
+ * write. Returns its words; 0 when anything else comes first (another register, a burst, a byte mask other than
+ * 0xF, JUMP0) or the words end. */
+uint32_t pica_call_parse(const uint32_t* w, uint32_t n, PicaCall* c);
+/* 1 when the n words are pads, then CMDBUF_JUMP0 as the last command (a chunk's return). */
+int pica_ret_check(const uint32_t* w, uint32_t n);
+
 /* libctru's float conversions (f32tof24, f32tof31), bit for bit. */
 uint32_t pica_f24(float v);
 uint32_t pica_f31(float v);

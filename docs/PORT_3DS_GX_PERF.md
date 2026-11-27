@@ -1019,6 +1019,7 @@ Rows for the switch table:
 | `gxdirty=0/1/2` | 0 (default): every state version change rebuilds the whole PICA state. 1: setters return early when their values are in force, others mark their class dirty; only dirty classes are rebuilt and sent (`plat_gpu_set_state_dirty`), and the uniform block by parts. 2: as 1, plus a full rebuild compared at every switch-off rebuild (`gxdirty verify` warnings, `gxdirty frame N:` line with `gxthreadstats`) |
 | `gxone=0/1/2` | GX native step 2 (docs/PORT_3DS_GX_NATIVE.md, "Step 2 as built"). 0 (default) off. 1: the dirty state classes (TEV with fog, textures, pixel with scissor/viewport) are interned at the draw boundary by their GX bytes; each id owns a PICA block built once by the port's own encoders (`plat/pica_enc.c`); the back end compares only ids and copies the blocks into the record. Implies `gxdirty`, `gxonehop=1`, `gximmdirect=1`, `gxthread=0`. 2: as `gxonehop=1` (keys and citro3d captures write the record) with every id block compared to the key path's words, the send decisions and the regions checked, and `gxdirty=2`; `gxone frame N:` lines with `gxthreadstats=N` |
 | `gxchunk=0/1/2` | GX native step 3 (docs/PORT_3DS_GX_NATIVE.md, "Step 3 as built"). Needs `gxone=1` (off with `gxone=2`, `gpufence=0`, `gpudrawcut`, `gpudrawskip`). 0 (default) off. 1: each gxbatch batch gets one prebuilt chunk of PICA words (attribute setup, scale rows, cull, draw packets) that the game thread copies into the frame list at a use; every word run of the frame list (placement `gx frame list`, linear memory) is submitted by the render thread as a command list of its own (`GX_ProcessCommandList`) instead of being copied into citro3d's buffer. 2: as 1, and the per-draw words of every chunk use are built beside it; when the record comes back both go through a PICA register-file model, compared at every chunk draw (`gxchunk verify` warnings). `gxchunkkb=N`: the chunk store (placement `gx chunks`, default 256). With `gxthreadstats=N`: a `gxchunk frame N:` line (chunk uses, draws, words, builds, store resets, lists submitted, citro3d splits, runs copied; verify draws compared, differ, one-sided, not compared) |
+| `gxcall=0/1/2` | GX native step 5 (docs/PORT_3DS_GX_NATIVE.md, "Step 5 as built"). Needs `gxchunk=1` or `2`, the chunk store and the frame list in linear memory (the default placements). 0 (default) off: chunks are copied (COPY mode). 1: a whole chunk use is a call (CALL mode): the frame list gets `CMDBUF_SIZE1/ADDR1` (the chunk), `CMDBUF_SIZE0/ADDR0` (the rest of the run, size patched when the run ends) and `CMDBUF_JUMP1`; the chunk ends with `CMDBUF_JUMP0`. A batch called in part is still copied. The chunk store is two halves (default `gxchunkkb` 512 with `gxcall`); a half called in the last 3 presented frames is not written again. 2: as 1 with `gxchunk=2` (forced): the verify reads each call as the command processor would (addresses, sizes, alignment, the chunk's return) and feeds the chunk's words into the register-file compare (`gxcall verify` and `gxchunk verify` warnings). With `gxthreadstats=N`: a `gxcall frame N:` line (calls, copied uses, calls copied by the render thread, store waits, half; verify calls, bad). **Console-gated:** Azahar is no evidence for jump semantics |
 | `gximmfl=0/1/2` | GX native step 4 (docs/PORT_3DS_GX_NATIVE.md, "Step 4 as built"). Needs `gxchunk=1` or `2` (so `gxone=1`, `gxthread=0`). 0 (default) off. 1: `GXEnd` routes an immediate primitive with the eligibility bits of its classes (vertex class plan, uniform block parts), converts it into the ring chunk and writes the draw into the frame list in one pass; the triangle indices go straight into the record's index arena. The pass-group route and the K hysteresis are unchanged (same words as 0). 2: as 1, and each immediate draw's old route bits and index list are compared on the game thread, its words (the old path's, built beside) through the register-file model (`gximmfl verify` and `gxchunk verify` warnings). With `gxthreadstats=N`: a `gximmfl frame N:` line (draws, merged, none; front-end checks, route differ, index differ) |
 | `gximmnow=0/1` | 0 (default). 1: a new immediate draw's pass-group record starts with the streak K (its group takes the shader path in its first frame when nothing in it is ineligible). **Not identical** to 0: up to K frames after a load, immediate draws that 0 keeps on the CPU path take the shader. Owner question open |
 | `gxfogcache=0/1` | 1 (default): the fog LUT is recomputed only when the fog parameters change and goes to the back end with an id instead of being hashed; 0 recomputes and hashes it on every rebuild (A/B) |
@@ -1481,6 +1482,49 @@ Release CIA; verify runs `--long 200`, `--allow-hw-faults`.
 | battle | 31.7 / 24.3 / 0.9 | 32.0 / 23.8 / 0.9 | 33.4 / 15.6 / 20.8 / 3.8 (fence 12.4) |
 
   `gximmfl=1` takes 0.2-1.1 ms of core-0 busy off K (pik_00 most: 1 150 immediate draws a frame); the frame does not change. C3 stays the faster config (busy 15.6-27.2 ms).
+
+## Step 5 of the native plan: `gxcall` (2026-11-28)
+
+Design and files: docs/PORT_3DS_GX_NATIVE.md, "Step 5 as built". Switch row: "For PORT_3DS_TESTING.md" above. Default 0. Built on port3ds `8adf7774` (steps 3-4 on D2), branch `gxcall`.
+
+### What changes per batch chunk use (K + `gxcall=1`)
+
+| Per whole chunk use | `gxchunk=1` (COPY) | `gxchunk=1 gxcall=1` (CALL) |
+|---|---|---|
+| Frame-list words written by core 0 | the chunk's words (gor_01: about 117 per use, 28 752 per frame) | 10 or 12 (a call); gor_01 est. 245 x 11 = about 2.7 K per frame |
+| `memcpy` of the chunk | yes | no |
+| Words the command processor reads | the same | the same plus the call (10-12) and the return (4) per use |
+| Batch called in part | copied, last count patched | the same (copied) |
+| Run end | list end | list end, then each call's SIZE0 patched (one store per call) |
+| Store reset | generation bump, store starts again | generation bump; the other half, only when it was not called in the last 3 presented frames (else "not yet": the batch draws per draw until it is free) |
+| Render thread, run not submitted (queue past 20 entries) | `cmd_put` of the run | the run copied with each call replaced by the chunk's words (`ck_put_calls`): the COPY words |
+
+The register sequence is that of COPY mode: the chunk's words are the words COPY copies (the return and the byte-mask-0 pads write nothing). Est. gain (core 0, Azahar, not measured): the `memcpy` of ~115 KB of words per frame in gor_01, ~170 KB in pik_00 (about 0.1-0.3 ms); on the console also L2 and bus traffic. The command processor reads ~14 more words per use (no timing evidence in Azahar).
+
+### Host test
+
+`tools/port3ds/pica_enc_test/build.sh`, then `build/pica_enc_test/pica_model_test [<list.bin>...]`: the call and return encoders and parsers alone (alignment 0 and 8 bytes past a 16-byte boundary: 12 and 10 words), 400 random lists of 1-63 segments copied or called (any alignment, calls back to back, first and last), each run through a small command-processor model with the probe's jump rules (`cp_exec`: fetch SIZEn*8 bytes at ADDRn*8 when JUMPn is written; every jump the last command of a 16-byte block; fetches 16-byte aligned, sizes multiples of 16): **8 577 calls, the commands read equal the copies, word for word and in the register-file model** (FINALIZE counted apart: GPUCMD_Split writes it once or twice by length). A SIZE0 short by 64 bytes is found. With the two gpuhang/gpudump lists (`build/azahar-profile/.../gpuhang/`), every second draw's commands become a called chunk: 559 and 412 segments, equal.
+
+### Ready for measurement (not run: owner rule 2026-11-28, one integration build, one measurement agent)
+
+Configs: K = C1 + `gxone=1 gxchunk=1`; KC = K + `gxcall=1`; KCV = C1 + `gxone=1 gxchunk=1 gxcall=2` (gxchunk becomes 2). Scenes: gor_01, pik_00, usu_00 (story 30), battle (gon_02, story 30, battle=1, btlauto=perfect).
+
+1. **KCV verify** (dev or release, `gxthreadstats=60 --long 200`, to frame 841), 4 scenes. Pass: start lines `gxchunk=2: ...` and `gxcall=2: ...`; every `gxcall frame` line from the map on has calls above 0; `verify calls` above 0 and `bad 0`; every `gxchunk frame` line `differ 0`; no `gxcall verify` and no `gxchunk verify` warning.
+2. **Sweep** KCV `map_sweep --area tik --story 30`: every segment's `gxcall frame` lines `bad 0`, `gxchunk ... differ 0`, no verify warning.
+3. **determ_ab** shots 780-785, K vs KC, 4 scenes: 6 of 6 identical each. (Azahar's jump support makes this an emulator check only.)
+4. **Stereo** `stereoforce=1` gor_01, 780-782, K vs KC: 9 of 9 identical.
+5. **GPU hang** KC `gpuhangtest=700 gpuhangrecover=1`: `reset #1 done`, shot 820 has content.
+6. **Store waits**: KC with `gxchunkkb=64` gor_01 (small store, forces resets): no hang, picture as K (determ 780-785), `gxcall frame` lines show `waits` and the half changing.
+7. **Copy fallback**: the `calls copied by the render thread` count above 0 in some scene (the 20-entry queue limit), with determ equal.
+8. Timing (release, `gx_perf_ab` defaults, best of 2), K vs KC: core-0 busy only (Azahar's command-processor time is no evidence).
+
+**Console checks** (owner-gated; Azahar proves none of them):
+
+1. gpuprobe `probe=cmdlist` first (`cb_jump0/1`, `cb_call1`, `cb_call500`, `cb_call_nest`, `cb_call_a8/a16`, `cb_call_size8/16`, `cb_irq`): all OK before any game run with `gxcall`.
+2. KC in gor_01 and pik_00: no GPU hang (gpuhang dump if any), picture equal to K by shots 780-785; P3D still arrives once per submitted list (a JUMP1/JUMP0 pair inside a list must not end it early: compare frame times and the `gpu fence` waits with K).
+3. Pad difference: the game pads with byte-mask-0 FACECULLING writes; the probe pads with FACECULLING = 0 (mask 0xF). If a jump after a mask-0 pad misbehaves, `cb_call` with mask-0 pads is the probe case to add.
+4. Command-processor time per call (cp_thru gives words per us; the call adds two fetch restarts per use, ~250-360 per frame).
+5. Data-cache flush: the chunks are written by core 0 and flushed by `C3D_FrameEnd(0)`'s linear-heap flush (as the frame list); a stale chunk shows as wrong geometry or a hang.
 
 ## Heap margin (2026-11-27)
 

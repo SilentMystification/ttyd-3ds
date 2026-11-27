@@ -137,8 +137,13 @@ void gx_opts_init(void) {
         }
     }
     gx_opt_immfl = gx_opt_one == 1 ? plat_gpu_immfl_active() : 0; /* gximmfl: the back end took it (gxchunk on) */
-    PLOG_I("gx: statever %d fogcache %d unlit %d dirty %d immdirect %d one %d immfl %d", gx_opt_statever,
-           gx_opt_fogcache, gx_opt_unlit, gx_opt_dirty, gx_opt_immdirect, gx_opt_one, gx_opt_immfl);
+    gx_opt_fifo = plat_switch_int("gxfifo", 0);
+    if (gx_opt_fifo < 0 || gx_opt_fifo > 2) {
+        gx_opt_fifo = 0;
+    }
+    gx_rec_fast_update(); /* the setters' word (gx_rec_fast.fifo) reads gxfifo, gxdirty and gxstatededup */
+    PLOG_I("gx: statever %d fogcache %d unlit %d dirty %d immdirect %d one %d immfl %d fifo %d", gx_opt_statever,
+           gx_opt_fogcache, gx_opt_unlit, gx_opt_dirty, gx_opt_immdirect, gx_opt_one, gx_opt_immfl, gx_opt_fifo);
     gx_vsh_init();
 }
 
@@ -2291,6 +2296,10 @@ static void vsh_prepare(void) {
 static PlatGpuVshConst s_vw;        /* the block being kept */
 static u32 s_vw_why_c, s_vw_why_t;
 static int s_vw_has_nrm = -1, s_vw_tex_pos;
+/* gxbopenxf: the matrix slots the kept block reads besides the current one (the texture part's texgen rows: position
+ * slots, texture-matrix slots) and the slot tick at which the block last saw the matrices (gx_xft) */
+static u16 s_vw_pmask, s_vw_tmask;
+static u32 s_vw_tick;
 
 static void vsh_part_color(PlatGpuVshConst* c, u32* why) {
     *why = 0;
@@ -2332,6 +2341,7 @@ static void vsh_part_color(PlatGpuVshConst* c, u32* why) {
 static void vsh_part_tex(PlatGpuVshConst* c, u32* why, int has_nrm) {
     *why = 0;
     s_vw_tex_pos = 0;
+    s_vw_pmask = s_vw_tmask = 0;
     memset(c->tex, 0, sizeof(c->tex));
     memset(c->tgsrc, 0, sizeof(c->tgsrc));
     for (int u = 0; u < 3; u++) {
@@ -2359,6 +2369,11 @@ static void vsh_part_tex(PlatGpuVshConst* c, u32* why, int has_nrm) {
             *why |= GXV_R_TGPOST;
         }
         s_vw_tex_pos |= tg->mtx < 30;
+        if (tg->mtx < 30) {
+            s_vw_pmask |= (u16)(1u << (tg->mtx / 3u));
+        } else if (tg->mtx < 60) {
+            s_vw_tmask |= (u16)(1u << ((tg->mtx - 30u) / 3u));
+        }
         const f32* m = matrix_rows(tg->mtx);
         memcpy(c->tex[3 * u], m, 16);
         memcpy(c->tex[3 * u + 1], m + 4, 16);
@@ -2393,17 +2408,60 @@ static void vsh_part_clip(PlatGpuVshConst* c) {
 }
 
 static void vsh_verify(void);
+static u32 vsh_check(void);
+static void vsh_xf_note(void);
+
+/* any slot of mask (bit i: slots[i]) changed after tick t */
+static inline int xft_mask_since(const u32* slots, u32 mask, u32 t) {
+    while (mask != 0) {
+        u32 i = (u32)__builtin_ctz(mask);
+        if (gx_xft_since(slots[i], t)) {
+            return 1;
+        }
+        mask &= mask - 1;
+    }
+    return 0;
+}
+
+/* gxbopenxf: the matrix classes pending (GXD_CLIP / GXD_TEXROW from the setters) without those whose slots the kept
+ * block reads did not change since it last saw them: clip rows read the current position matrix and the projection,
+ * the lit colour part the current position and normal matrices, the texture part its texgens' rows (masks) and, for
+ * the fog unit, the current position matrix. The current-matrix index itself is checked by the caller. */
+static u32 vsh_xf_filter(u32 g) {
+    const u32 t = s_vw_tick, pn = gx.cur_pnmtx % GX_POS_MTX_COUNT;
+    if ((g & GXD_CLIP) && !gx_xft_since(gx_xft.proj, t) && !gx_xft_since(gx_xft.pos[pn], t) &&
+        !gx_xft_since(gx_xft.nrm[pn], t) && !xft_mask_since(gx_xft.pos, s_vw_pmask, t)) {
+        g &= ~(u32)GXD_CLIP;
+    }
+    if ((g & GXD_TEXROW) && !xft_mask_since(gx_xft.tex, s_vw_tmask, t)) {
+        g &= ~(u32)GXD_TEXROW;
+    }
+    return g;
+}
 
 static void vsh_state_dirty(void) {
-    u32 d = s_vsh_dirty | (gx_dirty & (GXD_CLIP | GXD_TEXROW));
+    u32 g = gx_dirty & (GXD_CLIP | GXD_TEXROW);
+    u32 dropped = 0;
+    if (gx_opt_bopen_xf && g != 0 && (s_vsh_dirty & (GXD_CLIP | GXD_TEXROW)) == 0 && s_vsh_pn == gx.cur_pnmtx) {
+        u32 f = vsh_xf_filter(g);
+        dropped = g & ~f;
+        g = f;
+    }
+    u32 d = s_vsh_dirty | g;
     if (s_vsh_pn != gx.cur_pnmtx) {
         d |= GXD_CLIP;
     }
     int has_nrm = gx.vtx_desc[GX_VA_NRM] != GX_NONE || gx.vtx_desc[GX_VA_NBT] != GX_NONE;
     int nrm_changed = has_nrm != s_vw_has_nrm;
     if (d == 0 && !nrm_changed) {
+        if (dropped != 0) {
+            gx_dirty &= ~(GXD_CLIP | GXD_TEXROW); /* seen: the slots the block reads are as they were */
+            s_vw_tick = gx_xft.tick;
+            vsh_xf_note();
+        }
         return;
     }
+    s_vw_tick = gx_xft.tick;
     s_vsh_dirty = 0;
     gx_dirty &= ~(GXD_CLIP | GXD_TEXROW);
     s_vsh_pn = gx.cur_pnmtx;
@@ -2433,6 +2491,29 @@ static void vsh_state_dirty(void) {
             }
         }
     }
+    if (dropped != 0) {
+        vsh_xf_note();
+    }
+}
+
+/* gxbopenxf: a part was not rebuilt for a matrix class (counted); gxbopen=2 builds the whole block from the state
+ * and compares (the kept result goes on, as gxdirty=2's check) */
+static void vsh_xf_note(void) {
+    if (gx_opt_bopen != 2) {
+        gx_vsh_bopen.vskips++;
+        return;
+    }
+    gx_vsh_bopen.vchecks++;
+    u32 bad = vsh_check();
+    if (bad != 0) {
+        static u32 s_logged;
+        gx_vsh_bopen.vdiffer++;
+        if (s_logged++ < 8) {
+            PLOG_W("gxbopenxf verify: frame %lu: uniform block kept by the slot ticks differs from a full build, parts "
+                   "0x%lx (1 block, 2 reasons, 4 units, 8 light)",
+                   (unsigned long)gx_perf_frame_no(), (unsigned long)bad);
+        }
+    }
 }
 
 static void vsh_state(void) {
@@ -2455,6 +2536,20 @@ static void vsh_state(void) {
 
 /* gxdirty=2: vsh_prepare's block, reasons, unit attributes and light flag must be the kept ones. */
 static void vsh_verify(void) {
+    u32 bad = vsh_check();
+    s_dv.vchecks++;
+    if (bad != 0) {
+        s_dv.vbad++;
+        if (s_dv.logged < 20) {
+            s_dv.logged++;
+            PLOG_W("gxdirty verify: frame %lu uniform block mismatch, parts 0x%lx (1 block, 2 reasons, 4 units, "
+                   "8 light)", (unsigned long)gx_perf_frame_no(), (unsigned long)bad);
+        }
+    }
+}
+
+/* vsh_prepare's results against the kept ones (bit mask of the parts that differ); the kept ones go on */
+static u32 vsh_check(void) {
     u32 reasons = s_vsh_reasons, cid = s_vsh_const_id, lid = s_vsh_light_id;
     int lit = s_vsh_lit;
     u8 ua[3] = {s_vsh_unit_attr[0], s_vsh_unit_attr[1], s_vsh_unit_attr[2]};
@@ -2474,15 +2569,6 @@ static void vsh_verify(void) {
     if (lit != s_vsh_lit || (lit && !gx_mem_equal(&kl, &s_vsh_light, sizeof(kl)))) {
         bad |= 8;
     }
-    s_dv.vchecks++;
-    if (bad != 0) {
-        s_dv.vbad++;
-        if (s_dv.logged < 20) {
-            s_dv.logged++;
-            PLOG_W("gxdirty verify: frame %lu uniform block mismatch, parts 0x%lx (1 block, 2 reasons, 4 units, "
-                   "8 light)", (unsigned long)gx_perf_frame_no(), (unsigned long)bad);
-        }
-    }
     /* go on with the kept result */
     s_vsh_reasons = reasons;
     s_vsh_lit = lit;
@@ -2491,6 +2577,7 @@ static void vsh_verify(void) {
     s_vsh_const_id = cid;
     s_vsh_light = kl;
     s_vsh_light_id = lid;
+    return bad;
 }
 
 /* gximmfl=2: the game thread's checks (the old route bits, the old index list; gx_draw_imm_fl) */
@@ -2710,7 +2797,7 @@ int gx_draw_imm_fl(u8 prim, u8 fmt, const PPCWGPipe* sl, u32 n) {
 
 
 int gx_draw_batch_begin(const u8 unit_attr[3], u32 bat, const void* list0, u32 nbytes0, u32* hint0, void** group,
-                        u32* cull) {
+                        u32* cull, void** ghint) {
     ensure_state();
     if (empty_target()) {
         return 0;
@@ -2720,7 +2807,7 @@ int gx_draw_batch_begin(const u8 unit_attr[3], u32 bat, const void* list0, u32 n
         unit_attr[0] != s_vsh_unit_attr[0] || unit_attr[1] != s_vsh_unit_attr[1] || unit_attr[2] != s_vsh_unit_attr[2]) {
         return 0;
     }
-    void* g = gx_vsh_batch_route(gx.cur_pnmtx, bat, list0, nbytes0, hint0);
+    void* g = gx_vsh_batch_route(gx.cur_pnmtx, bat, list0, nbytes0, hint0, ghint);
     if (g == NULL) {
         return 0;
     }

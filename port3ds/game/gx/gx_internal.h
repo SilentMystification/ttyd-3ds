@@ -322,8 +322,14 @@ static inline int gx_rec_on(void) { return gx_rec_mode != 0 && !gx_tls_translato
  * gx_tls_translator. */
 extern struct GxRecFast {
     uintptr_t w, tr_lo, tr_len;
+    /* switch gxfifo (gx_state.c): the hot setters' one word. 0: their fast body (gxfifo=1, `w` 0, gxdirty on, no
+     * gxstatededup); 2: gxfifo=2's check (same conditions); 1: the old body */
+    uintptr_t fifo;
 } gx_rec_fast;
 void gx_rec_fast_update(void);
+/* Switch gxfifo (default 0; docs/PORT_3DS_GX_NATIVE.md, revised plan step 2): 1 FIFO-cheap setters, 2 verify. */
+extern int gx_opt_fifo;
+void gx_fifo_log(u32 frames);
 static inline int gx_on_translator(void) {
     uintptr_t sp;
 #if defined(__arm__)
@@ -589,6 +595,24 @@ static inline void gx_dlc_track(int attr, u32 idx) {
 }
 void gx_dlcache_frame(void);
 void gx_dlcache_log(u32 frames);
+/* Switch gxlcall (GX native step 5; 0 off, 1 on, 2 verify): the open gxbatch batch's next member, tested by
+ * GXCallDisplayList (mode word 0) and gx_call_list before the per-list path. `list` is &gx_lcall (never a display
+ * list) when there is no next member or the switch is off. `mode` 1: a hit only advances the batch
+ * (gx_dlcache_lcall_take); 2: every call takes the per-list path and its decision is compared with the test's. */
+extern struct GxLcall {
+    const void* list;
+    u32 nbytes, ver, xfv, vtxv;
+    u32 mode;
+} gx_lcall;
+extern u32 gx_xf_version;
+/* The conditions of gx_dlcache_call's open-batch member test, in the same order of effect. */
+static inline int gx_lcall_hit(const void* list, u32 nbytes) {
+    return list == gx_lcall.list && nbytes == gx_lcall.nbytes && gx.version == gx_lcall.ver &&
+           gx_xf_version == gx_lcall.xfv && gx_vtx_version == gx_lcall.vtxv && !gx_bbox_active;
+}
+void gx_dlcache_lcall_take(void);
+u32 gx_dlcache_lcall_token(void);
+void gx_dlcache_lcall_verify(int hit, u32 token_before);
 #include "plat/memstable.h"
 u32 gx_dlcache_spans(const void* list, u32 nbytes, PlatMemSpan* sp, u32 max);
 
@@ -740,7 +764,34 @@ int gx_batch_member(u32 bat, u32 k, const void** list, u32* nbytes, u32** hint);
 /* gx_vsh.c */
 extern u32 gx_vsh_dec_epoch;
 int gx_vsh_rec_decided(u32* hint, const void* list, u32 nbytes, u32 bat);
-void* gx_vsh_batch_route(u32 pnmtx, u32 bat, const void* list0, u32 nbytes0, u32* hint0);
+/* ghint (gxbopen, NULL without): the batch's pass group of its last open, tried before the group key's hash and
+ * probe (taken only when it is a group of this frame with the state's key: the group the lookup finds); set to the
+ * group used. */
+void* gx_vsh_batch_route(u32 pnmtx, u32 bat, const void* list0, u32 nbytes0, u32* hint0, void** ghint);
+/* gxbopen (switch, gx_dlcache.c; 0 off, 1 on, 2 verify) and gx_vsh.c's counters of the pass-group hint */
+extern int gx_opt_bopen;
+extern struct GxVshBopen {
+    u32 hits, checks, differ;
+    u32 thits, tchecks, tdiffer; /* gxbopenxf: the last group kept by the slot ticks; verify checks, differ */
+    u32 vskips, vchecks, vdiffer; /* gxbopenxf: uniform-block parts not rebuilt (slots unchanged); verify */
+} gx_vsh_bopen;
+/* gxbopenxf (default 1 under gxbopen; 0 leaves gxbopen as it was): the slot ticks below key the vertex-state check
+ * (desc + formats by gx_vdesc_ver), the uniform block's matrix parts and the last pass group, in place of the global
+ * gx.version / gx_xf_version / gx_vtx_version. Set by gx_dlcache.c with gxbopen. */
+extern int gx_opt_bopen_xf;
+/* Per-slot change ticks (gx_state.c). `tick` counts the stores that changed a matrix, the projection or the viewport
+ * (gxfifo: only a store that changed a byte; gxfifo=0 and the verify bodies: every store); a slot holds the tick of
+ * its last change. "Slot unchanged since tick t" is (s32)(slot - t) <= 0: no wrap problem while fewer than 2^31
+ * changes separate the two. Written only by the thread that applies the setters to `gx`. */
+typedef struct {
+    u32 tick;
+    u32 proj, vp;
+    u32 pos[GX_POS_MTX_COUNT];
+    u32 nrm[GX_POS_MTX_COUNT];
+    u32 tex[GX_TEX_MTX_COUNT];
+} GxXfTicks;
+extern GxXfTicks gx_xft;
+static inline int gx_xft_since(u32 slot, u32 t) { return (s32)(slot - t) > 0; } /* changed after tick t */
 void gx_vsh_batch_count(void* group, u32 n, u32 verts, u32 idx);
 /* gx_draw.c: what the last gx_draw_vsh recorded (ok 0: it drew nothing through the shader path) */
 typedef struct {
@@ -753,7 +804,7 @@ extern GxVshLast gx_vsh_last;
 /* The state part of gx_draw_vsh for a whole batch: PICA state, uniforms, the group's route. 1: the batch may
  * draw (its uniform block is recorded, *group and *cull are set); 0: draw the members one by one. */
 int gx_draw_batch_begin(const u8 unit_attr[3], u32 bat, const void* list0, u32 nbytes0, u32* hint0, void** group,
-                        u32* cull);
+                        u32* cull, void** ghint);
 void gx_draw_batch_end(void* group, u32 n, u32 verts, u32 idx);
 
 #endif

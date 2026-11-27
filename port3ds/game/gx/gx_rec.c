@@ -81,6 +81,48 @@ enum { GXR_FCHK_LIST = 0xE0, GXR_FCHK_VD }; /* gxrecfuse=2's checks */
 enum { GXR_SHOT = 0xE8 }; /* plat_gpu_shot from the game thread: asked again when translated, in order */
 enum { GXR_STATE = 0xE9 }; /* gxsplit stage 2: EV_STATE (ev_state_apply) */
 static void ev_state_apply(const u32* w);
+/* gxsplit stage 3, switch gxsplitlp: the list predictor (above ev_put_list) */
+enum { GXR_LISTP = 0xEA };
+#define LP_SLOTS 1024
+typedef struct {
+    const void *pa, *na;
+    u32 ps, ns;
+} LpEntry;
+typedef struct {
+    const void* prev;
+    u32 prev_n;
+    LpEntry t[LP_SLOTS];
+} LpTable;
+static int s_ev_lp;
+static LpTable* s_lp_game; /* game thread */
+static LpTable* s_lp_tr;   /* core 2 */
+static u32 s_lp_hits, s_lp_bad; /* game thread; core 2 (verify) */
+static inline __attribute__((always_inline)) LpEntry* lp_slot(LpTable* t) {
+    return &t->t[(((u32)(uintptr_t)t->prev >> 5 ^ t->prev_n * 0x9E3779B1u) * 2654435761u >> 22) & (LP_SLOTS - 1)];
+}
+/* 1 when (list, n) is the predicted successor; the table learns it otherwise */
+static inline __attribute__((always_inline)) int lp_step(LpTable* t, const void* list, u32 n) {
+    LpEntry* e = lp_slot(t);
+    const int hit = e->pa == t->prev && e->ps == t->prev_n && e->na == list && e->ns == n;
+    if (!hit) {
+        e->pa = t->prev;
+        e->ps = t->prev_n;
+        e->na = list;
+        e->ns = n;
+    }
+    t->prev = list;
+    t->prev_n = n;
+    return hit;
+}
+/* core 2: the predicted list (GXR_LISTP) */
+static inline __attribute__((always_inline)) const void* lp_take(LpTable* t, u32* n) {
+    const LpEntry* e = lp_slot(t);
+    t->prev = e->na;
+    t->prev_n = e->ns;
+    *n = e->ns;
+    return e->na;
+}
+
 #define SHOT_WORDS 12u /* the path, 48 bytes */
 /* gxrecfuse counters (game thread; the checks' on the translator) */
 static struct {
@@ -287,6 +329,9 @@ static inline __attribute__((always_inline)) void run_one(u32 type, const u32* w
     case GXR_STATE: ev_state_apply(w); break;
     case GXR_LIST: {
         const void* list = (const void*)w[0];
+        if (s_ev_lp) {
+            lp_step(s_lp_tr, list, w[1]); /* gxsplitlp: core 2's table learns what the game thread's learns */
+        }
         if (n == 2) {
             gx_call_list(list, w[1], NULL); /* gxsplit stage 2: EV_LIST */
             break;
@@ -318,6 +363,24 @@ static inline __attribute__((always_inline)) void run_one(u32 type, const u32* w
             }
             check_textures();
         }
+        break;
+    }
+    case GXR_LISTP: {
+        /* gxsplitlp: the list that followed the last one the last time */
+        u32 ln;
+        const void* list = lp_take(s_lp_tr, &ln);
+        if (n == 4) {
+            if (list != (const void*)w[0] || ln != w[1]) {
+                if (s_lp_bad++ < 8) {
+                    PLOG_W("gxsplitlp verify: predicted list %p (%lu bytes), sent %p (%lu bytes)", list,
+                           (unsigned long)ln, (const void*)w[0], (unsigned long)w[1]);
+                }
+            } else if (gx_hash32(list, ln, 0x5EC0u) != w[3] && s_list_changed++ < 8) {
+                PLOG_W("gxthread verify: list %p (%lu bytes, called from %p) changed between its call and its "
+                       "translation", list, (unsigned long)ln, (const void*)w[2]);
+            }
+        }
+        gx_call_list(list, ln, n == 4 ? (const void*)w[2] : NULL);
         break;
     }
     case GXR_PRIM: {
@@ -428,7 +491,7 @@ static __attribute__((noinline, cold)) void consume_ph(u32 upto) {
             }
         } else if (type != GXR_WRAP) {
             s_cur = s_rd;
-            int ph = type == GXR_LIST ? GPH_T_LIST : type == GXR_PRIM ? GPH_T_PRIM : type == GXR_PRIMD ? GPH_T_PRIMD
+            int ph = type == GXR_LIST || type == GXR_LISTP ? GPH_T_LIST : type == GXR_PRIM ? GPH_T_PRIM : type == GXR_PRIMD ? GPH_T_PRIMD
                      : type == GXR_RAW ? GPH_T_RAW : type < REC_COUNT && type != REC_CopyDisp ? GPH_T_SET : GPH_T_OTHER;
             int p = gx_ph_enter(ph);
             run_one(type, c + 1, n);
@@ -723,11 +786,15 @@ static void dd_forget(void) {
     }
 }
 
-/* Lists the game built with state calls in them (their start addresses). */
-#define SL_SLOTS 2048
-static const void** s_state_lists; /* SL_SLOTS, allocated with the ring */
+/* Lists the game built with state calls in them (their start addresses). Open addressing, a power of two of slots
+ * (index: the top bits of a multiplicative hash, s_sl_shift). Under gxsplitev the table grows to stay at most half
+ * full (gxsplit stage 3: a list missing from it would be sent without its calls reaching the game thread's state). */
+#define SL_SLOTS 2048     /* the size it starts with */
+#define SL_MAX (1u << 16) /* the most either table grows to (gxsplitev) */
+static const void** s_state_lists; /* s_sl_mask + 1 slots, allocated with the ring */
+static u32 s_sl_mask = SL_SLOTS - 1, s_sl_shift = 21, s_sl_count;
 
-static u32 sl_hash(const void* p) { return ((u32)p >> 5) * 2654435761u >> 21; }
+static u32 sl_hash(const void* p) { return ((u32)p >> 5) * 2654435761u >> s_sl_shift; }
 
 /* A state list is known by address (the buffer it was built in) and by content: the game copies built lists
  * (mapdrv's per-material lists go from a scratch buffer into the map's block), and the copy is what it calls.
@@ -737,9 +804,15 @@ static u32 sl_hash(const void* p) { return ((u32)p >> 5) * 2654435761u >> 21; }
 typedef struct {
     u32 size, hash;
 } StateContent;
-static StateContent* s_state_content; /* SC_SLOTS, allocated with the ring */
+static StateContent* s_state_content; /* s_sc_mask + 1 slots, allocated with the ring */
+static u32 s_sc_mask = SC_SLOTS - 1, s_sc_shift = 21;
 static u32 s_sl_sizes[(0x10000 >> 10) + 1];
 static u32 s_sc_count;
+/* gxsplitev: a list with state calls could not be kept (a table at SL_MAX or no memory): from then on every list
+ * the tables do not know is walked on the game thread as a state list (ev_list), and one that does not parse makes
+ * the game thread's state start again from the translated one (an exclusive section). */
+static int s_sl_lost;
+static u32 s_sl_grows, s_sl_lost_n, s_sl_unknown_walked, s_sl_resync;
 /* gxlobj: bumped whenever the address table or a size bit gains an entry (an "is not a state list" answer that
  * hashed nothing holds until then); s_sl_hashed: the last is_state_list answer depended on the list's bytes */
 static u32 s_sl_gen = 1;
@@ -760,17 +833,85 @@ static void glo_verify(int ok, const char* what, const void* list, u32 nbytes) {
     }
 }
 
+static __attribute__((noinline, cold)) void sl_lose(const char* what, u32 slots) {
+    if (!s_sl_lost) {
+        PLOG_W("gxsplit: more than %lu %s: unknown display lists are walked on the game thread from now on",
+               (unsigned long)slots, what);
+    }
+    s_sl_lost = 1;
+    s_sl_lost_n++;
+}
+
+/* gxsplitev: a table twice as large (power of two), its entries placed again; 0 when it cannot */
+static __attribute__((noinline, cold)) int sl_grow_addr(void) {
+    const u32 old = s_sl_mask + 1, n = old * 2;
+    const void** t = n <= SL_MAX ? calloc(n, sizeof(*t)) : NULL;
+    if (t == NULL) {
+        return 0;
+    }
+    const void** o = s_state_lists;
+    s_state_lists = t;
+    s_sl_mask = n - 1;
+    s_sl_shift--;
+    for (u32 i = 0; i < old; i++) {
+        if (o[i] != NULL) {
+            u32 h = sl_hash(o[i]);
+            while (t[h] != NULL) {
+                h = (h + 1) & s_sl_mask;
+            }
+            t[h] = o[i];
+        }
+    }
+    free(o);
+    s_sl_grows++;
+    return 1;
+}
+static __attribute__((noinline, cold)) int sl_grow_content(void) {
+    const u32 old = s_sc_mask + 1, n = old * 2;
+    StateContent* t = n <= SL_MAX ? calloc(n, sizeof(*t)) : NULL;
+    if (t == NULL) {
+        return 0;
+    }
+    StateContent* o = s_state_content;
+    s_state_content = t;
+    s_sc_mask = n - 1;
+    s_sc_shift--;
+    for (u32 i = 0; i < old; i++) {
+        if (o[i].size != 0) {
+            u32 h = o[i].hash * 2654435761u >> s_sc_shift;
+            while (t[h].size != 0) {
+                h = (h + 1) & s_sc_mask;
+            }
+            t[h] = o[i];
+        }
+    }
+    free(o);
+    s_sl_grows++;
+    return 1;
+}
+
 static void sl_add_addr(const void* list) {
+    if (s_ev && s_sl_count + 1 > (s_sl_mask + 1) / 2) {
+        sl_grow_addr(); /* when it cannot, the free slots left are used */
+    }
     u32 h = sl_hash(list);
-    for (u32 i = 0; i < SL_SLOTS; i++, h = (h + 1) & (SL_SLOTS - 1)) {
+    for (u32 i = 0; i <= s_sl_mask; i++, h = (h + 1) & s_sl_mask) {
         if (s_state_lists[h] == list) {
             return;
         }
         if (s_state_lists[h] == NULL) {
+            if (s_ev && s_sl_count + 1 > s_sl_mask) {
+                break; /* keep one slot free: the lookups stop at a free slot */
+            }
             s_state_lists[h] = list;
+            s_sl_count++;
             s_sl_gen++;
             return;
         }
+    }
+    if (s_ev) {
+        sl_lose("display lists with state calls", s_sl_mask + 1);
+        return;
     }
     s_dedup = 0; /* table full: stop skipping calls (never seen) */
     PLOG_W("gxthread: more than %d display lists with state calls: dedup off", SL_SLOTS);
@@ -785,30 +926,39 @@ void gx_rec_state_list(const void* list, u32 nbytes) {
         return;
     }
     u32 hash = gx_hash32(list, nbytes, 0x5EC1u);
-    u32 h = hash * 2654435761u >> 21;
-    for (u32 i = 0; i < SC_SLOTS; i++, h = (h + 1) & (SC_SLOTS - 1)) {
+    if (s_ev && s_sc_count + 1 > (s_sc_mask + 1) / 2) {
+        sl_grow_content();
+    }
+    u32 h = hash * 2654435761u >> s_sc_shift;
+    for (u32 i = 0; i <= s_sc_mask; i++, h = (h + 1) & s_sc_mask) {
         StateContent* e = &s_state_content[h];
         if (e->size == nbytes && e->hash == hash) {
             return;
         }
         if (e->size == 0) {
+            if (s_ev && s_sc_count + 1 > s_sc_mask) {
+                break;
+            }
             e->size = nbytes;
             e->hash = hash;
             s_sl_sizes[(nbytes >> 5) >> 5] |= 1u << ((nbytes >> 5) & 31);
             s_sl_gen++;
-            if (++s_sc_count > SC_SLOTS / 2) {
+            if (++s_sc_count > SC_SLOTS / 2 && !s_ev) {
                 s_dedup = 0; /* table (half) full: stop skipping calls */
                 PLOG_W("gxthread: more than %d state list contents: dedup off", SC_SLOTS / 2);
             }
             return;
         }
     }
+    if (s_ev) {
+        sl_lose("state list contents", s_sc_mask + 1);
+    }
 }
 
 static inline __attribute__((always_inline)) int is_state_list(const void* list, u32 nbytes) {
     s_sl_hashed = 0;
     u32 h = sl_hash(list);
-    for (u32 i = 0; i < SL_SLOTS; i++, h = (h + 1) & (SL_SLOTS - 1)) {
+    for (u32 i = 0; i <= s_sl_mask; i++, h = (h + 1) & s_sl_mask) {
         if (s_state_lists[h] == list) {
             return 1;
         }
@@ -824,8 +974,8 @@ static inline __attribute__((always_inline)) int is_state_list(const void* list,
     s_sl_hashes++;
     s_sl_hash_bytes += nbytes;
     u32 hash = gx_hash32(list, nbytes, 0x5EC1u);
-    h = hash * 2654435761u >> 21;
-    for (u32 i = 0; i < SC_SLOTS; i++, h = (h + 1) & (SC_SLOTS - 1)) {
+    h = hash * 2654435761u >> s_sc_shift;
+    for (u32 i = 0; i <= s_sc_mask; i++, h = (h + 1) & s_sc_mask) {
         const StateContent* e = &s_state_content[h];
         if (e->size == nbytes && e->hash == hash) {
             sl_add_addr(list); /* known from now on by address (a stale entry only costs a dedup reset) */
@@ -1134,6 +1284,24 @@ static struct {
 } s_evs;
 static u32 s_ev_vchk, s_ev_vbad, s_ev_vbad_cls[GS_VCLS]; /* core 2 (verify) */
 
+/* gxsplitmw: bytes both threads hold equal between events (the verify classes: what the hot setters and the shadow
+ * keep), so that a run may take a short gap of them along */
+static int s_gs_merge;
+static u32 s_gs_sync[GX_GS_BM_WORDS];
+static void gs_sync_range(u32 a, u32 b) {
+    for (u32 i = a; i < b && i < sizeof(GxState); i++) {
+        s_gs_sync[i >> 5] |= 1u << (i & 31);
+    }
+}
+static inline int gs_gap_ok(u32 a, u32 b) {
+    for (u32 i = a; i < b; i++) {
+        if (!(s_gs_sync[i >> 5] >> (i & 31) & 1)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void eff_range(size_t a, size_t b, u32 e) {
     for (size_t l = a >> 4; l <= (b - 1) >> 4 && l < EFF_LINES; l++) {
         s_eff[l] |= (u16)e;
@@ -1173,6 +1341,11 @@ static void ev_tables_init(void) {
     VCR(5, tex_map, tlut);
     VCR(6, alpha_comp0, dst_alpha_enable);
     VCR(7, scissor, scissor_off);
+    for (u32 i = 0; i < GS_VCLS; i++) {
+        gs_sync_range(s_vc_a[i], s_vc_b[i]);
+    }
+    gs_sync_range(offsetof(GxState, cull), offsetof(GxState, cull) + 1);
+    s_gs_sync[offsetof(GxState, version) >> 5] &= ~(0xFu << (offsetof(GxState, version) & 31));
 }
 
 static void ev_hashes(const GxState* g, u32* h) {
@@ -1232,8 +1405,8 @@ static __attribute__((noinline)) void gs_flush_slow(void) {
                 const u32 ones = rest == 0xFFFFFFFFu ? 32 : (u32)__builtin_ctz(~rest);
                 const u32 start = k * 32 + tz, end = start + ones;
                 b = ones + tz >= 32 ? 0 : b & ~(((1u << ones) - 1) << tz);
-                if (open && start == cur_end) {
-                    cur_end = end;
+                if (open && (start == cur_end || (s_gs_merge && start - cur_end <= 4 && gs_gap_ok(cur_end, start)))) {
+                    cur_end = end; /* gxsplitmw: a gap of up to a word costs no more than a run's word */
                     continue;
                 }
                 if (open) {
@@ -1417,33 +1590,39 @@ static int list_pure(const u8* p, u32 nbytes) {
 }
 
 /* A state list core 2 will run itself: its state calls into gx_game in order, the primitives and commands between
- * them skipped with gx_game's vertex state (as core 2 will read them); nothing marked. 0 when it does not parse. */
-static int list_walk_silent(const u8* p, u32 nbytes) {
+ * them skipped with gx_game's vertex state (as core 2 will read them); nothing marked. 0 when it does not parse.
+ * rec (or NULL): the calls as they are applied (id | count << 8, then the words; at most cap words, else *nw is
+ * cap + 1), the vertex formats the primitives use (*fmask) and whether every call is a hot setter's (*hot). */
+static int list_walk_silent(const u8* p, u32 nbytes, u32* rec, u32 cap, u32* nw, u32* fmask, int* hot) {
     const u8* end = p + nbytes;
     u32 w[32];
+    u32 k = 0;
     while (p < end) {
         const u32 op = *p;
         if (op == 0x00 || op == 0x48 || op == 0x44) {
             p++;
         } else if (op >= 0x80 && op < 0xC0) {
             if (end - p < 3) {
-                return 1; /* the reader stops at the end */
+                break; /* the reader stops at the end */
             }
             const u32 n = (u32)p[1] << 8 | p[2];
             const u32 vb = list_vtx_bytes(&gx_game, op & 7);
+            if (rec != NULL) {
+                *fmask |= 1u << (op & 7);
+            }
             p += 3;
             if ((u32)(end - p) / (vb ? vb : 1) < n) {
-                return 1;
+                break;
             }
             p += n * vb;
         } else if (op == GXDL_OP_RAW_PRIM) {
             if (end - p < 8) {
-                return 1;
+                break;
             }
             const u32 count = be32(p + 4);
             p += 8;
             if (count > 64u * 1024u || (u32)(end - p) / 4 < count) {
-                return 1; /* the reader stops here too (gx_pipe.c) */
+                break; /* the reader stops here too (gx_pipe.c) */
             }
             p += count * 4;
         } else if (op >= GXDL_OP_PORT) {
@@ -1451,18 +1630,30 @@ static int list_walk_silent(const u8* p, u32 nbytes) {
             if (!port_op(p, end, &id, w, &n, &p)) {
                 return 0;
             }
-            if (!gx_gs_call(id, w)) {
+            int h = gx_gs_call(id, w);
+            if (!h) {
                 gx_shadow_call(id, w);
+            }
+            if (rec != NULL) {
+                *hot &= h;
+                if (k + 1 + n <= cap) {
+                    rec[k] = id | n << 8;
+                    memcpy(rec + k + 1, w, n * sizeof(u32));
+                    k += 1 + n;
+                } else {
+                    k = cap + 1;
+                    rec = NULL;
+                }
             }
         } else if (op == 0x08) {
             p += 6;
         } else if (op == 0x10) {
             if (end - p < 5) {
-                return 1;
+                break;
             }
             const u32 count = (be32(p + 1) >> 16) + 1;
             if ((u32)(end - p - 5) / 4 < count) {
-                return 1;
+                break;
             }
             p += 5 + count * 4;
         } else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38 || op == 0x61) {
@@ -1471,44 +1662,379 @@ static int list_walk_silent(const u8* p, u32 nbytes) {
             return 0;
         }
     }
+    if (nw != NULL) {
+        *nw = k;
+    }
     return 1;
 }
 
-/* gx_rec_list under gxsplit stage 2 */
-static void ev_list(const void* list, u32 nbytes, const void* caller) {
-    s_evs.lists++;
-    if (s_state_lists != NULL && is_state_list(list, nbytes)) {
-        const u8* p = (const u8*)list;
-        if (list_pure(p, nbytes)) {
-            /* state calls only: applied here, in order; the list is not sent */
-            const u8* end = p + nbytes;
-            u32 w[32];
-            while (p < end) {
-                if (*p == 0x00 || *p == 0x48 || *p == 0x44) {
-                    p++;
-                    continue;
-                }
-                u32 id, n;
-                port_op(p, end, &id, w, &n, &p); /* parses: list_pure said so */
-                s_evs.sl_pure_calls++;
-                if (!gx_gs_call(id, w)) {
-                    ev_cold(id, w, n);
-                }
+/* ---- gxsplit stage 3 (docs/PORT_3DS_GX_NATIVE.md, "Stage 3 as built") ----
+ * Switch gxsplitsl (default 1 under gxsplitev, 2 with gxsplit=2; 0: stage 2's walk at every call): the game
+ * thread's state lists, keyed by address and size with a copy of their bytes (compared word by word at each call,
+ * as gxsdl and gxrecfuse do). An entry keeps the list's calls decoded and, when every call is a hot setter's, the
+ * list's net delta on GxState (built as gxsdlx builds it: the calls run once on gx_game from its state and once
+ * from the bitwise complement; the bits equal after both are the list's writes). A hit applies the delta: per
+ * word a compare and, when it differs, a store and the bitmap marks of the bytes that changed; no LEB128 decode,
+ * no setter. A list with a cold call applies its decoded calls. A list core 2 also runs (primitives or commands
+ * in it) is entered under the vertex state its decode was made with (vtx_desc and the formats its primitives
+ * use: the walk sizes primitives with them); its changes are not marked. gxsplitsl=2: at each delta hit the delta
+ * is checked against the calls from the same state (gx_game but the version word must be equal).
+ * Differences from stage 2 (state equal): a list whose calls end with the values in force marks nothing (a call
+ * that changes a field and a later one that puts it back no longer send it); core 2's versions and dirty classes
+ * then move for the bytes that changed only. */
+#define ES_SLOTS 2048
+#define ES_POOL_WORDS (256 * 1024) /* the most the pool holds before it starts again */
+#define ES_POOL_FIRST (16 * 1024)
+#define ES_MAX_BYTES 0x4000
+#define ES_TMP_WORDS 4096
+#define ES_NWORDS (sizeof(GxState) / 4)
+#define ES_VER_WORD (offsetof(GxState, version) / 4)
+#define ES_NODELTA 0xFFFFu
+_Static_assert(ES_NWORDS < 0x10000, "gxsplitsl: a GxState word index fits 16 bits");
+typedef struct {
+    const void* list;
+    u32 nbytes;
+    u32 pos;   /* pool word of the copy of the bytes; the calls, then the delta follow */
+    u32 words; /* of the calls */
+    u32 vh;    /* sent: the hash of the vertex state the decode holds for (es_vhash(fmask)) */
+    u16 nf, nm; /* delta: nf of (index, value), then nm of (index, kept bits, value); nf ES_NODELTA: none */
+    u8 sent;   /* core 2 runs the list too */
+    u8 fmask;  /* sent: the vertex formats its primitives use */
+} EsEntry;
+static int s_ev_sl;
+static EsEntry* s_es;
+static u32* s_es_pool;
+static u32 s_es_used, s_es_cap;
+static u32* s_es_tmp;   /* ES_TMP_WORDS: calls being decoded */
+static u32* s_es_dtmp;  /* ES_NWORDS * 3: a delta being built */
+static GxState *s_es_s0, *s_es_a; /* scratch */
+static u32 s_es_bm[GX_GS_BM_WORDS], s_es_sum[GX_GS_SUM_WORDS];
+static u64 s_es_vh_ver;
+static u32 s_es_vh, s_es_vh_fmask = 0x100;
+static struct {
+    u32 hit_delta, hit_calls, decoded, built, nodelta, resets, vchk, vbad;
+} s_ess;
+
+/* the vertex state a sent list's walk sizes its primitives with: vtx_desc and the formats in fmask, of the GxState
+ * prefix at g (gx_game, or a copy of its first bytes) */
+_Static_assert(offsetof(GxState, vtx_desc) == 0, "gxsplitsl: the vertex description leads GxState");
+static u8 s_es_vsave[offsetof(GxState, array_base)];
+static u32 es_vhash_of(const void* g, u32 fmask) {
+    const u8* b = (const u8*)g;
+    u32 h = gx_hash32(b, sizeof(gx_game.vtx_desc), 0x5EC3u);
+    for (u32 f = 0; f < GX_MAX_VTXFMT; f++) {
+        if (fmask >> f & 1) {
+            h = gx_hash32(b + offsetof(GxState, vat) + f * sizeof(gx_game.vat[0]), sizeof(gx_game.vat[0]), h);
+        }
+    }
+    return h;
+}
+static inline u32 es_vhash(u32 fmask) {
+    if (gx_vdesc_ver[1] != s_es_vh_ver || fmask != s_es_vh_fmask) {
+        s_es_vh = es_vhash_of(&gx_game, fmask);
+        s_es_vh_ver = gx_vdesc_ver[1];
+        s_es_vh_fmask = fmask;
+    }
+    return s_es_vh;
+}
+
+static int es_init(void) {
+    s_es = calloc(ES_SLOTS, sizeof(EsEntry));
+    s_es_pool = malloc(ES_POOL_FIRST * sizeof(u32));
+    s_es_tmp = malloc(ES_TMP_WORDS * sizeof(u32));
+    s_es_dtmp = malloc(ES_NWORDS * 3 * sizeof(u32));
+    s_es_s0 = malloc(sizeof(GxState));
+    s_es_a = malloc(sizeof(GxState));
+    if (s_es == NULL || s_es_pool == NULL || s_es_tmp == NULL || s_es_dtmp == NULL || s_es_s0 == NULL ||
+        s_es_a == NULL) {
+        free(s_es);
+        free(s_es_pool);
+        free(s_es_tmp);
+        free(s_es_dtmp);
+        free(s_es_s0);
+        free(s_es_a);
+        s_es = NULL;
+        return 0;
+    }
+    s_es_cap = ES_POOL_FIRST;
+    return 1;
+}
+
+/* the entry of this list with its bytes as they are now (*slot: NULL), or NULL (*slot: the slot to fill) */
+static inline __attribute__((always_inline)) EsEntry* es_find(const void* list, u32 nbytes, EsEntry** slot) {
+    const u32 h = ((u32)(uintptr_t)list >> 5 ^ nbytes * 0x9E3779B1u) * 2654435761u >> 21;
+    EsEntry* e = NULL;
+    EsEntry* freeslot = NULL;
+    for (u32 i = 0; i < 4; i++) {
+        EsEntry* c = &s_es[(h + i) & (ES_SLOTS - 1)];
+        if (c->list == list && c->nbytes == nbytes) {
+            e = c;
+            break;
+        }
+        if (c->list == NULL && freeslot == NULL) {
+            freeslot = c;
+        }
+    }
+    *slot = NULL;
+    if (e != NULL) {
+        int same;
+        if (((uintptr_t)list & 3) == 0) {
+            const u32* a = (const u32*)list;
+            const u32* b = s_es_pool + e->pos;
+            u32 nw = nbytes >> 2, diff = 0;
+            for (u32 i = 0; i < nw; i++) {
+                diff |= a[i] ^ b[i];
             }
-            s_evs.sl_pure++;
+            same = diff == 0 && memcmp((const u8*)list + nw * 4, b + nw, nbytes & 3) == 0;
+        } else {
+            same = memcmp(list, s_es_pool + e->pos, nbytes) == 0;
+        }
+        if (same) {
+            return e;
+        }
+        *slot = e; /* the list changed: decoded again into its slot */
+        return NULL;
+    }
+    *slot = freeslot != NULL ? freeslot : &s_es[h & (ES_SLOTS - 1)];
+    return NULL;
+}
+
+/* marks the bytes of GxState word o that differ between a and b */
+static inline __attribute__((always_inline)) void es_mark(u32 o, u32 d) {
+    u32 t = d | d >> 4;
+    t |= t >> 2;
+    t |= t >> 1;
+    t &= 0x01010101u;
+    const u32 nib = (t | t >> 7 | t >> 14 | t >> 21) & 0xFu;
+    gx_gs_bm[o >> 3] |= nib << ((o & 7) << 2);
+    gx_gs_sum[o >> 8] |= 1u << ((o >> 3) & 31);
+}
+
+/* index word: o | bit 31 when the word holds bytes of the vertex description or formats */
+static inline __attribute__((always_inline)) void es_delta_apply(const u32* d, u32 nf, u32 nm, int mark) {
+    u32* g = (u32*)&gx_game;
+    u32 vd = 0, any = 0;
+    for (u32 i = nf; i != 0; i--, d += 2) {
+        const u32 hd = d[0], o = hd & 0xFFFFu, cur = g[o], v = d[1];
+        if (cur != v) {
+            g[o] = v;
+            vd |= hd;
+            any = 1;
+            if (mark) {
+                es_mark(o, cur ^ v);
+            }
+        }
+    }
+    for (u32 i = nm; i != 0; i--, d += 3) {
+        const u32 hd = d[0], o = hd & 0xFFFFu, cur = g[o], v = (cur & d[1]) | d[2];
+        if (cur != v) {
+            g[o] = v;
+            vd |= hd;
+            any = 1;
+            if (mark) {
+                es_mark(o, cur ^ v);
+            }
+        }
+    }
+    if (vd >> 31) {
+        gx_vdesc_ver[1]++;
+    }
+    if (mark && any) {
+        gx_gs_any = 1;
+    }
+}
+
+/* the decoded calls on gx_game: hot ones through their _gs bodies (marked), cold ones as EV_CALL (sent == 0) or into
+ * the shadow only (sent: core 2 runs the list) */
+static int es_calls(const u32* c, u32 nw, int sent) {
+    int hot = 1;
+    for (const u32* ce = c + nw; c < ce;) {
+        const u32 hd = *c++, id = hd & 0xFF, n = hd >> 8 & 0xFF;
+        if (!gx_gs_call(id, c)) {
+            hot = 0;
+            if (sent) {
+                gx_shadow_call(id, c);
+            } else {
+                ev_cold(id, c, n);
+            }
+        }
+        c += n;
+    }
+    return hot;
+}
+static void es_calls_hot(const u32* c, u32 nw) {
+    for (const u32* ce = c + nw; c < ce;) {
+        const u32 hd = *c++;
+        gx_gs_call(hd & 0xFF, c);
+        c += hd >> 8 & 0xFF;
+    }
+}
+
+/* Builds the delta of calls c (all hot) into s_es_dtmp; gx_game, its marks and the vertex counter are as before.
+ * Returns the words, *nf and *nm the entries. */
+static __attribute__((noinline, cold)) u32 es_build(const u32* c, u32 nw, u32* nf, u32* nm) {
+    u32* g = (u32*)&gx_game;
+    const u32* s0 = (const u32*)s_es_s0;
+    const u32* a = (const u32*)s_es_a;
+    memcpy(s_es_s0, &gx_game, sizeof(GxState));
+    memcpy(s_es_bm, gx_gs_bm, sizeof(s_es_bm));
+    memcpy(s_es_sum, gx_gs_sum, sizeof(s_es_sum));
+    const u32 any = gx_gs_any;
+    es_calls_hot(c, nw);
+    memcpy(s_es_a, &gx_game, sizeof(GxState));
+    for (u32 w = 0; w < ES_NWORDS; w++) {
+        g[w] = ~s0[w];
+    }
+    es_calls_hot(c, nw);
+    const u32 vd0 = (u32)(offsetof(GxState, vtx_desc) / 4);
+    const u32 vd1 = (u32)((offsetof(GxState, array_base) + 3) / 4);
+    u32 f = 0, m = 0, kf = 0;
+    for (u32 w = 0; w < ES_NWORDS; w++) {
+        if (w != ES_VER_WORD && ~(a[w] ^ g[w]) == ~0u) {
+            kf++;
+        }
+    }
+    u32* df = s_es_dtmp;
+    u32* dm = s_es_dtmp + kf * 2;
+    for (u32 w = 0; w < ES_NWORDS; w++) {
+        const u32 bits = ~(a[w] ^ g[w]);
+        if (w == ES_VER_WORD || bits == 0) {
+            continue;
+        }
+        const u32 hd = w | (w >= vd0 && w < vd1 ? 1u << 31 : 0);
+        if (bits == ~0u) {
+            df[0] = hd;
+            df[1] = a[w];
+            df += 2;
+            f++;
+        } else {
+            dm[0] = hd;
+            dm[1] = ~bits;
+            dm[2] = a[w] & bits;
+            dm += 3;
+            m++;
+        }
+    }
+    memcpy(&gx_game, s_es_s0, sizeof(GxState));
+    memcpy(gx_gs_bm, s_es_bm, sizeof(s_es_bm));
+    memcpy(gx_gs_sum, s_es_sum, sizeof(s_es_sum));
+    gx_gs_any = any;
+    gx_vdesc_ver[1]++; /* the vertex state's memos (es_vhash, vtx_state_hash) are taken again */
+    *nf = f;
+    *nm = m;
+    s_ess.built++;
+    return f * 2 + m * 3;
+}
+
+/* A new entry in `slot` for the calls in s_es_tmp (nw words), with their delta when `hot` */
+static __attribute__((noinline, cold)) void es_store(EsEntry* slot, const void* list, u32 nbytes, u32 nw, int hot,
+                                                     int sent, u32 fmask, u32 vh) {
+    u32 nf = ES_NODELTA, nm = 0, dw = 0;
+    if (hot && nw != 0) {
+        dw = es_build(s_es_tmp, nw, &nf, &nm);
+    } else {
+        s_ess.nodelta++;
+    }
+    const u32 cw = (nbytes + 3) >> 2, need = cw + nw + dw;
+    if (s_es_used + need > ES_POOL_WORDS) {
+        memset(s_es, 0, sizeof(EsEntry) * ES_SLOTS);
+        s_es_used = 0;
+        s_ess.resets++;
+        slot = &s_es[(((u32)(uintptr_t)list >> 5 ^ nbytes * 0x9E3779B1u) * 2654435761u >> 21) & (ES_SLOTS - 1)];
+    }
+    if (s_es_used + need > s_es_cap) {
+        u32 ncap = s_es_cap * 2;
+        while (ncap < s_es_used + need) {
+            ncap *= 2;
+        }
+        ncap = ncap < ES_POOL_WORDS ? ncap : ES_POOL_WORDS;
+        u32* np = realloc(s_es_pool, ncap * sizeof(u32));
+        if (np == NULL) {
+            slot->list = NULL;
             return;
         }
-        gs_flush(); /* the state before the list, then the list's own calls are not marked */
-        if (!list_walk_silent(p, nbytes) && s_evs.sl_fail++ < 4) {
-            PLOG_W("gxsplit: display list %p (%lu bytes, called from %p) does not parse on the game thread: its state "
-                   "calls after that point are not in the game thread's state", list, (unsigned long)nbytes, caller);
+        s_es_pool = np;
+        s_es_cap = ncap;
+    }
+    u32* q = s_es_pool + s_es_used;
+    q[cw - 1] = 0;
+    memcpy(q, list, nbytes);
+    memcpy(q + cw, s_es_tmp, nw * sizeof(u32));
+    memcpy(q + cw + nw, s_es_dtmp, dw * sizeof(u32));
+    slot->list = list;
+    slot->nbytes = nbytes;
+    slot->pos = s_es_used;
+    slot->words = nw;
+    slot->vh = vh;
+    slot->nf = (u16)nf;
+    slot->nm = (u16)nm;
+    slot->sent = (u8)sent;
+    slot->fmask = (u8)fmask;
+    s_es_used += need;
+}
+
+/* gxsplitsl=2: the delta against the calls from the same state; the calls' result stays */
+static __attribute__((noinline, cold)) void es_verify(const EsEntry* e, const u32* c, const u32* d) {
+    memcpy(s_es_s0, &gx_game, sizeof(GxState));
+    es_delta_apply(d, e->nf, e->nm, !e->sent);
+    memcpy(s_es_a, &gx_game, sizeof(GxState));
+    memcpy(&gx_game, s_es_s0, sizeof(GxState));
+    es_calls_hot(c, e->words);
+    const u32* a = (const u32*)s_es_a;
+    const u32* g = (const u32*)&gx_game;
+    u32 bad = ES_NWORDS;
+    for (u32 w = 0; w < ES_NWORDS && bad == ES_NWORDS; w++) {
+        if (w != ES_VER_WORD && a[w] != g[w]) {
+            bad = w;
         }
-        if (gx_gs_any) {
-            gs_clear_all();
+    }
+    s_ess.vchk++;
+    if (bad != ES_NWORDS && s_ess.vbad++ < 8) {
+        PLOG_W("gxsplitsl verify: list %p (%lu bytes, %s) word %lu: delta %08lx, calls %08lx", e->list,
+               (unsigned long)e->nbytes, e->sent ? "sent" : "applied here", (unsigned long)bad,
+               (unsigned long)a[bad], (unsigned long)g[bad]);
+    }
+}
+
+/* a known entry: its delta or its calls on gx_game */
+static inline __attribute__((always_inline)) void es_apply(const EsEntry* e) {
+    const u32* c = s_es_pool + e->pos + ((e->nbytes + 3) >> 2);
+    if (e->nf != ES_NODELTA) {
+        const u32* d = c + e->words;
+        s_ess.hit_delta++;
+        if (__builtin_expect(s_ev_sl == 2, 0)) {
+            es_verify(e, c, d);
+        } else {
+            es_delta_apply(d, e->nf, e->nm, !e->sent);
         }
-        s_evs.sl_sent++;
     } else {
-        gs_flush();
+        s_ess.hit_calls++;
+        es_calls(c, e->words, e->sent);
+    }
+}
+
+/* ---- EV_LIST as one word (switch gxsplitlp, default 1 under gxsplitev) ----
+ * Frames repeat their list calls in the same order (the batches of gxbatch are runs of them). Both threads keep the
+ * same table, updated from the same EV_LIST events in ring order: per list (address, size) the list sent after it
+ * the last time. When the list to send is the one that followed the list sent before it, the event is
+ * GXR_LISTP with no words (one ring word); core 2 takes the address and size from its own table. gxsplit=2: GXR_LISTP
+ * carries address, size, caller and byte hash, and core 2 counts the predictions that differ. */
+/* the list event (EV_LIST or GXR_LISTP) */
+static inline __attribute__((always_inline)) void ev_put_list(const void* list, u32 nbytes, const void* caller) {
+    if (s_ev_lp && lp_step(s_lp_game, list, nbytes)) {
+        s_lp_hits++;
+        const u32 n = s_list_hash ? 4 : 0;
+        u32* c = put(GXR_LISTP, n);
+        if (n) {
+            c[0] = (u32)list;
+            c[1] = nbytes;
+            c[2] = (u32)caller;
+            c[3] = gx_hash32(list, nbytes, 0x5EC0u);
+        }
+        s_gs.lists++;
+        s_lists_rec++;
+        commit(n, 0);
+        return;
     }
     const u32 n = s_list_hash ? 4 : 2;
     u32* c = put(GXR_LIST, n);
@@ -1521,6 +2047,103 @@ static void ev_list(const void* list, u32 nbytes, const void* caller) {
     s_gs.lists++;
     s_lists_rec++;
     commit(n, 0);
+}
+
+/* a list whose walk did not parse: the game thread's state starts again from the translated one */
+static __attribute__((noinline, cold)) void ev_list_resync(const void* list, u32 nbytes, const void* caller) {
+    if (s_evs.sl_fail++ < 4) {
+        PLOG_W("gxsplit: display list %p (%lu bytes, called from %p) does not parse on the game thread: its state "
+               "is taken from the translated one (exclusive section)", list, (unsigned long)nbytes, caller);
+    }
+    s_sl_resync++;
+    gx_rec_excl_begin(GXF_FULL);
+    gx_rec_excl_end();
+}
+
+/* ev_list on a miss of the kept lists (or without them): the walk or decode, stored into `slot` when given */
+static __attribute__((noinline)) void ev_list_slow(const void* list, u32 nbytes, const void* caller, EsEntry* slot) {
+    const u8* p = (const u8*)list;
+    if (list_pure(p, nbytes)) {
+        /* state calls only: applied here, in order; the list is not sent */
+        u32 nw = 0;
+        if (slot != NULL && gx_sdl_scan(p, nbytes, s_es_tmp, ES_TMP_WORDS, &nw) == nbytes) {
+            s_ess.decoded++;
+            const int hot = es_calls(s_es_tmp, nw, 0);
+            es_store(slot, list, nbytes, nw, hot, 0, 0, 0);
+            s_evs.sl_pure++;
+            return;
+        }
+        const u8* end = p + nbytes;
+        u32 w[32];
+        while (p < end) {
+            if (*p == 0x00 || *p == 0x48 || *p == 0x44) {
+                p++;
+                continue;
+            }
+            u32 id, n;
+            port_op(p, end, &id, w, &n, &p); /* parses: list_pure said so */
+            s_evs.sl_pure_calls++;
+            if (!gx_gs_call(id, w)) {
+                ev_cold(id, w, n);
+            }
+        }
+        s_evs.sl_pure++;
+        return;
+    }
+    gs_flush(); /* the state before the list, then the list's own calls are not marked */
+    u32 fmask = 0, nw = 0;
+    int hot = 1;
+    if (slot != NULL) {
+        memcpy(s_es_vsave, &gx_game, sizeof(s_es_vsave)); /* the vertex state the walk starts from */
+    }
+    const int ok = list_walk_silent(p, nbytes, slot != NULL ? s_es_tmp : NULL, ES_TMP_WORDS, &nw, &fmask, &hot);
+    if (gx_gs_any) {
+        gs_clear_all();
+    }
+    if (ok && slot != NULL && nw <= ES_TMP_WORDS) {
+        s_ess.decoded++;
+        es_store(slot, list, nbytes, nw, hot, 1, fmask, es_vhash_of(s_es_vsave, fmask));
+    }
+    s_evs.sl_sent++;
+    ev_put_list(list, nbytes, caller);
+    if (!ok) {
+        ev_list_resync(list, nbytes, caller);
+    }
+}
+
+/* gx_rec_list under gxsplit stage 2 */
+static void ev_list(const void* list, u32 nbytes, const void* caller) {
+    s_evs.lists++;
+    const int known = s_state_lists != NULL && is_state_list(list, nbytes);
+    if (!known && !s_sl_lost) {
+        gs_flush();
+        ev_put_list(list, nbytes, caller);
+        return;
+    }
+    s_sl_unknown_walked += !known;
+    EsEntry* slot = NULL;
+    if (s_ev_sl && nbytes - 1u < ES_MAX_BYTES) {
+        EsEntry* e = es_find(list, nbytes, &slot);
+        if (e != NULL && !e->sent) {
+            s_evs.sl_pure++;
+            es_apply(e);
+            return;
+        }
+        if (e != NULL && e->vh == es_vhash(e->fmask)) {
+            gs_flush(); /* the state before the list, then the list's own changes are not marked */
+            es_apply(e);
+            if (gx_gs_any) {
+                gs_clear_all();
+            }
+            s_evs.sl_sent++;
+            ev_put_list(list, nbytes, caller);
+            return;
+        }
+        if (e != NULL) {
+            slot = e; /* entered under another vertex state: decoded again into its slot */
+        }
+    }
+    ev_list_slow(list, nbytes, caller, slot);
 }
 
 /* a primitive or raw command larger than a quarter of the ring: the state before it, then translated here, inside an
@@ -2570,6 +3193,17 @@ void gx_rec_frame(void) {
                (unsigned long)s_ev_vbad_cls[1], (unsigned long)s_ev_vbad_cls[2], (unsigned long)s_ev_vbad_cls[3],
                (unsigned long)s_ev_vbad_cls[4], (unsigned long)s_ev_vbad_cls[5], (unsigned long)s_ev_vbad_cls[6],
                (unsigned long)s_ev_vbad_cls[7]);
+        PLOG_I("gxsplit stage 3 frame %lu: per frame state lists by delta %lu, by kept calls %lu, decoded %lu; "
+               "EV_LIST as one word %lu | totals: deltas built %lu, lists without delta %lu, pool resets %lu; tables "
+               "grown %lu, entries lost %lu, unknown lists walked %lu, resyncs %lu; verify delta %lu checks, %lu "
+               "mismatches, predictions wrong %lu",
+               (unsigned long)s_frame_no, (unsigned long)(s_ess.hit_delta / f), (unsigned long)(s_ess.hit_calls / f),
+               (unsigned long)(s_ess.decoded / f), (unsigned long)(s_lp_hits / f), (unsigned long)s_ess.built,
+               (unsigned long)s_ess.nodelta, (unsigned long)s_ess.resets, (unsigned long)s_sl_grows,
+               (unsigned long)s_sl_lost_n, (unsigned long)s_sl_unknown_walked, (unsigned long)s_sl_resync,
+               (unsigned long)s_ess.vchk, (unsigned long)s_ess.vbad, (unsigned long)s_lp_bad);
+        s_ess.hit_delta = s_ess.hit_calls = s_ess.decoded = 0;
+        s_lp_hits = 0;
         const u32 fail = s_evs.sl_fail;
         memset(&s_evs, 0, sizeof(s_evs));
         s_evs.sl_fail = fail;
@@ -2731,6 +3365,29 @@ void gx_rec_init(void) {
         s_dedup = 0;
         ev_tables_init();
         gs_clear_all();
+        /* gxsplit stage 3 (docs/PORT_3DS_GX_NATIVE.md "Stage 3 as built"): kept state lists with their deltas
+         * (gxsplitsl, 2 verify), the list predictor (gxsplitlp), matrix words and run gaps (gxsplitmw) */
+        s_ev_sl = plat_switch_int("gxsplitsl", s_gxsplit == 2 ? 2 : 1);
+        if (s_ev_sl < 0 || s_ev_sl > 2) {
+            s_ev_sl = 0;
+        }
+        if (s_ev_sl && !es_init()) {
+            PLOG_W("gxsplitsl: no memory for the kept state lists: walked at every call");
+            s_ev_sl = 0;
+        }
+        s_ev_lp = plat_switch_int("gxsplitlp", 1) != 0;
+        if (s_ev_lp) {
+            s_lp_game = calloc(1, sizeof(LpTable));
+            s_lp_tr = calloc(1, sizeof(LpTable));
+            if (s_lp_game == NULL || s_lp_tr == NULL) {
+                free(s_lp_game);
+                free(s_lp_tr);
+                s_lp_game = s_lp_tr = NULL;
+                s_ev_lp = 0;
+            }
+        }
+        gx_split_mw = plat_switch_int("gxsplitmw", 1) != 0;
+        s_gs_merge = gx_split_mw;
     }
     s_fuse = s_dedup ? plat_switch_int("gxrecfuse", 1) : 0;
     if (s_fuse < 0 || s_fuse > 2) {
@@ -2775,6 +3432,9 @@ void gx_rec_init(void) {
     gx_rec_mode = mode;
     s_ev = s_ev && s_gxsplit; /* the translator thread may not have started */
     s_ev_on = s_ev;
+    if (!s_ev) {
+        s_ev_sl = s_ev_lp = s_gs_merge = gx_split_mw = 0;
+    }
     s_list_hash = mode == 3 || s_gxsplit == 2;
     gx_rec_fast_update();
     plat_memstable_set_hook(mem_hook);
@@ -2786,5 +3446,8 @@ void gx_rec_init(void) {
         PLOG_I("gxsplit stage 2: the game thread's setters write its own state; EV_STATE at draw boundaries into the "
                "%lu KB event ring (gxsplitkb, linear or heap)%s", (unsigned long)(words / 256u),
                s_gxsplit == 2 ? ", class hashes checked on core 2 (verify)" : "");
+        PLOG_I("gxsplit stage 3: gxsplitsl=%d (kept state lists as deltas%s), gxsplitlp=%d (EV_LIST as one word when "
+               "predicted), gxsplitmw=%d (matrix words, run gaps)", s_ev_sl, s_ev_sl == 2 ? ", verify" : "", s_ev_lp,
+               gx_split_mw);
     }
 }

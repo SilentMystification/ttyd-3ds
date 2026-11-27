@@ -374,6 +374,43 @@ static FIFO_COLD void fv_end(const char* name) {
         }                                        \
     }
 
+/* As FIFO_VER, with the regions' _gs body named name##_gsr (the setter writes its own _gs) */
+#define FIFO_VER_GSR(name, P, A, ...)            \
+    static FIFO_COLD void name##_ver P {         \
+        fv_begin(__VA_ARGS__);                   \
+        name##_fast(&gx FV_PRE A);               \
+        fv_mid();                                \
+        name##_old A;                            \
+        fv_end(#name);                           \
+    }                                            \
+    static FIFO_GS void name##_gsr P {           \
+        const u32 c0_ = gx_gs_chg;               \
+        name##_fast(&gx_game FV_PRE A);          \
+        if (gx_gs_chg != c0_) {                  \
+            gx_gs_mark2(__VA_ARGS__);            \
+        }                                        \
+    }
+
+/* gxsplit stage 3, switch gxsplitmw (gx_rec.c sets it; default 1 under gxsplitev): the matrix loads on gx_game
+ * store and mark the words that differ, not the whole matrix (the same bytes in the end: the fast bodies write
+ * every word when one differs) */
+int gx_split_mw;
+static inline __attribute__((always_inline)) u32 gs_store_words(void* dst, const void* src, u32 n) {
+    u32 ch = 0;
+    for (u32 k = 0; k < n; k++) {
+        const u32 v = ld32((const u8*)src + 4 * k);
+        u8* d = (u8*)dst + 4 * k;
+        if (ld32(d) != v) {
+            st32(d, v);
+            const u32 o = (u32)(d - (const u8*)&gx_game) >> 2;
+            gx_gs_bm[o >> 3] |= 0xFu << ((o & 7) << 2);
+            gx_gs_sum[o >> 8] |= 1u << ((o >> 3) & 31);
+            ch = 1;
+        }
+    }
+    return ch;
+}
+
 void gx_fifo_log(u32 frames) {
     if (gx_opt_fifo != 2 || frames == 0) {
         return;
@@ -624,8 +661,17 @@ static inline __attribute__((always_inline)) void load_pos_mtx_fast(GxState* con
     memcpy(S->pos_mtx[i], mtx, sizeof(S->pos_mtx[i]));
     fifo_touch_xf_s(S, GXD_CLIP);
 }
-FIFO_VER(load_pos_mtx, (const f32 mtx[3][4], u32 id), (mtx, id), id / 3 < GX_POS_MTX_COUNT ? gx.pos_mtx[id / 3] : NULL,
-         sizeof(gx.pos_mtx[0]), NULL, 0)
+FIFO_VER_GSR(load_pos_mtx, (const f32 mtx[3][4], u32 id), (mtx, id),
+             id / 3 < GX_POS_MTX_COUNT ? gx.pos_mtx[id / 3] : NULL, sizeof(gx.pos_mtx[0]), NULL, 0)
+static FIFO_GS void load_pos_mtx_gs(const f32 mtx[3][4], u32 id) {
+    const u32 i = id / 3;
+    if (!gx_split_mw) {
+        load_pos_mtx_gsr(mtx, id);
+    } else if (i < GX_POS_MTX_COUNT && gs_store_words(gx_game.pos_mtx[i], mtx, 12)) {
+        gx_gs_chg++;
+        gx_gs_any = 1;
+    }
+}
 FIFO_HOT void GXLoadPosMtxImm(const f32 mtx[3][4], u32 id) {
     FIFO_DISPATCH(load_pos_mtx, (mtx, id));
     load_pos_mtx_fast(&gx, mtx, id);
@@ -656,8 +702,23 @@ static inline __attribute__((always_inline)) void load_nrm_mtx_fast(GxState* con
     }
     fifo_touch_xf_s(S, GXD_CLIP);
 }
-FIFO_VER(load_nrm_mtx, (const f32 mtx[3][4], u32 id), (mtx, id), id / 3 < GX_POS_MTX_COUNT ? gx.nrm_mtx[id / 3] : NULL,
-         sizeof(gx.nrm_mtx[0]), NULL, 0)
+FIFO_VER_GSR(load_nrm_mtx, (const f32 mtx[3][4], u32 id), (mtx, id),
+             id / 3 < GX_POS_MTX_COUNT ? gx.nrm_mtx[id / 3] : NULL, sizeof(gx.nrm_mtx[0]), NULL, 0)
+static FIFO_GS void load_nrm_mtx_gs(const f32 mtx[3][4], u32 id) {
+    const u32 i = id / 3;
+    if (!gx_split_mw) {
+        load_nrm_mtx_gsr(mtx, id);
+    } else if (i < GX_POS_MTX_COUNT) {
+        u32 ch = 0;
+        for (int r = 0; r < 3; r++) {
+            ch |= gs_store_words(gx_game.nrm_mtx[i][r], mtx[r], 3);
+        }
+        if (ch) {
+            gx_gs_chg++;
+            gx_gs_any = 1;
+        }
+    }
+}
 FIFO_HOT void GXLoadNrmMtxImm(const f32 mtx[3][4], u32 id) {
     FIFO_DISPATCH(load_nrm_mtx, (mtx, id));
     load_nrm_mtx_fast(&gx, mtx, id);
@@ -737,8 +798,32 @@ static inline void* tex_mtx_ptr(u32 id) {
     u8* f;
     return tex_mtx_dst(&gx, id, &f);
 }
-FIFO_VER(load_tex_mtx, (const f32 mtx[][4], u32 id, GXTexMtxType type), (mtx, id, type), tex_mtx_ptr(id),
-         sizeof(gx.tex_mtx[0]), tex_mtx_flag(id), 1)
+FIFO_VER_GSR(load_tex_mtx, (const f32 mtx[][4], u32 id, GXTexMtxType type), (mtx, id, type), tex_mtx_ptr(id),
+             sizeof(gx.tex_mtx[0]), tex_mtx_flag(id), 1)
+static FIFO_GS void load_tex_mtx_gs(const f32 mtx[][4], u32 id, GXTexMtxType type) {
+    if (!gx_split_mw) {
+        load_tex_mtx_gsr(mtx, id, type);
+        return;
+    }
+    u8* is3x4;
+    f32 (*dst)[4] = tex_mtx_dst(&gx_game, id, &is3x4);
+    if (dst == NULL) {
+        return;
+    }
+    const u32 three = type == GX_MTX3x4;
+    static const u32 row2[4] = {0, 0, 0x3F800000u, 0}; /* 0, 0, 1.0f, 0 */
+    u32 ch = gs_store_words(dst, mtx, 8);
+    ch |= gs_store_words(dst[2], three ? mtx[2] : (const f32*)(const void*)row2, 4);
+    if (is3x4 != NULL && *is3x4 != three) {
+        *is3x4 = (u8)three;
+        gs_mark((u32)(is3x4 - (u8*)&gx_game), 1);
+        ch = 1;
+    }
+    if (ch) {
+        gx_gs_chg++;
+        gx_gs_any = 1;
+    }
+}
 FIFO_HOT void GXLoadTexMtxImm(const f32 mtx[][4], u32 id, GXTexMtxType type) {
     FIFO_DISPATCH(load_tex_mtx, (mtx, id, type));
     load_tex_mtx_fast(&gx, mtx, id, type);

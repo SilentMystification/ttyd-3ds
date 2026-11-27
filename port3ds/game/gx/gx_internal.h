@@ -299,6 +299,8 @@ void gx_shadow_call(u32 id, const u32* w);
 #define GX_GS_SUM_WORDS ((GX_GS_BM_WORDS + 31) / 32)
 extern u32 gx_gs_bm[GX_GS_BM_WORDS], gx_gs_sum[GX_GS_SUM_WORDS], gx_gs_any, gx_gs_chg;
 int gx_gs_call(u32 id, const u32* w);
+/* gxsplit stage 3, switch gxsplitmw (gx_rec.c): matrix loads on gx_game mark the words that changed */
+extern int gx_split_mw;
 
 /* ---- gx_rec.c: recording GX calls for a translator (switch gxthread) ----
  *   0 (default): every GX call is translated where it is made (the game thread);

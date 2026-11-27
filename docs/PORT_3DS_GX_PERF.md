@@ -1688,3 +1688,25 @@ S2 = I + `gxsplit=1` (gxsplitev=1 by default); S2V = I + `gxsplit=2`; S1 = S2 + 
 5. Images: `determ_ab.py --a "I" --b "S2" --scenes gor_01,pik_00,usu_00,battle` (shots 780-785): 6 of 6 per scene.
 6. Game state: `gw_diff.py` as stage 1 step 6 with B = S2: 160 records equal.
 7. Timing, release: `gx_perf_ab.py --a "S1" --b "S2" --scenes gor_01,pik_00,usu_00,battle --repeat 2`, then `--a "I" --b "S2"`; per core as stage 1 step 9. With `gxthreadstats=60` also note the `full` fences per frame and `rec ... words` per frame; repeat S2 with `gxsplitkb=512` and `gxsplitkb=1024` when `full` fences are above about 1 per frame.
+
+## Step 10 stage 3: kept state lists, table growth, matrix words, one-word EV_LIST (2026-11-28)
+
+Design: docs/PORT_3DS_GX_NATIVE.md, "Stage 3 as built". Switches `gxsplitsl` (default 1, 2 with gxsplit=2), `gxsplitmw` (1), `gxsplitlp` (1), all only under `gxsplitev`. Not measured (owner rule 2026-11-28).
+
+### Checks done without the emulator
+
+- One dev build (`--dev --no-cia`) as the compile check, no warnings in the GX files. No `src/` change.
+- Host test (scratchpad `host3/t.c`, copies of `es_mark`, the run loop of `gs_flush_slow` with gap merging, the two-run delta): 100 000 random byte marks of a word equal to the byte reference; 20 000 random mark sets: the runs cover every marked byte, gap bytes only inside the sync bitmap, bitmap cleared, never more words than without merging; the delta of a list (a field written twice, a masked byte, a write of the value in force) applied to a random state equals the calls.
+
+### Gates (integration build, release CIA)
+
+S3 = I + `gxsplit=1` (stage 3 on by default); S3V = I + `gxsplit=2` (gxsplitsl=2 by default); S2 = S3 + `gxsplitsl=0 gxsplitmw=0 gxsplitlp=0` (stage 2).
+
+1. Start line: `gxsplit stage 3: gxsplitsl=1 ... gxsplitlp=1 ... gxsplitmw=1`.
+2. Verify, 4 scenes: `run_azahar.py --frames 841 --switches "<scene> S3V gxthreadstats=60"`. Pass: as stage 2 step 2 (`verify N checks, 0 mismatches`, no `gxsplit verify: class` warnings), and in the `gxsplit stage 3` lines `verify delta N checks, 0 mismatches` (N > 0), `predictions wrong 0`, `entries lost 0`, `resyncs 0`; no `gxsplitsl verify` or `gxsplitlp verify` warnings.
+3. Each part alone under verify (class hashes): S3V + `gxsplitsl=0`, S3V + `gxsplitmw=0`, S3V + `gxsplitlp=0`, gor_01 and battle: 0 mismatches.
+4. Frame lists: `gxfldig_cmp.py <I log> <S3V log>` exit 0.
+5. Sweep: `map_sweep.py --area tik --story 30 --switches "S3V gxthreadstats=60"`: every map ok, 0 mismatches of every kind.
+6. Images: `determ_ab.py --a "I" --b "S3" --scenes gor_01,pik_00,usu_00,battle` (shots 780-785): 6 of 6 per scene.
+7. Game state: `gw_diff.py` as stage 1 step 6 with B = S3: 160 records equal.
+8. Timing, release: `gx_perf_ab.py --a "S2" --b "S3" --scenes gor_01,pik_00,usu_00,battle --repeat 2`; core 0 GX and core 2 translator per core as stage 1 step 9. With `gxthreadstats=60` note per frame `rec ... words` (est. 60-120 K to 40-95 K), EV_STATE runs/bytes, `EV_LIST as one word` against `lists`, `state lists by delta`, and `full` fences.

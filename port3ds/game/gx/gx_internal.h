@@ -649,6 +649,21 @@ void gx_vsh_init(void);
 /* The stream of a cache entry, or NULL with *reason set. */
 GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, u32 nd, const u8* vtx_desc,
                                  const GxAttrFmt (*vat)[GX_VA_MAX_ATTR], u8 fmt_mask, u32* reason);
+/* dlcjob (gx_dlcache.c): the build split in a pure part (any thread) and the placement (game thread). */
+typedef struct {
+    u32 why; /* GXV_R_* (0: buildable; the fields below are set only then) */
+    int posk;
+    int sk[3];
+    u32 nslots, nrm, stride, layout, nidx;
+    int32_t off[6];
+    u8 slot_attr[3];
+    u8 attr_slot[8];
+} GxVshPrep;
+u32 gx_vsh_stream_prep(const GxVertex* v, u32 nv, const GxDlcDraw* d, u32 nd, const u8* vtx_desc,
+                       const GxAttrFmt (*vat)[GX_VA_MAX_ATTR], u8 fmt_mask, GxVshPrep* p);
+void gx_vsh_stream_fill(const GxVshPrep* p, const GxVertex* v, u32 nv, const GxDlcDraw* d, u32 nd, u8* out, u16* ix,
+                        u32 first);
+GxVshStream* gx_vsh_stream_place(const GxVshPrep* p, u32 why, u32 nv, const u8* bytes, const u16* ix, u32* reason);
 void gx_vsh_stream_free(GxVshStream* s); /* the vertices are reused only after the frames in flight */
 const void* gx_vsh_stream_base(const GxVshStream* s);
 /* Routes one draw under position matrix `pnmtx`: `reasons` 0 for a shader-eligible

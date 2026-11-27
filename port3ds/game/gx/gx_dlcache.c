@@ -45,6 +45,7 @@
 #include "gx_bigmem.h"
 #include "gx_internal.h"
 #include "gx_lobj.h"
+#include "plat/job.h"
 #include "plat/memstable.h"
 #include "plat/plat.h"
 
@@ -56,7 +57,8 @@
 #define DLC_DYNAMIC_AFTER 4
 #define DLC_MAX_RANGES 12
 
-enum { E_FREE = 0, E_BUILT, E_NOCACHE, E_DYNAMIC };
+/* E_PENDING (dlcjob): built by a job; drawn uncached (the plain decode) until installed at a frame end */
+enum { E_FREE = 0, E_BUILT, E_NOCACHE, E_DYNAMIC, E_PENDING };
 
 typedef GxDlcDraw DlcDraw;
 
@@ -101,6 +103,7 @@ typedef struct {
     u16 bat_head;     /* gxbatch: chain of the batches that start with this entry (index + 1) */
     u16 bat;          /* gxbatch: a batch that holds this entry (index + 1): while it is in use the entry is too */
     u16 sdl;          /* gxsdl: the slot of the list's pre-decoded state calls (index + 1), a hint checked on use */
+    u16 jrec;         /* dlcjob: the entry's job record while E_PENDING (half << 12 | index, + 1), else 0 */
 } DlcEntry;
 
 static DlcEntry* s_e; /* DLC_ENTRIES, heap (gx_bigmem.h) */
@@ -124,7 +127,10 @@ static u32 s_used_bytes, s_live;
 int gx_dlc_capturing;
 u16* gx_dlc_idx; /* GX_DLC_IDX_CAP, heap */
 u32 gx_dlc_nidx;
-static GxVertex* s_cap_v; /* DLC_CAP_VERTS, heap */
+static GxVertex* s_cap_buf; /* DLC_CAP_VERTS, heap */
+static GxVertex* s_cap_v;   /* where the capture goes: s_cap_buf, or (dlcjob) the staging half */
+static u32 s_cap_room = DLC_CAP_VERTS; /* vertices that fit at s_cap_v */
+static int s_cap_jobbed;    /* dlcjob: the capture is in the staging half */
 static DlcDraw s_cap_d[DLC_CAP_DRAWS];
 static u32 s_cap_nv, s_cap_nd;
 static u8 s_cap_fmt_mask;
@@ -139,6 +145,7 @@ static u32 s_cap_epoch;         /* the registry's epoch when the decode began */
 static struct {
     u32 calls, hits, built, changed, variant, nocache, dynamic_calls, too_big, sparse, evicted, alloc_fail;
     u32 deferred; /* dlspread: builds left for a later frame */
+    u32 pending;  /* dlcjob: calls of an entry a job builds (drawn uncached) */
     u32 relinks; /* lru_skip_batched: entries moved back to the front */
     u32 hit_verts;
     u32 verified, mismatched, full;
@@ -155,11 +162,21 @@ static void bat_kill_chain(DlcEntry* e);
 static void bat_init(void);
 static int bat_open_chain(DlcEntry* e);
 static void bat_log(u32 frames);
+/* dlcjob (below) */
+static int s_job;
+static void dlcj_init(void);
+static void dlcj_forget(DlcEntry* e);
+static void dlcj_cap_begin(void);
+static void dlcj_cap_spill(void);
+static int dlcj_take(DlcEntry* e, const GxState* st);
 static u32 s_bat_log_every, s_bat_log_frames; /* the gxbatch line every gxthreadstats (or gxstats) frames */
 
 /* Frees an entry's decoded vertices and its stream (whose vertices the GPU
  * may still read: gx_vsh_stream_free holds them for the frames in flight). */
 static void free_blob(DlcEntry* e) {
+    if (e->jrec) {
+        dlcj_forget(e); /* its job is done (joined) or will skip it: the blob can go */
+    }
     e->gen++;
     s_dlc_epoch++;
     if (e->bat_head) {
@@ -192,7 +209,8 @@ static void init(void) {
     }
     s_e = gx_big_alloc("gxcache entries", sizeof(DlcEntry) * DLC_ENTRIES);
     gx_dlc_idx = gx_big_alloc("gxcache indices", sizeof(u16) * GX_DLC_IDX_CAP);
-    s_cap_v = gx_big_alloc("gxcache capture", sizeof(GxVertex) * DLC_CAP_VERTS);
+    s_cap_buf = gx_big_alloc("gxcache capture", sizeof(GxVertex) * DLC_CAP_VERTS);
+    s_cap_v = s_cap_buf;
     s_budget = (u32)plat_switch_int("gxcachekb", 8192) * 1024u;
     s_trust = plat_switch_int("gxtrust", 1) != 0;
     s_scribble_at = (u32)plat_switch_int("gxscribble", 0);
@@ -211,6 +229,7 @@ static void init(void) {
     PLOG_I("gxcache: %s, budget %lu KB, %d entries, trust %d", s_enabled == 2 ? "verify" : s_enabled ? "on" : "off",
            (unsigned long)(s_budget / 1024), DLC_ENTRIES, s_trust);
     bat_init();
+    dlcj_init();
 }
 
 int gx_dlcache_enabled(void) {
@@ -302,7 +321,8 @@ static void entry_drop(DlcEntry* e) {
  * over a cyclic working set larger than itself never hits). */
 static int evictable(const DlcEntry* e) {
     /* a batch draws its members without stamping them: a member of a recently used batch is in use */
-    return e != NULL && gx_perf_frame_no() - e->last_frame > 1 && !(e->bat && gx_batch_recent(e->bat));
+    return e != NULL && gx_perf_frame_no() - e->last_frame > 1 && !(e->bat && gx_batch_recent(e->bat)) &&
+           e->state != E_PENDING; /* dlcjob: a job writes its blob */
 }
 
 /* gxbatch: a batch's draws do not move its members in the LRU list or stamp them, so the tail can be an entry
@@ -559,6 +579,17 @@ static inline __attribute__((always_inline)) int call_slow_body(const GxState* s
             lru_front(e);
             goto decode_plain;
         }
+        if (e->state == E_PENDING) {
+            if (!same_state_full(st, e)) {
+                continue;
+            }
+            /* dlcjob: its entry is being built; drawn by the plain decode meanwhile (what a miss draws) */
+            s_st.pending++;
+            e->last_frame = frame;
+            lru_unlink(e);
+            lru_front(e);
+            goto decode_plain;
+        }
         if (e->state == E_DYNAMIC) {
             s_st.dynamic_calls++;
             e->last_frame = frame;
@@ -609,6 +640,9 @@ static inline __attribute__((always_inline)) int call_slow_body(const GxState* s
                 s_cap_nv = s_cap_nd = 0;
                 s_cap_fmt_mask = 0;
                 s_cap_abort = 0;
+                s_cap_v = s_cap_buf;
+                s_cap_room = DLC_CAP_VERTS;
+                s_cap_jobbed = 0;
                 gx_dlc_nidx = 0;
                 gx_dlc_capturing = 1;
                 goto decode_plain;
@@ -679,6 +713,9 @@ static inline __attribute__((always_inline)) int call_slow_body(const GxState* s
     s_cap_nv = s_cap_nd = 0;
     s_cap_fmt_mask = 0;
     s_cap_abort = 0;
+    if (s_job) {
+        dlcj_cap_begin();
+    }
     gx_dlc_nidx = 0;
 decode_plain:
     if (s_lobj && first != 0) {
@@ -1591,6 +1628,9 @@ GxVertex* gx_dlc_cap_reserve(u8 fmt, u32 n) {
         }
         return NULL;
     }
+    if (s_cap_nv + n > s_cap_room) {
+        dlcj_cap_spill(); /* dlcjob: the staging half is full: the rest of the capture goes the old way */
+    }
     s_cap_fmt_mask |= (u8)(1u << (fmt & 7));
     return &s_cap_v[s_cap_nv];
 }
@@ -1878,7 +1918,10 @@ void gx_dlc_cap_finish(const GxState* st, u32 kind) {
             v += GX_VA_MAX_ATTR;
         }
     }
-    memcpy(e_verts(e), s_cap_v, s_cap_nv * sizeof(GxVertex));
+    int jobbed = s_cap_jobbed && dlcj_take(e, st);
+    if (!jobbed) {
+        memcpy(e_verts(e), s_cap_v, s_cap_nv * sizeof(GxVertex));
+    }
     memcpy(e_idx(e), gx_dlc_idx, s_cap_nv * nr * sizeof(u16));
     e->arr_hash = nr ? gather_hash(ranges, nr, gx_dlc_idx, s_cap_nv) : 0;
     lru_unlink(e);
@@ -1891,6 +1934,10 @@ void gx_dlc_cap_finish(const GxState* st, u32 kind) {
     }
     e->vsh = NULL;
     e->vsh_reason = 0;
+    if (jobbed) {
+        e->state = E_PENDING; /* the job copies the vertices and makes the stream; installed at a frame end */
+        goto out;
+    }
     if (gx_vsh_on) {
         e->vsh = gx_vsh_stream_build(e_verts(e), e->nverts, e_draws(e), e->ndraws, st->vtx_desc,
                                      (const GxAttrFmt(*)[GX_VA_MAX_ATTR])e_vat(e), e->fmt_mask, &e->vsh_reason);
@@ -1904,6 +1951,286 @@ void gx_dlc_cap_finish(const GxState* st, u32 kind) {
 out:
     if (gx_perf_on > 0) {
         gx_perf.t_cache += plat_ticks() - t0;
+    }
+}
+
+/* ---- dlcjob: entry builds on the job workers (switch dlcjob, default 0; PORT_3DS_GX_PERF.md "dlcjob") ----
+ *
+ * A first-seen list is decoded and drawn as before (the plain decode: the picture of a miss), but its capture
+ * goes into this frame's staging half instead of s_cap_buf. At the list's end the game thread does what reads
+ * game memory or the cache's tables (ranges, eviction, the entry, its blob, the index copy, the array hash, the
+ * trust request: all at the same moment as with dlcjob=0) and leaves the entry E_PENDING; the bulk (the vertex
+ * copy into the blob, the stream's layout and exactness, its vertex bytes and triangle indices) is a job's. At
+ * the frame's end the jobs of the frame are submitted; at the next frame's end they are joined (a job the worker
+ * has not started runs on the joining thread) and their entries installed: stream memory taken in the same
+ * order as gx_vsh_stream_build, the bytes copied, E_BUILT. Until then a call of the list draws the plain
+ * decode (dlspread's rule: a miss and a hit draw the same picture). Under determ the install frame is fixed.
+ *
+ * Jobs touch only their records, the staging half and the blob the game thread gave them; no allocation, no
+ * GPU call, no game memory. A pending entry is never evicted; if its blob must go anyway (free_blob), the
+ * half's jobs are joined first.
+ *
+ * dlcjob=2: at the install the game thread makes the entry again the old way (vertices from the capture, the
+ * stream's layout and bytes) and compares it with the job's, byte for byte (`dlcjob:` line, mismatched). */
+#define DLCJ_RECS 2048 /* per half (dlspread 1500 a frame fits); the index fits 12 bits of jrec */
+#define DLCJ_JOBS 8    /* jobs per frame (the ring holds 64) */
+
+typedef struct {
+    DlcEntry* e;          /* NULL: the entry went before the install (the job skips it) */
+    const GxVertex* src;  /* the capture, in the staging half */
+    GxVertex* dst;        /* the blob's vertices */
+    const GxDlcDraw* d;   /* the blob's draws */
+    const GxAttrFmt* vat; /* the blob's attribute formats */
+    u8* out;              /* the stream's vertex bytes (nv x max stride), in the staging half */
+    u16* ix;              /* its triangle indices from vertex 0 (3 x nv), in the staging half */
+    u32 nv, nd;
+    u8 fmt_mask, vsh;
+    u8 vtx_desc[GX_VA_MAX_ATTR];
+    u32 why; /* written by the job */
+    GxVshPrep prep;
+} DlcJob;
+
+typedef struct {
+    u8* base;
+    u32 cap, used;
+    DlcJob* rec; /* DLCJ_RECS */
+    u32 nrec;
+    PlatJob h[DLCJ_JOBS];
+    u32 njobs; /* submitted, not joined */
+} DlcHalf;
+
+typedef struct {
+    u32 half, begin, end;
+} DlcJobArg;
+
+static DlcHalf s_jh[2];
+static DlcJobArg s_jarg[2][DLCJ_JOBS];
+static u32 s_jcur;       /* the half this frame captures into */
+static u32 s_jmax_stride; /* the widest stream vertex */
+static u8* s_jref;        /* dlcjob=2: the old way's stream bytes and indices */
+static struct {
+    u32 queued, installed, spilled, no_room, forgotten, joins_forced, verified, mismatched;
+    u64 install_ticks;
+} s_jst;
+
+static void dlcj_init(void) {
+    s_job = s_enabled > 0 ? plat_switch_int("dlcjob", 0) : 0;
+    if (s_job < 0 || s_job > 2) {
+        s_job = 1;
+    }
+    if (!s_job) {
+        return;
+    }
+    int32_t off[6];
+    s_jmax_stride = plat_vsh_layout_n(0, 3, 0, 1, off); /* floats, three slots, the normal */
+    u32 kb = (u32)plat_switch_int("dlcjobkb", 1536);
+    kb = kb < 256 ? 256 : kb;
+    for (u32 h = 0; h < 2; h++) {
+        s_jh[h].cap = kb * 1024u;
+        s_jh[h].base = gx_big_alloc(h ? "dlcjob staging 1" : "dlcjob staging 0", s_jh[h].cap);
+        s_jh[h].rec = gx_big_alloc(h ? "dlcjob records 1" : "dlcjob records 0", sizeof(DlcJob) * DLCJ_RECS);
+    }
+    if (s_job == 2) {
+        s_jref = gx_big_alloc("dlcjob verify", DLC_CAP_VERTS * (s_jmax_stride + 3 * sizeof(u16)));
+    }
+    PLOG_I("dlcjob: %s, staging 2 x %lu KB, %d records a half, %lu workers", s_job == 2 ? "verify" : "on",
+           (unsigned long)kb, DLCJ_RECS, (unsigned long)plat_job_workers());
+}
+
+static inline u32 dlcj_align(u32 n) { return (n + 7) & ~7u; }
+
+/* A new capture: into the staging half when it has room for some vertices. */
+static void dlcj_cap_begin(void) {
+    DlcHalf* h = &s_jh[s_jcur];
+    u32 room = h->cap - h->used;
+    if (h->nrec < DLCJ_RECS && room >= 64 * sizeof(GxVertex)) {
+        s_cap_v = (GxVertex*)(h->base + h->used);
+        u32 n = room / (u32)sizeof(GxVertex);
+        s_cap_room = n < DLC_CAP_VERTS ? n : DLC_CAP_VERTS;
+        s_cap_jobbed = 1;
+    } else {
+        s_cap_v = s_cap_buf;
+        s_cap_room = DLC_CAP_VERTS;
+        s_cap_jobbed = 0;
+        s_jst.no_room++;
+    }
+}
+
+/* The staging half cannot hold the rest: the capture moves to s_cap_buf (and is built the old way). */
+static void dlcj_cap_spill(void) {
+    memcpy(s_cap_buf, s_cap_v, s_cap_nv * sizeof(GxVertex));
+    s_cap_v = s_cap_buf;
+    s_cap_room = DLC_CAP_VERTS;
+    s_cap_jobbed = 0;
+    s_jst.spilled++;
+}
+
+/* The finished capture of entry e (blob header written) becomes a job record. 0: no room (built the old way). */
+static int dlcj_take(DlcEntry* e, const GxState* st) {
+    DlcHalf* h = &s_jh[s_jcur];
+    u32 nv = e->nverts;
+    u32 vbytes = dlcj_align(nv * (u32)sizeof(GxVertex));
+    u32 obytes = dlcj_align(nv * s_jmax_stride);
+    u32 ibytes = dlcj_align(3 * nv * (u32)sizeof(u16));
+    if ((const u8*)s_cap_v != h->base + h->used || h->nrec >= DLCJ_RECS || h->used + vbytes + obytes + ibytes > h->cap) {
+        s_jst.no_room++;
+        return 0;
+    }
+    DlcJob* r = &h->rec[h->nrec];
+    r->e = e;
+    r->src = s_cap_v;
+    r->dst = e_verts(e);
+    r->d = e_draws(e);
+    r->vat = e_vat(e);
+    r->out = h->base + h->used + vbytes;
+    r->ix = (u16*)(r->out + obytes);
+    r->nv = nv;
+    r->nd = e->ndraws;
+    r->fmt_mask = e->fmt_mask;
+    r->vsh = (u8)(gx_vsh_on != 0);
+    memcpy(r->vtx_desc, st->vtx_desc, sizeof(r->vtx_desc));
+    r->why = 0;
+    h->used += vbytes + obytes + ibytes;
+    e->jrec = (u16)((s_jcur << 12 | h->nrec) + 1);
+    h->nrec++;
+    s_jst.queued++;
+    return 1;
+}
+
+static void dlcj_build(DlcJob* r) {
+    memcpy(r->dst, r->src, r->nv * sizeof(GxVertex));
+    if (!r->vsh) {
+        return;
+    }
+    r->why = gx_vsh_stream_prep(r->src, r->nv, r->d, r->nd, r->vtx_desc, (const GxAttrFmt(*)[GX_VA_MAX_ATTR])r->vat,
+                                r->fmt_mask, &r->prep);
+    if (r->why == 0) {
+        gx_vsh_stream_fill(&r->prep, r->src, r->nv, r->d, r->nd, r->out, r->ix, 0);
+    }
+}
+
+static void dlcj_run(void* arg) {
+    const DlcJobArg* a = arg;
+    DlcJob* rec = s_jh[a->half].rec;
+    for (u32 i = a->begin; i < a->end; i++) {
+        if (rec[i].e != NULL) {
+            dlcj_build(&rec[i]);
+        }
+    }
+}
+
+static void dlcj_join(u32 half) {
+    DlcHalf* h = &s_jh[half];
+    if (h->njobs != 0) {
+        plat_job_join_all(h->h, h->njobs);
+        h->njobs = 0;
+    }
+}
+
+static void dlcj_forget(DlcEntry* e) {
+    u32 half = (u32)(e->jrec - 1) >> 12, i = (u32)(e->jrec - 1) & 0xFFF;
+    if (s_jh[half].njobs != 0) {
+        s_jst.joins_forced++;
+        dlcj_join(half); /* a job may be writing the blob */
+    }
+    s_jh[half].rec[i].e = NULL;
+    e->jrec = 0;
+    s_jst.forgotten++;
+}
+
+/* dlcjob=2: the entry made the old way from the same capture, compared with the job's. */
+static void dlcj_verify(const DlcJob* r, const DlcEntry* e) {
+    s_jst.verified++;
+    int bad = memcmp(e_verts(e), r->src, r->nv * sizeof(GxVertex)) != 0;
+    if (r->vsh) {
+        GxVshPrep p;
+        u32 why = gx_vsh_stream_prep(r->src, r->nv, e_draws(e), e->ndraws, e->vtx_desc,
+                                     (const GxAttrFmt(*)[GX_VA_MAX_ATTR])e_vat(e), e->fmt_mask, &p);
+        bad |= why != r->why;
+        if (!bad && why == 0) {
+            const GxVshPrep* q = &r->prep;
+            bad |= p.posk != q->posk || p.nslots != q->nslots || p.nrm != q->nrm || p.stride != q->stride ||
+                   p.layout != q->layout || p.nidx != q->nidx || memcmp(p.attr_slot, q->attr_slot, 8) != 0 ||
+                   memcmp(p.off, q->off, sizeof(p.off)) != 0;
+            for (u32 k = 0; !bad && k < p.nslots; k++) {
+                bad |= p.sk[k] != q->sk[k] || p.slot_attr[k] != q->slot_attr[k];
+            }
+            if (!bad) {
+                u8* ob = s_jref;
+                u16* ib = (u16*)(s_jref + r->nv * s_jmax_stride);
+                gx_vsh_stream_fill(&p, r->src, r->nv, e_draws(e), e->ndraws, ob, ib, 0);
+                bad |= memcmp(ob, r->out, r->nv * p.stride) != 0 || memcmp(ib, r->ix, p.nidx * sizeof(u16)) != 0;
+                const GxVshStream* s = e->vsh;
+                if (!bad && s != NULL) {
+                    /* what the install placed: the same bytes, the indices from the segment's first vertex */
+                    const u8* sv = (const u8*)gx_vsh_stream_base(s) + s->first * p.stride;
+                    const u16* si = s->lidx != NULL ? s->lidx : s->idx;
+                    bad |= memcmp(sv, ob, r->nv * p.stride) != 0;
+                    for (u32 i = 0; !bad && i < p.nidx; i++) {
+                        bad |= si[i] != (u16)(ib[i] + s->first);
+                    }
+                    bad |= s->layout != p.layout || s->nidx != p.nidx || s->nverts != r->nv;
+                }
+            }
+        }
+    }
+    if (bad && s_jst.mismatched++ == 0) {
+        PLOG_W("dlcjob: entry of list %p (%lu bytes) differs from the old build", e->list, (unsigned long)e->nbytes);
+    }
+}
+
+static void dlcj_install(u32 half) {
+    DlcHalf* h = &s_jh[half];
+    for (u32 i = 0; i < h->nrec; i++) {
+        DlcJob* r = &h->rec[i];
+        DlcEntry* e = r->e;
+        if (e == NULL) {
+            continue;
+        }
+        e->jrec = 0;
+        e->state = E_BUILT;
+        if (r->vsh) {
+            e->vsh = gx_vsh_stream_place(&r->prep, r->why, r->nv, r->out, r->ix, &e->vsh_reason);
+            if (e->vsh != NULL) {
+                s_used_bytes += e->vsh->bytes;
+            }
+        }
+        if (s_job == 2) {
+            dlcj_verify(r, e);
+        }
+        if (gx_perf_on > 0 && sizeof(GxVertex) % sizeof(f32) == 0) {
+            exactness(e_verts(e), e->nverts, e->vtx_desc[GX_VA_TEX0] != GX_NONE);
+        }
+        s_jst.installed++;
+    }
+    h->nrec = 0;
+    h->used = 0;
+}
+
+/* Frame end: last frame's jobs joined and installed, this frame's submitted, the halves swap. */
+static void dlcj_frame(void) {
+    u64 t0 = plat_ticks();
+    u32 prev = s_jcur ^ 1;
+    dlcj_join(prev);
+    dlcj_install(prev);
+    DlcHalf* h = &s_jh[s_jcur];
+    if (h->nrec != 0) {
+        u32 per = (h->nrec + DLCJ_JOBS - 1) / DLCJ_JOBS; /* a constant divisor: a shift */
+        u32 b = 0;
+        h->njobs = 0;
+        while (b < h->nrec) {
+            u32 e = b + per < h->nrec ? b + per : h->nrec;
+            DlcJobArg* a = &s_jarg[s_jcur][h->njobs];
+            *a = (DlcJobArg){s_jcur, b, e};
+            h->h[h->njobs++] = plat_job_submit(dlcj_run, a);
+            b = e;
+        }
+    }
+    s_jcur = prev;
+    u64 dt = plat_ticks() - t0;
+    s_jst.install_ticks += dt;
+    if (gx_perf_on > 0) {
+        gx_perf.t_cache += dt;
     }
 }
 
@@ -2009,6 +2336,9 @@ static void lobj_check(void) {
 }
 
 void gx_dlcache_frame(void) {
+    if (s_job) {
+        dlcj_frame();
+    }
     if (s_lobj == 2 && (++s_lobj_frames & 63) == 0) {
         lobj_check();
     }
@@ -2063,6 +2393,17 @@ void gx_dlcache_log(u32 frames) {
            (unsigned long)ms.ranges,
            (unsigned long)ms.covered_kb, (unsigned long)(ms.fills / f), (unsigned long)(ms.writes / f),
            (unsigned long)(ms.releases / f), (unsigned long)ms.revokes, (unsigned long)f, (unsigned long)ms.dropped);
+    if (s_job) {
+        PLOG_I("gxstats   dlcjob: queued %lu installed %lu pending calls/frame %lu | spilled %lu no room %lu forgotten %lu "
+               "(forced joins %lu) | verified %lu mismatched %lu | frame-end %lu us/frame",
+               (unsigned long)s_jst.queued, (unsigned long)s_jst.installed, (unsigned long)(a->pending / f),
+               (unsigned long)s_jst.spilled, (unsigned long)s_jst.no_room, (unsigned long)s_jst.forgotten,
+               (unsigned long)s_jst.joins_forced, (unsigned long)s_jst.verified, (unsigned long)s_jst.mismatched,
+               (unsigned long)(s_jst.install_ticks / (PLAT_TICKS_PER_SEC / 1000000u) / f));
+        u32 mism = s_jst.mismatched;
+        memset(&s_jst, 0, sizeof(s_jst));
+        s_jst.mismatched = mism; /* kept: the total since boot */
+    }
     if (s_scribbled) {
         PLOG_I("gxstats   scribble: %lu trusted hits on the scribbled entry, %lu mismatched, %lu stale in these frames",
                (unsigned long)a->scribble_hits, (unsigned long)a->mismatched, (unsigned long)a->stale);

@@ -1014,6 +1014,7 @@ Rows for the switch table:
 | `gxcachekb=N` | The cache's memory budget in KB (default 8192) |
 | `gxtrust=0/1` | 1 (default): a cache entry whose list and array spans lie in covered memory of the content-stable registry (`port3ds/plat/memstable.c`), unchanged since its last full check, is a hit without hashing; 0 hashes every hit (A/B). `gxcache=2` still hashes and decodes trusted hits and counts what trust skipped (`stale`, `mismatched`) |
 | `gxsdl=0/1` | 1 (default since 2026-11-27): keeps the decoded leading state calls (NOPs and port opcodes) of each display list that misses the display-list cache, with a copy of their bytes, so a repeated list skips the LEB128 decode (`gx_sdl_run`, gx_state.c); the bytes are compared on every call, so changed memory decodes again. Same calls in the same order. Log `gxsdl:` every 262144 lookups. |
+| `gxsdlx=0/1/2` | 0 (default): needs `gxsdl=1`. 1: a gxsdl entry's calls are applied as the list's net delta on `gx` (word compare + store + side-effect OR per entry, no setter call); on the record path (`gxrecfuse`) a list's calls that a later call of the same id and slot overwrites are dropped at decode. 2: as 1, and each delta is checked against the old calls from the same state (`gxsdlx verify` lines). See "State lists as net deltas (`gxsdlx`)". Log `gxsdlx:` with `gxsdl:`, `gxsdlx record:` with `gxrecfuse frame`. |
 | `gxscribble=N` | Test of the verify mode, not for play: at game frame N, xors one byte of an array a cached (preferably trusted) list reads, with no flush and no report. With `gxcache=2` it must show as `mismatched` and `stale`; with trust on it keeps drawing the old vertices, and the `gxstats scribble` line counts those hits (the contract) |
 | `gxstatever=0/1` | 0 (default): every state version change rebuilds the PICA state. 1: matrix and projection loads do not bump the version, and a version change whose state (texgen to pixel engine without the lights, viewport) equals the last build skips `build_state` (`builds N (unchanged M)` in `gxstats`). Fewer rebuilds, but no time saved yet (see Results) |
 | `gxdirty=0/1/2` | 0 (default): every state version change rebuilds the whole PICA state. 1: setters return early when their values are in force, others mark their class dirty; only dirty classes are rebuilt and sent (`plat_gpu_set_state_dirty`), and the uniform block by parts. 2: as 1, plus a full rebuild compared at every switch-off rebuild (`gxdirty verify` warnings, `gxdirty frame N:` line with `gxthreadstats`) |
@@ -1067,6 +1068,28 @@ All 192 comparisons identical; no differing pixels. The water shots have low con
 | battle | 22.1 to 21.0 | 20.5 to 18.9 |
 
 Identity: `determ` shots 780-785 byte-identical in all four scenes in C1 and C3; `gw_diff` (gor_01, 1600 frames padscript) 160 records equal in C1 and C3.
+
+## State lists as net deltas (`gxsdlx`, 2026-11-28)
+
+Revised plan step 3 (PORT_3DS_GX_NATIVE.md). Switch `gxsdlx` (default 0; 2 verify; needs `gxsdl=1`). Files: `port3ds/game/gx/gx_state.c` (gxsdl block: `sdx_build`, `sdx_apply`, `sdx_verify`), `port3ds/game/gx/gx_rec.c` (`fl_net`, switch read).
+
+Where `gx` is applied (C1, K, the translator with `gxthread=2`), at a gxsdl hit (bytes equal, as before):
+- **Build** (first hit after a decode; cold): every call id must be one a display list can hold (all of them write `gx` from their arguments only: audited setters). The calls run one at a time on two scratch copies of `gx`: the state in force and its bitwise complement. A bit that ends equal in both runs is written by the list. Per GxState word: the bits written, their value, and the side effects of the calls that changed the word in either run (gxdirty classes, `gx.version`, `gx_vtx_version`, `gx_xf_version`, `gx_vdesc_ver[0]`, from 16 bits next to the word index). `gx`, `gx_dirty` and the versions are restored after. A word changed by a call with no side effect, or written with none recorded, makes the list not take part. The deltas live in their own pool (grows to 128 K words, then starts again: the deltas are built again at their next hit); the gxsdl pool and its reset points are unchanged.
+- **Apply**: full-word entries (index | side, value), then masked ones (index | side, kept bits, value): `cur != new` stores and ORs the side bits; at the end the dirty classes go into `gx_dirty` and each version moves once if its bit is set. No `gx_apply_call`, no setter, no `touch`.
+- Off (the calls are applied, as before) with `gxdirty=0`, `gxstatededup=1` (its table would miss the calls), a primitive open, or the game thread recording.
+
+Differences from the call-by-call replay (state equal; checked by `gxsdlx=2`): a call that writes the values in force no longer bumps the versions or sets its dirty class (matrix loads, `GXSetArray`, `GXSetVtxDesc` have no SAME); versions move once a list instead of once a changed call (their readers compare them for equality only: gx_draw.c, gx_vsh.c, gx_dlcache.c). More lists may then continue a batch, as with `gxrecfuse`.
+
+On the record path (`gxthread=2 gxrecfuse=1`, game thread): the fused list's calls are already compared against the dedup slots, so the delta there is the net call list: at decode a call is dropped when a later call of the same list has the same id and slot (same setter, same object: it writes every field the earlier one writes; other slots write other fields). Channel calls (bit 31, overlapping selectors) are kept. The translator's state after the list and the dedup slots after it are unchanged. `gxrecfuse=2` checks it as before (the list applied again on the translator must change nothing).
+
+`gxsdlx=2`: at each delta hit the delta is applied and its state kept, then `gx` and the globals go back and the old calls are applied; GxState (but `gx.version`) must be equal, and the classes the delta newly set must be within those the calls newly set. The calls' result stays. Counters: checks, mismatches (first 8 logged with the word index), and the hits where the calls set more classes than the delta (writes of values in force; not a mismatch).
+
+Not done yet (owner rule 2026-11-28: one compile check, measurement by the integration agent): measurements, gates. When gxfifo's packed shadow lands, the build must diff that shadow too (it diffs GxState only).
+
+Runs for the measurement agent (release build, `gxsdlx` is the only change):
+- Verify: `gxsdlx=2` in C1 and K, gor_01, pik_00, usu_00, battle, to frame 841: 0 `gxsdlx verify` mismatches; C3 + `gxsdlx=2 gxrecfuse=2` gor_01, pik_00, battle: 0 mismatches of both; `map_sweep.py --area tik` with C1 + `gxsdlx=2` and with C3 + `gxsdlx=2 gxrecfuse=2`: every map ok.
+- Identity: `determ_ab.py` shots 780-785, `gxsdlx=0` against `gxsdlx=1`, C1, K and C3, four scenes: 6 of 6 each.
+- Timing: `gx_perf_ab` defaults (windows 721-840), best of 2, `gxsdlx=0` vs `1`: C1 busy, K core 0, C3 game thread and translator, gor_01 and pik_00 (est. -1..1.5 / -1.5..2 ms where the lists are applied). Counters: `gxsdlx:` lines (applied, built, entries, not taking part), `gxsdlx record:` (dropped).
 
 ## Fused state on the record (`gxrecfuse`, 2026-11-26)
 

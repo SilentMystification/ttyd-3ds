@@ -482,6 +482,8 @@ void gx_tev_compile_memo(PlatGpuState* st);
 void gx_dl_replay_port_op(const u8** p, const u8* end);
 /* switch gxsdl (gx_state.c): applies the pre-decoded state calls at the start of a list, returns the bytes covered */
 extern int gx_opt_sdl;
+/* switch gxsdlx (gx_state.c, default 0; 2 verify): a gxsdl entry's calls applied as the list's net delta on `gx` */
+extern int gx_opt_sdlx;
 /* `hint` (or NULL): a u16 that keeps the entry's slot, so the next call of the same list skips the hash and the probe */
 u32 gx_sdl_run(const u8* list, u32 nbytes, u16* hint);
 /* Decodes the leading NOPs and port opcodes of a list into calls (id | count << 8, then the words; at most cap

@@ -110,6 +110,10 @@ typedef struct {
     s32 oh_split;              /* byte offset in data of the last stereo mark (gxonehop=1), -1: none */
     u32 oh_tail_draws, oh_tail_z; /* draws after that mark, and those of them writing depth (stereostats) */
     int oh_st;                 /* gxstereo: the game thread saw 3D on at the record's start (marks written) */
+    u32* tv_w;                 /* gxstereo=4: the tail start built at the record's end (past `now`), compared when the record comes back */
+    u32 tv_n, tv_n1, tv_full;
+    const void* tv_lay;
+    s32 tv_off;
     void* caps[256];           /* the CMD_OH_CAPTURE bodies the render thread fills (imported at reuse) */
     u32 ncaps;
     /* gxchunk=2: the per-draw words beside each batch chunk (ckref), the chunks' places in ow and ckref, and per draw
@@ -337,13 +341,20 @@ static int s_immfl; /* switch gximmfl (GX native step 4; the gximmfl section aft
  * record whose start saw 3D on (stereo_maybe); a mono record then has no mark, no full state sent again after it,
  * no citro3d flush and no list split at it. 2: marks as 0, and counts what 1 would change (see oh_stereo_log). */
 static int s_gxstereo;
+/* gxstereo=3 (tail start) and 4 (its verify): see the gxstereo section after oh_mark */
+static u32 s_oh_markw = 640; /* arena words kept free at a draw for a mark (3: its tail start) */
 static struct {
+    u32 tail_marks, tail_built, tail_words, tail_bad, nodefer; /* 3: marks left empty, tail starts written, their words,
+                                                                * frames drawn in mono as no start could be built, marks
+                                                                * written in full as the model held a block with no id */
     u32 marks, skipped, mono_recs;   /* game thread: marks written, marks 1 leaves out, records started in mono */
     u32 st_frames, late, mono_frames; /* render thread: stereo frames, of them from a mono-started record (2: what 1
                                         * shows in mono), 3D wanted but no split (1: the frame after 3D went on) */
 } s_gst;
 static int s_ck_tier_linear = 1; /* the frame list is in linear memory (C3D_FrameEnd(0) flushes it) */
 static void ck_verify(Record* r);
+static void st_verify(Record* r);
+static PicaModel *s_tv_a, *s_tv_b, *s_tv_c; /* gxstereo=4 */
 static void ck_log(u32 frames);
 static u32 s_one_cur[3];
 static void one_vfy(int c, const u32* key, const PlatGpuState* st, int key_sends);
@@ -447,6 +458,9 @@ static void submit(int present) {
     if (s_onehop) {
         if (s_chunk == 2 || s_immfl == 2) {
             ck_verify(&s_rec[s_cur]); /* before the import: it reads the record's captures */
+        }
+        if (s_gxstereo == 4) {
+            st_verify(&s_rec[s_cur]); /* before the import: it reads the record's captures */
         }
         oh_import(&s_rec[s_cur]); /* the render thread is done with it: its captured words go into the tables */
     }
@@ -3077,7 +3091,7 @@ static void direct_log(void) {
 #define OH_SIDE_BYTES (192u << 10)
 #define OH_ROOM_BYTES 3072u /* record bytes a shader draw's commands, a CMD_STATE and a mark need at most */
 #define OH_DRAW_WORDS 1024u /* arena words of one shader draw at most (3 blocks, a layout, all rows, the packet) */
-#define OH_MARK_WORDS 640u  /* arena words of a mark at most (all rows, the fog LUT) */
+#define OH_MARK_WORDS s_oh_markw /* arena words of a mark at most (all rows, the fog LUT; gxstereo=3: and the tail start's blocks) */
 #define OH_PENDING 0xFFFFFFFFu
 #define OH_CAPW 76u
 
@@ -3102,6 +3116,11 @@ typedef struct {
     s32 lit, lcount;
     const u32* w;
     u32 n;
+    /* gxstereo=3: the tail start, at the last mark only: the first n1 words, then citro3d's flush when `flush`, then the
+     * rest, then the layout block of `lay` (a capture of this record, its words known when the replay gets here).
+     * A mark of the other kinds has n1 == n, no flush, no lay. */
+    u32 n1, flush;
+    const OhCap* lay;
 } OhMark;
 
 /* the recording thread's model of the GPU (mirrors the replay's s_dkey, s_gpu_valid, v_* ...) */
@@ -3122,6 +3141,17 @@ static struct {
     u32 gdraw, seq;
     u32 held[3], held_ep; /* gxone: the class block ids the GPU holds (valid with gpu_valid), the texture epoch */
 } s_om;
+/* gxstereo=3/4: what the model held at the last mark (the tail start is built from it at the record's end) */
+static struct {
+    int valid;
+    s32 lit, lcount;
+    u32 gpu_valid, held[3], held_ep, v_cull, v_layout;
+    int lay_valid, fog_valid;
+    const void* v_stream;
+    u32 rows_valid[3];
+    u32 rows[96][4];
+    u32 fog[128];
+} s_tm;
 static VshDraw s_oh_md; /* gxonehop=1: the last shader draw, while one may merge into it (s_last_vdraw) */
 static DTab s_otab[DC_N];
 static u32 s_oh_words; /* arena words per record */
@@ -3253,7 +3283,10 @@ static void oh_record_start(void) {
     s_om.lcount = -1;
     s_om.seq = s_submit_seq + 1;
     r->oh_st = !s_gxstereo || stereo_maybe();
-    s_om.st_off = s_gxstereo == 1 && !r->oh_st;
+    s_om.st_off = s_gxstereo != 0 && s_gxstereo != 2 && !r->oh_st;
+    s_tm.valid = 0;
+    r->tv_w = NULL;
+    r->tv_off = -1;
     s_gst.mono_recs += !r->oh_st;
     vunif_reset_u(&s_vg);
     s_vg.pend[0] = s_vg.pend[1] = s_vg.pend[2] = 0;
@@ -3270,9 +3303,9 @@ static int oh_class(const PlatGpuState* st) {
 }
 
 /* runs of the rows in mask (3 words), as direct_unif_run writes them */
-static u32* oh_rows_u(u32* w, const u32* mask, const VUnif* u);
-static inline u32* oh_rows(u32* w, const u32* mask) { return oh_rows_u(w, mask, &s_vg); }
-static u32* oh_rows_u(u32* w, const u32* mask, const VUnif* u) {
+static u32* oh_rows_v(u32* w, const u32* mask, const u32 (*val)[4]);
+static inline u32* oh_rows(u32* w, const u32* mask) { return oh_rows_v(w, mask, s_vg.val); }
+static u32* oh_rows_v(u32* w, const u32* mask, const u32 (*val)[4]) {
     u32 i = 0;
     while (i < 96) {
         u32 wd = mask[i >> 5] >> (i & 31);
@@ -3289,10 +3322,43 @@ static u32* oh_rows_u(u32* w, const u32* mask, const VUnif* u) {
             j++;
         }
         w = enc_write(w, GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000u | i);
-        w = enc_add(w, GPUCMD_HEADER(0, 0xF, GPUREG_VSH_FLOATUNIFORM_DATA), &u->val[i][0], (j - i) * 4);
+        w = enc_add(w, GPUCMD_HEADER(0, 0xF, GPUREG_VSH_FLOATUNIFORM_DATA), &val[i][0], (j - i) * 4);
         i = j;
     }
     return w;
+}
+
+static u32* oh_rows_u(u32* w, const u32* mask, const VUnif* u) { return oh_rows_v(w, mask, u->val); }
+
+static u32 oh_tail_build(u32* w0, u32 room, u32* n1, const OhCap** lay);
+static void oh_tail_finish(Record* r);
+
+/* gxstereo=3/4: the model's state at a mark, kept for the tail start (oh_tail_build) */
+static void oh_tail_snap(void) {
+    s_tm.lit = s_om.lit;
+    s_tm.lcount = s_om.lcount;
+    s_tm.gpu_valid = (u32)s_om.gpu_valid;
+    memcpy(s_tm.held, s_om.held, sizeof(s_tm.held));
+    s_tm.held_ep = s_om.held_ep;
+    s_tm.v_cull = s_om.v_cull;
+    s_tm.v_layout = s_om.v_layout;
+    s_tm.v_stream = s_om.v_stream;
+    s_tm.lay_valid = s_om.lay_valid;
+    s_tm.fog_valid = s_om.fog_valid;
+    memcpy(s_tm.rows_valid, s_vg.valid, sizeof(s_tm.rows_valid));
+    memcpy(s_tm.rows, s_vg.val, sizeof(s_tm.rows));
+    if (s_om.fog_valid) {
+        memcpy(s_tm.fog, s_om.fog, sizeof(s_tm.fog));
+    }
+}
+
+/* gxstereo=3: a mark can stay empty when the model's blocks all have ids (or it holds none), as the tail start can then
+ * be built from the ids at the record's end */
+static int oh_tail_defer_ok(void) {
+    if (s_om.gpu_valid == 0) {
+        return 1;
+    }
+    return s_om.gpu_valid == 7 && s_om.held[0] != 0 && s_om.held[1] != 0 && s_om.held[2] != 0;
 }
 
 static void oh_mark(void) {
@@ -3307,21 +3373,31 @@ static void oh_mark(void) {
     s_gst.marks++;
     oh_close();
     Record* r = oh_rec();
-    u32* w0 = r->ow + r->now;
-    u32* w = oh_rows(w0, s_vg.valid);
-    if (s_om.fog_valid) {
-        w = enc_write(w, GPUREG_FOG_LUT_INDEX, 0);
-        w = enc_add(w, GPUCMD_HEADER(0, 0xF, GPUREG_FOG_LUT_DATA0), s_om.fog, 128);
+    int defer = s_gxstereo == 3 && oh_tail_defer_ok(); /* the mark writes nothing: the model goes on as if there were none */
+    int snap = s_gxstereo == 4 || defer;
+    s_gst.nodefer += s_gxstereo == 3 && !defer;
+    if (snap) {
+        oh_tail_snap();
     }
-    r->now = (u32)(w - r->ow);
-    if (s_chunk) {
-        r->now = (r->now + 3u) & ~3u; /* the next list starts on a 16-byte boundary */
+    u32* w0 = r->ow + r->now;
+    u32* w = w0;
+    if (!defer) {
+        w = oh_rows(w0, s_vg.valid);
+        if (s_om.fog_valid) {
+            w = enc_write(w, GPUREG_FOG_LUT_INDEX, 0);
+            w = enc_add(w, GPUCMD_HEADER(0, 0xF, GPUREG_FOG_LUT_DATA0), s_om.fog, 128);
+        }
+        r->now = (u32)(w - r->ow);
+        if (s_chunk) {
+            r->now = (r->now + 3u) & ~3u; /* the next list starts on a 16-byte boundary */
+        }
     }
     s_om.chunk0 = r->now; /* the mark's words are not part of the run */
     OhMark* m = oh_put(CMD_OH_MARK, sizeof(OhMark));
     r = oh_rec();
+    s_tm.valid = snap && m != NULL;
     if (m != NULL) {
-        *m = (OhMark){s_om.lit, s_om.lcount, w0, (u32)(w - w0)};
+        *m = (OhMark){s_om.lit, s_om.lcount, w0, (u32)(w - w0), (u32)(w - w0), 0, NULL};
         if (s_onehop == 1) {
             r->oh_split = (s32)((u8*)m - sizeof(CmdHead) - r->data);
         }
@@ -3329,9 +3405,12 @@ static void oh_mark(void) {
     if (s_onehop == 2) {
         rec_put(CMD_OH_MARK, 0); /* the replay drops what it holds there too */
     }
-    s_om.gpu_valid = 0;
-    s_om.lay_valid = 0;
-    s_om.c3d = 1;
+    s_gst.tail_marks += defer;
+    if (!defer) {
+        s_om.gpu_valid = 0;
+        s_om.lay_valid = 0;
+        s_om.c3d = 1;
+    }
     s_om.after_scene = 0;
     r->oh_tail_draws = r->oh_tail_z = 0;
     s_ost.marks++;
@@ -3355,6 +3434,9 @@ static void oh_record_end(int present) {
         oh_mark();
     }
     oh_close();
+    if (s_gxstereo >= 3 && present && s_tm.valid && oh_rec()->oh_split >= 0) {
+        oh_tail_finish(oh_rec());
+    }
     if (!s_om.scene_seen) {
         oh_rec()->oh_split = -1; /* no scene draw: the frame stays mono */
     }
@@ -3995,6 +4077,97 @@ static int oh_state_one(const PlatGpuState* st) {
     }
     s_om.gpu_valid = 7;
     return pix;
+}
+
+/* ---- gxstereo=3: the stereo tail's start, written once at the record's end ----
+ * In a stereo frame only the last mark splits the record; the marks before it did nothing at the replay but made the
+ * model forget what the GPU holds, so the next draw sent the flush, 3 class blocks, the layout and the rows again.
+ * With gxstereo=3 a mark leaves the model alone and keeps what it held (oh_tail_snap: the class block ids and texture
+ * epoch, the layout key, the cull word, the rows, the fog LUT, the two uniforms of citro3d). At the record's end the
+ * last mark gets its words: the rows and the fog LUT, citro3d's flush, the blocks of the held ids copied from the
+ * store, the cull word, the layout block. These are the words the old mark and the first draw after it wrote, in
+ * their order; the tail's draws were recorded against the model that did not forget, so they send only what they
+ * change. A start that cannot be built (a store reset or a texture block encoded again since the mark, no layout
+ * entry, no room) leaves the frame in mono (oh_split -1; counted). gxstereo=4 writes the marks as 0 and builds the
+ * start beside them at the end; when the record comes back, st_verify compares it through the register model. */
+#define OH_TAIL_BAD 0xFFFFFFFFu
+static u32 oh_tail_build(u32* w0, u32 room, u32* n1, const OhCap** lay) {
+    u32* w = w0;
+    *lay = NULL;
+    w = oh_rows_v(w, s_tm.rows_valid, s_tm.rows);
+    if (s_tm.fog_valid) {
+        w = enc_write(w, GPUREG_FOG_LUT_INDEX, 0);
+        w = enc_add(w, GPUCMD_HEADER(0, 0xF, GPUREG_FOG_LUT_DATA0), s_tm.fog, 128);
+    }
+    *n1 = (u32)(w - w0);
+    if (*n1 + 8 * 4 + 3 * 64 + 2 * OH_CAPW + 8 > room) {
+        return OH_TAIL_BAD;
+    }
+    if (s_tm.gpu_valid == 7) {
+        for (int c = 0; c < ONE_CLS; c++) {
+            const OneStore* st = &s_one_st[c];
+            u32 id = s_tm.held[c], i = (id & 0xFFFFu) - 1;
+            if (id == 0 || id >> 16 != st->gen || i >= st->used || (c == DC_TEX && st->ep[i] != s_tm.held_ep)) {
+                return OH_TAIL_BAD;
+            }
+            u32 n = st->meta[i] & 0xFFu;
+            if (n > 64) {
+                return OH_TAIL_BAD;
+            }
+            memcpy(w, st->mem + (size_t)i * st->stride, n * 4);
+            w += n;
+        }
+        if (s_tm.v_cull != 0) {
+            w = enc_write(w, GPUREG_FACECULLING_CONFIG, (u32)vsh_cull(s_tm.v_cull) & 3);
+        }
+    }
+    if (s_tm.lay_valid) {
+        u32 k[DK_LAY] = {(u32)(uintptr_t)s_tm.v_stream, s_tm.v_layout};
+        DTab* t = &s_otab[DC_LAY];
+        u32* e = dtab_find(t, k, dkey_hash(k, t->keyw));
+        if (e == NULL) {
+            return OH_TAIL_BAD;
+        }
+        if (e[1] != OH_PENDING) {
+            if (e[1] == 0 || e[1] > OH_CAPW) {
+                return OH_TAIL_BAD;
+            }
+            memcpy(w, e + 3 + t->keyw, e[1] * 4);
+            w += e[1];
+        } else if (e[4 + t->keyw] == s_om.seq) {
+            *lay = (const OhCap*)(uintptr_t)e[3 + t->keyw]; /* captured earlier in this record: its words come at the replay */
+        } else {
+            return OH_TAIL_BAD;
+        }
+    }
+    return (u32)(w - w0);
+}
+
+static void oh_tail_finish(Record* r) {
+    u32 n1 = 0;
+    const OhCap* lay = NULL;
+    u32* w0 = r->ow + r->now; /* past the record's last list: nothing executes these words, the replay copies them */
+    u32 n = r->now < s_oh_words ? oh_tail_build(w0, s_oh_words - r->now, &n1, &lay) : OH_TAIL_BAD;
+    if (n == OH_TAIL_BAD) {
+        s_gst.tail_bad++;
+        if (s_gxstereo == 3) {
+            r->oh_split = -1; /* the frame stays mono */
+        }
+        return;
+    }
+    if (s_gxstereo == 3) {
+        OhMark* m = (OhMark*)(r->data + r->oh_split + sizeof(CmdHead));
+        *m = (OhMark){m->lit, m->lcount, w0, n, n1, 1, lay};
+        s_gst.tail_built++;
+        s_gst.tail_words += n;
+    } else {
+        r->tv_w = w0;
+        r->tv_n = n;
+        r->tv_n1 = n1;
+        r->tv_lay = lay;
+        r->tv_off = r->oh_split;
+        r->tv_full = s_tm.gpu_valid == 7 && s_tm.lay_valid;
+    }
 }
 
 static void one_bad_log(int c, const char* what, const u32* ref, u32 rn, const u32* w, u32 n) {
@@ -4759,6 +4932,165 @@ static void ck_feed2(const u32* w, u32 n) {
     pica_model_feed(s_ck_mb, w, n);
 }
 
+/* gxstereo=4, game thread, when the record comes back (its captures filled): the tail start built at the record's end
+ * through the register model, against
+ *  A: the words the GPU got from the record's start to the last mark (marks' own words not applied, as the replay does),
+ *     where both know a register: the start must hold what the stream had set;
+ *  C: the old mark's words and the old tail up to its first draw packet (what the old path sends there), where both
+ *     know: the start must hold the same values; and the registers C knows and the start does not (only when the
+ *     start held blocks and a layout), minus the draw packet's own: the draw writes those itself in the new path
+ *     (the cull word and the scale rows when they changed), the log lists them. */
+static struct {
+    u32 checks, a_differ, c_differ, unres, partial, unc_rows, unc_fog, logged;
+    u32 unc[PICA_NREG / 32 + 1];
+} s_stv;
+static u32 pica_cmd_len(const u32* w) { return ((w[1] >> 20 & 0x7FFu) + 3u) & ~1u; }
+static void st_feed_cap(PicaModel* m, const OhCap* b) {
+    const OhCap* src = b->ref != NULL && b->ref->n > 0 ? b->ref : b;
+    if (src->n > 0) {
+        pica_model_feed(m, src->res, src->n);
+    } else {
+        pica_model_reset(m);
+    }
+}
+static void st_verify(Record* r) {
+    if (r->tv_w == NULL || r->tv_off < 0) {
+        return;
+    }
+    s_stv.checks++;
+    PicaModel *a = s_tv_a, *b = s_tv_b, *c = s_tv_c;
+    pica_model_reset(a);
+    pica_model_reset(b);
+    pica_model_reset(c);
+    u8* last = r->data + r->tv_off;
+    for (u8* p = r->data; p < last;) {
+        CmdHead* hd = (CmdHead*)p;
+        u8* body = p + sizeof(CmdHead);
+        p = body + hd->size;
+        switch (hd->type) {
+        case CMD_OH_CAPTURE: st_feed_cap(a, (const OhCap*)body); break;
+        case CMD_OH_WORDS: pica_model_feed(a, ((const OhWords*)body)->w, ((const OhWords*)body)->n); break;
+        case CMD_OH_MARK:
+        case CMD_OH_UNIF:
+        case CMD_STATE:
+        case CMD_STATE_DELTA:
+        case CMD_FOG:
+        case CMD_VSH_CONST:
+        case CMD_VSH_LIGHT: break;
+        default: pica_model_reset(a); break; /* citro3d writes registers the model does not see */
+        }
+    }
+    pica_model_feed(b, r->tv_w, r->tv_n1);
+    pica_model_feed(b, r->tv_w + r->tv_n1, r->tv_n - r->tv_n1);
+    int lay_ok = 1;
+    if (r->tv_lay != NULL) {
+        const OhCap* l = (const OhCap*)r->tv_lay;
+        const OhCap* src = l->ref != NULL && l->ref->n > 0 ? l->ref : l;
+        if (src->n > 0) {
+            pica_model_feed(b, src->res, src->n);
+        } else {
+            lay_ok = 0;
+            s_stv.unres++;
+        }
+    }
+    PicaModelDiff d;
+    pica_model_cmp(a, b, &d);
+    s_stv.a_differ += d.differ != 0;
+    if (d.differ != 0 && s_stv.logged < 16) {
+        s_stv.logged++;
+        PLOG_W("gxstereo=4 verify: frame %lu, tail start against the stream: %lu differ, first %04lx: stream %08lx, start %08lx",
+               (unsigned long)r->frame, (unsigned long)d.differ, (unsigned long)d.first_reg, (unsigned long)d.first_a,
+               (unsigned long)d.first_b);
+    }
+    /* C: the old mark and the old tail up to the first draw packet */
+    const OhMark* m = (const OhMark*)(last + sizeof(CmdHead));
+    pica_model_feed(c, m->w, m->n);
+    int stop = 0;
+    for (u8* p = last + sizeof(CmdHead) + ((CmdHead*)last)->size; p < r->data + r->used && !stop;) {
+        CmdHead* hd = (CmdHead*)p;
+        u8* body = p + sizeof(CmdHead);
+        p = body + hd->size;
+        if (hd->type == CMD_OH_CAPTURE) {
+            const OhCap* cp = (const OhCap*)body;
+            const OhCap* src = cp->ref != NULL && cp->ref->n > 0 ? cp->ref : cp;
+            if (src->n > 0) {
+                pica_model_feed(c, src->res, src->n);
+            } else {
+                stop = 1;
+            }
+        } else if (hd->type == CMD_OH_WORDS) {
+            const OhWords* ow = (const OhWords*)body;
+            for (u32 o = 0; o < ow->n;) {
+                u32 reg = ow->w[o + 1] & 0xFFFFu, len = pica_cmd_len(ow->w + o);
+                if (reg == GPUREG_DRAWARRAYS || reg == GPUREG_DRAWELEMENTS) {
+                    stop = 1;
+                    break;
+                }
+                pica_model_feed(c, ow->w + o, len);
+                o += len;
+            }
+        } else if (hd->type != CMD_OH_FLUSH && hd->type != CMD_OH_UNIF && hd->type != CMD_STATE &&
+                   hd->type != CMD_STATE_DELTA && hd->type != CMD_FOG && hd->type != CMD_VSH_CONST &&
+                   hd->type != CMD_VSH_LIGHT) {
+            stop = 1;
+        }
+    }
+    pica_model_cmp(c, b, &d);
+    s_stv.c_differ += d.differ != 0;
+    if (d.differ != 0 && s_stv.logged < 16) {
+        s_stv.logged++;
+        PLOG_W("gxstereo=4 verify: frame %lu, tail start against the old mark path: %lu differ, first %04lx: old %08lx, "
+               "start %08lx",
+               (unsigned long)r->frame, (unsigned long)d.differ, (unsigned long)d.first_reg, (unsigned long)d.first_a,
+               (unsigned long)d.first_b);
+    }
+    if (!r->tv_full || !lay_ok) {
+        s_stv.partial++; /* the tail resends the blocks or the layout itself: nothing to cover */
+        return;
+    }
+    u8 pkt[PICA_NREG] = {0}; /* the draw packet's registers */
+    for (u32 o = 0; o + 1 < s_tpl_n;) {
+        u32 reg = s_tpl[o + 1] & 0xFFFFu, n = (s_tpl[o + 1] >> 20 & 0x7FFu) + 1u;
+        for (u32 k = 0; k < n && reg + k < PICA_NREG; k++) {
+            pkt[reg + k] = 1;
+        }
+        o += pica_cmd_len(s_tpl + o);
+    }
+    for (u32 i = 0; i < PICA_NREG; i++) {
+        if (c->known[i] && !b->known[i] && !pkt[i]) {
+            s_stv.unc[i >> 5] |= 1u << (i & 31);
+        }
+    }
+    for (u32 i = 0; i < 96; i++) {
+        s_stv.unc_rows += c->unif_known[i] && !b->unif_known[i];
+    }
+    for (u32 i = 0; i < 128; i++) {
+        s_stv.unc_fog += c->fog_known[i] && !b->fog_known[i];
+    }
+}
+static void st_verify_log(void) {
+    char list[160];
+    u32 n = 0, pos = 0;
+    list[0] = 0;
+    for (u32 i = 0; i < PICA_NREG; i++) {
+        if (s_stv.unc[i >> 5] >> (i & 31) & 1) {
+            n++;
+            if (pos < sizeof(list) - 8) {
+                pos += (u32)snprintf(list + pos, sizeof(list) - pos, " %03lx", (unsigned long)i);
+            }
+        }
+    }
+    PLOG_I("gxstereo=4 verify: %lu tail starts checked, differing from the stream %lu, from the old mark path %lu, layout "
+           "words unresolved %lu, starts without blocks or layout %lu; registers the old path sends and the start does "
+           "not (the draw writes them itself) %lu:%s; rows %lu, fog entries %lu",
+           (unsigned long)s_stv.checks, (unsigned long)s_stv.a_differ, (unsigned long)s_stv.c_differ,
+           (unsigned long)s_stv.unres, (unsigned long)s_stv.partial, (unsigned long)n, list, (unsigned long)s_stv.unc_rows,
+           (unsigned long)s_stv.unc_fog);
+    u32 lg = s_stv.logged;
+    memset(&s_stv, 0, sizeof(s_stv));
+    s_stv.logged = lg;
+}
+
 /* gxchunk=2, game thread, when the record comes back (its captures filled): both word streams through the model. */
 static void ck_verify(Record* r) {
     if (r->ckover) {
@@ -5164,7 +5496,7 @@ static void render_record(Record* r) {
         }
     }
     if (s_gxstereo && r->present && s_onehop == 1 && split == NULL && stereo_wanted()) {
-        s_gst.mono_frames++; /* 3D on, but the record has no split (gxstereo=1: it started in mono) */
+        s_gst.mono_frames++; /* 3D on, but the record has no split (gxstereo=1/3: it started in mono, or 3: no tail start) */
     }
     int stereo = split != NULL && stereo_begin();
     s_ohv_on = s_onehop == 2 && !stereo; /* gxonehop=2: compare mono records */
@@ -5565,7 +5897,35 @@ eye_again:
                 /* the split: what the tail needs that its own words do not send */
                 const OhMark* m = (const OhMark*)body;
                 oh_apply_unif(m->lit, m->lcount);
-                cmd_put(m->w, m->n);
+                if (m->n1 > 0) {
+                    cmd_put(m->w, m->n1);
+                }
+                if (m->flush) {
+                    /* gxstereo=3: what CMD_OH_FLUSH does before the first draw of the old tail */
+                    if (!vsh_mode) {
+                        vsh_mode = 1;
+                        C3D_BoolUnifSet(GPU_VERTEX_SHADER, s_uloc_vsh, true);
+                        s_c3d_unif = 1;
+                    }
+                    c3d_flush();
+                }
+                if (m->n > m->n1) {
+                    cmd_put(m->w + m->n1, m->n - m->n1);
+                }
+                if (m->lay != NULL) {
+                    const OhCap* c = m->lay;
+                    const OhCap* src = c->ref != NULL && c->ref->n > 0 ? c->ref : c;
+                    if (src->n > 0) {
+                        cmd_put(src->res, src->n);
+                    } else {
+                        OhCap t; /* not kept: the setters run again, as at its first capture */
+                        memset(&t, 0, sizeof(t));
+                        t.cls = c->cls;
+                        t.key[0] = c->key[0];
+                        t.key[1] = c->key[1];
+                        oh_capture(&t);
+                    }
+                }
                 s_shadow_stale = 1;
                 s_orst.marks++;
             }
@@ -5685,6 +6045,16 @@ eye_again:
                        s_gxstereo, (unsigned long)s_gst.st_frames, (unsigned long)s_gst.late,
                        (unsigned long)s_gst.mono_frames, (unsigned long)s_gst.mono_recs, (unsigned long)s_gst.marks,
                        s_gxstereo == 2 ? " by gxstereo=1" : "", (unsigned long)s_gst.skipped);
+                if (s_gxstereo >= 3) {
+                    PLOG_I("gxstereo=%d tail start: marks left empty %lu, written in full (a block with no id) %lu, starts "
+                           "built %lu (%lu words), not buildable %lu%s",
+                           s_gxstereo, (unsigned long)s_gst.tail_marks, (unsigned long)s_gst.nodefer,
+                           (unsigned long)s_gst.tail_built, (unsigned long)s_gst.tail_words, (unsigned long)s_gst.tail_bad,
+                           s_gxstereo == 3 ? " (each one a mono frame)" : "");
+                    if (s_gxstereo == 4) {
+                        st_verify_log();
+                    }
+                }
                 memset(&s_gst, 0, sizeof(s_gst));
             }
         }
@@ -6341,16 +6711,32 @@ void plat_gpu_init(void) {
         s_immfl = 0;
     }
     s_gxstereo = plat_switch_int("gxstereo", 0);
-    if (s_gxstereo < 0 || s_gxstereo > 2) {
+    if (s_gxstereo < 0 || s_gxstereo > 4) {
         s_gxstereo = 0;
     }
+    if (s_gxstereo >= 3 && s_one != 1) {
+        PLOG_W("gxstereo=%d: 1 (the tail start needs gxone=1)", s_gxstereo);
+        s_gxstereo = 1;
+    }
+    if (s_gxstereo == 4 && (s_tv_a = malloc(sizeof(PicaModel))) != NULL && (s_tv_b = malloc(sizeof(PicaModel))) != NULL &&
+        (s_tv_c = malloc(sizeof(PicaModel))) == NULL) {
+        s_tv_a = NULL;
+    }
+    if (s_gxstereo == 4 && s_tv_a == NULL) {
+        PLOG_W("gxstereo=4: 1 (no memory for the register models)");
+        s_gxstereo = 1;
+    }
+    s_oh_markw = s_gxstereo >= 3 ? 640u + 3u * 64u + 2u * OH_CAPW + 64u : 640u;
     if (s_gxstereo && s_onehop != 1) {
         PLOG_W("gxstereo: off (it needs gxonehop=1, gxone=1 or gxchunk)");
         s_gxstereo = 0;
     }
     if (s_gxstereo) {
         PLOG_I("gxstereo=%d: stereo marks %s", s_gxstereo,
-               s_gxstereo == 1 ? "only in records started with 3D on" : "as gxstereo=0, counting what gxstereo=1 leaves out");
+               s_gxstereo == 2   ? "as gxstereo=0, counting what gxstereo=1 leaves out"
+               : s_gxstereo == 3 ? "only in records started with 3D on, empty except the last (its tail start is written at the record's end)"
+               : s_gxstereo == 4 ? "as gxstereo=1; the tail start is built beside and compared through the register model"
+                                 : "only in records started with 3D on");
     }
     if (s_immfl) {
         PLOG_I("gximmfl=%d: immediate draws straight into the frame list%s", s_immfl,

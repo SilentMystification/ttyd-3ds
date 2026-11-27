@@ -130,3 +130,73 @@ uint32_t pica_enc_list_end(uint32_t* out, uint32_t n_before, int fb_flush) {
     }
     return (uint32_t)(w - out);
 }
+
+/* ---- command-buffer calls (pica_enc.h; the gpuprobe cases cb_call*: lb_call, lb_ret) ---- */
+#define R_FACECULL 0x040u
+#define R_CB_SIZE0 0x238u /* SIZE1 0x239, ADDR0 0x23A, ADDR1 0x23B */
+#define R_CB_JUMP0 0x23Cu
+#define R_CB_JUMP1 0x23Du
+
+uint32_t pica_enc_call(uint32_t* out, uint32_t out_phys, uint32_t chunk_phys, uint32_t chunk_bytes, uint32_t* size0) {
+    uint32_t* w = out;
+    w = put(w, 0xF, R_CB_SIZE0 + 1, chunk_bytes >> 3);
+    w = put(w, 0xF, R_CB_SIZE0 + 3, chunk_phys >> 3);
+    *size0 = (uint32_t)(w - out);
+    w = put(w, 0xF, R_CB_SIZE0, 0);
+    uint32_t* a0 = w;
+    w = put(w, 0xF, R_CB_SIZE0 + 2, 0);
+    if (((out_phys >> 2) + (uint32_t)(w - out) + 2) & 3u) {
+        w = put(w, 0, R_FACECULL, 0); /* JUMP1 ends a 16-byte block */
+    }
+    w = put(w, 0xF, R_CB_JUMP1, 1);
+    *a0 = (out_phys + (uint32_t)(w - out) * 4u) >> 3;
+    return (uint32_t)(w - out);
+}
+
+uint32_t pica_enc_ret(uint32_t* out) {
+    uint32_t* w = put(out, 0, R_FACECULL, 0);
+    put(w, 0xF, R_CB_JUMP0, 1);
+    return PICA_RET_WORDS;
+}
+
+uint32_t pica_call_parse(const uint32_t* w, uint32_t n, PicaCall* c) {
+    c->set = 0;
+    for (uint32_t i = 0; i + 2 <= n; i += 2) {
+        uint32_t v = w[i], h = w[i + 1], reg = h & 0xFFFFu, mask = (h >> 16) & 0xFu;
+        if ((h & 0x7FF00000u) != 0) {
+            return 0; /* a burst */
+        }
+        if (reg == R_FACECULL && mask == 0) {
+            continue;
+        }
+        if (mask != 0xFu) {
+            return 0;
+        }
+        if (reg >= R_CB_SIZE0 && reg < R_CB_JUMP0) {
+            uint32_t k = reg - R_CB_SIZE0; /* 0 size0, 1 size1, 2 addr0, 3 addr1 */
+            if (k < 2) {
+                c->size[k] = v;
+            } else {
+                c->addr[k - 2] = v;
+            }
+            c->set |= 1u << k;
+        } else if (reg == R_CB_JUMP1) {
+            return i + 2;
+        } else {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+int pica_ret_check(const uint32_t* w, uint32_t n) {
+    if (n < 2 || (n & 1u)) {
+        return 0;
+    }
+    for (uint32_t i = 0; i + 2 < n; i += 2) {
+        if (w[i + 1] != HDR(0, 0, R_FACECULL)) {
+            return 0;
+        }
+    }
+    return w[n - 1] == HDR(0, 0xF, R_CB_JUMP0);
+}

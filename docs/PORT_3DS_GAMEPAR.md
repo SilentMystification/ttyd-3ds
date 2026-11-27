@@ -1,6 +1,6 @@
 # Game subsystems across cores (gamepar)
 
-Status: 2026-11-27, Azahar only. Owner decision of 2026-11-27: run self-contained game subsystems on more cores with byte-identical results; `src/` changes only under `TARGET_PORT`; the render thread may move to core 1 (`gpucore=1`), core 2 keeps the translator and the job worker. Steps 0, 1, 2b and 3 are built. Steps 4 (sort) and 5 (matrix subtrees) are open. Every switch is off by default.
+Status: 2026-11-27, Azahar only. Owner decision of 2026-11-27: run self-contained game subsystems on more cores with byte-identical results; `src/` changes only under `TARGET_PORT`; the render thread may move to core 1 (`gpucore=1`), core 2 keeps the translator and the job worker. Steps 0, 1, 2b and 3 are built and measured; 2026-11-28: step 3 made leaner and step 6 (`animprejob`) built, both not measured yet (see "Measurement runs"). Steps 4 (sort) and 5 (matrix subtrees) are open. Every switch is off by default.
 
 ## Switches
 
@@ -16,6 +16,9 @@ Status: 2026-11-27, Azahar only. Owner decision of 2026-11-27: run self-containe
 | `mapdispjob=1` | Step 3. mapDisp in phases with the per-object outcomes in parallel (`src/driver/mapdrv.c`) |
 | `mapdispjob=2` | As 1, and the original loop also runs; its dispEntry records and screen rectangles are compared with phase B's (`[MAPDISPJOB]` lines) |
 | `mapdispgrain=N` | Smallest chunk of objects (default 32; rounded up to a power of two, at most 64 chunks) |
+| `animprejob=1` | Step 6. Early pose evaluation on job worker 0, reused by the game's `animPoseMain` call when the key matches (`src/driver/animdrv.c`) |
+| `animprejob=2` | As 1, and each reuse restores the backup, runs the call and compares its scalars and buffers with the worker's (`[ANIMPREJOB]` lines) |
+| `animprewin=W` | 0 (default): the window is `camDraw` (field characters, drawn by `npcDisp`); 1: from `marioStMain` to the end of `camDraw` (also battle units, which `btlDispMain` evaluates in the game logic) |
 
 ## Step 0: counters
 
@@ -50,7 +53,36 @@ Gates: `jobcheck=1` split conversion runs identical to inline in every run; dete
 
 A: every entry's matrices (mapReCalcMatrix as the loop calls it; each entry's tree is separate, nothing reads another entry's matrices). P: each object's outcome through `plat_job_pfor_dyn`: the loop body's tests and float maths in the same order (the double-transformed corner kept), 8 bytes per object (what, mode, z), written sequentially per chunk. B: in object order, the screenRect clears and the dispEntry calls, so dispEntry order (fsort tie-breaks) is the loop's. Jobs call no GX, heap, rand or OS.
 
+Leaner phases (2026-11-28, after the first timings below): P writes only the objects with something to do (8 bytes: index, what, mode, z), packed from the first slot of their chunk, and a 16-bit count per chunk; B walks the chunks in order and only their listed objects. A culled or skipped object costs one test pass in P and nothing in B (before: an 8-byte write in P, a read and a branch in B, for each of the 1122-1303 objects in gor_01 and pik_00, of which 131-297 make a dispEntry). A range call that holds several chunks (`jobs=0`, one-chunk loops) splits them itself, so the lists are the same in every case. `[MAPDISPJOB]` lines add the listed count. Not measured yet (owner rule 2026-11-28: one integration build).
+
 `mapdispjob=2` (phase B's dispEntry records and rectangles saved and undone, the loop run, both compared field by field; chunks taken over included): 0 mismatches in gor_01 (838 calls, 37 chunks taken over with `jobtakeover=50`), pik_00 (838, 56), usu_00 (838, 27), battle (838, 32), with `gpucore=1 gxthread=2` too, and in the tik (3478 calls) and jin (2398) sweeps.
+
+## Step 6: early pose evaluation (`animprejob`)
+
+Built 2026-11-28, not measured yet. `animPoseMain` (US/JP/EU body, `src/driver/animdrv.c`) becomes `portAnimPoseMainBody(poseId, slot)` under `TARGET_PORT`, behind a wrapper `animPoseMain`; the GameCube source is unchanged (matching build 100%).
+
+- Window: `animprewin=0` from the start to the end of `camDraw` (NPCs evaluate in `npcDisp*`); `animprewin=1` from the start of `marioStMain` to the end of `camDraw` (battle units evaluate in `btlDispMain`, inside `battleMain`, so only this window reaches them). The game's calls in a window are recorded (at most 64 poses) for the next window.
+- At the window's start the recorded poses that still qualify (in use, no paper overlay, not a shared paper pose, file and animation valid) get a slot: key snapshot, backup area, state PENDING; one ring job on worker 0 takes the slots in order (compare-and-swap PENDING to RUNNING), saves the scalars it writes (`rawFrame` .. `lastFrameTime`, `scaleZFlip`, `loopTime`, `curKeyValue`), runs the body in place and marks DONE. The body saves the accumulation buffers just before it accumulates keyframes (`lastFrameZero` changed) and the output arrays and nodes just before it writes them.
+- The game's call: PENDING, the game takes the slot (CANCELLED) and runs the call itself; RUNNING, it waits; DONE, it builds the key again: file data and animation pointers, `renderFieldTime`, `renderTime`, `localTime`, flags, type flags, type, file, animation, paper id, `localTimeRate`, `rotationY`, the CAMERA_3D at/pos x and z (paper turn) and the ten buffer pointers, plus `useFloatScratch` 0 and the post-run `lastFrameZero`/`lastFrameTime`. Equal: the result stands (the call only does `OSInitFastCast`, as the body would). Different: the backup is restored and the call runs.
+- Settle: every other driver function that reads or writes a pose (time, animation, paper and effect setters, `animPoseGetLoopTimes`, `animPoseGetPeraEnd`, `animPoseGetAnimPosePtr`, the draw functions, release, world position/matrix evaluation, Vivian) first settles that pose and its paper pose (wait if running, restore the backup); `animPoseRefresh` and `animPoseAutoRelease` settle all. The window's end restores every pose the game did not evaluate. So the game never sees a pose the original order of calls would not give it, also for a pose it skips this frame (off screen, culled).
+- In a job the body skips `OSInitFastCast` (GQR5 is game-thread state: `hitdrv.c` and `effdrv.c` scale it) and never uses the float scratch; it reads the S8 conversion (`port_gqr[4]`), which only `OSInitFastCast` writes, so the window opens only once it holds the S8 value.
+- `animprejob=2`: on each reuse, the worker's result (scalars, accumulation buffers, outputs) is kept, the backup restored, the body run as the game runs it and both compared (`[ANIMPREJOB]` mismatch warnings by field group); the game keeps the call's result.
+- Not covered: code outside the driver that reads a pose's evaluated fields directly through a pointer it kept from before the window (none found in `src/`; `evt_mobj.c` reads only `flags`). The recorder snapshots small vertex arrays at record time; a span too large for the snapshot is read live by the translator, as before (the early run writes a pose's arrays at the window's start, the original at its draw call).
+- Hardware fit: one ring submit per window; slot states are words (atomics, no system call); the key is about 100 bytes compared once per call; the backups are sequential copies made on the worker; no doubles added (the paper turn's `atan2` is the game's).
+- `[ANIMPREJOB]` lines every 120 frames: windows, poses submitted and skipped, hits, key misses, settled by an access, not evaluated by the game, taken by the game before the worker, waits (count, us), compared, mismatches.
+
+## Job worker 0 under C3 (`jobprio`)
+
+With C3 (`gxthread=2`) the translator runs on core 2 at 0x2F, above worker 0 (0x30), so worker 0 ran 0 chunks there. `jobprio=0x2E` puts it above the translator; with `gpucore=1` the render thread (0x2E, `plat/gpu.c`) is on core 1, so core 2 holds the translator and worker 0 only. The first runs (table below, `+ jobprio=0x2E`) showed no gain for mapdispjob alone. animprejob depends on worker 0 (ring jobs run only there): under C3 without `jobprio=0x2E` the game takes most slots itself (`taken by the game before the worker`), which costs it nothing but gains nothing. To measure (ready, not run: owner rule 2026-11-28), see "Measurement runs" below.
+
+## Measurement runs (2026-11-28, for the integration build)
+
+C3 as below; scenes gor_01, pik_00, usu_00, battle. Pass conditions in brackets.
+
+1. Verify, dev build: C3 `gpucore=1 jobprio=0x2E jobw1=1 mapnameidx=1 mapdispjob=2 animprejob=2 gamecnt=120`, frames to 840, each scene, and `animprewin=1` for battle and gor_01 [`[MAPDISPJOB]` mismatches 0, `[ANIMPREJOB]` mismatches 0, no `mismatch` warnings; `[ANIMPREJOB]` hits > 0 in gor_01 and pik_00 (window 0) and battle (window 1)]. Same with `jobtakeover=50` once (chunks taken over > 0) [0 mismatches]. map_sweep `--area tik` with `mapdispjob=2 animprejob=2` [all maps ok, 0 mismatches].
+2. Identity: determ_ab.py shots 780-785, C3 `gpucore=1` vs C3 `gpucore=1 jobprio=0x2E jobw1=1 mapnameidx=1 mapdispjob=1 animprejob=1` (and `animprewin=1` in battle) [6/6 byte-identical per scene]; gw_diff gor_01 1600-frame padscript, same pair [all records equal].
+3. Timing, release: `gx_perf_ab.py --repeat 2 --scenes gor_01,pik_00,usu_00,battle`, A = C3 `gpucore=1 jobprio=0x2E jobw1=1 mapnameidx=1`, B = A + `mapdispjob=1`; then B vs B + `animprejob=1`; then battle B + `animprejob=1 animprewin=1` [frame/c0 per scene; mapDisp us per frame from `gamecnt=120` in a release run: phases below the original loop's 930-1130 (gor_01) and 1530-1590 (pik_00)].
+4. `jobprio`: `gx_perf_ab.py --repeat 2`, A = C3 `gpucore=1 jobw1=1 mapnameidx=1 mapdispjob=1 animprejob=1`, B = A + `jobprio=0x2E` [render column (core 1) and transl column unchanged within 0.5 ms; `[ANIMPREJOB]` "taken by the game before the worker" falls with B; `jobstats=120` chunks_w0 > 0 with B].
 
 ## Identity
 

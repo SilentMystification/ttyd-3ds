@@ -5,6 +5,10 @@
 #include "port_addr.h"
 #include "port_formats.h"
 #include "port3ds/gamepar.h"
+#include "plat/job.h"
+#include "plat/plat.h"
+#include <stddef.h>
+#include <stdlib.h>
 #endif
 #include "driver/animdrv.h"
 #include <dolphin/os/OSFastCast.h>
@@ -3217,6 +3221,25 @@ void* vivihimoData[4] = {
 #endif
 /** Points at the animation driver's work (files, textures, pose pool, scratch buffers). */
 static AnimationWork* wp = &work;
+#ifdef TARGET_PORT
+// animprejob (see portAnimPreBegin): 1 while early pose evaluations may be outstanding; then every driver access to a
+// pose first settles it (waits for the worker, restores the pose's backup).
+static int port_apj_live;
+static void portAnimPreSettle(s32 poseId);
+static void portAnimPreSettleAll(void);
+#define PORT_APJ_SETTLE(id)            \
+    do {                               \
+        if (port_apj_live) {           \
+            portAnimPreSettle(id);     \
+        }                              \
+    } while (0)
+#define PORT_APJ_SETTLE_ALL()          \
+    do {                               \
+        if (port_apj_live) {           \
+            portAnimPreSettleAll();    \
+        }                              \
+    } while (0)
+#endif
 
 //.sbss
 Mtx* g_modeling_mtx;
@@ -3381,6 +3404,9 @@ static void animPose_AllocBuffer(AnimationPose* pose) {
 
 /** heavily inlined */
 void animPoseRefresh(void) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE_ALL();
+#endif
     int i;
 
     initTestHeap(); // inline
@@ -3651,16 +3677,25 @@ BOOL animEffectAsync(const char* animName, u32 group) {
 
 /** Turns on pose poseId's paper turning (the flat character flips to face its new direction). */
 void animPosePeraOn(s32 poseId) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     wp->poses[poseId].flags |= ANIM_POSE_FLAG_PERA;
 }
 
 /** Turns off pose poseId's paper turning. */
 void animPosePeraOff(s32 poseId) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     wp->poses[poseId].flags &= ~ANIM_POSE_FLAG_PERA;
 }
 
 /** Turns on paper turning for pose poseId's paper overlay pose, copying the pose's current turn angles to it. */
 void animPosePaperPeraOn(s32 poseId) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* dst = &wp->poses[wp->poses[poseId].paperId];
     AnimationPose* src = &wp->poses[poseId];
 
@@ -3672,11 +3707,17 @@ void animPosePaperPeraOn(s32 poseId) {
 
 /** Turns off paper turning for pose poseId's paper overlay pose. */
 void animPosePaperPeraOff(s32 poseId) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     wp->poses[wp->poses[poseId].paperId].flags &= ~ANIM_POSE_FLAG_PERA;
 }
 
 /** Sets how fast pose poseId's animation plays (1.0 normal speed). */
 void animPoseSetLocalTimeRate(s32 poseId, f32 localTimeRate) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* pose = &wp->poses[poseId];
     pose->localTimeRate = localTimeRate;
 }
@@ -3686,6 +3727,9 @@ void animPoseSetLocalTimeRate(s32 poseId, f32 localTimeRate) {
  * and its own paper overlay's too.
  */
 void animPoseSetLocalTime(s32 poseId, f32 localTimeFrames) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose *pose, *pera;
 
     pose = &wp->poses[poseId];
@@ -3701,6 +3745,9 @@ void animPoseSetLocalTime(s32 poseId, f32 localTimeFrames) {
 
 /** Sets the time pose poseId's animation counts from, in animTimeGetTime milliseconds. */
 void animPoseSetStartTime(s32 poseId, OSTime startTime) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* pose = &wp->poses[poseId];
     pose->localTime = startTime;
 }
@@ -3742,6 +3789,9 @@ inline s32 animPoseGetAnimIdx(AnimationPoseData* data, const char* name) {
  * with reset FALSE nothing happens if it already plays that animation.
  */
 void animPoseSetAnim(s32 poseId, const char* animName, BOOL reset) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* pose;
     s32 animId;
 
@@ -3784,6 +3834,9 @@ s32 animPaperPoseGetId(const char* animName, s32 group) {
  * paper overlay; NULL detaches it. someflag turns on caching of the overlay's screen rectangle.
  */
 void animPoseSetPaperAnimGroup(s32 poseId, const char* animName, BOOL someflag) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* pose = animPoseGetAnimPosePtr(poseId);
 
     if (!animName) {
@@ -3812,6 +3865,9 @@ void animPoseSetPaperAnimGroup(s32 poseId, const char* animName, BOOL someflag) 
  * an overlay of its own (not shared) is evaluated at once.
  */
 void animPoseSetPaperAnim(s32 poseId, const char* animName, BOOL reset) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* pose = animPoseGetAnimPosePtr(poseId);
     AnimationPoseData* data;
     s32 id;
@@ -3851,6 +3907,9 @@ inline s32 animEffectPoseEntry(const char* animName, s32 group) {
  * Does nothing if that overlay is already attached with the same someflag (screen rectangle caching).
  */
 void animPoseSetEffect(s32 poseId, const char* animName, BOOL someflag) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* paper;
     AnimationPose* pose = animPoseGetAnimPosePtr(poseId);
 
@@ -3885,6 +3944,9 @@ void animPoseSetEffect(s32 poseId, const char* animName, BOOL someflag) {
 
 /** Plays animation animName on pose poseId's paper overlay, if it has one. */
 void animPoseSetEffectAnim(s32 poseId, const char* animName, BOOL reset) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* pose = &wp->poses[poseId];
 
     if (pose->paperId != -1) {
@@ -3914,6 +3976,9 @@ f32 animPoseGetHeight(s32 poseId) {
 
 /** How many times pose poseId's current animation has looped (fractional). */
 f32 animPoseGetLoopTimes(s32 id) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(id);
+#endif
     AnimationPose* pose = &wp->poses[id];
     return pose->loopTime;
 }
@@ -3923,6 +3988,9 @@ f32 animPoseGetLoopTimes(s32 id) {
  * TRUE also when turning is off.
  */
 BOOL animPoseGetPeraEnd(s32 poseId) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* pose = &wp->poses[poseId];
 
     if (!(pose->flags & ANIM_POSE_FLAG_PERA)) {
@@ -4374,6 +4442,506 @@ void animPoseMain(s32 poseId) {
     }
 }
 #else
+#ifdef TARGET_PORT
+// animprejob (port3ds/include/port3ds/gamepar.h, docs/PORT_3DS_GAMEPAR.md step 6). At the window's start the poses
+// the previous window evaluated are evaluated again early, in place, on job worker 0 (one ring job), each with a
+// backup of what it writes. The game's own animPoseMain call then reuses the result when the inputs (the key) are
+// the ones the worker used; any other access to the pose through the driver first undoes the early run (settle:
+// wait for it, restore the backup), and so does the window's end for a pose the game did not evaluate. The pose
+// state the game sees is the state the original order of calls gives. Not taken: poses with a paper overlay
+// (the recursive call), shared paper poses and calls with the float scratch on (wp->vtxArrayPos is shared).
+// The worker skips OSInitFastCast (GQR5 is game-thread state: hitdrv and effdrv scale it); a hit sets it as the
+// call would. Hardware fit: the key is ~100 bytes compared once per call; the job is one ring submit per window;
+// a slot's state is one word (atomics, no system call); backups are sequential copies on the worker.
+
+#define APJ_MAX 64
+
+typedef struct {
+    const void* data; // the pose's file data and animation
+    const void* anim;
+    OSTime renderFieldTime;
+    OSTime renderTime;
+    OSTime localTime;
+    u32 flags;
+    s32 typeFlags, type, fileId, animId, paperId;
+    f32 localTimeRate, rotationY;
+    f32 cam[4]; // CAMERA_3D at.x, at.z, pos.x, pos.z (the paper turn)
+    void* bufs[10];
+} PortAnimKey;
+
+enum { APJ_FREE, APJ_PENDING, APJ_RUNNING, APJ_DONE, APJ_CANCELLED, APJ_SETTLED };
+
+#define APJ_SCAL_OFF offsetof(AnimationPose, rawFrame)
+#define APJ_SCAL_LEN (offsetof(AnimationPose, lastFrameTime) + sizeof(f32) - APJ_SCAL_OFF) // rawFrame .. lastFrameTime
+#define APJ_SAVED_ACCUM 1u
+#define APJ_SAVED_OUT 2u
+
+typedef struct PortAnimSlot {
+    PortAnimKey key;
+    s32 poseId;
+    u32 state; // APJ_* (atomic)
+    u32 saved; // APJ_SAVED_*
+    s32 nA, nB, nC, nD, nE;
+    u8* bk;    // accum (bufferVtxPos, bufferVtxNrm, bufferGroupVisibility, bufferNode, bufferTexAnimEntries), then outputs
+    u8* bkOut;
+    Vec* outPos; // the output arrays the call wrote (the pose's own: the float scratch is never on in a job)
+    Vec* outNrm;
+    s32 postLfz;
+    f32 postLft;
+    u8 scal[APJ_SCAL_LEN];
+    f32 scaleZFlip, loopTime;
+    s32 curKeyValue;
+} PortAnimSlot;
+
+static int s_apj = -1;     // animprejob: 0 off, 1 on, 2 on + each hit compared with the call run again
+static int s_apj_win;      // animprewin: 0 the window is camDraw, 1 from marioStMain to the end of camDraw
+static int s_apj_open;     // a window is open: calls are recorded for the next one
+static PortAnimSlot s_apj_slots[APJ_MAX];
+static u32 s_apj_n;
+static PlatJob s_apj_job;
+static u8* s_apj_slot_of;  // per pose: slot + 1, 0 none (this window)
+static u32* s_apj_stamp;   // per pose: the window that recorded it
+static u32 s_apj_gen = 1;
+static s16 s_apj_rec[APJ_MAX];
+static u32 s_apj_rec_n;
+static u8* s_apj_arena;
+static u32 s_apj_arena_cap;
+static u8* s_apj_vbuf;     // animprejob=2: the worker's result while the call runs again
+static u32 s_apj_vbuf_cap;
+static struct {
+    u32 windows, submitted, hits, keymiss, settled, unused, cancelled, late, waits, compared, mismatches, skipped;
+    u64 wait_ticks;
+} s_apj_stats;
+static u32 s_apj_logged;
+
+static inline u32 apjSize4(u32 n) {
+    return (n + 3u) & ~3u;
+}
+
+static void portAnimPoseMainBody(s32 poseId, PortAnimSlot* port_slot);
+
+static void portAnimPreKey(PortAnimKey* k, const AnimationPose* pose) {
+    const AnimationPoseData* file = animPoseGetBaseData(pose);
+    const CameraEntry* cam = camGetPtr(CAMERA_3D);
+    memset(k, 0, sizeof(*k));
+    k->data = file;
+    k->anim = file->anims[pose->animId].data;
+    k->renderFieldTime = gp->renderFieldTime;
+    k->renderTime = gp->renderTime;
+    k->localTime = pose->localTime;
+    k->flags = pose->flags;
+    k->typeFlags = pose->typeFlags;
+    k->type = pose->type;
+    k->fileId = pose->fileId;
+    k->animId = pose->animId;
+    k->paperId = pose->paperId;
+    k->localTimeRate = pose->localTimeRate;
+    k->rotationY = pose->rotationY;
+    k->cam[0] = cam->cameraAt.x;
+    k->cam[1] = cam->cameraAt.z;
+    k->cam[2] = cam->cameraPos.x;
+    k->cam[3] = cam->cameraPos.z;
+    k->bufs[0] = pose->bufferVtxPos;
+    k->bufs[1] = pose->vtxArrayPos;
+    k->bufs[2] = pose->bufferVtxNrm;
+    k->bufs[3] = pose->vtxArrayNrm;
+    k->bufs[4] = pose->bufferGroupVisibility;
+    k->bufs[5] = pose->groupVisibility;
+    k->bufs[6] = pose->bufferNode;
+    k->bufs[7] = pose->nodes;
+    k->bufs[8] = pose->bufferTexAnimEntries;
+    k->bufs[9] = pose->texAnimEntries;
+}
+
+// Called by the body in a job: before the keyframe accumulation writes the pose's buffers.
+static void portAnimPreSaveAccum(PortAnimSlot* s, const AnimationPose* pose) {
+    u8* d = s->bk;
+    memcpy(d, pose->bufferVtxPos, (u32)s->nA * sizeof(Vec));
+    d += (u32)s->nA * sizeof(Vec);
+    memcpy(d, pose->bufferVtxNrm, (u32)s->nB * sizeof(Vec));
+    d += (u32)s->nB * sizeof(Vec);
+    memcpy(d, pose->bufferGroupVisibility, (u32)s->nC);
+    d += apjSize4((u32)s->nC);
+    memcpy(d, pose->bufferNode, (u32)s->nD * 4u);
+    d += (u32)s->nD * 4u;
+    memcpy(d, pose->bufferTexAnimEntries, (u32)s->nE * sizeof(AnimTexMtx));
+    s->saved |= APJ_SAVED_ACCUM;
+}
+
+// Called by the body in a job: before the output arrays are written.
+static void portAnimPreSaveOut(PortAnimSlot* s, const AnimationPose* pose, const u8* grpA, const u8* grpB) {
+    u8* d = s->bkOut;
+    s->outPos = (Vec*)grpA;
+    s->outNrm = (Vec*)grpB;
+    memcpy(d, grpA, (u32)s->nA * sizeof(Vec));
+    d += (u32)s->nA * sizeof(Vec);
+    memcpy(d, grpB, (u32)s->nB * sizeof(Vec));
+    d += (u32)s->nB * sizeof(Vec);
+    memcpy(d, pose->nodes, (u32)s->nD * 4u);
+    s->saved |= APJ_SAVED_OUT;
+}
+
+static void portAnimPreRestore(PortAnimSlot* s) {
+    AnimationPose* pose = &wp->poses[s->poseId];
+    memcpy((u8*)pose + APJ_SCAL_OFF, s->scal, APJ_SCAL_LEN);
+    pose->scaleZFlip = s->scaleZFlip;
+    pose->loopTime = s->loopTime;
+    pose->curKeyValue = s->curKeyValue;
+    if (s->saved & APJ_SAVED_ACCUM) {
+        const u8* d = s->bk;
+        memcpy(s->key.bufs[0], d, (u32)s->nA * sizeof(Vec));
+        d += (u32)s->nA * sizeof(Vec);
+        memcpy(s->key.bufs[2], d, (u32)s->nB * sizeof(Vec));
+        d += (u32)s->nB * sizeof(Vec);
+        memcpy(s->key.bufs[4], d, (u32)s->nC);
+        d += apjSize4((u32)s->nC);
+        memcpy(s->key.bufs[6], d, (u32)s->nD * 4u);
+        d += (u32)s->nD * 4u;
+        memcpy(s->key.bufs[8], d, (u32)s->nE * sizeof(AnimTexMtx));
+    }
+    if (s->saved & APJ_SAVED_OUT) {
+        const u8* d = s->bkOut;
+        memcpy(s->outPos, d, (u32)s->nA * sizeof(Vec));
+        d += (u32)s->nA * sizeof(Vec);
+        memcpy(s->outNrm, d, (u32)s->nB * sizeof(Vec));
+        d += (u32)s->nB * sizeof(Vec);
+        memcpy(s->key.bufs[7], d, (u32)s->nD * 4u);
+    }
+}
+
+static void portAnimPreJob(void* arg) {
+    (void)arg;
+    const u32 n = s_apj_n;
+    for (u32 i = 0; i < n; i++) {
+        PortAnimSlot* s = &s_apj_slots[i];
+        u32 expect = APJ_PENDING;
+        if (!__atomic_compare_exchange_n(&s->state, &expect, APJ_RUNNING, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            continue; // the game thread got there first
+        }
+        AnimationPose* pose = &wp->poses[s->poseId];
+        memcpy(s->scal, (const u8*)pose + APJ_SCAL_OFF, APJ_SCAL_LEN);
+        s->scaleZFlip = pose->scaleZFlip;
+        s->loopTime = pose->loopTime;
+        s->curKeyValue = pose->curKeyValue;
+        s->saved = 0;
+        portAnimPoseMainBody(s->poseId, s);
+        s->postLfz = pose->lastFrameZero;
+        s->postLft = pose->lastFrameTime;
+        __atomic_store_n(&s->state, APJ_DONE, __ATOMIC_RELEASE);
+    }
+}
+
+// Waits for a slot the worker holds; returns its state (DONE, or SETTLED after a cancel).
+static u32 portAnimPreClaim(PortAnimSlot* s) {
+    u32 st = __atomic_load_n(&s->state, __ATOMIC_ACQUIRE);
+    if (st == APJ_PENDING) {
+        u32 expect = APJ_PENDING;
+        if (__atomic_compare_exchange_n(&s->state, &expect, APJ_CANCELLED, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            s->state = APJ_SETTLED;
+            return APJ_CANCELLED;
+        }
+        st = expect;
+    }
+    if (st == APJ_RUNNING) {
+        u64 t0 = plat_ticks();
+        do {
+            __asm__ volatile("yield");
+            st = __atomic_load_n(&s->state, __ATOMIC_ACQUIRE);
+        } while (st == APJ_RUNNING);
+        s_apj_stats.waits++;
+        s_apj_stats.wait_ticks += plat_ticks() - t0;
+    }
+    return st;
+}
+
+static void portAnimPreSettleSlot(PortAnimSlot* s, int at_end) {
+    u32 st = portAnimPreClaim(s);
+    if (st == APJ_CANCELLED) {
+        s_apj_stats.cancelled++;
+    } else if (st == APJ_DONE) {
+        portAnimPreRestore(s);
+        s->state = APJ_SETTLED;
+        if (at_end) {
+            s_apj_stats.unused++;
+        } else {
+            s_apj_stats.settled++;
+        }
+    }
+}
+
+// Any driver access to pose poseId (and its paper overlay) other than its animPoseMain call.
+static void portAnimPreSettle(s32 poseId) {
+    if (poseId < 0 || poseId >= wp->totalPoses) {
+        return;
+    }
+    u32 idx = s_apj_slot_of[poseId];
+    if (idx != 0) {
+        portAnimPreSettleSlot(&s_apj_slots[idx - 1], 0);
+    }
+    s32 paper = wp->poses[poseId].paperId;
+    if (paper >= 0 && paper < wp->totalPoses && (idx = s_apj_slot_of[paper]) != 0) {
+        portAnimPreSettleSlot(&s_apj_slots[idx - 1], 0);
+    }
+}
+
+static void portAnimPreSettleAll(void) {
+    for (u32 i = 0; i < s_apj_n; i++) {
+        portAnimPreSettleSlot(&s_apj_slots[i], 0);
+    }
+}
+
+static void portAnimPreMismatch(const char* what, s32 poseId) {
+    s_apj_stats.mismatches++;
+    if (s_apj_logged < 20) {
+        s_apj_logged++;
+        PLOG_W("[ANIMPREJOB] mismatch: %s, pose %ld", what, (long)poseId);
+    }
+}
+
+// animprejob=2 on a hit: keep the worker's result, restore the backup, run the call as the game does, compare.
+static void portAnimPreVerify(PortAnimSlot* s, AnimationPose* pose) {
+    const u32 accum = (u32)s->nA * sizeof(Vec) + (u32)s->nB * sizeof(Vec) + apjSize4((u32)s->nC) + (u32)s->nD * 4u +
+                      (u32)s->nE * sizeof(AnimTexMtx);
+    const u32 out = (u32)s->nA * sizeof(Vec) + (u32)s->nB * sizeof(Vec) + (u32)s->nD * 4u;
+    const u32 need = APJ_SCAL_LEN + 12u + accum + out;
+    if (need > s_apj_vbuf_cap) {
+        u8* p = realloc(s_apj_vbuf, need);
+        if (p == NULL) {
+            OSInitFastCast();
+            return; // keep the worker's result, nothing compared
+        }
+        s_apj_vbuf = p;
+        s_apj_vbuf_cap = need;
+    }
+    // the worker's result: the scalars, the accumulation buffers and the outputs, in that order
+    u8* v = s_apj_vbuf;
+    PortAnimSlot cur = *s;
+    cur.bk = v + APJ_SCAL_LEN + 12u;
+    cur.bkOut = cur.bk + accum;
+    memcpy(v, (const u8*)pose + APJ_SCAL_OFF, APJ_SCAL_LEN);
+    memcpy(v + APJ_SCAL_LEN, &pose->scaleZFlip, 4);
+    memcpy(v + APJ_SCAL_LEN + 4, &pose->loopTime, 4);
+    memcpy(v + APJ_SCAL_LEN + 8, &pose->curKeyValue, 4);
+    portAnimPreSaveAccum(&cur, pose);
+    portAnimPreSaveOut(&cur, pose, (const u8*)pose->vtxArrayPos, (const u8*)pose->vtxArrayNrm);
+    portAnimPreRestore(s);
+    portAnimPoseMainBody(s->poseId, NULL);
+    s_apj_stats.compared++;
+    if (memcmp(v, (const u8*)pose + APJ_SCAL_OFF, APJ_SCAL_LEN) != 0 || memcmp(v + APJ_SCAL_LEN, &pose->scaleZFlip, 4) != 0 ||
+        memcmp(v + APJ_SCAL_LEN + 4, &pose->loopTime, 4) != 0 || memcmp(v + APJ_SCAL_LEN + 8, &pose->curKeyValue, 4) != 0) {
+        portAnimPreMismatch("frame, keyframe or loop values", s->poseId);
+    }
+    const u8* d = cur.bk;
+    if (memcmp(d, pose->bufferVtxPos, (u32)s->nA * sizeof(Vec)) != 0 ||
+        memcmp(d + (u32)s->nA * sizeof(Vec), pose->bufferVtxNrm, (u32)s->nB * sizeof(Vec)) != 0) {
+        portAnimPreMismatch("accumulated vertex buffers", s->poseId);
+    }
+    d += (u32)s->nA * sizeof(Vec) + (u32)s->nB * sizeof(Vec);
+    if (memcmp(d, pose->bufferGroupVisibility, (u32)s->nC) != 0) {
+        portAnimPreMismatch("group visibility", s->poseId);
+    }
+    d += apjSize4((u32)s->nC);
+    if (memcmp(d, pose->bufferNode, (u32)s->nD * 4u) != 0 ||
+        memcmp(d + (u32)s->nD * 4u, pose->bufferTexAnimEntries, (u32)s->nE * sizeof(AnimTexMtx)) != 0) {
+        portAnimPreMismatch("accumulated nodes or texture animation", s->poseId);
+    }
+    d = cur.bkOut;
+    if (memcmp(d, pose->vtxArrayPos, (u32)s->nA * sizeof(Vec)) != 0 ||
+        memcmp(d + (u32)s->nA * sizeof(Vec), pose->vtxArrayNrm, (u32)s->nB * sizeof(Vec)) != 0) {
+        portAnimPreMismatch("vertex arrays", s->poseId);
+    }
+    d += (u32)s->nA * sizeof(Vec) + (u32)s->nB * sizeof(Vec);
+    if (memcmp(d, pose->nodes, (u32)s->nD * 4u) != 0) {
+        portAnimPreMismatch("nodes", s->poseId);
+    }
+}
+
+// The game's animPoseMain call. Returns 1 when the worker's result stands (the call is done).
+static int portAnimPreTake(s32 poseId) {
+    u32 idx = s_apj_slot_of[poseId];
+    if (idx == 0) {
+        return 0;
+    }
+    PortAnimSlot* s = &s_apj_slots[idx - 1];
+    u32 st = portAnimPreClaim(s);
+    if (st == APJ_CANCELLED) {
+        s_apj_stats.late++; // the worker had not started it
+        return 0;
+    }
+    if (st != APJ_DONE) {
+        return 0; // settled: evaluated or restored before
+    }
+    AnimationPose* pose = &wp->poses[poseId];
+    PortAnimKey k;
+    portAnimPreKey(&k, pose);
+    f32 lft = pose->lastFrameTime;
+    if ((s32)wp->useFloatScratch == 0 && memcmp(&k, &s->key, sizeof(k)) == 0 && pose->lastFrameZero == s->postLfz &&
+        memcmp(&lft, &s->postLft, sizeof(lft)) == 0) {
+        s_apj_stats.hits++;
+        if (s_apj == 2) {
+            portAnimPreVerify(s, pose);
+        } else {
+            OSInitFastCast(); // as the call does
+        }
+        s->state = APJ_SETTLED;
+        return 1;
+    }
+    s_apj_stats.keymiss++;
+    portAnimPreRestore(s);
+    s->state = APJ_SETTLED;
+    return 0;
+}
+
+// The poses the last window evaluated, evaluated early on the worker. where: 0 camDraw, 1 marioStMain.
+void portAnimPreBegin(int where) {
+    if (s_apj < 0) {
+        s_apj = plat_switch_int("animprejob", 0);
+        s_apj_win = plat_switch_int("animprewin", 0);
+        if (s_apj != 0) {
+            PLOG_I("animprejob=%d: pose evaluation on job worker 0 from %s%s", s_apj, s_apj_win ? "marioStMain" : "camDraw",
+                   s_apj == 2 ? ", each hit compared with the call" : "");
+        }
+    }
+    if (s_apj <= 0 || where != s_apj_win || wp->poses == NULL) {
+        return;
+    }
+    if (s_apj_open) {
+        portAnimPreEnd(); // the last window had no camDraw
+    }
+    if (s_apj_slot_of == NULL) {
+        s_apj_slot_of = calloc((u32)wp->totalPoses, 1);
+        s_apj_stamp = calloc((u32)wp->totalPoses, sizeof(u32));
+        if (s_apj_slot_of == NULL || s_apj_stamp == NULL) {
+            s_apj = 0;
+            return;
+        }
+    }
+    s_apj_stats.windows++;
+    s_apj_open = 1;
+    u32 nrec = s_apj_rec_n;
+    s_apj_rec_n = 0;
+    s_apj_gen++;
+    if (!plat_job_enabled() || port_gqr[OS_FASTCAST_S8] != ((OS_GQR_S8 << 16) | OS_GQR_S8)) {
+        return; // record only (the S8 conversion the worker reads is set by the first OSInitFastCast)
+    }
+    // sizes and eligibility
+    u32 need = 0;
+    u32 n = 0;
+    for (u32 i = 0; i < nrec; i++) {
+        s32 id = s_apj_rec[i];
+        AnimationPose* pose = &wp->poses[id];
+        if (!(pose->flags & ANIM_POSE_FLAG_USED) || pose->paperId != -1 || (pose->typeFlags & ANIM_POSE_TYPE_SHARED_PAPER) ||
+            pose->fileId < 0 || pose->fileId >= wp->totalFiles || !wp->files[pose->fileId].active ||
+            wp->files[pose->fileId].handle == NULL || wp->files[pose->fileId].handle->data == NULL) {
+            s_apj_stats.skipped++;
+            continue;
+        }
+        const AnimationPoseData* file = animPoseGetBaseData(pose);
+        if (file == NULL || pose->animId < 0 || pose->animId >= file->animCount || file->anims[pose->animId].data == NULL) {
+            s_apj_stats.skipped++;
+            continue;
+        }
+        PortAnimSlot* s = &s_apj_slots[n++];
+        s->poseId = id;
+        s->nA = (s32)file->bufferPosNum;
+        s->nB = (s32)file->bufferNrmNum;
+        s->nC = (s32)file->bufferVisibilityNum;
+        s->nD = (s32)file->bufferNodeNum;
+        s->nE = (s32)file->bufferTexAnimNum;
+        need += 2u * ((u32)s->nA * sizeof(Vec) + (u32)s->nB * sizeof(Vec) + (u32)s->nD * 4u) + apjSize4((u32)s->nC) +
+                (u32)s->nE * sizeof(AnimTexMtx);
+    }
+    if (n == 0) {
+        return;
+    }
+    if (need > s_apj_arena_cap) {
+        u8* p = realloc(s_apj_arena, need);
+        if (p == NULL) {
+            return;
+        }
+        s_apj_arena = p;
+        s_apj_arena_cap = need;
+    }
+    u8* a = s_apj_arena;
+    for (u32 i = 0; i < n; i++) {
+        PortAnimSlot* s = &s_apj_slots[i];
+        AnimationPose* pose = &wp->poses[s->poseId];
+        s->bk = a;
+        a += (u32)s->nA * sizeof(Vec) + (u32)s->nB * sizeof(Vec) + apjSize4((u32)s->nC) + (u32)s->nD * 4u +
+             (u32)s->nE * sizeof(AnimTexMtx);
+        s->bkOut = a;
+        a += (u32)s->nA * sizeof(Vec) + (u32)s->nB * sizeof(Vec) + (u32)s->nD * 4u;
+        s->saved = 0;
+        portAnimPreKey(&s->key, pose);
+        s->state = APJ_PENDING;
+        s_apj_slot_of[s->poseId] = (u8)(i + 1);
+    }
+    s_apj_n = n;
+    s_apj_stats.submitted += n;
+    port_apj_live = 1;
+    s_apj_job = plat_job_submit(portAnimPreJob, NULL);
+}
+
+// End of camDraw: the poses the game did not evaluate are restored.
+void portAnimPreEnd(void) {
+    if (!s_apj_open) {
+        return;
+    }
+    for (u32 i = 0; i < s_apj_n; i++) {
+        portAnimPreSettleSlot(&s_apj_slots[i], 1);
+    }
+    if (s_apj_job != 0) {
+        plat_job_join(s_apj_job); // every slot is settled: a job not started yet takes none
+        s_apj_job = 0;
+    }
+    for (u32 i = 0; i < s_apj_n; i++) {
+        s_apj_slot_of[s_apj_slots[i].poseId] = 0;
+        s_apj_slots[i].state = APJ_FREE;
+    }
+    s_apj_n = 0;
+    port_apj_live = 0;
+    s_apj_open = 0;
+}
+
+static inline void portAnimPreRecord(s32 poseId) {
+    const AnimationPose* pose = &wp->poses[poseId];
+    if ((s32)wp->useFloatScratch == 0 && pose->paperId == -1 && !(pose->typeFlags & ANIM_POSE_TYPE_SHARED_PAPER) &&
+        s_apj_stamp[poseId] != s_apj_gen && s_apj_rec_n < APJ_MAX) {
+        s_apj_stamp[poseId] = s_apj_gen;
+        s_apj_rec[s_apj_rec_n++] = (s16)poseId;
+    }
+}
+
+void portAnimPreFrame(u32 frame) {
+    static u32 s_last;
+    if (s_apj <= 0 || frame % 120 != 0 || s_apj_stats.windows == s_last) {
+        return;
+    }
+    s_last = s_apj_stats.windows;
+    const u64 tpu = PLAT_TICKS_PER_SEC / 1000000u;
+    PLOG_I("[ANIMPREJOB] frame %lu: %lu windows, %lu poses submitted, %lu skipped; %lu hits, %lu key misses, %lu settled by an "
+           "access, %lu not evaluated by the game, %lu taken by the game before the worker; %lu waits %lu us; compared %lu, "
+           "mismatches %lu",
+           (unsigned long)frame, (unsigned long)s_apj_stats.windows, (unsigned long)s_apj_stats.submitted,
+           (unsigned long)s_apj_stats.skipped, (unsigned long)s_apj_stats.hits, (unsigned long)s_apj_stats.keymiss,
+           (unsigned long)s_apj_stats.settled, (unsigned long)s_apj_stats.unused, (unsigned long)s_apj_stats.cancelled,
+           (unsigned long)s_apj_stats.waits, (unsigned long)(s_apj_stats.wait_ticks / tpu), (unsigned long)s_apj_stats.compared,
+           (unsigned long)s_apj_stats.mismatches);
+}
+
+void animPoseMain(s32 poseId) {
+    if (port_gamecnt_on()) {
+        port_cnt_animpose();
+    }
+    if (s_apj_open) {
+        portAnimPreRecord(poseId);
+        if (port_apj_live && portAnimPreTake(poseId)) {
+            return;
+        }
+    }
+    portAnimPoseMainBody(poseId, NULL);
+}
+#endif
 /**
  * Advances pose poseId to the current time and evaluates its animation:
  * works out the frame (at the pose's time rate, looping by the animation's loop range and counting loops),
@@ -4381,7 +4949,11 @@ void animPoseMain(s32 poseId) {
  * texture animation and group visibility, blending towards the next keyframe.
  * A pose's own paper overlay is evaluated first.
  */
+#ifdef TARGET_PORT
+static void portAnimPoseMainBody(s32 poseId, PortAnimSlot* port_slot) {
+#else
 void animPoseMain(s32 poseId) {
+#endif
     s32 frame;
     s32 nA;
     s32 nB;
@@ -4421,17 +4993,20 @@ void animPoseMain(s32 poseId) {
     s64 ms;
     s32 paperId;
 
-#ifdef TARGET_PORT
-    if (port_gamecnt_on()) {
-        port_cnt_animpose();
-    }
-#endif
     poses = wp->poses;
     pose = &poses[poseId];
     file = animPoseGetBaseData(pose);
     anim = file->anims[pose->animId].data;
+#ifdef TARGET_PORT
+    // in a job: no OSInitFastCast (GQR5 belongs to the game thread) and never the shared float scratch
+    if (port_slot == NULL) {
+        OSInitFastCast();
+    }
+    if (port_slot == NULL && (s32)wp->useFloatScratch != 0) {
+#else
     OSInitFastCast();
     if ((s32)wp->useFloatScratch != 0) {
+#endif
         grpA = (u8*)wp->vtxArrayPos;
         grpB = (u8*)wp->vtxArrayNrm;
     } else {
@@ -4439,7 +5014,12 @@ void animPoseMain(s32 poseId) {
         grpB = (u8*)pose->vtxArrayNrm;
     }
     paperId = pose->paperId;
+#ifdef TARGET_PORT
+    // a job only runs poses without a paper overlay (a change of paperId settles the pose first)
+    if (port_slot == NULL && paperId != -1 && !(animPoseGetAnimPosePtr(paperId)->typeFlags & ANIM_POSE_TYPE_SHARED_PAPER)) {
+#else
     if (paperId != -1 && !(animPoseGetAnimPosePtr(paperId)->typeFlags & ANIM_POSE_TYPE_SHARED_PAPER)) {
+#endif
         animPoseMain(paperId);
     }
     if (anim == NULL)
@@ -4528,6 +5108,11 @@ void animPoseMain(s32 poseId) {
     nD = file->bufferNodeNum;
     nE = file->bufferTexAnimNum;
     if (pose->lastFrameZero != frame) {
+#ifdef TARGET_PORT
+        if (port_slot != NULL) {
+            portAnimPreSaveAccum(port_slot, pose);
+        }
+#endif
         if (pose->lastFrameZero == -1 || pose->lastFrameZero > frame) {
             kfEnd = &anim->keyframes[frame] + 1;
             kf = anim->keyframes;
@@ -4695,6 +5280,11 @@ void animPoseMain(s32 poseId) {
         if (pose->lastFrameTime > t)
             pose->lastFrameTime = 0.0f;
     }
+#ifdef TARGET_PORT
+    if (port_slot != NULL && frame <= nextFrame) {
+        portAnimPreSaveOut(port_slot, pose, grpA, grpB);
+    }
+#endif
     if (frame == nextFrame) {
         if (nA != 0)
             memcpy_as4(grpA, (u8*)pose->bufferVtxPos, nA * sizeof(Vec));
@@ -6038,6 +6628,9 @@ static void dispProc(s32 parentId, s32 groupId, s32 xluStage, s32 nextKeyframe, 
 
 /** Draws pose poseId at x, y, z turned by rotY degrees and scaled, for draw stage xluMode. */
 void animPoseDraw(s32 poseId, f32 x, f32 y, f32 z, f32 rotY, f32 scale, s32 xluMode) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     Mtx matrix;
 
     MTXTrans(matrix, x, y, z);
@@ -6080,6 +6673,9 @@ static inline f32 _animCamAngle(void) {
  * when seen from the back), scales it, evaluates the animation if needed and draws its group tree.
  */
 void _animPoseDrawMtx(AnimationPose* pose, Mtx matrix, s32 xluMode, f32 rotY, f32 scale) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE((s32)(pose - wp->poses));
+#endif
     Mtx result;
     Mtx tmp2;
     Mtx tmp1;
@@ -6264,6 +6860,9 @@ static inline void apdEval(AnimationPose* pose, Mtx matrix, f32 rotY, f32 scale)
  * textured with the pose's own image rendered offscreen and stretched to the overlay's shape.
  */
 void animPoseDrawMtx(s32 poseId, Mtx matrix, s32 xluMode, f32 rotY, f32 scale) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     Mtx m1;
     static Mtx mtx;
     Mtx m2;
@@ -6402,6 +7001,9 @@ inline void animPoseFileRelease(s32 fileId) {
  * normal poses free their world position and matrix buffers and their animation file.
  */
 void animPoseRelease(s32 poseId) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* pose = &wp->poses[poseId];
 
     if ((u32)pose->typeFlags != 0) {
@@ -6420,6 +7022,9 @@ void animPoseRelease(s32 poseId) {
 
 /** Drops a reference to the paper pose poseId and releases it with its file when no user is left. */
 void animPaperPoseRelease(s32 poseId) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* pose = &wp->poses[poseId];
 
     pose->references--;
@@ -6434,6 +7039,9 @@ void animPaperPoseRelease(s32 poseId) {
  * releasing the battle poses also leaves battle mode. Then reallocates the vertex buffers of the rest.
  */
 void animPoseAutoRelease(s32 type) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE_ALL();
+#endif
     int i;
     AnimationPose* pose;
 
@@ -6821,6 +7429,9 @@ void animStrippedPool(f32* p, u32 n) {
 
 /** Returns pose poseId's entry. */
 AnimationPose* animPoseGetAnimPosePtr(s32 poseId) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     return &wp->poses[poseId];
 }
 
@@ -6910,6 +7521,9 @@ static void evalProc(s32 parentId, s32 groupId) {
  * when evaluated (for attaching things to body parts), allocating the buffer from the pose's heap.
  */
 void animPoseWorldPositionEvalOn(s32 poseId) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* pose = &wp->poses[poseId];
     AnimationPoseData* data = animPoseGetBaseData(pose);
     u8 heap;
@@ -6934,6 +7548,9 @@ void animPoseWorldPositionEvalOn(s32 poseId) {
 
 /** Stops pose poseId recording group world positions and frees the buffer. */
 void L_animPoseWorldPositionEvalOff(s32 poseId) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* pose = &wp->poses[poseId];
 
     if (pose->flags & ANIM_POSE_FLAG_WORLD_POSITIONS) {
@@ -6948,6 +7565,9 @@ void L_animPoseWorldPositionEvalOff(s32 poseId) {
  * allocating the buffer from the pose's heap.
  */
 void animPoseWorldMatrixEvalOn(s32 poseId) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* pose = &wp->poses[poseId];
     AnimationPoseData* data = animPoseGetBaseData(pose);
     u8 heap;
@@ -6972,6 +7592,9 @@ void animPoseWorldMatrixEvalOn(s32 poseId) {
 
 /** Updates Vivian's (or Marilyn's or Beldam's) hair and tail chain this frame with the character's position pos. */
 void animPoseVivianMain(s32 poseId, Vec* pos) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* pose = &wp->poses[poseId];
 
     pose->flags |= ANIM_POSE_FLAG_VIVIAN;
@@ -7025,6 +7648,9 @@ inline void animPoseMainSub(AnimationPose* pose) {
  * saving and restoring the driver's current draw state around it.
  */
 void animPoseDrawShape(s32 poseId, s32 shapeId) {
+#ifdef TARGET_PORT
+    PORT_APJ_SETTLE(poseId);
+#endif
     AnimationPose* pose;
     GXTexObj* texObj0;
     GXTexObj* texObj1;

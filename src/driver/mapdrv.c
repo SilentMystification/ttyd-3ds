@@ -2424,32 +2424,41 @@ static inline BOOL mapClipTest(Vec* v) {
 #define MDO_OFF 0x4   // dispEntry of the _off callback
 #define MDO_MAIN 0x8  // dispEntry on the object's camera
 
+// One object with something to do (what != 0). Phase P writes only these, packed at the front of the
+// object's chunk; phase B walks only these (a culled object costs P its tests and nothing in B).
 typedef struct {
+    u16 k;   // object index (entry 0, then entry 1)
     u8 what; // MDO_*
     u8 mode; // render mode of the OFF and MAIN entries
-    u16 pad;
     f32 z;   // their order
 } PortMapDispOut;
+
+#define MDJ_MAX_CHUNKS 64 // plat_job_pfor_dyn's limit
 
 typedef struct {
     MapWork* wp;
     CameraEntry* camera;
-    u32 n0; // objects of entry 0
+    u32 n0;    // objects of entry 0
+    u32 shift; // chunk size 2^shift, as plat_job_pfor_dyn picks it
     PortMapDispOut* out[2]; // normal and alternate (a chunk the caller took over from a worker)
+    u16* cnt[2];            // per chunk: entries written at out[c << shift]
 } PortMapDispArg;
 
 static int s_mdj = -1; // mapdispjob: 0 off, 1 on, 2 on + compare with the loop
 static int s_mdj_grain;
 static PortMapDispOut* s_mdj_out[2];
+static u16 s_mdj_cnt[2][MDJ_MAX_CHUNKS];
 static u16 (*s_mdj_rect)[2][4]; // mapdispjob=2: screen rectangles before and after phase B
 static DispEntry* s_mdj_ents;   // mapdispjob=2: phase B's dispEntry records
 static u32 s_mdj_cap, s_mdj_ent_cap, s_mdj_ents_n;
 static struct {
-    u32 calls, objects, entries, takeovers, compared, mismatches, serial;
+    u32 calls, objects, listed, entries, takeovers, compared, mismatches, serial;
 } s_mdj_stats;
 static u32 s_mdj_logged;
 
-static void portMapDispObj(const MapEntry* entry, const MapObject* obj, const CameraEntry* camera, PortMapDispOut* o) {
+// The loop body's tests and float maths in the same order. Returns what (0: nothing to do); *mode_out and
+// *zo only when MDO_OFF or MDO_MAIN is set.
+static u32 portMapDispObj(const MapEntry* entry, const MapObject* obj, const CameraEntry* camera, u32* mode_out, f32* zo) {
     Mtx mtx;
     Vec v;
     Vec center;
@@ -2457,30 +2466,28 @@ static void portMapDispObj(const MapEntry* entry, const MapObject* obj, const Ca
     s32 mode;
     const MapFileJoint* joint;
     BOOL clipped;
+    u32 what = 0;
+    const u32 flags = obj->flags;
 
-    o->what = 0;
-    o->mode = 0;
-    o->pad = 0;
-    o->z = 0.0f;
-    if (obj->flags & MAPOBJ_FLAG_DISABLE)
-        return;
-    if ((obj->flags & MAPOBJ_FLAG_HIDE) && !(obj->flags & MAPOBJ_FLAG_OFFSCREEN))
-        return;
-    if ((obj->flags & MAPOBJ_FLAG_COLOR_ALPHA) && obj->color.a == 0)
-        return;
-    if (obj->flags & MAPOBJ_FLAG_BBOX) {
-        o->what |= MDO_CLEAR;
+    if (flags & MAPOBJ_FLAG_DISABLE)
+        return 0;
+    if ((flags & MAPOBJ_FLAG_HIDE) && !(flags & MAPOBJ_FLAG_OFFSCREEN))
+        return 0;
+    if ((flags & MAPOBJ_FLAG_COLOR_ALPHA) && obj->color.a == 0)
+        return 0;
+    if (flags & MAPOBJ_FLAG_BBOX) {
+        what = MDO_CLEAR;
     }
-    if (obj->flags & MAPOBJ_FLAG_IN_GROUP)
-        return;
-    if (!(obj->flags & MAPOBJ_FLAG_GROUP) && obj->joints->partCount < 1)
-        return;
-    if (!(obj->flags & MAPOBJ_FLAG_NO_BLEND) && (entry->flags & MAPENT_FLAG_BLEND) && entry->blend.a == 0)
-        return;
-    if (!(obj->flags & MAPOBJ_FLAG_NO_BLEND2) && (entry->flags & MAPENT_FLAG_BLEND2) && entry->blend2.a == 0)
-        return;
+    if (flags & MAPOBJ_FLAG_IN_GROUP)
+        return what;
+    if (!(flags & MAPOBJ_FLAG_GROUP) && obj->joints->partCount < 1)
+        return what;
+    if (!(flags & MAPOBJ_FLAG_NO_BLEND) && (entry->flags & MAPENT_FLAG_BLEND) && entry->blend.a == 0)
+        return what;
+    if (!(flags & MAPOBJ_FLAG_NO_BLEND2) && (entry->flags & MAPENT_FLAG_BLEND2) && entry->blend2.a == 0)
+        return what;
     PSMTXConcat(camera->view, obj->modelWorldMtx, mtx);
-    if ((obj->flags & MAPOBJ_FLAG_BBOX_CULL) && !mapClipOffFlag) {
+    if ((flags & MAPOBJ_FLAG_BBOX_CULL) && !mapClipOffFlag) {
         joint = obj->joints;
         clipped = FALSE;
         v.x = joint->bboxMax.x;
@@ -2544,7 +2551,7 @@ static void portMapDispObj(const MapEntry* entry, const MapObject* obj, const Ca
         clipped = TRUE;
     vis:
         if (clipped)
-            return;
+            return what;
     }
     PSMTXMultVec(mtx, &obj->center, &center);
     PSMTX44MultVec(camera->projection, &center, &center);
@@ -2561,30 +2568,60 @@ static void portMapDispObj(const MapEntry* entry, const MapObject* obj, const Ca
             mode = 2;
         }
     }
-    if (obj->flags & MAPOBJ_FLAG_BBOX) {
-        o->what |= MDO_BBOX;
+    if (flags & MAPOBJ_FLAG_BBOX) {
+        what |= MDO_BBOX;
     }
-    if (obj->flags & MAPOBJ_FLAG_OFFSCREEN) {
-        o->what |= MDO_OFF;
+    if (flags & MAPOBJ_FLAG_OFFSCREEN) {
+        what |= MDO_OFF;
     }
-    if (!(obj->flags & MAPOBJ_FLAG_HIDE)) {
-        o->what |= MDO_MAIN;
+    if (!(flags & MAPOBJ_FLAG_HIDE)) {
+        what |= MDO_MAIN;
     }
-    o->mode = (u8)mode;
-    o->z = z;
+    *mode_out = (u32)mode;
+    *zo = z;
+    return what;
 }
 
+// Objects [k, end) of one entry (base: the entry's first global index), listed from o on; returns the new end.
+static PortMapDispOut* portMapDispRun(const MapEntry* e, u32 base, u32 k, u32 end, const CameraEntry* camera, PortMapDispOut* o) {
+    const MapObject* obj = &e->objects[k - base];
+    for (; k < end; k++, obj++) {
+        u32 mode = 0;
+        f32 z = 0.0f;
+        u32 what = portMapDispObj(e, obj, camera, &mode, &z);
+        if (what != 0) {
+            o->k = (u16)k;
+            o->what = (u8)what;
+            o->mode = (u8)mode;
+            o->z = z;
+            o++;
+        }
+    }
+    return o;
+}
+
+// Items [begin, end), chunk by chunk (one call can hold several chunks: jobs=0 and a one-chunk loop run the
+// whole range in one call): each chunk's list is packed from its own first slot, its length in cnt[alt].
 static void portMapDispRange(void* p, u32 begin, u32 end, int alt) {
     const PortMapDispArg* a = p;
-    PortMapDispOut* out = a->out[alt];
     const MapEntry* e0 = &a->wp->entries[0];
     const MapEntry* e1 = &a->wp->entries[1];
-    for (u32 k = begin; k < end; k++) {
-        if (k < a->n0) {
-            portMapDispObj(e0, &e0->objects[k], a->camera, &out[k]);
-        } else {
-            portMapDispObj(e1, &e1->objects[k - a->n0], a->camera, &out[k]);
+    const u32 size = 1u << a->shift;
+    while (begin < end) {
+        u32 cend = (begin & ~(size - 1)) + size;
+        if (cend > end) {
+            cend = end;
         }
+        PortMapDispOut* first = &a->out[alt][begin];
+        PortMapDispOut* o = first;
+        if (begin < a->n0) {
+            o = portMapDispRun(e0, 0, begin, cend < a->n0 ? cend : a->n0, a->camera, o);
+        }
+        if (cend > a->n0) {
+            o = portMapDispRun(e1, a->n0, begin > a->n0 ? begin : a->n0, cend, a->camera, o);
+        }
+        a->cnt[alt][begin >> a->shift] = (u16)(o - first);
+        begin = cend;
     }
 }
 
@@ -2625,6 +2662,9 @@ static int portMapDispJob(MapWork* wp, CameraEntry* camera, s32* n_before, u32* 
     if (s_mdj < 0) {
         s_mdj = plat_switch_int("mapdispjob", 0);
         s_mdj_grain = plat_switch_int("mapdispgrain", 32);
+        if (s_mdj_grain < 1) {
+            s_mdj_grain = 1;
+        }
         if (s_mdj != 0) {
             PLOG_I("mapdispjob=%d: mapDisp outcomes in parallel, chunks of at least %d objects%s", s_mdj, s_mdj_grain,
                    s_mdj == 2 ? ", compared with the loop" : "");
@@ -2639,7 +2679,7 @@ static int portMapDispJob(MapWork* wp, CameraEntry* camera, s32* n_before, u32* 
     }
     u32 n0 = count > 0 && wp->entries[0].numJoints > 0 ? (u32)wp->entries[0].numJoints : 0;
     u32 n = n0 + (count > 1 && wp->entries[1].numJoints > 0 ? (u32)wp->entries[1].numJoints : 0);
-    if (!portMapDispGrow(n)) {
+    if (n > 0xFFFFu || !portMapDispGrow(n)) { // the list holds 16-bit indexes
         s_mdj_stats.serial++;
         return 0;
     }
@@ -2655,7 +2695,15 @@ static int portMapDispJob(MapWork* wp, CameraEntry* camera, s32* n_before, u32* 
             }
         }
     }
-    // P: outcomes
+    // P: the listed objects. The chunk size is plat_job_pfor_dyn's (the smallest 2^k >= grain with at most
+    // 64 chunks), computed here for the range function and checked against the shift it returns.
+    u32 shift = 0;
+    while ((1u << shift) < (u32)s_mdj_grain && shift < 31) {
+        shift++;
+    }
+    while (shift < 31 && ((n + (1u << shift) - 1) >> shift) > MDJ_MAX_CHUNKS) {
+        shift++;
+    }
     // static, not on the stack: a worker that lost a chunk to the caller may still read it after we return
     // (until the next batch, which waits for it: quiesce first, then refill)
     static PortMapDispArg arg;
@@ -2663,42 +2711,53 @@ static int portMapDispJob(MapWork* wp, CameraEntry* camera, s32* n_before, u32* 
     arg.wp = wp;
     arg.camera = camera;
     arg.n0 = n0;
+    arg.shift = shift;
     arg.out[0] = s_mdj_out[0];
     arg.out[1] = s_mdj_out[1];
-    u32 shift = 0;
-    u64 alt = plat_job_pfor_dyn(portMapDispRange, &arg, n, (u32)s_mdj_grain, &shift);
-    // B: apply in object order
+    arg.cnt[0] = s_mdj_cnt[0];
+    arg.cnt[1] = s_mdj_cnt[1];
+    u32 shift_used = shift;
+    u64 alt = plat_job_pfor_dyn(portMapDispRange, &arg, n, (u32)s_mdj_grain, &shift_used);
+    if (shift_used != shift) {
+        plat_fatal("mapdispjob: chunk shift %lu, expected %lu", (unsigned long)shift_used, (unsigned long)shift);
+    }
+    // B: the listed objects in object order
     s32 nb = entry_n;
     if (s_mdj == 2) {
         for (u32 k = 0; k < n; k++) {
             memcpy(s_mdj_rect[k][0], portMapDispObjAt(wp, n0, k)->screenRect, sizeof(s_mdj_rect[k][0]));
         }
     }
-    for (u32 k = 0; k < n; k++) {
-        const PortMapDispOut* o = &s_mdj_out[(alt >> (k >> shift)) & 1][k];
-        MapObject* obj;
-        if (o->what == 0) {
-            continue;
-        }
-        obj = portMapDispObjAt(wp, n0, k);
-        if (o->what & MDO_CLEAR) {
-            obj->screenRect[2] = 0;
-            obj->screenRect[3] = 0;
-            obj->screenRect[0] = 0;
-            obj->screenRect[1] = 0;
-        }
-        if (o->what & MDO_BBOX) {
-            dispEntry((CameraId)1, 5000.0f, 3, (DispCallback)(!(obj->flags & MAPOBJ_FLAG_GROUP) ? mapDispMapObj_bbox : mapDispMapGrp_bbox), obj);
-        }
-        if (o->what & MDO_OFF) {
-            dispEntry((CameraId)1, o->z, o->mode, (DispCallback)(!(obj->flags & MAPOBJ_FLAG_GROUP) ? mapDispMapObj_off : mapDispMapGrp_off), obj);
-        }
-        if (o->what & MDO_MAIN) {
-            dispEntry(obj->cameraId, o->z, o->mode, (DispCallback)(!(obj->flags & MAPOBJ_FLAG_GROUP) ? mapDispMapObj : mapDispMapGrp), obj);
+    u32 listed = 0;
+    const u32 nchunks = n != 0 ? ((n - 1) >> shift) + 1 : 0;
+    for (u32 c = 0; c < nchunks; c++) {
+        const u32 b = (u32)(alt >> c) & 1;
+        const PortMapDispOut* o = &s_mdj_out[b][c << shift];
+        const PortMapDispOut* oe = o + s_mdj_cnt[b][c];
+        listed += s_mdj_cnt[b][c];
+        for (; o < oe; o++) {
+            MapObject* obj = portMapDispObjAt(wp, n0, o->k);
+            const u32 what = o->what;
+            if (what & MDO_CLEAR) {
+                obj->screenRect[2] = 0;
+                obj->screenRect[3] = 0;
+                obj->screenRect[0] = 0;
+                obj->screenRect[1] = 0;
+            }
+            if (what & MDO_BBOX) {
+                dispEntry((CameraId)1, 5000.0f, 3, (DispCallback)(!(obj->flags & MAPOBJ_FLAG_GROUP) ? mapDispMapObj_bbox : mapDispMapGrp_bbox), obj);
+            }
+            if (what & MDO_OFF) {
+                dispEntry((CameraId)1, o->z, o->mode, (DispCallback)(!(obj->flags & MAPOBJ_FLAG_GROUP) ? mapDispMapObj_off : mapDispMapGrp_off), obj);
+            }
+            if (what & MDO_MAIN) {
+                dispEntry(obj->cameraId, o->z, o->mode, (DispCallback)(!(obj->flags & MAPOBJ_FLAG_GROUP) ? mapDispMapObj : mapDispMapGrp), obj);
+            }
         }
     }
     s_mdj_stats.calls++;
     s_mdj_stats.objects += n;
+    s_mdj_stats.listed += listed;
     s_mdj_stats.entries += (u32)(entry_n - nb);
     for (u64 m = alt; m != 0; m &= m - 1) {
         s_mdj_stats.takeovers++;
@@ -2769,10 +2828,10 @@ void portMapDispJobFrame(u32 frame) {
         return;
     }
     s_last = s_mdj_stats.calls;
-    PLOG_I("[MAPDISPJOB] frame %lu: %lu calls, %lu objects, %lu dispEntry, %lu chunks taken over, %lu serial; compared %lu, "
-           "mismatches %lu",
+    PLOG_I("[MAPDISPJOB] frame %lu: %lu calls, %lu objects, %lu listed, %lu dispEntry, %lu chunks taken over, %lu serial; "
+           "compared %lu, mismatches %lu",
            (unsigned long)frame, (unsigned long)s_mdj_stats.calls, (unsigned long)s_mdj_stats.objects,
-           (unsigned long)s_mdj_stats.entries, (unsigned long)s_mdj_stats.takeovers, (unsigned long)s_mdj_stats.serial,
+           (unsigned long)s_mdj_stats.listed, (unsigned long)s_mdj_stats.entries, (unsigned long)s_mdj_stats.takeovers, (unsigned long)s_mdj_stats.serial,
            (unsigned long)s_mdj_stats.compared, (unsigned long)s_mdj_stats.mismatches);
 }
 #endif

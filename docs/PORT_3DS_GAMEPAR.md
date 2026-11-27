@@ -16,6 +16,8 @@ Status: 2026-11-27, Azahar only. Owner decision of 2026-11-27: run self-containe
 | `mapdispjob=1` | Step 3. mapDisp in phases with the per-object outcomes in parallel (`src/driver/mapdrv.c`) |
 | `mapdispjob=2` | As 1, and the original loop also runs; its dispEntry records and screen rectangles are compared with phase B's (`[MAPDISPJOB]` lines) |
 | `mapdispgrain=N` | Smallest chunk of objects (default 32; rounded up to a power of two, at most 64 chunks) |
+| `sortjob=1` | Step 4. `qqsort` of n >= 256 (dispSort) sorts the two subranges after the first partition in parallel (`src/system.c`, a port copy of `fsort` with locals); the permutation is the serial one |
+| `sortjob=2` | As 1, and the serial copy sorts a copy of the input; the permutations are compared (`[SORTJOB]` lines) |
 
 ## Step 0: counters
 
@@ -51,6 +53,12 @@ Gates: `jobcheck=1` split conversion runs identical to inline in every run; dete
 A: every entry's matrices (mapReCalcMatrix as the loop calls it; each entry's tree is separate, nothing reads another entry's matrices). P: each object's outcome through `plat_job_pfor_dyn`: the loop body's tests and float maths in the same order (the double-transformed corner kept), 8 bytes per object (what, mode, z), written sequentially per chunk. B: in object order, the screenRect clears and the dispEntry calls, so dispEntry order (fsort tie-breaks) is the loop's. Jobs call no GX, heap, rand or OS.
 
 `mapdispjob=2` (phase B's dispEntry records and rectangles saved and undone, the loop run, both compared field by field; chunks taken over included): 0 mismatches in gor_01 (838 calls, 37 chunks taken over with `jobtakeover=50`), pik_00 (838, 56), usu_00 (838, 27), battle (838, 32), with `gpucore=1 gxthread=2` too, and in the tik (3478 calls) and jin (2398) sweeps.
+
+## Step 4: sortjob
+
+`fsort` (the quicksort under `qqsort`) keeps its scratch in statics, so `src/system.c` has a TARGET_PORT copy, `portFsort`, with `lo/hi/gt/tail/p` as locals and the comparator as a parameter (the game's `fsort` is unchanged and still used with `sortjob=0`). It makes the same comparisons and swaps in the same order within a range. After the first partition (n >= 256, both sides >= 32) the smaller side and the larger side are two disjoint ranges: they run as two chunks of one `plat_job_pfor_dyn` batch (the game thread takes one, a worker the other; the game thread runs both when no worker is free), so the permutation is byte-identical to the serial sort. A chunk the game thread takes over from a late worker sorts a copy of the input made before the batch (the worker may still be sorting the original); after `plat_job_pfor_quiesce` the copy is moved back. The job argument and the copy are static (see the bug note in step 2b). The comparator runs on the worker: it must only read (dispSort's reads two floats; no GX, heap, rand or OS). Sorts of n < 256 stay on the game thread (the copy with locals). `qqsort` with n == 2 (DVDMgrMain, 24 per frame) swaps the two elements directly when the first compares greater, as `fsort` does.
+
+`sortjob=2`: the serial copy sorts a copy of the input and the two tables are compared.
 
 ## Identity
 

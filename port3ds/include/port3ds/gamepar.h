@@ -59,5 +59,6 @@ void port_nameidx_frame(u32 frame);
 
 /* ---- Step 3: mapDisp in phases (src/driver/mapdrv.c) ---- */
 void portMapDispJobFrame(u32 frame); /* [MAPDISPJOB] totals every 120 frames */
+void portSortJobFrame(u32 frame);    /* [SORTJOB] totals every 120 frames (src/system.c, step 4) */
 
 #endif

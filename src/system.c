@@ -15,6 +15,9 @@
 #include "libc_decls.h"
 #ifdef TARGET_PORT
 #include "port3ds/gamepar.h"
+#include "plat/job.h"
+#include "plat/plat.h"
+#include <string.h>
 #endif
 
 #define HALF_PI 1.570796f
@@ -485,6 +488,346 @@ static void fsort(void** base, u32 n) {
     } while (n > 1);
 }
 
+#ifdef TARGET_PORT
+/* Port copy of fsort: the scratch variables are locals and the comparator is a parameter, so two threads can
+ * sort disjoint ranges at once. The same comparisons and swaps in the same order within a range as fsort, so
+ * the permutation is byte-identical. top: after the first partition, the two subranges may be sorted in
+ * parallel (sortjob). */
+typedef s32 (*PortSortCmp)(const void* a, const void* b);
+#define SORTJOB_MIN_N 256
+#define SORTJOB_MIN_SIDE 32
+
+static void portFsort(void** base, u32 n, PortSortCmp comp, int top);
+static int portSortPar(void** a, u32 na, void** b, u32 nb, PortSortCmp comp);
+
+/* The two sort tasks. A chunk the caller runs itself because a worker holds it (alt) sorts a copy of the input
+ * made before the batch: the worker may still be sorting the original, so the caller takes the copy back
+ * after plat_job_pfor_quiesce. Static: a late worker still reads it. */
+static struct {
+    void** origin; /* start of the whole table */
+    void** rng[2];
+    u32 len[2];
+    PortSortCmp comp;
+    void* copy[0xC00]; /* input copy of the ranges, at their offsets from origin */
+} s_sortpar;
+static void** s_sort_origin;
+
+static void portSortParFn(void* arg, u32 begin, u32 end, int alt) {
+    (void)arg;
+    for (u32 i = begin; i < end; i++) {
+        void** r = s_sortpar.rng[i];
+        if (alt) {
+            r = s_sortpar.copy + (r - s_sortpar.origin);
+        }
+        portFsort(r, s_sortpar.len[i], s_sortpar.comp, 0);
+    }
+}
+
+static void portFsort(void** base, u32 n, PortSortCmp comp, int top) {
+    void** lo;
+    void** hi;
+    void** gt;
+    void** tail;
+    void* p;
+    void** end;   /* r30 */
+    void** mid;   /* r29 */
+    void** start; /* r28 */
+    void** pv;    /* r27 */
+    int c;
+    int s;
+    int b;
+    int half;
+    u32 g;
+    u32 t;
+    u32 k;
+    int step;
+    u32 mask;
+
+    int first = top;
+
+    do {
+        end = &base[n - 1];
+        tail = end;
+
+        if (n == 2) {
+            if (comp(base[0], *tail) > 0) {
+                p = base[0];
+                base[0] = *tail;
+                *tail = p;
+            }
+            return;
+        }
+
+        if (n == 4) {
+            lo = base;
+            mid = tail;
+            gt = tail;
+            hi = tail - 1;
+        } else if (n < 40) {
+            mid = &base[n >> 1];
+            if (comp(base[0], *tail) > 0) {
+                if (comp(base[0], *mid) < 0) {
+                    p = *tail;
+                    *tail = *mid;
+                    *mid = base[0];
+                    base[0] = p;
+                } else if (comp(*mid, *tail) < 0) {
+                    p = base[0];
+                    base[0] = *mid;
+                    *mid = *tail;
+                    *tail = p;
+                } else {
+                    p = base[0];
+                    base[0] = *tail;
+                    *tail = p;
+                }
+            } else {
+                if (comp(base[0], *mid) > 0) {
+                    p = base[0];
+                    base[0] = *mid;
+                    *mid = p;
+                } else if (comp(*mid, *tail) > 0) {
+                    p = *mid;
+                    *mid = *tail;
+                    *tail = p;
+                }
+            }
+            if (n == 3) {
+                return;
+            }
+            lo = base + 1;
+            gt = tail;
+            hi = tail - 1;
+        } else {
+            /* bit length of n */
+            mask = 0xFFFFFFFF;
+            step = 32;
+            k = 63;
+            while (mask != 0) {
+                t = mask & n;
+                half = step >> 1;
+                mask &= mask << ((half == 0) ? 1 : half);
+                if (t != 0)
+                    k -= step;
+                if (t == 0)
+                    mask >>= step;
+                step = half;
+            }
+            b = (k > 32) ? 0 : 32 - k;
+
+            /* s ~ sqrt(n) */
+            if (b & 1) {
+                s = 1 << (b >> 1);
+            } else {
+                s = n >> (b >> 1);
+            }
+
+            g = n / s;
+            mid = &base[(s / 2) * g];
+            tail = &base[(s - 1) * g];
+            start = base;
+
+            /* quickselect the median of the strided sample to *mid */
+            for (;;) {
+                lo = start;
+                gt = tail;
+                hi = tail;
+                pv = &start[(tail - start) / 2 / g * g];
+
+            sel_scan:
+                while (hi >= lo) {
+                    c = comp(*hi, *pv);
+                    if (c > 0)
+                        gt = hi;
+                    else if (c < 0)
+                        goto sel_lscan;
+                    hi -= g;
+                }
+                goto sel_done;
+            sel_lscan:
+                while (lo < hi) {
+                    c = comp(*lo, *pv);
+                    if (c >= 0) {
+                        p = *lo;
+                        *lo = *hi;
+                        *hi = p;
+                        if (c > 0)
+                            gt = hi;
+                        if (!(c > 0))
+                            pv = hi;
+                        lo += g;
+                        hi -= g;
+                        goto sel_scan;
+                    }
+                    lo += g;
+                }
+            sel_done:
+                if (gt < pv) {
+                    p = *gt;
+                    *gt = *pv;
+                    *pv = p;
+                    gt += g;
+                }
+
+                if (gt <= mid)
+                    start = gt;
+                else if (hi >= mid)
+                    tail = hi;
+                else
+                    break;
+
+                if (start >= tail)
+                    break;
+            }
+
+            lo = base;
+            tail = end;
+            gt = end;
+            hi = end;
+        }
+
+        /* main partition around *mid */
+    scan:
+        while (hi >= lo) {
+            c = comp(*hi, *mid);
+            if (c > 0)
+                gt = hi;
+            else if (c < 0)
+                goto lscan;
+            hi--;
+        }
+        goto done;
+    lscan:
+        while (lo < hi) {
+            c = comp(*lo, *mid);
+            if (c >= 0) {
+                p = *lo;
+                *lo = *hi;
+                *hi = p;
+                if (c > 0)
+                    gt = hi;
+                if (!(c > 0))
+                    mid = hi;
+                lo++;
+                hi--;
+                goto scan;
+            }
+            lo++;
+        }
+    done:
+        if (gt < mid) {
+            p = *gt;
+            *gt++ = *mid;
+            *mid = p;
+        }
+
+        /* recurse smaller side, iterate larger side */
+        if (hi - base < tail - gt) {
+            lo = hi;
+            hi = base;
+            base = gt;
+        } else {
+            lo = tail;
+            tail = hi;
+            hi = gt;
+        }
+        n = (tail - base) + 1;
+        if (first) {
+            first = 0;
+            if (lo > hi && (u32)((lo - hi) + 1) >= SORTJOB_MIN_SIDE && n >= SORTJOB_MIN_SIDE &&
+                portSortPar(hi, (lo - hi) + 1, base, n, comp)) {
+                return;
+            }
+        }
+        if (lo > hi) {
+            portFsort(hi, (lo - hi) + 1, comp, 0);
+        }
+    } while (n > 1);
+}
+
+/* sortjob (docs/PORT_3DS_GAMEPAR.md, step 4): -1 unread, 0 the game's fsort, 1 the copy with the two
+ * subranges after the first partition sorted in parallel (n >= 256), 2 also the serial copy on a copy of the
+ * input, permutations compared. */
+static int s_sortjob = -1;
+static struct {
+    u32 calls, par, takeovers, compared, mismatches;
+} s_sortjob_stats;
+static void* s_sort_chk[0xC00];
+
+static void sortjobInit(void) {
+    s_sortjob = plat_switch_int("sortjob", 0);
+    if (s_sortjob != 0) {
+        PLOG_I("sortjob=%d: sorts of n >= %d in two parallel halves%s", s_sortjob, SORTJOB_MIN_N,
+               s_sortjob == 2 ? ", compared with the serial sort" : "");
+    }
+}
+
+void portSortJobFrame(u32 frame) {
+    static u32 s_last;
+    if (s_sortjob <= 0 || frame % 120 != 0 || s_sortjob_stats.calls == s_last) {
+        return;
+    }
+    s_last = s_sortjob_stats.calls;
+    PLOG_I("[SORTJOB] frame %lu: %lu big sorts, %lu parallel, %lu with a chunk taken over; compared %lu, mismatches %lu",
+           (unsigned long)frame, (unsigned long)s_sortjob_stats.calls, (unsigned long)s_sortjob_stats.par,
+           (unsigned long)s_sortjob_stats.takeovers, (unsigned long)s_sortjob_stats.compared,
+           (unsigned long)s_sortjob_stats.mismatches);
+}
+
+static int portSortPar(void** a, u32 na, void** b, u32 nb, PortSortCmp comp) {
+    uint64_t mask;
+    uint32_t shift = 0;
+    void** o = s_sort_origin;
+
+    plat_job_pfor_quiesce();
+    s_sortpar.origin = o;
+    s_sortpar.rng[0] = b; /* the larger side first */
+    s_sortpar.len[0] = nb;
+    s_sortpar.rng[1] = a;
+    s_sortpar.len[1] = na;
+    s_sortpar.comp = comp;
+    memcpy(s_sortpar.copy + (b - o), b, nb * sizeof(void*));
+    memcpy(s_sortpar.copy + (a - o), a, na * sizeof(void*));
+    mask = plat_job_pfor_dyn(portSortParFn, &s_sortpar, 2, 1, &shift);
+    s_sortjob_stats.par++;
+    if (mask != 0) {
+        plat_job_pfor_quiesce();
+        s_sortjob_stats.takeovers++;
+        for (u32 i = 0; i < 2; i++) {
+            if ((mask >> i) & 1) {
+                memcpy(s_sortpar.rng[i], s_sortpar.copy + (s_sortpar.rng[i] - o), s_sortpar.len[i] * sizeof(void*));
+            }
+        }
+    }
+    return 1;
+}
+
+/** Sorts the table with the serial copy, or (sortjob >= 1, n >= 256) with the subranges in parallel; the
+ * permutation is the same. */
+static void portSortTable(void** table, u32 n, PortSortCmp cmp) {
+    if (s_sortjob < 0) {
+        sortjobInit();
+    }
+    if (s_sortjob == 0 || n < SORTJOB_MIN_N) {
+        portFsort(table, n, cmp, 0);
+        return;
+    }
+    s_sortjob_stats.calls++;
+    if (s_sortjob == 2) {
+        memcpy(s_sort_chk, table, n * sizeof(void*));
+    }
+    s_sort_origin = table;
+    portFsort(table, n, cmp, 1);
+    if (s_sortjob == 2) {
+        portFsort(s_sort_chk, n, cmp, 0);
+        s_sortjob_stats.compared++;
+        if (memcmp(s_sort_chk, table, n * sizeof(void*)) != 0) {
+            s_sortjob_stats.mismatches++;
+        }
+    }
+}
+#endif
+
 /**
  * Sorts n elements of size bytes at base with compare, like qsort:
  * sorts a table of pointers (at most 0xC00 elements, size at most 0x100 bytes) with fsort,
@@ -514,6 +857,17 @@ void qqsort(void* base, u32 n, u32 size, s32 (*compare)(const void* a, const voi
     if (n <= 1) {
         return;
     }
+#ifdef TARGET_PORT
+    /* n == 2 (DVDMgrMain, 24 per frame): fsort swaps the two entries when the first compares greater */
+    if (n == 2) {
+        if (compare(base, (u8*)base + size) > 0) {
+            memcpy(buf, base, size);
+            memcpy(base, (u8*)base + size, size);
+            memcpy((u8*)base + size, buf, size);
+        }
+        return;
+    }
+#endif
 
     src = (u8*)base;
     pp = table;
@@ -523,7 +877,11 @@ void qqsort(void* base, u32 n, u32 size, s32 (*compare)(const void* a, const voi
         src += size;
     }
 
+#ifdef TARGET_PORT
+    portSortTable(table, n, compare);
+#else
     fsort(table, n);
+#endif
 
 #ifdef TARGET_PORT
     /* (cur - base) is always a multiple of size, so the divide is exact: shift out the

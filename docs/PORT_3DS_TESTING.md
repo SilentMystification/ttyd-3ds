@@ -144,6 +144,7 @@ Switches the game reads (space-separated words in `--switches`):
 | `gamecnt=N`, `jobprobe=1` | `[GAMECNT]` counters of the game's hot loops every N frames; job wake-up round trips (PORT_3DS_GAMEPAR.md) |
 | `mapnameidx=1/2` | Hash index for mapGetMapObj, hitNameToPtr, lightNameToPtr; 2 also runs the walk and counts mismatches (`[NAMEIDX]`) |
 | `mapdispjob=1/2`, `mapdispgrain=N` | mapDisp's per-object outcomes in parallel; 2 also runs the loop and compares (`[MAPDISPJOB]`) |
+| `sortjob=1/2` | qqsort of n >= 256 in two parallel halves; 2 also compares with the serial sort (`[SORTJOB]`) |
 | `loadstats` | A `[LOADCONV]` line per load-time conversion, and a summary per load: per-kind time, DVD reads and wait |
 | `convhash` | Adds an FNV-1a hash of each converted file to the `loadstats` lines |
 | `arqspin` | ARQ waits poll with a yield (the old behaviour) instead of sleeping until the next ARQ callback |

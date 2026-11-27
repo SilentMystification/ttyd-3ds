@@ -460,6 +460,7 @@ extern int gx_bbox_active;
 extern int gx_opt_vshbbox; /* switch gxvshbbox */
 extern int gx_opt_vshlit;  /* switch gxvshlit */
 extern int gx_opt_vshtg;   /* switch gxvshtg */
+extern int gx_opt_vshlit2, gx_opt_vshpost, gx_opt_vshpal; /* switches gxvshlit2, gxvshpost, gxvshpal (gx_draw.c) */
 void gx_bbox_clear(void);
 void gx_bbox_read(u16* out);
 void gx_bbox_counts(u32* reads, u32* mism);
@@ -666,6 +667,8 @@ typedef struct {
 u32 gx_vsh_imm_reasons(u8 prim, u32 n);
 int gx_vsh_imm_room(u32 n);
 const GxVshImm* gx_vsh_imm_build(u8 prim, const GxVertex* v, u32 n);
+/* gxvshpal: the same, with 3 x the vertex's position matrix index in the normal slot's x (y, z 0) */
+const GxVshImm* gx_vsh_imm_build_pal(u8 prim, const GxVertex* v, u32 n);
 /* The ring's vertex layout: byte offsets of position, colour, slots 0..2, normal; returns the stride. */
 u32 gx_vsh_imm_layout(int32_t off[6]);
 void gx_vsh_imm_write(const GxVertex* v, u32 n, const u8* vtx_desc, u8* out, u8 attr_slot[8]);
@@ -716,6 +719,7 @@ void gx_immdirect_log(u32 frames);
 void gx_vsh_count_shader(u32 nverts, u32 nidx);
 void gx_vsh_frame(void); /* frame boundary: hysteresis, decal links, counters */
 void gx_vsh_log(u32 frames);
+void gx_vsh_emu_log(void); /* gx_draw.c: the gxvshlit2/post/pal=2 check's totals */
 /* gx_draw.c: draws a cached entry through the shader when its group takes that path; 0: draw it on the CPU. */
 int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nbytes, u32 nverts, const GxVertex* v,
                 const GxDlcDraw* d, u32 nd);

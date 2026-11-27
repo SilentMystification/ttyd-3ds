@@ -731,6 +731,19 @@ const GxVshImm* gx_vsh_imm_build(u8 prim, const GxVertex* v, u32 n) {
     return gx_vsh_imm_done(prim, n, attr_slot);
 }
 
+/* gxvshpal: an unlit draw with per-vertex position matrices. Its normal is not read (no lighting, no texgen from
+ * it), so the slot carries the shader's palette index: 3 x the matrix index (the rows' offset), exact in a float. */
+const GxVshImm* gx_vsh_imm_build_pal(u8 prim, const GxVertex* v, u32 n) {
+    u8 attr_slot[8];
+    u8* dst = gx_vsh_imm_dst();
+    gx_vsh_imm_write(v, n, gx.vtx_desc, dst, attr_slot);
+    for (u32 i = 0; i < n; i++) {
+        f32 ix[3] = {(f32)(3u * (v[i].pnmtx % GX_POS_MTX_COUNT)), 0.0f, 0.0f};
+        memcpy(dst + i * s_imm_stride + s_imm_off[5], ix, 12);
+    }
+    return gx_vsh_imm_done(prim, n, attr_slot);
+}
+
 /* ---- gximmdirect while recording (gxthread=1..3): the game thread's own chunks ----
  * The game thread writes a primitive's vertices at GXEnd into these, the
  * translator draws them from here (or rebuilds GxVertex from them for the CPU

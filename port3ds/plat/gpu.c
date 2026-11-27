@@ -223,7 +223,8 @@ static int s_uloc_rot0, s_uloc_rot1;
 static int s_uloc_vsh, s_uloc_clip, s_uloc_texrow, s_uloc_texsel, s_uloc_vscale, s_uloc_clrmix, s_uloc_matclr;
 /* GX lighting in the shader (PlatGpuVshLight) */
 static int s_uloc_lit, s_uloc_eyerow, s_uloc_nrmrow, s_uloc_amb, s_uloc_dmode, s_uloc_amode, s_uloc_lpos, s_uloc_ldir,
-    s_uloc_lcol, s_uloc_lka, s_uloc_lkk, s_uloc_lcount;
+    s_uloc_lcol, s_uloc_lka, s_uloc_lkk, s_uloc_lcount, s_uloc_ambmix, s_uloc_lsel;
+static int s_uloc_post, s_uloc_postf; /* post-transform texture matrices (gxvshpost) */
 static u32 s_last_vlight_id; /* the light block last recorded in the current record (0: none) */
 static int s_uloc_tgsrc;
 static PlatGpuVshLight s_last_vlight;
@@ -2304,6 +2305,12 @@ static void vsh_const_rows(VUnif* u, const PlatGpuVshConst* c) {
     }
     vunif(s_uloc_clrmix, c->clrmix[0], c->clrmix[1], c->clrmix[2], c->clrmix[3]);
     vunif(s_uloc_matclr, c->matclr[0], c->matclr[1], c->matclr[2], c->matclr[3]);
+    vunif(s_uloc_postf, c->postf[0], c->postf[1], c->postf[2], c->postf[3]);
+    if (c->postf[3] != 0.0f) { /* else the shader does not read them */
+        for (int i = 0; i < 9; i++) {
+            vunif(s_uloc_post + i, c->post[i][0], c->post[i][1], c->post[i][2], c->post[i][3]);
+        }
+    }
 }
 
 /* The light block's rows; returns the light count's int uniform x (n - 1, 0 with none). */
@@ -2328,14 +2335,17 @@ static int vsh_light_rows(VUnif* u, const PlatGpuVshLight* l) {
     vunif(s_uloc_amb, l->amb[0], l->amb[1], l->amb[2], l->amb[3]);
     vunif(s_uloc_dmode, l->dmode[0], l->dmode[1], l->dmode[2], l->dmode[3]);
     vunif(s_uloc_amode, l->amode[0], l->amode[1], l->amode[2], l->amode[3]);
+    vunif(s_uloc_ambmix, l->ambmix[0], l->ambmix[1], l->ambmix[2], l->ambmix[3]);
+    vunif(s_uloc_lsel, l->lsel[0], l->lsel[1], l->lsel[2], l->lsel[3]);
     u32 n = l->count > PLAT_VSH_LIGHTS ? PLAT_VSH_LIGHTS : l->count;
+    /* every w as given (0 in a light block, but the colour's alpha with lit alpha and the matrix palette's rows) */
     for (u32 i = 0; i < (n ? n : 1); i++) {
-        vunif(s_uloc_lpos + i, l->light[i].pos[0], l->light[i].pos[1], l->light[i].pos[2], 0);
-        vunif(s_uloc_ldir + i, l->light[i].dir[0], l->light[i].dir[1], l->light[i].dir[2], 0);
-        vunif(s_uloc_lcol + i, l->light[i].color[0], l->light[i].color[1],
-                      l->light[i].color[2], 0);
-        vunif(s_uloc_lka + i, l->light[i].a[0], l->light[i].a[1], l->light[i].a[2], 0);
-        vunif(s_uloc_lkk + i, l->light[i].k[0], l->light[i].k[1], l->light[i].k[2], 0);
+        vunif(s_uloc_lpos + i, l->light[i].pos[0], l->light[i].pos[1], l->light[i].pos[2], l->light[i].pos[3]);
+        vunif(s_uloc_ldir + i, l->light[i].dir[0], l->light[i].dir[1], l->light[i].dir[2], l->light[i].dir[3]);
+        vunif(s_uloc_lcol + i, l->light[i].color[0], l->light[i].color[1], l->light[i].color[2],
+              l->light[i].color[3]);
+        vunif(s_uloc_lka + i, l->light[i].a[0], l->light[i].a[1], l->light[i].a[2], l->light[i].a[3]);
+        vunif(s_uloc_lkk + i, l->light[i].k[0], l->light[i].k[1], l->light[i].k[2], l->light[i].k[3]);
     }
     /* the loop runs count + 1 times; with no light it runs once over light 0, which the front end zeroes */
     return n ? (int)n - 1 : 0;
@@ -6287,9 +6297,22 @@ void plat_gpu_init(void) {
     s_uloc_lka = shaderInstanceGetUniformLocation(s_prog.vertexShader, "lka");
     s_uloc_lkk = shaderInstanceGetUniformLocation(s_prog.vertexShader, "lkk");
     s_uloc_lcount = shaderInstanceGetUniformLocation(s_prog.vertexShader, "lcount");
+    s_uloc_ambmix = shaderInstanceGetUniformLocation(s_prog.vertexShader, "ambmix");
+    s_uloc_lsel = shaderInstanceGetUniformLocation(s_prog.vertexShader, "lsel");
+    s_uloc_post = shaderInstanceGetUniformLocation(s_prog.vertexShader, "post");
+    s_uloc_postf = shaderInstanceGetUniformLocation(s_prog.vertexShader, "postf");
+    if (s_uloc_post < 0 || s_uloc_postf < 0) {
+        plat_fatal("gpu: the shader has no post-transform uniforms");
+    }
+    /* the matrix palette (PlatGpuVshLight.lsel) indexes lpos, ldir, lcol, lka as one array */
+    if (s_uloc_lpos >= 0 && (s_uloc_ldir != s_uloc_lpos + 8 || s_uloc_lcol != s_uloc_lpos + 16 ||
+                             s_uloc_lka != s_uloc_lpos + 24 || s_uloc_lkk != s_uloc_lpos + 32)) {
+        plat_fatal("gpu: the light uniforms are not contiguous (lpos %d ldir %d lcol %d lka %d)", s_uloc_lpos,
+                   s_uloc_ldir, s_uloc_lcol, s_uloc_lka);
+    }
     if (s_uloc_lit < 0 || s_uloc_eyerow < 0 || s_uloc_nrmrow < 0 || s_uloc_amb < 0 || s_uloc_dmode < 0 ||
         s_uloc_amode < 0 || s_uloc_lpos < 0 || s_uloc_ldir < 0 || s_uloc_lcol < 0 || s_uloc_lka < 0 ||
-        s_uloc_lkk < 0 || s_uloc_lcount < 0) {
+        s_uloc_lkk < 0 || s_uloc_lcount < 0 || s_uloc_ambmix < 0 || s_uloc_lsel < 0) {
         PLOG_W("gpu: the shader has no lighting uniforms: lit draws stay on the CPU");
         s_uloc_lit = -1;
     }

@@ -218,6 +218,7 @@ void gx_perf_frame(void) {
     }
     gx_dlcache_log(f);
     gx_vsh_log(f);
+    gx_vsh_emu_log();
     memset(&s_sum, 0, sizeof(s_sum));
     s_frames = 0;
 }

@@ -1,5 +1,8 @@
 // Game start-up and the main loop: marioStInit initialises every driver, marioStMain/marioStDisp run them each
 // frame; also the DVD error check thread and the rumble check.
+#ifdef TARGET_PORT
+#include "port3ds/gamepar.h"
+#endif
 #include "mario/mariost.h"
 
 #include "battle/battle.h"
@@ -377,6 +380,9 @@ void marioStInit(void) {
 void marioStMain(void) {
     int i;
 
+#ifdef TARGET_PORT
+    portAnimPreBegin(1); // animprejob with animprewin=1: from here to the end of camDraw
+#endif
     while (gp->dvdError) {
         OSYieldThread();
     }

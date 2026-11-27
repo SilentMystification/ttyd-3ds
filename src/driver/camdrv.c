@@ -1,5 +1,8 @@
 // Camera driver: the fixed set of cameras (offscreen, shadow, background, 3D, 2D, fade...), their
 // projection and view matrices, and the per-frame camera update.
+#ifdef TARGET_PORT
+#include "port3ds/gamepar.h"
+#endif
 #include "driver/camdrv.h"
 #include "driver/mapdrv.h"
 #include "driver/seqdrv.h"
@@ -360,6 +363,9 @@ static void camEvalNearFar(CameraEntry* camera) {
 void camDraw(void) {
     int cameraId;
 
+#ifdef TARGET_PORT
+    portAnimPreBegin(0); // animprejob: pose evaluation on job worker 0 during the draw
+#endif
     camLetterBox();
     dispSort();
     for (cameraId = 0; cameraId < CAMERA_MAX; cameraId++) {
@@ -378,6 +384,9 @@ void camDraw(void) {
             sysDummyDraw(camera->view);
         }
     }
+#ifdef TARGET_PORT
+    portAnimPreEnd(); // poses the draw did not evaluate get their state back
+#endif
     dispReInit();
 }
 

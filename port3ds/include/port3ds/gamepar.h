@@ -60,4 +60,16 @@ void port_nameidx_frame(u32 frame);
 /* ---- Step 3: mapDisp in phases (src/driver/mapdrv.c) ---- */
 void portMapDispJobFrame(u32 frame); /* [MAPDISPJOB] totals every 120 frames */
 
+/* ---- Step 6: early pose evaluation (src/driver/animdrv.c) ----
+ * Switch animprejob=1: at the start of a window, the poses the previous window evaluated (animPoseMain, no paper
+ * overlay, not a shared paper pose, float scratch off) are evaluated in place on job worker 0, each with a backup of
+ * what it writes. The game's animPoseMain call reuses the result when its key (file, animation, time, pose clock and
+ * flags, rotation, camera, buffers) is unchanged; any other driver access to the pose, and the window's end, restore
+ * the backup first. animprejob=2: each reuse restores the backup, runs the call and compares scalars and buffers
+ * ([ANIMPREJOB] lines). animprewin=0: the window is camDraw (field characters); 1: from marioStMain to the end of
+ * camDraw (battle units are evaluated in btlDispMain, in the game logic). */
+void portAnimPreBegin(int where); /* 0 camDraw start, 1 marioStMain start */
+void portAnimPreEnd(void);        /* camDraw end */
+void portAnimPreFrame(u32 frame); /* [ANIMPREJOB] totals every 120 frames */
+
 #endif

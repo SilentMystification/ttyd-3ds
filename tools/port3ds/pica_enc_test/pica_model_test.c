@@ -95,6 +95,16 @@ static void test_model(void) {
     uint32_t bad[] = {1, HDR(0, 0xF, 0x2C1, 5), 2};
     pica_model_feed(&a, bad, 3);
     CHECK(a.bad == 1, "short command");
+    /* feed_draw stops after the draw trigger (t1: texture config, then the draw, then FINALIZE) */
+    pica_model_reset(&a);
+    CHECK(pica_model_feed_draw(&a, t1, 6) == 4 && a.draws == 1 && a.finals == 0, "feed_draw stops at the draw");
+    CHECK(pica_model_feed_draw(&a, t1 + 4, 2) == 2 && a.finals == 1, "feed_draw: the rest");
+    pica_model_reset(&b);
+    pica_model_feed(&b, t2, 2);
+    CHECK(pica_model_digest(&a) == pica_model_digest(&b), "digest: events and the clear bit are not state");
+    uint32_t t3[] = {0x00001006u, HDR(0, 0xF, 0x080, 0)};
+    pica_model_feed(&b, t3, 2);
+    CHECK(pica_model_digest(&a) != pica_model_digest(&b), "digest: a state change");
 }
 
 /* the list through two models, B with every command written twice (the copy first), compared at every draw */
@@ -115,7 +125,7 @@ static void test_list(const char* path) {
     pica_model_reset(&a);
     pica_model_reset(&b);
     pica_model_reset(&c);
-    uint32_t i = 0, draws = 0, cmps = 0, differ = 0, cdiffer = 0, cmds = 0;
+    uint32_t i = 0, draws = 0, cmps = 0, differ = 0, cdiffer = 0, cmds = 0, ddiffer = 0, dseen = 0;
     while (i + 1 < n) {
         uint32_t hdr = w[i + 1], extra = hdr >> 20 & 0xFFu, reg = hdr & 0xFFFFu;
         uint32_t len = 2 + extra;
@@ -148,6 +158,9 @@ static void test_list(const char* path) {
             differ += d.differ != 0;
             pica_model_cmp(&a, &c, &d);
             cdiffer += d.differ != 0 && d.first_reg == 0x040;
+            /* gxfldig: equal states give equal digests; a changed cull value changes it */
+            ddiffer += pica_model_digest(&a) != pica_model_digest(&b);
+            dseen += d.differ != 0 && pica_model_digest(&a) != pica_model_digest(&c);
         }
         draws = a.draws;
         i += len;
@@ -155,6 +168,21 @@ static void test_list(const char* path) {
     CHECK(a.bad == 0 && b.bad == 0, "%s: %u bad commands", path, a.bad + b.bad);
     CHECK(differ == 0, "%s: %u of %u draws differ", path, differ, cmps);
     CHECK(cdiffer > 0, "%s: a changed face-culling value was not seen", path);
+    CHECK(ddiffer == 0 && dseen == cdiffer, "%s: digests: %u equal states differ, %u of %u changed states seen", path,
+          ddiffer, dseen, cdiffer);
+    /* pica_model_feed_draw: the same list in runs that end at each draw gives the same draws and state */
+    static PicaModel e;
+    pica_model_reset(&e);
+    uint32_t left = i, runs = 0;
+    const uint32_t* q = w;
+    while (left != 0) {
+        uint32_t k = pica_model_feed_draw(&e, q, left);
+        q += k;
+        left -= k;
+        runs++;
+    }
+    CHECK(e.draws == a.draws && runs >= e.draws && pica_model_digest(&e) == pica_model_digest(&a),
+          "%s: feed_draw: %u draws in %u runs, %u fed whole", path, e.draws, runs, a.draws);
     printf("%s: %u words, %u commands, %u draws, %u compared, %u differ (with every cull value changed: %u), "
            "%u texture-cache clears, %u LUT words\n",
            path, n, cmds, draws, cmps, differ, cdiffer, a.texclears, a.luts);

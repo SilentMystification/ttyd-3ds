@@ -168,6 +168,64 @@ void pica_model_feed(PicaModel* m, const uint32_t* w, uint32_t n) {
     }
 }
 
+uint32_t pica_model_feed_draw(PicaModel* m, const uint32_t* w, uint32_t n) {
+    uint32_t i = 0;
+    while (i + 1 < n) {
+        uint32_t hdr = w[i + 1];
+        uint32_t r = hdr & 0xFFFFu, extra = hdr >> 20 & 0xFFu, inc = hdr >> 31;
+        uint32_t len = 2 + extra;
+        len += len & 1u;
+        if (i + 2 + extra > n) {
+            m->bad++;
+            return n;
+        }
+        pica_model_feed(m, w + i, i + len <= n ? len : n - i);
+        i += len;
+        uint32_t last = inc ? r + extra : r;
+        if (r <= R_DRAWELEMENTS && last >= R_DRAWARRAYS) {
+            return i < n ? i : n; /* a draw trigger: the caller looks at the state now */
+        }
+    }
+    return n;
+}
+
+static uint32_t dg_mix(uint32_t h, uint32_t v) {
+    h = (h ^ v) * 0x01000193u;
+    return h ^ (h >> 15);
+}
+
+uint32_t pica_model_digest(const PicaModel* m) {
+    uint32_t h = 0x811C9DC5u;
+    for (uint32_t r = 0; r < PICA_NREG; r++) {
+        uint32_t k = m->known[r];
+        if (k == 0 || !reg_is_state(r)) {
+            continue;
+        }
+        uint32_t bm = (k & 1u ? 0xFFu : 0) | (k & 2u ? 0xFF00u : 0) | (k & 4u ? 0xFF0000u : 0) |
+                      (k & 8u ? 0xFF000000u : 0);
+        h = dg_mix(dg_mix(h, r << 4 | k), m->reg[r] & bm);
+    }
+    for (uint32_t i = 0; i < 96; i++) {
+        if (m->unif_known[i]) {
+            h = dg_mix(h, 0x1000u + i);
+            for (int j = 0; j < 4; j++) {
+                h = dg_mix(h, m->unif[i][j]);
+            }
+        }
+    }
+    for (uint32_t i = 0; i < 16; i++) {
+        if (m->fixed_known[i]) {
+            h = dg_mix(dg_mix(dg_mix(dg_mix(h, 0x2000u + i), m->fixed[i][0]), m->fixed[i][1]), m->fixed[i][2]);
+        }
+    }
+    for (uint32_t i = 0; i < 128; i++) {
+        if (m->fog_known[i]) {
+            h = dg_mix(dg_mix(h, 0x3000u + i), m->fog[i]);
+        }
+    }
+    return h;
+}
+
 static void note(PicaModelDiff* d, uint32_t id, uint32_t a, uint32_t b) {
     if (d->differ++ == 0) {
         d->first_reg = id;

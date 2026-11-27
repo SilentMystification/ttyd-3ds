@@ -84,6 +84,10 @@ MusyX's frame renders into the AI block that plays three quanta later (15 ms), a
 
 The DSP reads linear memory and ARAM is a heap buffer, so each sample is copied to a cache in linear memory (4 MB by default, `ndspcachekb=N`, at most half of the free linear memory), least recently used first out, never while a channel plays it. The game reloads sound groups at the same ARAM addresses, so a cached copy is compared with ARAM at every start (`memcmp`, about the cost of the copy) and replaced when it differs.
 
+`aramgen=1` (default 0; needs `ndspvoices=1`) skips that compare. Every write into ARAM (`ARQPostRequest` MRAM to ARAM, `aramUploadData`, `aramInit`'s zero fill; no other writer exists: `port_aram_ptr` users otherwise only read) calls `plat_aram_write` before and after its copy. It takes the next number of a sequence and stamps the 8 KB blocks it touches (a 8 KB heap table). A cached sample whose blocks hold no stamp newer than the sequence value read before its last compare is equal to ARAM, so the start skips the `memcmp`. `aramgen=2` does the compare as well and logs `[NDSPV] aramgen: compares skipped N, disagreements M, ARAM writes W`; M must be 0. Only a start that overlaps a write in progress could differ from the old path (the old compare saw half-written data too). Audio output is identical: the same hits and misses, the same cached bytes.
+
+Paper check of the other option (sample part of ARAM in linear memory, play in place): the 12% of samples that need re-aligned copies (151 of 1247) keep a cache. Linear peaks at about 28 of 32 MB in C3, so about 4 MB is free, the size of the present cache; the sample part of ARAM is larger than that (up to most of the 16 MB), so it does not fit. Not done.
+
 ### Loops
 
 NDSP loops a whole wave buffer, and an ADPCM buffer must start at a frame (14 samples, 8 bytes). A voice plays as buffer A (the start up to the loop) and buffer B (the loop, repeated, its decoder history reloaded at each pass as MusyX's loop type 0 does).

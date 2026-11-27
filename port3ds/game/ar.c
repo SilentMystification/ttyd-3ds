@@ -14,6 +14,7 @@
 #include <malloc.h>
 #include <string.h>
 
+#include "plat/audio.h"
 #include "plat/memstable.h"
 #include "plat/plat.h"
 #include "plat/thread.h"
@@ -154,7 +155,9 @@ void ARQPostRequest(ARQRequest* request, u32 owner, u32 type, u32 priority, u32 
         if (dest + length > ARAM_SIZE) {
             plat_fatal("ARQ: write of %lu bytes at ARAM %08lx", (unsigned long)length, (unsigned long)dest);
         }
+        plat_aram_write(dest, length);
         memcpy(s_aram + dest, (const void*)source, length);
+        plat_aram_write(dest, length);
     } else {
         if (source + length > ARAM_SIZE) {
             plat_fatal("ARQ: read of %lu bytes at ARAM %08lx", (unsigned long)length, (unsigned long)source);

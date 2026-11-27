@@ -191,6 +191,9 @@ void plat_debug_option_changed(void) {
     if (PLAT_RETAIL_BUILD) {
         return;
     }
+    if (plat_opt_get(PLAT_OPT_KEY_RETAIL, 0) != 0) {
+        plat_opt_set(PLAT_OPT_KEY_RETAIL, 0); /* the old key: the new setting replaces it */
+    }
     if (!plat_debug_wanted()) {
         plat_retail_on = 1;
         plat_log_retail_now(1);
@@ -205,7 +208,6 @@ void plat_debug_set(int on) {
     if (PLAT_RETAIL_BUILD) {
         return;
     }
-    plat_opt_set(PLAT_OPT_KEY_RETAIL, 0); /* the old key: the new setting replaces it */
     plat_opt_set(PLAT_OPT_KEY_DEBUGMODE, on ? PLAT_OPT_DEBUG_ON : PLAT_OPT_DEBUG_OFF);
     plat_options_save();
 }

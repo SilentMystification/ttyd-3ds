@@ -336,7 +336,7 @@ if(TTYD_GX_O3)
     set_source_files_properties(${_gx_sources} TARGET_DIRECTORY ttyd_port_game PROPERTIES COMPILE_OPTIONS "-O3")
 endif()
 
-#   TTYD_RETAIL: the retail build (build.sh --retail; docs/PORT_3DS_TESTING.md, "Retail mode"): the port's logging
+#   TTYD_RETAIL: the retail build (build.sh --retail; docs/PORT_3DS_TESTING.md, "Debug mode"): the port's logging
 #                (PLOG_*, OSReport, tst_log), the gxstats/gxphase/texframe timers and the PMU hooks compile out, and
 #                retail mode is always on. Only the port's two halves get the define: the decomp sources build as before.
 option(TTYD_RETAIL "Retail build: logging and instrumentation compiled out" OFF)

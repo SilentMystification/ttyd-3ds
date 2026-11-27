@@ -16,7 +16,7 @@
 # with -DTTYD_LTO=OFF -DTTYD_GX_O3=OFF, so the release directory keeps its LTO build.
 # Explicit -D options after it still win. Dev builds do not archive the ELF.
 # --retail (or TTYD_RETAIL=1) adds -DTTYD_RETAIL=ON in its own directory (build/3ds/<name>-retail, or
-# <name>-dev-retail with --dev); docs/PORT_3DS_TESTING.md, "Retail mode".
+# <name>-dev-retail with --dev); docs/PORT_3DS_TESTING.md, "Debug mode".
 #
 # Compile jobs go through ccache by default (TTYD_CCACHE=0 turns it off; cache shared in
 # ${XDG_CACHE_HOME:-~/.cache}/ttyd3ds/ccache). The ELF of a ccache build is byte-identical to a no-ccache

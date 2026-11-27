@@ -92,15 +92,15 @@ background; when you close the menu the status lines and the last 28 log lines a
 | Audio | Master volume | 0 to 100 percent in steps of 10 (default 100) |
 | Performance | Quality | auto (default), high or fast. Stored only; later speed features will read it |
 | Language | Game language | PAL version only: English, Deutsch, Francais, Espanol, Italiano. Stored only for now |
-| Debug | Debug mode | auto (default), on or off. Turns the developer Select menu (ZL + SELECT) on. auto: on in a development build (`-dev` in the version), off in a release build. off: never, even in a development build. Switch `devmenu` still opens it |
+| Debug | Debug mode | auto (default), on or off. One switch for every developer function: the developer Select menu (ZL + SELECT), the log (`latest.log`), the update server, the crash watchdog and the test switches in `debug3ds.txt`. Off: none of them runs or uses memory (crashes still show the crash screen and write `crash.txt`). auto: on in a development build (`-dev` in the version), off in a release. Changes that stop something take effect at once where they can; the rest at the next start (the row then shows `relaunch`). This row is always there, so Debug mode can always be turned back on |
 
 - The options are kept in **`sdmc:/3ds/ttyd/options.txt`**, a small text file, not in your save. Delete it to go back to the defaults.
   If it is damaged the port ignores it, writes a line to the log and uses the defaults.
-- The Select menu of earlier builds was a developer menu. It is now only for developers (**ZL + SELECT**, opened by the switch `devmenu` or by **Debug mode** in the Options menu, see above; a HOME Menu start of a release build needs Debug mode set to on):
+- The Select menu of earlier builds was a developer menu. It is now only for developers (**ZL + SELECT**, while **Debug mode** in the Options menu is on, see above; a HOME Menu start of a release build needs Debug mode set to on):
   log level, warping to any map, return to title, exit, **Update server** (on or off, kept in `options.txt`; while it runs the row shows the
   console's IP address and port, for `libs/ctr-devkit/devupdate/devupdate.py`) and **Relaunch** (restarts the game at once with the current
   switches, so a changed option or the update server takes effect). Warping can break the story. Do not use it in a save you care about.
-  Release builds start with the update server off; development builds start with it on.
+  The update server runs only in Debug mode (on by default there); its Debug tab has a **Debug mode** row too.
 
 ## Saves
 

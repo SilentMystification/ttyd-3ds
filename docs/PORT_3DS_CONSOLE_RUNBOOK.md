@@ -6,7 +6,7 @@ Written 2026-11-27 for the first console session after the unattended work. One 
 
 - **Every console push needs the owner's explicit go.** `push`, `restart`, `files put`, `queue start`, `supervisor ...` and the Select-menu actions all change the console. Ask once per step block, not once per command; no automatic push loops. Building on the PC needs no go.
 - **No sleep or poll loops.** Use one blocking call: `run_hw.py --no-send --until "<regex>" --timeout N` follows the live log and returns when the pattern shows (or on timeout). For a probe mode that has no live log, one `devupdate.py log` after the stated time.
-- **Retail mode turns the update server off** unless the `devupdate` switch is given (or the Select menu "Update server" option is on). A relaunch that devupdate itself starts keeps the server on. Every `push` or `restart` of a retail build or `retail=1` run therefore carries `devupdate`. A start from the HOME Menu of a retail build has no server: recover with FBI (`tools/port3ds/fbi_install.py`) or put `devupdate` in `sdmc:/3ds/ttyd/debug3ds.txt`.
+- **Unattended sessions need Debug mode on** (one-time setup below). Debug mode off (`retail=1`, `debug=0`, the Options setting off, a tagged release under "auto", or a `TTYD_RETAIL` build) has no update server and no supervisor heartbeat, and ignores the `devupdate` switch and the "Update server" option. Only the test escape `retailkeep=...,devupdate*` keeps the server in such a run, so every `push` or `restart` of a retail build or a `retail=1` run carries `devupdate*` in its `retailkeep=` list; without it the remote session ends at that launch. A HOME Menu start in Debug mode off has no server: recover with a HOME start of a build in Debug mode on (the stored setting "on" covers every build but `TTYD_RETAIL`), FBI (`tools/port3ds/fbi_install.py`), or `debug=1` in `sdmc:/3ds/ttyd/debug3ds.txt`.
 - The console is at `192.168.8.221`. The ARP entry needs about 20 s to warm up: retry a refused first call. Keep it on the charger, lid open.
 - Add `fastboot` to every manual `restart` (it presses A through the title cards; `hw_baseline.py` and `run_hw.py` add it themselves, plain `devupdate.py restart` does not).
 - No game assets in a CIA: the disc image is at `sdmc:/3ds/ttyd/game.iso`.
@@ -30,7 +30,18 @@ tools/port3ds/build.sh libs/ctr-devkit/supervisor   # build/3ds/supervisor/ctrdk
 - The A/B configs are built into `tools/port3ds/hw_baseline.py` (`--configs list` prints the switches of each; names are case-insensitive; no edit needed): `D`, `C3`, `K`, `I`, `gpucore1`, `kg1`, `par`, `all`, `old`, `noqtm`, `recheap`, `vramtex`. The old names `default`, `gxdirty`, `gxdirect` are aliases of `D`.
 - Config meaning: **D** = the defaults (`gxdirty gxdirect gximmdirect gxsdl gxrecfuse gxreclgroup texasync texfast` on, `dlspread=1500`, `tex16=0` exact textures; `gxthread=0`). **C3** = D + `gxthread=2 gxpipeline=1`. **K** = D + `gxone=1 gxchunk=1`. **I** = K + `gximmfl=1`. **gpucore1** = C3 + `gpucore=1`; **kg1** = K + `gpucore=1`; **par** = C3 + `jobw1=1 mapnameidx=1 mapdispjob=1`; **all** = gpucore1 + par; **old** = the explicit switch set from before the default flip (D2). If the planner flips `gxthread=2 gxpipeline=1` to the default before the session (owner-questions 15), D already is C3: then the "D vs C3" pair becomes `gxthread=0 gxpipeline=0` against the default.
 - Also on the PC before the session: `tools/port3ds/hw_baseline.py --dry-run` to see the exact commands, and `$D --help` for flags.
-- Check on the console once: `sdmc:/3ds/ttyd/game.iso`, `sdmc:/3ds/dspfirm.cdc`, and `devupdate` in `sdmc:/3ds/ttyd/debug3ds.txt` (so a HOME start of the release CIA has the server).
+- Check on the console once: `sdmc:/3ds/ttyd/game.iso`, `sdmc:/3ds/dspfirm.cdc`.
+
+### One-time setup: Debug mode on (owner, by hand, once per SD card)
+
+The update server, the supervisor heartbeat, the log, the watchdog and the debug switches all belong to Debug mode (docs/PORT_3DS_TESTING.md, "Debug mode"). Development builds have it on by default ("auto"); set it to **on** so that a tagged release or a changed default cannot drop the console out of the remote session:
+
+1. Start the game from the HOME Menu. Press SELECT (the Options menu), R to the **Debug** page, set **Debug mode** to `on`, B to close (the setting is saved to `sdmc:/3ds/ttyd/options.txt` as `debugmode=1`). The row shows `relaunch` when the change takes effect only at the next launch.
+2. Leave the Select-menu (ZL+SELECT) General tab "Update server" at `on` (the default under Debug mode).
+3. Optional fallback: `debug=1` as a word in `sdmc:/3ds/ttyd/debug3ds.txt` forces Debug mode on whatever `options.txt` says (a run's `restart` switches still come first). Do not put `devupdate` there: under Debug mode on the server starts by itself.
+4. Check: `$D ping` answers; the boot log has `devupdate:` and `watchdog: 10 s, monitor thread started, guard thread started`.
+
+To leave Debug mode for a measurement, use the run switches (`retail=1 retailkeep=...,devupdate*`), not the stored setting: the stored setting outlives the session.
 
 ## A. Probe, calibration, baseline (about 1 h 15 min)
 
@@ -211,10 +222,10 @@ The lines are `heap until map change from <map>: peak arena ... at least N KiB f
 
 ### D5. Retail (about 15 min)
 
-Three cells per scene (gor_01, pik_00, usu_00, battle), each with `bench=721,841` (mean us per game frame, game busy, render over 120 frames; the line `bench 721-841:` goes to `latest.log`). Retail mode needs `devupdate` to keep the server.
+Three cells per scene (gor_01, pik_00, usu_00, battle), each with `bench=721,841` (mean us per game frame, game busy, render over 120 frames; the line `bench 721-841:` goes to `latest.log`). Retail mode (Debug mode off) reads only the switches in `retailkeep=`: `bench` and `devupdate*` (the server, its port and token) must be in it.
 
 ```sh
-KEEP="retailkeep=map,story,party,battle,btlauto,fastboot,gx*,tex*"
+KEEP="retailkeep=map,story,party,battle,btlauto,fastboot,gx*,tex*,bench,devupdate*"
 SC="map=gor_01 story=30"                                  # then pik_00, usu_00, "map=gon_02 story=30 battle=1 btlauto=perfect"
 # cell 1: base, release CIA, retail=0
 $D restart "fastboot $SC gxthread=2 gxpipeline=1 bench=721,841 livelog"
@@ -227,7 +238,7 @@ $D push build/3ds/game-retail/ttyd.cia --switches "fastboot $SC gxthread=2 gxpip
 $D files get @/latest.log -o build/hw-retail/gor_01_rbuild.log
 ```
 
-Do cell 3 last in the whole session block (retail has no server on a HOME start); to leave it, `$D push build/3ds/game/ttyd.cia --switches devupdate --wait 120` while it is still running. If the log is empty, wait for the `bench` frame (about 90 s after the restart) and fetch again. Pass: frame time equal or better; game busy within 0.7 ms (Azahar: no fps gain, 0.0 to 0.65 ms busy; what retail buys is memory and the removed periodic hitches: the 0.45 ms `mallinfo` walks every 500 ms and 30 s). Note the hitches: in cell 1 `slow frame` lines in the log show them; in retail look at feel and, if wanted, `pmu` is off. Fill: **PORT_3DS_TESTING.md** "Retail mode" results table (add a "console" block) and the retail line in owner-questions.
+Do cell 3 last in the whole session block (retail has no server on a HOME start); to leave it, `$D push build/3ds/game/ttyd.cia --switches "retailkeep=devupdate*" --wait 120` while it is still running (the release CIA then boots in the stored Debug mode, on after the one-time setup). If the log is empty, wait for the `bench` frame (about 90 s after the restart) and fetch again. Pass: frame time equal or better; game busy within 0.7 ms (Azahar: no fps gain, 0.0 to 0.65 ms busy; what retail buys is memory and the removed periodic hitches: the 0.45 ms `mallinfo` walks every 500 ms and 30 s). Note the hitches: in cell 1 `slow frame` lines in the log show them; in retail look at feel and, if wanted, `pmu` is off. Fill: **PORT_3DS_TESTING.md** "Debug mode" results table (add a "console" block) and the retail line in owner-questions.
 
 ### D6. Efb608, vramtex (optional, only with time; about 10 min)
 
@@ -338,7 +349,7 @@ About 5 h 30 min in all. With 2 h: PC prep, A1-A3, A4 (`default`), B, C1-C2, D1 
 | hang survival, hang bisect | PORT_3DS_TESTING.md "GPU hang survival" and "GPU hang"; owner-questions 4b, 4d |
 | texdt | PORT_3DS_GX_PERF.md "`texdt`" measurement plan |
 | heap | PORT_3DS_GX_PERF.md "Heap margin" |
-| retail | PORT_3DS_TESTING.md "Retail mode" results |
+| retail | PORT_3DS_TESTING.md "Debug mode" results |
 | QTM | PORT_3DS_QTM.md section 9, 7; PORT_3DS_GX_NATIVE.md 4b |
 | updater, deterministic CIA, supervisor | PORT_3DS_TESTING.md "ctr-devkit"; `TtydCia.cmake`; CTR_DEVKIT_PLAN.md "Test plan" |
 

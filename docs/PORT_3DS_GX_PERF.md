@@ -1018,6 +1018,7 @@ Rows for the switch table:
 | `gxstatever=0/1` | 0 (default): every state version change rebuilds the PICA state. 1: matrix and projection loads do not bump the version, and a version change whose state (texgen to pixel engine without the lights, viewport) equals the last build skips `build_state` (`builds N (unchanged M)` in `gxstats`). Fewer rebuilds, but no time saved yet (see Results) |
 | `gxdirty=0/1/2` | 0 (default): every state version change rebuilds the whole PICA state. 1: setters return early when their values are in force, others mark their class dirty; only dirty classes are rebuilt and sent (`plat_gpu_set_state_dirty`), and the uniform block by parts. 2: as 1, plus a full rebuild compared at every switch-off rebuild (`gxdirty verify` warnings, `gxdirty frame N:` line with `gxthreadstats`) |
 | `gxone=0/1/2` | GX native step 2 (docs/PORT_3DS_GX_NATIVE.md, "Step 2 as built"). 0 (default) off. 1: the dirty state classes (TEV with fog, textures, pixel with scissor/viewport) are interned at the draw boundary by their GX bytes; each id owns a PICA block built once by the port's own encoders (`plat/pica_enc.c`); the back end compares only ids and copies the blocks into the record. Implies `gxdirty`, `gxonehop=1`, `gximmdirect=1`, `gxthread=0`. 2: as `gxonehop=1` (keys and citro3d captures write the record) with every id block compared to the key path's words, the send decisions and the regions checked, and `gxdirty=2`; `gxone frame N:` lines with `gxthreadstats=N` |
+| `gxfifo=0/1/2` | GX native revised plan step 2 (docs/PORT_3DS_GX_NATIVE.md, "Step 2 of the revised plan as built: `gxfifo`"). 0 (default): every setter runs its old body. 1: 36 hot setters compare their packed arguments with GxState in one or two words and store, bump and mark dirty only on a change; the vertex description, formats, arrays and matrix loads compare too. Active only with `gxthread=0`, nothing recorded, no primitive open, `gxdirty` on and no `gxstatededup`; else the old body. 2: each such call runs the fast and the old body and compares bytes, versions and dirty bits (`gxfifo verify` warnings, `gxfifo frame N:` line with `gxthreadstats`) |
 | `gxfogcache=0/1` | 1 (default): the fog LUT is recomputed only when the fog parameters change and goes to the back end with an id instead of being hashed; 0 recomputes and hashes it on every rebuild (A/B) |
 | `gxunlit=0/1` | 1 (default): unlit colour channels skip `channel_color` and the eye-space normal; 0 the general path (A/B) |
 | `gxmerge=0/1` | 1 (default): consecutive draws with nothing recorded between them extend one draw command (`plat/gpu.c`); 0 one command per draw (A/B). `gxstats` shows `gpu draws N (of M calls)` |
@@ -1354,6 +1355,50 @@ C1, C3, G, V as above. Identity runs on the dev build (`--dev --no-cia`), verify
 | battle | 27.6 / 19.6 / 3.7 | 28.9 / 20.9 / 1.1 | 27.1 / 15.6 / 13.9 / 3.8 (fence 5.4) |
 
   `gxone=1` moves the state work to core 0: render thread -5.0..-5.8 ms, core-0 busy +1.3..+3.9 ms, frame not better (gor_01 50.0 against 34.2: the game thread now misses the second vblank). C3 stays the faster config (core-0 busy 15.6-27.3 ms). The base build (port3ds `1630266e`, release) gives the same C1 and C3 numbers as this build (C3 busy 22.5, 27.2, 18.8, 15.6; C1 31.7, 38.7, 28.2, 19.4): the merge adds no cost with the switches off.
+
+## Step 2 of the revised plan: `gxfifo` (2026-11-27)
+
+Design: docs/PORT_3DS_GX_NATIVE.md, "Step 2 of the revised plan as built: `gxfifo`". Commit `56f59f76` on port3ds `6850a415`. C1 = defaults (`gxthread=0`), C3 = C1 + `gxthread=2 gxpipeline=1`, K = C1 + `gxone=1 gxchunk=1`.
+
+### Code size (release ELF, `nm -S`)
+
+| | base `6850a415` | `gxfifo` build |
+|---|---|---|
+| all `GXSet*`/`GXLoad*`/`GXClear*` incl. LTO clones | 421 700 B (121 functions, 57 of them clones, 195 768 B) | 97 040 B (70, 6 clones) + old bodies 143 196 B (37, `.text.unlikely`) = 240 236 B |
+| the 36 hot setters (what `gxfifo=1` runs) | about 150 KB of the above | 8.1 KB (84-736 B each) |
+
+The old bodies still inline the record path (C3 runs them); taking it out of line is the inlining trap above (+5 ms in C3), so the setter total stays at 240 KB, not tens of KB, until the record path goes (option B).
+
+### Hot-path instructions (release, objdump, straight line; unchanged = the compare's early return, changed = up to the return after the stores)
+
+| Setter | unchanged | changed | | Setter | unchanged | changed |
+|---|---|---|---|---|---|---|
+| `GXSetNumChans` (and the other one-byte setters) | 8 | 18 | | `GXSetTevColorIn`/`AlphaIn` | 25 | 35 |
+| `GXSetTevColorOp`/`AlphaOp` | 29 | 40 | | `GXSetTevOrder` | 23 | 37 |
+| `GXSetTevKColorSel`/`KAlphaSel` | 17 | 27 | | `GXSetTevSwapMode` | 21 | 33 |
+| `GXSetBlendMode` | 16 | 25 | | `GXSetAlphaCompare` | 19 | 29 |
+| `GXSetVtxDesc` | 15 | 28 | | `GXSetVtxAttrFmt` | 29 | 47 |
+| `GXSetArray` | 20 | 24 | | `GXClearVtxDesc` | 19 | 40 |
+| `GXSetTexCoordGen2` | 34 | 47 | | `GXSetChanCtrl` (one channel / pair) | about 30 / 50 | 40 / 60 |
+| `GXSetCurrentMtx` | 11 | 21 | | `GXLoadPosMtxImm` (12-word compare) | 63 | 92 |
+
+### Gates (Azahar)
+
+- `gxfifo=2`, dev build, to frame 841: gor_01 4.70 M checks (to 781), pik_00 6.05 M, usu_00 3.14 M, battle 2.23 M, K (`gxone=1 gxchunk=1`) gor_01 6.05 M and pik_00 4.67 M: **0 mismatches**, no `gxfifo verify` line; about 22 K checks a frame, 22% of them changes. `gxdirty` and `gximmdirect` verify lines in the same runs 0 mismatches. `map_sweep.py --area tik --story 30 --switches "gxfifo=2"`: 22 of 22 maps ok, 23.6 M checks, 0 mismatches.
+- `determ_ab.py` shots 780-785, `gxfifo=0` against `1`, gor_01, pik_00, usu_00, battle: C1 24 of 24, C3 24 of 24 (cold record path), K 24 of 24 identical.
+- `gw_diff` 1600-frame padscript gor_01, `gxfifo=0` against `1`: C1 and K 160 of 160 records equal (32 fields).
+
+### Timing (release 3dsx, `gx_perf_ab --repeat 2`, windows 722-841, core-0 busy ms; C3: game / translator)
+
+| Scene | base C1 | C1 `gxfifo=0` | C1 `gxfifo=1` | K `gxfifo=0` | K `gxfifo=1` | base C3 | C3 `gxfifo=0` | C3 `gxfifo=1` |
+|---|---|---|---|---|---|---|---|---|
+| gor_01 | 29.5 | 30.7 | **27.7** | 34.0 | **31.2** | 22.3 / 13.2 | 23.3 / 13.2 | 23.3 / 13.2 |
+| pik_00 | 35.9 | 37.1 | **34.0** | 41.1 | **38.2** | 27.2 / 15.4 | 28.1 / 15.4 | 28.1 / 15.4 |
+| usu_00 | 27.9 | 28.7 | **26.6** | 31.4 | **29.2** | 18.6 / 13.3 | 19.6 / 13.4 | 19.6 / 13.4 |
+| battle | 21.5 | 21.8 | **20.8** | 23.1 | **21.9** | 15.1 / 21.0 | 15.4 / 21.5 | 15.6 / 21.1 |
+
+- `gxfifo=1` against `gxfifo=0` of the same build: C1 -3.0, -3.1, -2.1, -1.0 ms; K -2.8, -2.9, -2.2, -1.2 ms; C3 0 (the record path, as designed). Against the base build: C1 -1.8, -1.9, -1.3, -0.7 ms.
+- **Open: `gxfifo=0` costs +1.0..+1.2 ms (C1) and +0.7..+1.0 ms (C3 game) against the base build**, reproduced in a second pair of runs (base 29.5/35.9 twice, this build 30.6-30.7/37.1-37.3). A second layout (old body inline after the test, LTO clones kept, 437 KB of setters) gave the same numbers (C1 30.6/37.3, C3 23.1/27.9) and a worse pik_00 with `gxfifo=1` (34.6), so it was dropped: the cost is not the out-of-line call. Cause not found; the dispatch alone is 4-7 instructions on about 20 K calls (est. 0.4-0.6 ms at Azahar's 4.5 ns an instruction).
 
 ## Heap margin (2026-11-27)
 

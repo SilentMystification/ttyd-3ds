@@ -94,6 +94,8 @@ static PlatEvent* s_ev_done;
 static int s_sleeping, s_want_done;
 static int s_fence_release = 1;
 static int s_excl;
+static int s_gxsplit; /* switch gxsplit (gx_rec_init): K on the translator thread */
+static int s_list_hash; /* gxthread=3, gxsplit=2: a list call carries the hash of its bytes, checked at translation */
 
 /* counters: the game thread's (gs), the translator's (ts) */
 static struct {
@@ -281,14 +283,16 @@ static inline __attribute__((always_inline)) void run_one(u32 type, const u32* w
             }
             break;
         }
-        if (gx_rec_mode == 3) {
+        if (s_list_hash) {
             if (gx_hash32(list, w[1], 0x5EC0u) != w[3]) {
                 if (s_list_changed++ < 8) {
                     PLOG_W("gxthread verify: list %p (%lu bytes, called from %p) changed between its call and its "
                            "translation", list, (unsigned long)w[1], (const void*)w[2]);
                 }
             }
-            gx_rec_check_read(list, w[1], GXV_READ_LIST);
+            if (gx_rec_mode == 3) {
+                gx_rec_check_read(list, w[1], GXV_READ_LIST);
+            }
         }
         gx_call_list(list, w[1], (const void*)w[2]);
         if (gx_rec_mode == 3) {
@@ -1477,11 +1481,11 @@ void gx_rec_list(const void* list, u32 nbytes, const void* caller) {
         }
         dd_forget(); /* its state calls change the translator's state */
     }
-    if (s_lgroup && gx_rec_mode != 3) {
+    if (s_lgroup && !s_list_hash) {
         rec_list_grouped(list, nbytes, caller);
         return;
     }
-    u32 n = gx_rec_mode == 3 ? 4 : 3;
+    u32 n = s_list_hash ? 4 : 3;
     u32* c = put(GXR_LIST, n);
     c[0] = (u32)list;
     c[1] = nbytes;
@@ -1666,6 +1670,10 @@ void gx_rec_prim(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* sl
  * reading indexed attributes from their arrays at once, so no snapshot is taken. 0: record it the old way. */
 int gx_rec_prim_direct(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* slots) {
     u32 fmt = primfmt & 7;
+    if (s_gxsplit) {
+        return 0; /* gxsplit: the translator routes, converts and writes the primitive (gximmfl); recorded with its
+                   * array snapshots */
+    }
     if (s_null || !gx_imm_rec_ok(&gx_game, (u8)(primfmt & 0xF8), nverts)) {
         gx_imm_rec_count(0);
         return 0;
@@ -2040,6 +2048,11 @@ void gx_rec_frame(void) {
                (unsigned long)(s_gs_signals / f));
         s_gs_signals = 0;
     }
+    if (s_gxsplit == 2) {
+        /* gxsplit=2's own checks (the frame lists themselves: the gxfldig lines of plat/gpu.c) */
+        PLOG_I("gxsplit verify frame %lu: lists changed between call and translation %lu, array snapshots not used "
+               "%lu (total)", (unsigned long)s_frame_no, (unsigned long)s_list_changed, (unsigned long)s_snap_mism);
+    }
     if (s_pipeline) {
         PLOG_I("gxthread   pipeline: %lu of %lu frame ends waited for the frame before", (unsigned long)s_pipe_waits,
                (unsigned long)f);
@@ -2131,7 +2144,22 @@ void gx_rec_init(void) {
     /* gxnull=1: record as gxthread=1 and drop the record at each fence (the fences still answer), so the game
      * thread's time is the game's own work plus recording; nothing is shown */
     s_null = plat_switch_int("gxnull", 0) != 0;
-    if (s_null) {
+    /* gxsplit (option B, docs/PORT_3DS_GX_NATIVE.md "Step 10"): K (gxone + gxchunk, gximmfl) runs on the translator
+     * thread on core 2, the game thread records, the render thread (gpucore=1) submits. Stage 1 records through this
+     * ring as gxthread=2 gxpipeline=1 does. */
+    s_gxsplit = plat_switch_int("gxsplit", 0);
+    if (s_gxsplit < 0 || s_gxsplit > 2) {
+        s_gxsplit = 0;
+    }
+    if (s_gxsplit && (s_null || plat_gpu_chunk_active() != 1 || !plat_is_new3ds())) {
+        PLOG_W("gxsplit: off (it needs gxone=1 gxchunk=1, a New 3DS and no gxnull)");
+        s_gxsplit = 0;
+    }
+    if (s_gxsplit) {
+        mode = 2;
+        s_pipeline = 1;
+        s_split = 0;
+    } else if (s_null) {
         mode = 1;
     } else if (mode != 0 && (plat_switch_int("gxonehop", 0) != 0 || plat_gpu_one_active())) {
         /* gxonehop and gxone (plat/gpu.c): the game thread writes the PICA words itself, no translator */
@@ -2197,13 +2225,15 @@ void gx_rec_init(void) {
         if (t == NULL) {
             PLOG_W("gxthread=2: no translator thread on core 2: recording and translating on the game thread (1)");
             mode = 1;
+            s_gxsplit = 0;
         }
     }
     gx_rec_mode = mode;
+    s_list_hash = mode == 3 || s_gxsplit == 2;
     gx_rec_fast_update();
     plat_memstable_set_hook(mem_hook);
     plat_gpu_set_shot_hook(shot_hook);
-    PLOG_I("gxthread=%d: GX calls recorded into a %lu KB ring, translated %s%s", mode,
+    PLOG_I("gxthread=%d: GX calls recorded into a %lu KB ring, translated %s%s%s", mode,
            (unsigned long)(words / 256u), mode == 2 ? "on core 2" : "on the game thread at each fence",
-           mode == 3 ? " (verify)" : "");
+           mode == 3 ? " (verify)" : "", s_gxsplit ? " (gxsplit: K on the translator, pipelined)" : "");
 }

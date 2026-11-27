@@ -335,6 +335,9 @@ static int s_immfl; /* switch gximmfl (GX native step 4; the gximmfl section aft
 static int s_ck_tier_linear = 1; /* the frame list is in linear memory (C3D_FrameEnd(0) flushes it) */
 static void ck_verify(Record* r);
 static void ck_log(u32 frames);
+static int s_fd_on; /* switch gxfldig (the gxfldig section after ck_log) */
+static void fd_record(Record* r);
+static void fd_init(void);
 static u32 s_one_cur[3];
 static void one_vfy(int c, const u32* key, const PlatGpuState* st, int key_sends);
 static int oh_state_one(const PlatGpuState* st);
@@ -437,6 +440,9 @@ static void submit(int present) {
     if (s_onehop) {
         if (s_chunk == 2 || s_immfl == 2) {
             ck_verify(&s_rec[s_cur]); /* before the import: it reads the record's captures */
+        }
+        if (__builtin_expect(s_fd_on, 0)) {
+            fd_record(&s_rec[s_cur]); /* gxfldig: also before the import */
         }
         oh_import(&s_rec[s_cur]); /* the render thread is done with it: its captured words go into the tables */
     }
@@ -4847,6 +4853,103 @@ static void ck_log(u32 f) {
     s_ckst.logged = logged;
 }
 
+/* ---- Switch gxfldig (and gxsplit=2): the frame list's register state per draw, for comparing two runs ----
+ * K keeps one instance of its state (gx, the class tables, the block and chunk stores, the GPU model), so K on core 0
+ * cannot run beside K on core 2 in one process. Instead each run digests its frame lists the same way and
+ * tools/port3ds/gxfldig_cmp.py compares two logs (determ: frame N is the same game state in both runs). On the
+ * recording thread, when a record comes back (its captures filled, as ck_verify): every CMD_OH_WORDS run and every
+ * capture's words go through pica_model; at each draw trigger the model's digest goes into the record's hash; any
+ * other command (citro3d's own words, not visible) starts the model again and goes into the hash by its type. A
+ * capture and the kept words of the same key write the same registers, so the digest does not depend on when a
+ * capture came back. Lines: `gxfldig frame F rec K: draws D steps S hash H` for frames gxfldigfrom ..
+ * gxfldigfrom + gxfldign - 1; with gxfldigdraw=F every draw of frame F: `gxfldig draw F.K.D: H`. */
+static u32 s_fd_from, s_fd_n = 600, s_fd_draw_frame = 0xFFFFFFFFu, s_fd_frame = 0xFFFFFFFFu, s_fd_rec;
+static PicaModel* s_fd_m;
+
+static inline u32 fd_mix(u32 h, u32 v) {
+    h = (h ^ v) * 0x01000193u;
+    return h ^ (h >> 15);
+}
+
+static __attribute__((noinline, cold)) void fd_record(Record* r) {
+    if (r->frame < s_fd_from || r->frame - s_fd_from >= s_fd_n || r->used == 0) {
+        return;
+    }
+    if (r->frame != s_fd_frame) {
+        s_fd_frame = r->frame;
+        s_fd_rec = 0;
+    }
+    pica_model_reset(s_fd_m);
+    u32 h = 0x811C9DC5u, draws = 0, steps = 0;
+    for (u8* p = r->data; p < r->data + r->used;) {
+        CmdHead* hd = (CmdHead*)p;
+        u8* body = p + sizeof(CmdHead);
+        p = body + hd->size;
+        if (hd->type == CMD_OH_CAPTURE) {
+            const OhCap* b = (const OhCap*)body;
+            const OhCap* src = b->ref != NULL && b->ref->n > 0 ? b->ref : b;
+            if (src->n > 0) {
+                pica_model_feed(s_fd_m, src->res, src->n);
+            } else {
+                pica_model_reset(s_fd_m);
+            }
+            continue;
+        }
+        if (hd->type == CMD_OH_MARK) {
+            continue; /* mono: its words are not applied */
+        }
+        if (hd->type != CMD_OH_WORDS) {
+            pica_model_reset(s_fd_m);
+            h = fd_mix(h, 0xC3D00000u | hd->type);
+            steps++;
+            continue;
+        }
+        const OhWords* c = (const OhWords*)body;
+        const u32* w = c->w;
+        u32 left = c->n;
+        while (left != 0) {
+            u32 before = s_fd_m->draws;
+            u32 k = pica_model_feed_draw(s_fd_m, w, left);
+            w += k;
+            left -= k;
+            if (s_fd_m->draws != before) {
+                draws++;
+                u32 d = pica_model_digest(s_fd_m);
+                h = fd_mix(h, d);
+                if (r->frame == s_fd_draw_frame) {
+                    PLOG_I("gxfldig draw %lu.%lu.%lu: %08lx", (unsigned long)r->frame, (unsigned long)s_fd_rec,
+                           (unsigned long)draws, (unsigned long)d);
+                }
+            }
+        }
+    }
+    PLOG_I("gxfldig frame %lu rec %lu: draws %lu steps %lu hash %08lx", (unsigned long)r->frame,
+           (unsigned long)s_fd_rec, (unsigned long)draws, (unsigned long)steps, (unsigned long)h);
+    s_fd_rec++;
+}
+
+static void fd_init(void) {
+    int split = plat_switch_int("gxsplit", 0);
+    s_fd_on = plat_switch_int("gxfldig", split == 2) != 0;
+    if (!s_fd_on) {
+        return;
+    }
+    s_fd_from = (u32)plat_switch_int("gxfldigfrom", 0);
+    s_fd_n = (u32)plat_switch_int("gxfldign", 600);
+    s_fd_draw_frame = (u32)plat_switch_int("gxfldigdraw", -1);
+    s_fd_m = malloc(sizeof(PicaModel));
+    if (s_fd_m == NULL || !s_onehop) {
+        PLOG_W("gxfldig: off (it needs gxonehop=1, e.g. through gxone, and %lu bytes heap)",
+               (unsigned long)sizeof(PicaModel));
+        free(s_fd_m);
+        s_fd_m = NULL;
+        s_fd_on = 0;
+        return;
+    }
+    PLOG_I("gxfldig: frame-list register state per draw, frames %lu..%lu%s", (unsigned long)s_fd_from,
+           (unsigned long)(s_fd_from + s_fd_n - 1), split == 2 ? " (gxsplit=2)" : "");
+}
+
 /* Start-up, after oh_init (the frame list): the chunk store, the scale rows, gxchunk=2's buffers. */
 static int ck_init(void) {
     u32 kb = (u32)plat_switch_int("gxchunkkb", 256);
@@ -6291,13 +6394,15 @@ void plat_gpu_init(void) {
     if (s_onehop) {
         oh_record_start(); /* the first record */
     }
+    fd_init(); /* switch gxfldig (gxsplit=2) */
     s_hang_recover = plat_switch_int("gpuhangrecover", 0) != 0; /* with gpuhangtest=N: the pretend hang ends at a GPU reset */
     s_hang_times = plat_switch_int("gpuhangtimes", 1);          /* how many records pretend to hang */
     LightEvent_Init(&s_fence_ev, RESET_STICKY);
     PLOG_I("gpu: gpusyncall %d gpufence %d gxflushrender %d gxstatedelta %d gxurow %d gxsync %d", s_sync_all,
            s_gpu_fence, s_flush_on_render, s_state_delta, s_urow, !s_threaded);
     /* Switch gpucore=N: the render thread's core (default 2 on the New 3DS, 1 on the old one). */
-    int core = plat_switch_int("gpucore", plat_is_new3ds() ? 2 : 1);
+    /* gxsplit (game/gx/gx_rec.c): core 2 holds the GX translator with K, so the render thread only submits, on core 1 */
+    int core = plat_switch_int("gpucore", plat_is_new3ds() && plat_switch_int("gxsplit", 0) == 0 ? 2 : 1);
     if (s_threaded) {
         s_thread = threadCreate(render_thread, NULL, 64 * 1024, 0x2E, core, false);
         if (s_thread == NULL) {

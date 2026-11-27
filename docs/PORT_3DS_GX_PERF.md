@@ -1642,3 +1642,27 @@ Known limits: after a GPU reset (`gpu_reset_apply`) a transfer that was in the l
 `pick_format_ex` (`gx_tex.c`) put an opaque texture in RGB565 and a one-bit-alpha texture in RGBA5551 whatever the decoded colours were (RGBA8 from CMPR, RGBA8 sources and palettes with 8-bit colours lose their low bits; gor_01 had 39 + 198 such textures). Now (`tex16=0`, default): a channel value v fits n bits when `v == code*255/(2^n-1)` or `v == (code << (8-n)) | (code >> (2n-8))` with `code = v >> (8-n)` (the first is what GX's RGB565 and RGB5A3 decode gives, the second is the PICA's widening). An opaque texture whose colours all fit (R and B 5 bits, G 6 bits) stays RGB565; one that does not fit is stored as **RGB8** (24 bit, bytes B, G, R as the PICA reads them; `tile_level` and `sample_tiled` know it, so `texcompact=2` verifies it). A one-bit-alpha texture whose colours all fit 5 bits stays RGBA5551; otherwise **RGBA8**. A cut-out in RGBA8 keeps no mip chain, as RGBA5551 did, so the picture changes only in the low colour bits. Colours of fully transparent texels count too (they bleed in with bilinear filtering). Grey textures stay LA8; `texcompact` formats are unchanged (a texture that fails the fit and has every channel a multiple of 17 goes to RGBA4 with `texcompact=1`, exact). `tex16=1` is the old choice. Cost: 2 bytes a texel become 3 (RGB8) or 4 (RGBA8) for the textures that change.
 
 Counters: `texstats=N` prints `texexact:` every 120 frames (uploads checked, textures changed per kind, level-0 KB before and after). Linear heap and VRAM: the changed textures grow by 1.5x (RGB8) or 2x (RGBA8); `vramtex` is off by default and its tier works on bytes (`vramtexmax` 256 KB per texture), so a texture that was under the limit as 16 bit may now be over it; the texture cache has no byte cap of its own (`CACHE_SIZE` 1024 entries, 120-frame eviction). The numbers per scene (textures and bytes changed, live texture KB with `tex16=0` and `tex16=1`) come from the measurement runs: see the report of the build that introduced this section.
+
+## Step 10: `gxsplit` (option B, stage 1, 2026-11-28)
+
+Design and files: docs/PORT_3DS_GX_NATIVE.md, "Step 10 stage 1 as built". Default 0. Stage 1 runs K unchanged on the translator thread (core 2) behind the gx_rec ring; the render thread moves to core 1 (`gpucore` default 1 under gxsplit).
+
+### Checks done without the emulator
+
+- Build: one dev build (`--dev --no-cia`) as the compile check (owner rule 2026-11-28). No `src/` change.
+- Host: `pica_model_test` on the two gpuhang/gpudump lists: ok, 0 failures, including the new digest and `pica_model_feed_draw` cases.
+- Hot paths: no setter changed. `gx_rec_list` and `run_one`'s list case read one more flag (`s_list_hash`, in place of `gx_rec_mode == 3`); `gx_rec_prim_direct` one more test; `submit` one more test of `s_fd_on`.
+
+### Gates (to run on the integration build, release CIA)
+
+C1 = `gxdirty=1 gxdirect=1 gximmdirect=1 texfast=1 texasync=1`; C3 = C1 + `gxthread=2 gxpipeline=1 gxsdl=1 gxrecfuse=1 gxreclgroup=1`; K = C1 + `gxone=1 gxchunk=1`; I = K + `gximmfl=1`; S = I + `gxsplit=1`; SV = I + `gxsplit=2`. Scenes as gx_perf_ab.py: gor_01, pik_00, usu_00, battle.
+
+1. Start lines (any S run): `gxthread=2: GX calls recorded into a 4096 KB ring, translated on core 2 (gxsplit: K on the translator, pipelined)`, `gpu: ... render thread on core 1`, `gxone=1`, `gxchunk`, `gximmfl=1`; no `gxsplit: off` warning.
+2. Verify, 4 scenes: `run_azahar.py --frames 841 --switches "<scene> SV gxthreadstats=60"`. Pass: `gxsplit verify frame N: lists changed between call and translation 0, array snapshots not used 0` (a few not used is a late-read finding to report, not noise); `gxfldig frame` lines present; no `gxthread verify`, `gxchunk verify`, `gximmfl verify` warning.
+3. Frame lists against K (the "K on core 0 beside it" check, as two `determ` runs): for each scene run `run_azahar.py --frames 760 --switches "<scene> determ I gxfldig=1 gxfldigfrom=700 gxfldign=50 gxfldigdraw=720"` and the same with `SV` in place of `I gxfldig=1`; then `tools/port3ds/gxfldig_cmp.py <I log> <SV log>`. Pass: exit 0, every common record equal, `draws: N compared, 0 differ`.
+4. Sweep: `map_sweep.py --area tik --story 30 --switches "SV gxthreadstats=60"`: every map ok, conditions of 2 in every log.
+5. Images: `determ_ab.py --a "I" --b "S" --scenes gor_01,pik_00,usu_00,battle` (shots 780-785): 6 of 6 per scene; then `--a "C3" --b "S"`.
+6. Game state: `gw_diff.py` 1600-frame padscript in gor_01 (`map=gor_01 story=30 determ gwdump=10`, A2 padscript), A = I, B = S: 160 records equal.
+7. Stereo: `stereo_ab.py` with A = I, B = S (as for gxchunk): equal.
+8. GPU hang: `gpuhangtest=N gpuhangrecover=1` with S in gor_01: the hang is detected, the GPU reset runs, the game goes on drawing (as for K).
+9. Timing, release: `gx_perf_ab.py --a "C3" --b "S" --scenes gor_01,pik_00,usu_00,battle --repeat 2`, then `--a "I" --b "S"`. Per core: core 0 = `busy` (game thread), core 2 = `transl` (S, C3) or none (I: K's GX is in `busy`), core 1 = `render` (S; under C3 and I the render thread is on core 2). Report frame, busy, fence, translator, render for each.

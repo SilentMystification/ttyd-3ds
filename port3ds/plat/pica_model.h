@@ -55,4 +55,11 @@ typedef struct {
 } PicaModelDiff;
 void pica_model_cmp(const PicaModel* a, const PicaModel* b, PicaModelDiff* d);
 
+/* Feeds whole commands from w until one that triggers a draw (GPUREG_DRAWARRAYS/DRAWELEMENTS), that one included;
+ * returns the words fed (n: no draw in them). */
+uint32_t pica_model_feed_draw(PicaModel* m, const uint32_t* w, uint32_t n);
+/* A hash of what the model knows (the state registers pica_model_cmp compares with their known bytes, the known
+ * uniform rows, fixed attributes and fog LUT entries): equal states give equal digests (gxfldig, gxsplit=2). */
+uint32_t pica_model_digest(const PicaModel* m);
+
 #endif

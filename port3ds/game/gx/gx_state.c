@@ -7,6 +7,7 @@
  * and GXCallDisplayList replays it through the same setter, as the GameCube
  * replays the register writes the SDK put in the list.
  */
+#include <stddef.h>
 #include <string.h>
 
 #include "gx_bigmem.h"
@@ -165,6 +166,150 @@ static inline void touch_xf(u32 cls) {
 static GXColor u2c(u32 v) { return (GXColor){(u8)(v >> 24), (u8)(v >> 16), (u8)(v >> 8), (u8)v}; }
 static u32 c2u(GXColor c) { return (u32)c.r << 24 | (u32)c.g << 16 | (u32)c.b << 8 | c.a; }
 
+/* ---- gxfifo: FIFO-cheap setters (docs/PORT_3DS_GX_NATIVE.md, revised plan step 2) ----
+ * A hot setter is three parts:
+ *   GXSetX:  one load of gx_rec_fast.fifo. 0 (gxfifo=1, gxthread=0, nothing recorded, no primitive open, gxdirty on,
+ *            no gxstatededup): the fast body. Else X_old (1) or X_ver (2), both out of line in .text.unlikely.
+ *   X_fast:  the GameCube's "a few FIFO stores": the arguments packed as the bytes GxState holds them, one or two
+ *            word compares with GxState itself (ARMv6 loads unaligned words), return when equal; else the stores,
+ *            the version and the class dirty bit. GxState is the packed shadow: no second copy, so the readers
+ *            (getters, build_dirty/build_one, the CPU path, the verify modes) read what they read before.
+ *   X_old:   the setter as it was (record ring for gxthread, display-list recording, statededup, verify modes,
+ *            the open primitive). gxfifo=0 always takes it.
+ * The vertex description, formats, arrays and the matrix loads compare too (the old bodies bump their versions on
+ * every call): a version changes only when a byte changed.
+ * gxfifo=2 (X_ver): runs X_fast, keeps its result, puts the state back, runs X_old, and compares the bytes of the
+ * setter's state and, when the fast body found a change, the versions and dirty bits (`gxfifo verify` lines). The
+ * state left is X_old's, so the run is the gxfifo=0 run. */
+int gx_opt_fifo;
+#define FIFO_HOT __attribute__((noinline, noclone))
+#define FIFO_COLD __attribute__((noinline, noclone, section(".text.unlikely.gxfifo")))
+#define FB(x) ((u32)(x) & 0xFFu)
+static inline u32 ld32(const void* p) {
+    u32 v;
+    __builtin_memcpy(&v, p, 4);
+    return v;
+}
+static inline void st32(void* p, u32 v) { __builtin_memcpy(p, &v, 4); }
+static inline u32 ld16(const void* p) {
+    u16 v;
+    __builtin_memcpy(&v, p, 2);
+    return v;
+}
+static inline u32 pk4(u32 a, u32 b, u32 c, u32 d) { return FB(a) | FB(b) << 8 | FB(c) << 16 | FB(d) << 24; }
+static inline void fifo_touch(u32 cls) {
+    gx.version++;
+    gx_dirty |= cls;
+}
+static inline void fifo_touch_xf(u32 cls) {
+    gx_xf_version++;
+    gx_dirty |= cls;
+    if (!gx_opt_statever) {
+        gx.version++;
+    }
+}
+/* the setter's start: one word decides */
+#define FIFO_DISPATCH(name, A)                       \
+    do {                                             \
+        const uintptr_t ff_ = gx_rec_fast.fifo;      \
+        if (__builtin_expect(ff_ != 0, 0)) {         \
+            if (ff_ == 2) {                          \
+                name##_ver A;                        \
+            } else {                                 \
+                name##_old A;                        \
+            }                                        \
+            return;                                  \
+        }                                            \
+    } while (0)
+
+/* gxfifo=2 */
+#define FV_MAX 128
+static struct {
+    u8* p[2];
+    u32 n[2];
+    u8 before[2][FV_MAX], fast[2][FV_MAX];
+    u32 c0[6], cf[6];
+    u32 checks, changes, bad;
+} s_fv;
+static void fv_counters(u32* c) {
+    c[0] = gx.version;
+    c[1] = gx_xf_version;
+    c[2] = gx_vtx_version;
+    c[3] = (u32)gx_vdesc_ver[0];
+    c[4] = (u32)(gx_vdesc_ver[0] >> 32);
+    c[5] = gx_dirty;
+}
+static void fv_set_counters(const u32* c) {
+    gx.version = c[0];
+    gx_xf_version = c[1];
+    gx_vtx_version = c[2];
+    gx_vdesc_ver[0] = (u64)c[4] << 32 | c[3];
+    gx_dirty = c[5];
+}
+static FIFO_COLD void fv_begin(void* p0, u32 n0, void* p1, u32 n1) {
+    s_fv.p[0] = p0;
+    s_fv.n[0] = p0 != NULL ? n0 : 0;
+    s_fv.p[1] = p1;
+    s_fv.n[1] = p1 != NULL ? n1 : 0;
+    for (int i = 0; i < 2; i++) {
+        if (s_fv.n[i] > FV_MAX) {
+            plat_fatal("gxfifo verify: region of %lu bytes", (unsigned long)s_fv.n[i]);
+        }
+        memcpy(s_fv.before[i], s_fv.p[i], s_fv.n[i]);
+    }
+    fv_counters(s_fv.c0);
+}
+static FIFO_COLD void fv_mid(void) {
+    for (int i = 0; i < 2; i++) {
+        memcpy(s_fv.fast[i], s_fv.p[i], s_fv.n[i]);
+        memcpy(s_fv.p[i], s_fv.before[i], s_fv.n[i]);
+    }
+    fv_counters(s_fv.cf);
+    fv_set_counters(s_fv.c0);
+}
+static FIFO_COLD void fv_end(const char* name) {
+    u32 co[6];
+    fv_counters(co);
+    int bytes_bad = 0, old_changed = 0;
+    for (int i = 0; i < 2; i++) {
+        bytes_bad |= memcmp(s_fv.fast[i], s_fv.p[i], s_fv.n[i]) != 0;
+        old_changed |= memcmp(s_fv.before[i], s_fv.p[i], s_fv.n[i]) != 0;
+    }
+    const int fast_changed = memcmp(s_fv.cf, s_fv.c0, sizeof(s_fv.c0)) != 0;
+    /* a change: the versions and dirty bits the old body left; no change: the old body changed no byte */
+    const int ctr_bad = fast_changed && memcmp(s_fv.cf, co, sizeof(co)) != 0;
+    s_fv.checks++;
+    s_fv.changes += (u32)fast_changed;
+    if (bytes_bad || ctr_bad || fast_changed != old_changed) {
+        if (s_fv.bad++ < 32) {
+            PLOG_W("gxfifo verify: %s: bytes %s, fast %s / old %s, counters %s (version %lu/%lu xf %lu/%lu vtx %lu/%lu "
+                   "vdesc %lu/%lu dirty %lx/%lx)",
+                   name, bytes_bad ? "DIFFER" : "same", fast_changed ? "changed" : "unchanged",
+                   old_changed ? "changed" : "unchanged", ctr_bad ? "DIFFER" : "ok", (unsigned long)s_fv.cf[0],
+                   (unsigned long)co[0], (unsigned long)s_fv.cf[1], (unsigned long)co[1], (unsigned long)s_fv.cf[2],
+                   (unsigned long)co[2], (unsigned long)s_fv.cf[3], (unsigned long)co[3], (unsigned long)s_fv.cf[5],
+                   (unsigned long)co[5]);
+        }
+    }
+}
+/* the regions: p0, n0, p1, n1 */
+#define FIFO_VER(name, P, A, ...)        \
+    static FIFO_COLD void name##_ver P { \
+        fv_begin(__VA_ARGS__);           \
+        name##_fast A;                       \
+        fv_mid();                            \
+        name##_old A;                        \
+        fv_end(#name);                       \
+    }
+
+void gx_fifo_log(u32 frames) {
+    if (gx_opt_fifo != 2 || frames == 0) {
+        return;
+    }
+    PLOG_I("gxfifo frame %lu: verify %lu checks (%lu changes), %lu mismatches (total)", (unsigned long)gx_perf_frame_no(),
+           (unsigned long)s_fv.checks, (unsigned long)s_fv.changes, (unsigned long)s_fv.bad);
+}
+
 /* ---- Vertex description ---- */
 
 /* The field writes of the calls the game thread's shadow keeps (gx_shadow_call). */
@@ -202,11 +347,35 @@ static void vat_set(GxState* st, u32 vtxfmt, u32 attr, u32 cnt, u32 type, u8 fra
     VDESC_TOUCH(st);
 }
 
-void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
+static FIFO_COLD void vtx_desc_old(GXAttr attr, GXAttrType type) {
     GX_CLOSE_PRIMITIVE();
     REC(SetVtxDesc, attr, type);
     vtx_desc_set(&gx, (u32)attr, (u32)type);
     gx_vtx_version++;
+}
+static inline void vtx_desc_fast(GXAttr attr, GXAttrType type) {
+    const u32 a = (u32)attr, t = FB(type);
+    if (a >= GX_VA_MAX_ATTR) {
+        return;
+    }
+    u8* d = gx.vtx_desc;
+    if (a == GX_VA_NRM || a == GX_VA_NBT) {
+        const u32 other = a == GX_VA_NRM ? GX_VA_NBT : GX_VA_NRM;
+        if (d[a] == t && d[other] == GX_NONE) {
+            return;
+        }
+        d[other] = GX_NONE;
+    } else if (d[a] == t) {
+        return;
+    }
+    d[a] = (u8)t;
+    gx_vdesc_ver[0]++;
+    gx_vtx_version++;
+}
+FIFO_VER(vtx_desc, (GXAttr attr, GXAttrType type), (attr, type), gx.vtx_desc, sizeof(gx.vtx_desc), NULL, 0)
+FIFO_HOT void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
+    FIFO_DISPATCH(vtx_desc, (attr, type));
+    vtx_desc_fast(attr, type);
 }
 
 void GXSetVtxDescv(const GXVtxDescList* list) {
@@ -248,18 +417,65 @@ void GXGetVtxAttrFmtv(GXVtxFmt fmt, GXVtxAttrFmtList* list) {
     list[n].attr = GX_VA_NULL;
 }
 
-void GXClearVtxDesc(void) {
+static FIFO_COLD void clear_vtx_desc_old(void) {
     GX_CLOSE_PRIMITIVE();
     REC0(ClearVtxDesc);
     vtx_desc_clear(&gx);
     gx_vtx_version++;
 }
+/* the cleared description: GX_NONE (0) everywhere but GX_VA_POS (9) = GX_DIRECT (1) */
+_Static_assert(offsetof(GxState, vtx_desc) == 0 && GX_VA_MAX_ATTR == 26 && GX_VA_POS == 9 && GX_NONE == 0 &&
+                   GX_DIRECT == 1,
+               "gxfifo: cleared vertex description words");
+static inline void clear_vtx_desc_fast(void) {
+    const u32* w = (const u32*)(const void*)gx.vtx_desc;
+    if ((w[0] | w[1] | (w[2] ^ 0x100u) | w[3] | w[4] | w[5] | ld16(gx.vtx_desc + 24)) == 0) {
+        return;
+    }
+    vtx_desc_clear(&gx);
+    gx_vtx_version++;
+}
+FIFO_VER(clear_vtx_desc, (void), (), gx.vtx_desc, sizeof(gx.vtx_desc), NULL, 0)
+FIFO_HOT void GXClearVtxDesc(void) {
+    FIFO_DISPATCH(clear_vtx_desc, ());
+    clear_vtx_desc_fast();
+}
 
-void GXSetVtxAttrFmt(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
+static FIFO_COLD void vtx_attr_fmt_old(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
     GX_CLOSE_PRIMITIVE();
     REC(SetVtxAttrFmt, vtxfmt, attr, cnt, type, frac);
     vat_set(&gx, (u32)vtxfmt, (u32)attr, (u32)cnt, (u32)type, frac);
     gx_vtx_version++;
+}
+static inline void vtx_attr_fmt_fast(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
+    u32 a = (u32)attr, c = FB(cnt);
+    if ((u32)vtxfmt >= GX_MAX_VTXFMT) {
+        return;
+    }
+    if (a == GX_VA_NBT) {
+        a = GX_VA_NRM;
+        c = GX_NRM_NBT;
+    }
+    if (a >= GX_VA_MAX_ATTR) {
+        return;
+    }
+    u8* p = &gx.vat[vtxfmt][a].cnt;
+    /* the word reaches one byte past the last format: array_base follows in GxState */
+    if (((ld32(p) ^ (c | FB(type) << 8 | (u32)frac << 16)) & 0xFFFFFFu) == 0) {
+        return;
+    }
+    p[0] = (u8)c;
+    p[1] = (u8)type;
+    p[2] = frac;
+    gx_vdesc_ver[0]++;
+    gx_vtx_version++;
+}
+FIFO_VER(vtx_attr_fmt, (GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac),
+         (vtxfmt, attr, cnt, type, frac), (u32)vtxfmt < GX_MAX_VTXFMT ? (void*)gx.vat[vtxfmt] : NULL,
+         sizeof(gx.vat[0]), NULL, 0)
+FIFO_HOT void GXSetVtxAttrFmt(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
+    FIFO_DISPATCH(vtx_attr_fmt, (vtxfmt, attr, cnt, type, frac));
+    vtx_attr_fmt_fast(vtxfmt, attr, cnt, type, frac);
 }
 
 void GXSetVtxAttrFmtv(GXVtxFmt vtxfmt, const GXVtxAttrFmtList* list) {
@@ -269,7 +485,7 @@ void GXSetVtxAttrFmtv(GXVtxFmt vtxfmt, const GXVtxAttrFmtList* list) {
     }
 }
 
-void GXSetArray(GXAttr attr, void* base_ptr, u8 stride) {
+static FIFO_COLD void set_array_old(GXAttr attr, void* base_ptr, u8 stride) {
     GX_CLOSE_PRIMITIVE();
     REC(SetArray, attr, (u32)base_ptr, stride);
     if (attr == GX_VA_NBT) {
@@ -280,6 +496,23 @@ void GXSetArray(GXAttr attr, void* base_ptr, u8 stride) {
         gx_vtx_version++;
         gx.array_stride[attr] = stride;
     }
+}
+static inline void set_array_fast(GXAttr attr, void* base_ptr, u8 stride) {
+    u32 a = (u32)attr == GX_VA_NBT ? (u32)GX_VA_NRM : (u32)attr;
+    if (a >= GX_VA_MAX_ATTR || (gx.array_base[a] == base_ptr && gx.array_stride[a] == stride)) {
+        return;
+    }
+    gx.array_base[a] = base_ptr;
+    gx.array_stride[a] = stride;
+    gx_vtx_version++;
+}
+static inline u32 array_slot(GXAttr attr) { return (u32)attr == GX_VA_NBT ? (u32)GX_VA_NRM : (u32)attr; }
+FIFO_VER(set_array, (GXAttr attr, void* base_ptr, u8 stride), (attr, base_ptr, stride),
+         array_slot(attr) < GX_VA_MAX_ATTR ? (void*)&gx.array_base[array_slot(attr)] : NULL, sizeof(gx.array_base[0]),
+         array_slot(attr) < GX_VA_MAX_ATTR ? (void*)&gx.array_stride[array_slot(attr)] : NULL, 1)
+FIFO_HOT void GXSetArray(GXAttr attr, void* base_ptr, u8 stride) {
+    FIFO_DISPATCH(set_array, (attr, base_ptr, stride));
+    set_array_fast(attr, base_ptr, stride);
 }
 
 void GXInvalidateVtxCache(void) {
@@ -293,7 +526,7 @@ void GXInvalidateVtxCache(void) {
 
 /* ---- Transform ---- */
 
-void GXLoadPosMtxImm(const f32 mtx[3][4], u32 id) {
+static FIFO_COLD void load_pos_mtx_old(const f32 mtx[3][4], u32 id) {
     REC(LoadPosMtx, id, F2U(mtx[0][0]), F2U(mtx[0][1]), F2U(mtx[0][2]), F2U(mtx[0][3]), F2U(mtx[1][0]),
         F2U(mtx[1][1]), F2U(mtx[1][2]), F2U(mtx[1][3]), F2U(mtx[2][0]), F2U(mtx[2][1]), F2U(mtx[2][2]),
         F2U(mtx[2][3]));
@@ -303,8 +536,30 @@ void GXLoadPosMtxImm(const f32 mtx[3][4], u32 id) {
         touch_xf(GXD_CLIP);
     }
 }
+/* the bits of n words (a float compare would call -0 and 0 equal) */
+static inline int words_equal(const void* a, const void* b, u32 n) {
+    u32 d = 0;
+    for (u32 k = 0; k < n; k++) {
+        d |= ld32((const u8*)a + 4 * k) ^ ld32((const u8*)b + 4 * k);
+    }
+    return d == 0;
+}
+static inline void load_pos_mtx_fast(const f32 mtx[3][4], u32 id) {
+    const u32 i = id / 3;
+    if (i >= GX_POS_MTX_COUNT || words_equal(gx.pos_mtx[i], mtx, 12)) {
+        return;
+    }
+    memcpy(gx.pos_mtx[i], mtx, sizeof(gx.pos_mtx[i]));
+    fifo_touch_xf(GXD_CLIP);
+}
+FIFO_VER(load_pos_mtx, (const f32 mtx[3][4], u32 id), (mtx, id), id / 3 < GX_POS_MTX_COUNT ? gx.pos_mtx[id / 3] : NULL,
+         sizeof(gx.pos_mtx[0]), NULL, 0)
+FIFO_HOT void GXLoadPosMtxImm(const f32 mtx[3][4], u32 id) {
+    FIFO_DISPATCH(load_pos_mtx, (mtx, id));
+    load_pos_mtx_fast(mtx, id);
+}
 
-void GXLoadNrmMtxImm(const f32 mtx[3][4], u32 id) {
+static FIFO_COLD void load_nrm_mtx_old(const f32 mtx[3][4], u32 id) {
     REC(LoadNrmMtx, id, F2U(mtx[0][0]), F2U(mtx[0][1]), F2U(mtx[0][2]), F2U(mtx[1][0]), F2U(mtx[1][1]),
         F2U(mtx[1][2]), F2U(mtx[2][0]), F2U(mtx[2][1]), F2U(mtx[2][2]));
     u32 i = id / 3;
@@ -317,8 +572,26 @@ void GXLoadNrmMtxImm(const f32 mtx[3][4], u32 id) {
         touch_xf(GXD_CLIP);
     }
 }
+static inline void load_nrm_mtx_fast(const f32 mtx[3][4], u32 id) {
+    const u32 i = id / 3;
+    if (i >= GX_POS_MTX_COUNT ||
+        (words_equal(gx.nrm_mtx[i][0], mtx[0], 3) && words_equal(gx.nrm_mtx[i][1], mtx[1], 3) &&
+         words_equal(gx.nrm_mtx[i][2], mtx[2], 3))) {
+        return;
+    }
+    for (int r = 0; r < 3; r++) {
+        memcpy(gx.nrm_mtx[i][r], mtx[r], sizeof(gx.nrm_mtx[i][r]));
+    }
+    fifo_touch_xf(GXD_CLIP);
+}
+FIFO_VER(load_nrm_mtx, (const f32 mtx[3][4], u32 id), (mtx, id), id / 3 < GX_POS_MTX_COUNT ? gx.nrm_mtx[id / 3] : NULL,
+         sizeof(gx.nrm_mtx[0]), NULL, 0)
+FIFO_HOT void GXLoadNrmMtxImm(const f32 mtx[3][4], u32 id) {
+    FIFO_DISPATCH(load_nrm_mtx, (mtx, id));
+    load_nrm_mtx_fast(mtx, id);
+}
 
-void GXLoadTexMtxImm(const f32 mtx[][4], u32 id, GXTexMtxType type) {
+static FIFO_COLD void load_tex_mtx_old(const f32 mtx[][4], u32 id, GXTexMtxType type) {
     GX_CLOSE_PRIMITIVE();
     int rows = type == GX_MTX3x4 ? 3 : 2;
     REC(LoadTexMtx, id, type, F2U(mtx[0][0]), F2U(mtx[0][1]), F2U(mtx[0][2]), F2U(mtx[0][3]), F2U(mtx[1][0]),
@@ -348,14 +621,78 @@ void GXLoadTexMtxImm(const f32 mtx[][4], u32 id, GXTexMtxType type) {
     }
     touch_xf(GXD_TEXROW);
 }
+/* the matrix id's storage (and its 3x4 flag for a texture matrix), or NULL */
+static inline f32 (*tex_mtx_dst(u32 id, u8** is3x4))[4] {
+    *is3x4 = NULL;
+    if (id >= GX_PTTEXMTX0) {
+        const u32 i = (id - GX_PTTEXMTX0) / 3;
+        return i < GX_PTTEX_MTX_COUNT ? gx.pttex_mtx[i] : NULL;
+    }
+    if (id >= GX_TEXMTX0) {
+        const u32 i = (id - GX_TEXMTX0) / 3;
+        if (i < GX_TEX_MTX_COUNT) {
+            *is3x4 = &gx.tex_mtx_is_3x4[i];
+            return gx.tex_mtx[i];
+        }
+    }
+    return NULL;
+}
+static inline void load_tex_mtx_fast(const f32 mtx[][4], u32 id, GXTexMtxType type) {
+    u8* is3x4;
+    f32 (*dst)[4] = tex_mtx_dst(id, &is3x4);
+    if (dst == NULL) {
+        return;
+    }
+    const u32 three = type == GX_MTX3x4;
+    static const u32 row2[4] = {0, 0, 0x3F800000u, 0}; /* 0, 0, 1.0f, 0 */
+    if ((is3x4 == NULL || *is3x4 == three) && words_equal(dst, mtx, 8) &&
+        words_equal(dst[2], three ? mtx[2] : (const f32*)(const void*)row2, 4)) {
+        return;
+    }
+    if (is3x4 != NULL) {
+        *is3x4 = (u8)three;
+    }
+    memcpy(dst, mtx, sizeof(f32) * 8);
+    memcpy(dst[2], three ? mtx[2] : (const f32*)(const void*)row2, sizeof(f32) * 4);
+    fifo_touch_xf(GXD_TEXROW);
+}
+static inline void* tex_mtx_flag(u32 id) {
+    u8* f;
+    tex_mtx_dst(id, &f);
+    return f;
+}
+static inline void* tex_mtx_ptr(u32 id) {
+    u8* f;
+    return tex_mtx_dst(id, &f);
+}
+FIFO_VER(load_tex_mtx, (const f32 mtx[][4], u32 id, GXTexMtxType type), (mtx, id, type), tex_mtx_ptr(id),
+         sizeof(gx.tex_mtx[0]), tex_mtx_flag(id), 1)
+FIFO_HOT void GXLoadTexMtxImm(const f32 mtx[][4], u32 id, GXTexMtxType type) {
+    FIFO_DISPATCH(load_tex_mtx, (mtx, id, type));
+    load_tex_mtx_fast(mtx, id, type);
+}
 
-void GXSetCurrentMtx(u32 id) {
+static FIFO_COLD void set_current_mtx_old(u32 id) {
     GX_CLOSE_PRIMITIVE();
     REC(SetCurrentMtx, id);
     SAME(gx.cur_pnmtx == id / 3);
     gx.cur_pnmtx = id / 3;
     gx_vtx_version++;
     gx_xf_version++;
+}
+static inline void set_current_mtx_fast(u32 id) {
+    const u32 i = id / 3;
+    if (gx.cur_pnmtx == i) {
+        return;
+    }
+    gx.cur_pnmtx = i;
+    gx_vtx_version++;
+    gx_xf_version++;
+}
+FIFO_VER(set_current_mtx, (u32 id), (id), &gx.cur_pnmtx, sizeof(gx.cur_pnmtx), NULL, 0)
+FIFO_HOT void GXSetCurrentMtx(u32 id) {
+    FIFO_DISPATCH(set_current_mtx, (id));
+    set_current_mtx_fast(id);
 }
 
 void GXSetProjection(const f32 mtx[4][4], GXProjectionType type) {
@@ -459,8 +796,8 @@ void GXSetScissorBoxOffset(s32 x_off, s32 y_off) {
 
 /* ---- Texture coordinate generation ---- */
 
-void GXSetTexCoordGen2(GXTexCoordID dst_coord, GXTexGenType func, GXTexGenSrc src_param, u32 mtx, GXBool normalize,
-                       u32 pt_texmtx) {
+static FIFO_COLD void tex_coord_gen_old(GXTexCoordID dst_coord, GXTexGenType func, GXTexGenSrc src_param, u32 mtx,
+                                        GXBool normalize, u32 pt_texmtx) {
     REC(SetTexCoordGen2, dst_coord, func, src_param, mtx, normalize, pt_texmtx);
     if ((u32)dst_coord >= GX_MAX_TEXGEN) {
         return;
@@ -477,25 +814,69 @@ void GXSetTexCoordGen2(GXTexCoordID dst_coord, GXTexGenType func, GXTexGenSrc sr
     gx_vtx_version++;
     touch(GXD_CHAN);
 }
-
-void GXSetNumTexGens(u8 nTexGens) {
-    REC(SetNumTexGens, nTexGens);
-    SAME(gx.num_texgens == nTexGens);
-    gx.num_texgens = nTexGens;
-    touch(GXD_CHAN);
+_Static_assert(offsetof(GxState, texgen[0].src) == offsetof(GxState, texgen[0].func) + 1 &&
+                   offsetof(GxState, texgen[0].normalize) == offsetof(GxState, texgen[0].func) + 2,
+               "gxfifo: texgen bytes");
+static inline void tex_coord_gen_fast(GXTexCoordID dst_coord, GXTexGenType func, GXTexGenSrc src_param, u32 mtx,
+                                      GXBool normalize, u32 pt_texmtx) {
+    const u32 d = (u32)dst_coord;
+    if (d >= GX_MAX_TEXGEN) {
+        return;
+    }
+    typeof(gx.texgen[0])* tg = &gx.texgen[d];
+    if (((ld32(&tg->func) ^ (FB(func) | FB(src_param) << 8 | FB(normalize) << 16)) & 0xFFFFFFu) == 0 &&
+        tg->mtx == mtx && tg->pt_mtx == pt_texmtx && gx.cur_texmtx[d] == FB(mtx)) {
+        return;
+    }
+    tg->func = (u8)func;
+    tg->src = (u8)src_param;
+    tg->mtx = mtx;
+    tg->normalize = normalize;
+    tg->pt_mtx = pt_texmtx;
+    gx.cur_texmtx[d] = (u8)mtx;
+    gx_vtx_version++;
+    fifo_touch(GXD_CHAN);
 }
+FIFO_VER(tex_coord_gen,
+         (GXTexCoordID dst_coord, GXTexGenType func, GXTexGenSrc src_param, u32 mtx, GXBool normalize, u32 pt_texmtx),
+         (dst_coord, func, src_param, mtx, normalize, pt_texmtx),
+         (u32)dst_coord < GX_MAX_TEXGEN ? (void*)&gx.texgen[dst_coord] : NULL, sizeof(gx.texgen[0]),
+         (u32)dst_coord < GX_MAX_TEXGEN ? (void*)&gx.cur_texmtx[dst_coord] : NULL, 1)
+FIFO_HOT void GXSetTexCoordGen2(GXTexCoordID dst_coord, GXTexGenType func, GXTexGenSrc src_param, u32 mtx,
+                                GXBool normalize, u32 pt_texmtx) {
+    FIFO_DISPATCH(tex_coord_gen, (dst_coord, func, src_param, mtx, normalize, pt_texmtx));
+    tex_coord_gen_fast(dst_coord, func, src_param, mtx, normalize, pt_texmtx);
+}
+
+/* the one-byte setters: compare, store, the class bit */
+#define FIFO_BYTE_SETTER(pub, name, rec_id, T, field, cls)                    \
+    static FIFO_COLD void name##_old(T v) {                                  \
+        REC(rec_id, v);                                                      \
+        SAME(gx.field == (u8)v);                                             \
+        gx.field = (u8)v;                                                    \
+        touch(cls);                                                          \
+    }                                                                        \
+    static inline void name##_fast(T v) {                                    \
+        if (gx.field == FB(v)) {                                             \
+            return;                                                          \
+        }                                                                    \
+        gx.field = (u8)v;                                                    \
+        fifo_touch(cls);                                                     \
+    }                                                                        \
+    FIFO_VER(name, (T v), (v), &gx.field, sizeof(gx.field), NULL, 0)        \
+    FIFO_HOT void pub(T v) {                                                 \
+        FIFO_DISPATCH(name, (v));                                            \
+        name##_fast(v);                                                      \
+    }
+
+FIFO_BYTE_SETTER(GXSetNumTexGens, num_texgens, SetNumTexGens, u8, num_texgens, GXD_CHAN)
 
 /* ---- Lighting ---- */
 
-void GXSetNumChans(u8 nChans) {
-    REC(SetNumChans, nChans);
-    SAME(gx.num_chans == nChans);
-    gx.num_chans = nChans;
-    touch(GXD_CHAN);
-}
+FIFO_BYTE_SETTER(GXSetNumChans, num_chans, SetNumChans, u8, num_chans, GXD_CHAN)
 
-void GXSetChanCtrl(GXChannelID chan, GXBool enable, GXColorSrc amb_src, GXColorSrc mat_src, u32 light_mask,
-                   GXDiffuseFn diff_fn, GXAttnFn attn_fn) {
+static FIFO_COLD void chan_ctrl_old(GXChannelID chan, GXBool enable, GXColorSrc amb_src, GXColorSrc mat_src,
+                                    u32 light_mask, GXDiffuseFn diff_fn, GXAttnFn attn_fn) {
     REC(SetChanCtrl, chan, enable, amb_src, mat_src, light_mask, diff_fn, attn_fn);
     int first, last;
     switch (chan) {
@@ -533,6 +914,47 @@ void GXSetChanCtrl(GXChannelID chan, GXBool enable, GXColorSrc amb_src, GXColorS
     }
     touch(GXD_CHAN);
 }
+_Static_assert(offsetof(GxState, chan[0].attn_fn) == offsetof(GxState, chan[0].enable) + 4 &&
+                   offsetof(GxState, chan[0].diff_fn) == offsetof(GxState, chan[0].enable) + 3,
+               "gxfifo: channel bytes");
+static inline int chan_eq(u32 c, u32 w, u32 attn, u32 mask) {
+    return ld32(&gx.chan[c].enable) == w && gx.chan[c].attn_fn == attn && gx.chan[c].light_mask == mask;
+}
+static inline void chan_put(u32 c, u32 w, u32 attn, u32 mask) {
+    st32(&gx.chan[c].enable, w);
+    gx.chan[c].attn_fn = (u8)attn;
+    gx.chan[c].light_mask = mask;
+}
+static inline void chan_ctrl_fast(GXChannelID chan, GXBool enable, GXColorSrc amb_src, GXColorSrc mat_src,
+                                  u32 light_mask, GXDiffuseFn diff_fn, GXAttnFn attn_fn) {
+    u32 c = (u32)chan;
+    const u32 w = pk4(enable, amb_src, mat_src, diff_fn), a = FB(attn_fn);
+    if (c < 4) { /* COLOR0, COLOR1, ALPHA0, ALPHA1 */
+        if (chan_eq(c, w, a, light_mask)) {
+            return;
+        }
+        chan_put(c, w, a, light_mask);
+    } else if (c - GX_COLOR0A0 < 2) { /* COLOR0A0: 0 and 2; COLOR1A1: 1 and 3 */
+        c -= GX_COLOR0A0;
+        if (chan_eq(c, w, a, light_mask) && chan_eq(c + 2, w, a, light_mask)) {
+            return;
+        }
+        chan_put(c, w, a, light_mask);
+        chan_put(c + 2, w, a, light_mask);
+    } else {
+        return;
+    }
+    fifo_touch(GXD_CHAN);
+}
+FIFO_VER(chan_ctrl,
+         (GXChannelID chan, GXBool enable, GXColorSrc amb_src, GXColorSrc mat_src, u32 light_mask, GXDiffuseFn diff_fn,
+          GXAttnFn attn_fn),
+         (chan, enable, amb_src, mat_src, light_mask, diff_fn, attn_fn), gx.chan, sizeof(gx.chan), NULL, 0)
+FIFO_HOT void GXSetChanCtrl(GXChannelID chan, GXBool enable, GXColorSrc amb_src, GXColorSrc mat_src, u32 light_mask,
+                            GXDiffuseFn diff_fn, GXAttnFn attn_fn) {
+    FIFO_DISPATCH(chan_ctrl, (chan, enable, amb_src, mat_src, light_mask, diff_fn, attn_fn));
+    chan_ctrl_fast(chan, enable, amb_src, mat_src, light_mask, diff_fn, attn_fn);
+}
 
 static void set_chan_color(GXColor* dst, GXChannelID chan, GXColor c) {
     switch (chan) {
@@ -546,7 +968,7 @@ static void set_chan_color(GXColor* dst, GXChannelID chan, GXColor c) {
     }
 }
 
-void GXSetChanAmbColor(GXChannelID chan, GXColor amb_color) {
+static FIFO_COLD void chan_amb_old(GXChannelID chan, GXColor amb_color) {
     REC(SetChanAmbColor, chan, c2u(amb_color));
     if (gx_opt_dirty) {
         GXColor t[2] = {gx.amb[0], gx.amb[1]};
@@ -556,8 +978,25 @@ void GXSetChanAmbColor(GXChannelID chan, GXColor amb_color) {
     set_chan_color(gx.amb, chan, amb_color);
     touch(GXD_CHAN);
 }
+/* the material and ambient colours: the two colours after the call, compared as two words */
+static inline void chan_color_fast(GXColor* dst, GXChannelID chan, GXColor c) {
+    GXColor t[2] = {dst[0], dst[1]};
+    set_chan_color(t, chan, c);
+    if (ld32(&t[0]) == ld32(&dst[0]) && ld32(&t[1]) == ld32(&dst[1])) {
+        return;
+    }
+    dst[0] = t[0];
+    dst[1] = t[1];
+    fifo_touch(GXD_CHAN);
+}
+static inline void chan_amb_fast(GXChannelID chan, GXColor c) { chan_color_fast(gx.amb, chan, c); }
+FIFO_VER(chan_amb, (GXChannelID chan, GXColor c), (chan, c), gx.amb, sizeof(gx.amb), NULL, 0)
+FIFO_HOT void GXSetChanAmbColor(GXChannelID chan, GXColor amb_color) {
+    FIFO_DISPATCH(chan_amb, (chan, amb_color));
+    chan_amb_fast(chan, amb_color);
+}
 
-void GXSetChanMatColor(GXChannelID chan, GXColor mat_color) {
+static FIFO_COLD void chan_mat_old(GXChannelID chan, GXColor mat_color) {
     REC(SetChanMatColor, chan, c2u(mat_color));
     if (gx_opt_dirty) {
         GXColor t[2] = {gx.mat[0], gx.mat[1]};
@@ -566,6 +1005,12 @@ void GXSetChanMatColor(GXChannelID chan, GXColor mat_color) {
     }
     set_chan_color(gx.mat, chan, mat_color);
     touch(GXD_CHAN);
+}
+static inline void chan_mat_fast(GXChannelID chan, GXColor c) { chan_color_fast(gx.mat, chan, c); }
+FIFO_VER(chan_mat, (GXChannelID chan, GXColor c), (chan, c), gx.mat, sizeof(gx.mat), NULL, 0)
+FIFO_HOT void GXSetChanMatColor(GXChannelID chan, GXColor mat_color) {
+    FIFO_DISPATCH(chan_mat, (chan, mat_color));
+    chan_mat_fast(chan, mat_color);
 }
 
 /* GXLightObj: our GxLightObj inside the SDK's 64 bytes. */
@@ -709,14 +1154,32 @@ void GXLoadLightObjImm(const GXLightObj* lt_obj, GXLightID light) {
 
 /* ---- TEV ---- */
 
-void GXSetNumTevStages(u8 nStages) {
-    REC(SetNumTevStages, nStages);
-    SAME(gx.num_tev == nStages);
-    gx.num_tev = nStages;
-    touch(GXD_TEV);
-}
+FIFO_BYTE_SETTER(GXSetNumTevStages, num_tev, SetNumTevStages, u8, num_tev, GXD_TEV)
 
-void GXSetTevOrder(GXTevStageID stage, GXTexCoordID coord, GXTexMapID map, GXChannelID color) {
+/* a TEV stage's bytes at `off` (n of 1..8), compared with the packed lo (bytes 0-3) and hi (bytes 4-7) */
+#define TEV_OFF(f) offsetof(typeof(gx.tev[0]), f)
+static inline int tev_put(u32 stage, u32 off, u32 n, u32 lo, u32 hi) {
+    u8* p = (u8*)&gx.tev[stage] + off;
+    const u32 m_lo = n >= 4 ? 0xFFFFFFFFu : (1u << (8 * n)) - 1;
+    const u32 m_hi = n <= 4 ? 0 : n >= 8 ? 0xFFFFFFFFu : (1u << (8 * (n - 4))) - 1;
+    if (((ld32(p) ^ lo) & m_lo) == 0 && (m_hi == 0 || ((ld32(p + 4) ^ hi) & m_hi) == 0)) {
+        return 0;
+    }
+    for (u32 k = 0; k < n; k++) {
+        p[k] = (u8)((k < 4 ? lo >> (8 * k) : hi >> (8 * (k - 4))) & 0xFF);
+    }
+    fifo_touch(GXD_TEV);
+    return 1;
+}
+#define TEV_FAST(stage, field, n, lo, hi)                     \
+    do {                                                      \
+        if ((u32)(stage) < GX_MAX_TEV) {                      \
+            tev_put((u32)(stage), TEV_OFF(field), n, lo, hi); \
+        }                                                     \
+    } while (0)
+#define TEV_VER_REGION(stage) (u32)(stage) < GX_MAX_TEV ? (void*)&gx.tev[stage] : NULL, sizeof(gx.tev[0]), NULL, 0
+
+static FIFO_COLD void tev_order_old(GXTevStageID stage, GXTexCoordID coord, GXTexMapID map, GXChannelID color) {
     REC(SetTevOrder, stage, coord, map, color);
     if ((u32)stage >= GX_MAX_TEV) {
         return;
@@ -728,8 +1191,20 @@ void GXSetTevOrder(GXTevStageID stage, GXTexCoordID coord, GXTexMapID map, GXCha
     gx.tev[stage].color = (u8)color;
     touch(GXD_TEV);
 }
+/* GX_TEXMAP_NULL is 0xFF: the old map8 is the low byte in both cases */
+_Static_assert(GX_TEXMAP_NULL == 0xFF, "gxfifo: TEV order map byte");
+static inline void tev_order_fast(GXTevStageID stage, GXTexCoordID coord, GXTexMapID map, GXChannelID color) {
+    TEV_FAST(stage, coord, 3, pk4(coord, map, color, 0), 0);
+}
+FIFO_VER(tev_order, (GXTevStageID stage, GXTexCoordID coord, GXTexMapID map, GXChannelID color),
+         (stage, coord, map, color), TEV_VER_REGION(stage))
+FIFO_HOT void GXSetTevOrder(GXTevStageID stage, GXTexCoordID coord, GXTexMapID map, GXChannelID color) {
+    FIFO_DISPATCH(tev_order, (stage, coord, map, color));
+    tev_order_fast(stage, coord, map, color);
+}
 
-void GXSetTevColorIn(GXTevStageID stage, GXTevColorArg a, GXTevColorArg b, GXTevColorArg c, GXTevColorArg d) {
+static FIFO_COLD void tev_color_in_old(GXTevStageID stage, GXTevColorArg a, GXTevColorArg b, GXTevColorArg c,
+                                       GXTevColorArg d) {
     REC(SetTevColorIn, stage, a, b, c, d);
     if ((u32)stage >= GX_MAX_TEV) {
         return;
@@ -742,8 +1217,20 @@ void GXSetTevColorIn(GXTevStageID stage, GXTevColorArg a, GXTevColorArg b, GXTev
     gx.tev[stage].c_in[3] = (u8)d;
     touch(GXD_TEV);
 }
+static inline void tev_color_in_fast(GXTevStageID stage, GXTevColorArg a, GXTevColorArg b, GXTevColorArg c,
+                                     GXTevColorArg d) {
+    TEV_FAST(stage, c_in, 4, pk4(a, b, c, d), 0);
+}
+FIFO_VER(tev_color_in, (GXTevStageID stage, GXTevColorArg a, GXTevColorArg b, GXTevColorArg c, GXTevColorArg d),
+         (stage, a, b, c, d), TEV_VER_REGION(stage))
+FIFO_HOT void GXSetTevColorIn(GXTevStageID stage, GXTevColorArg a, GXTevColorArg b, GXTevColorArg c,
+                              GXTevColorArg d) {
+    FIFO_DISPATCH(tev_color_in, (stage, a, b, c, d));
+    tev_color_in_fast(stage, a, b, c, d);
+}
 
-void GXSetTevAlphaIn(GXTevStageID stage, GXTevAlphaArg a, GXTevAlphaArg b, GXTevAlphaArg c, GXTevAlphaArg d) {
+static FIFO_COLD void tev_alpha_in_old(GXTevStageID stage, GXTevAlphaArg a, GXTevAlphaArg b, GXTevAlphaArg c,
+                                       GXTevAlphaArg d) {
     REC(SetTevAlphaIn, stage, a, b, c, d);
     if ((u32)stage >= GX_MAX_TEV) {
         return;
@@ -756,9 +1243,20 @@ void GXSetTevAlphaIn(GXTevStageID stage, GXTevAlphaArg a, GXTevAlphaArg b, GXTev
     gx.tev[stage].a_in[3] = (u8)d;
     touch(GXD_TEV);
 }
+static inline void tev_alpha_in_fast(GXTevStageID stage, GXTevAlphaArg a, GXTevAlphaArg b, GXTevAlphaArg c,
+                                     GXTevAlphaArg d) {
+    TEV_FAST(stage, a_in, 4, pk4(a, b, c, d), 0);
+}
+FIFO_VER(tev_alpha_in, (GXTevStageID stage, GXTevAlphaArg a, GXTevAlphaArg b, GXTevAlphaArg c, GXTevAlphaArg d),
+         (stage, a, b, c, d), TEV_VER_REGION(stage))
+FIFO_HOT void GXSetTevAlphaIn(GXTevStageID stage, GXTevAlphaArg a, GXTevAlphaArg b, GXTevAlphaArg c,
+                              GXTevAlphaArg d) {
+    FIFO_DISPATCH(tev_alpha_in, (stage, a, b, c, d));
+    tev_alpha_in_fast(stage, a, b, c, d);
+}
 
-void GXSetTevColorOp(GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale scale, GXBool clamp,
-                     GXTevRegID out_reg) {
+static FIFO_COLD void tev_color_op_old(GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale scale, GXBool clamp,
+                                       GXTevRegID out_reg) {
     REC(SetTevColorOp, stage, op, bias, scale, clamp, out_reg);
     if ((u32)stage >= GX_MAX_TEV) {
         return;
@@ -772,9 +1270,21 @@ void GXSetTevColorOp(GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale 
     gx.tev[stage].c_out = (u8)out_reg;
     touch(GXD_TEV);
 }
+static inline void tev_color_op_fast(GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale scale, GXBool clamp,
+                                     GXTevRegID out_reg) {
+    TEV_FAST(stage, c_op, 5, pk4(op, bias, scale, clamp), FB(out_reg));
+}
+FIFO_VER(tev_color_op,
+         (GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale scale, GXBool clamp, GXTevRegID out_reg),
+         (stage, op, bias, scale, clamp, out_reg), TEV_VER_REGION(stage))
+FIFO_HOT void GXSetTevColorOp(GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale scale, GXBool clamp,
+                              GXTevRegID out_reg) {
+    FIFO_DISPATCH(tev_color_op, (stage, op, bias, scale, clamp, out_reg));
+    tev_color_op_fast(stage, op, bias, scale, clamp, out_reg);
+}
 
-void GXSetTevAlphaOp(GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale scale, GXBool clamp,
-                     GXTevRegID out_reg) {
+static FIFO_COLD void tev_alpha_op_old(GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale scale, GXBool clamp,
+                                       GXTevRegID out_reg) {
     REC(SetTevAlphaOp, stage, op, bias, scale, clamp, out_reg);
     if ((u32)stage >= GX_MAX_TEV) {
         return;
@@ -787,6 +1297,18 @@ void GXSetTevAlphaOp(GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale 
     gx.tev[stage].a_clamp = clamp;
     gx.tev[stage].a_out = (u8)out_reg;
     touch(GXD_TEV);
+}
+static inline void tev_alpha_op_fast(GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale scale, GXBool clamp,
+                                     GXTevRegID out_reg) {
+    TEV_FAST(stage, a_op, 5, pk4(op, bias, scale, clamp), FB(out_reg));
+}
+FIFO_VER(tev_alpha_op,
+         (GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale scale, GXBool clamp, GXTevRegID out_reg),
+         (stage, op, bias, scale, clamp, out_reg), TEV_VER_REGION(stage))
+FIFO_HOT void GXSetTevAlphaOp(GXTevStageID stage, GXTevOp op, GXTevBias bias, GXTevScale scale, GXBool clamp,
+                              GXTevRegID out_reg) {
+    FIFO_DISPATCH(tev_alpha_op, (stage, op, bias, scale, clamp, out_reg));
+    tev_alpha_op_fast(stage, op, bias, scale, clamp, out_reg);
 }
 
 /* GXSetTevOp: the SDK's presets (GXTev.c). */
@@ -821,7 +1343,7 @@ void GXSetTevOp(GXTevStageID id, GXTevMode mode) {
     GXSetTevAlphaOp(id, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
 }
 
-void GXSetTevColor(GXTevRegID id, GXColor color) {
+static FIFO_COLD void tev_color_old(GXTevRegID id, GXColor color) {
     REC(SetTevColor, id, c2u(color));
     if ((u32)id < 4) {
         SAME(gx.tev_reg[id].r == color.r && gx.tev_reg[id].g == color.g && gx.tev_reg[id].b == color.b &&
@@ -829,6 +1351,26 @@ void GXSetTevColor(GXTevRegID id, GXColor color) {
         gx.tev_reg[id] = (GXColorS10){color.r, color.g, color.b, color.a};
         touch(GXD_TEV);
     }
+}
+static inline void tev_color_fast(GXTevRegID id, GXColor color) {
+    if ((u32)id >= 4) {
+        return;
+    }
+    /* GXColorS10 r, g, b, a as s16: the colour's bytes widened */
+    const u32 lo = (u32)color.r | (u32)color.g << 16, hi = (u32)color.b | (u32)color.a << 16;
+    u8* p = (u8*)&gx.tev_reg[id];
+    if (ld32(p) == lo && ld32(p + 4) == hi) {
+        return;
+    }
+    st32(p, lo);
+    st32(p + 4, hi);
+    fifo_touch(GXD_TEV);
+}
+FIFO_VER(tev_color, (GXTevRegID id, GXColor color), (id, color), (u32)id < 4 ? (void*)&gx.tev_reg[id] : NULL,
+         sizeof(gx.tev_reg[0]), NULL, 0)
+FIFO_HOT void GXSetTevColor(GXTevRegID id, GXColor color) {
+    FIFO_DISPATCH(tev_color, (id, color));
+    tev_color_fast(id, color);
 }
 
 void GXSetTevColorS10(GXTevRegID id, GXColorS10 color) {
@@ -841,7 +1383,7 @@ void GXSetTevColorS10(GXTevRegID id, GXColorS10 color) {
     }
 }
 
-void GXSetTevKColor(GXTevKColorID id, GXColor color) {
+static FIFO_COLD void tev_kcolor_old(GXTevKColorID id, GXColor color) {
     REC(SetTevKColor, id, c2u(color));
     if ((u32)id < 4) {
         SAME(c2u(gx.tev_kcolor[id]) == c2u(color));
@@ -849,8 +1391,21 @@ void GXSetTevKColor(GXTevKColorID id, GXColor color) {
         touch(GXD_TEV);
     }
 }
+static inline void tev_kcolor_fast(GXTevKColorID id, GXColor color) {
+    if ((u32)id >= 4 || ld32(&gx.tev_kcolor[id]) == ld32(&color)) {
+        return;
+    }
+    gx.tev_kcolor[id] = color;
+    fifo_touch(GXD_TEV);
+}
+FIFO_VER(tev_kcolor, (GXTevKColorID id, GXColor color), (id, color), (u32)id < 4 ? (void*)&gx.tev_kcolor[id] : NULL,
+         sizeof(gx.tev_kcolor[0]), NULL, 0)
+FIFO_HOT void GXSetTevKColor(GXTevKColorID id, GXColor color) {
+    FIFO_DISPATCH(tev_kcolor, (id, color));
+    tev_kcolor_fast(id, color);
+}
 
-void GXSetTevKColorSel(GXTevStageID stage, GXTevKColorSel sel) {
+static FIFO_COLD void tev_ksel_old(GXTevStageID stage, GXTevKColorSel sel) {
     REC(SetTevKColorSel, stage, sel);
     if ((u32)stage < GX_MAX_TEV) {
         SAME(gx.tev[stage].kc_sel == (u8)sel);
@@ -858,8 +1413,14 @@ void GXSetTevKColorSel(GXTevStageID stage, GXTevKColorSel sel) {
         touch(GXD_TEV);
     }
 }
+static inline void tev_ksel_fast(GXTevStageID stage, GXTevKColorSel sel) { TEV_FAST(stage, kc_sel, 1, FB(sel), 0); }
+FIFO_VER(tev_ksel, (GXTevStageID stage, GXTevKColorSel sel), (stage, sel), TEV_VER_REGION(stage))
+FIFO_HOT void GXSetTevKColorSel(GXTevStageID stage, GXTevKColorSel sel) {
+    FIFO_DISPATCH(tev_ksel, (stage, sel));
+    tev_ksel_fast(stage, sel);
+}
 
-void GXSetTevKAlphaSel(GXTevStageID stage, GXTevKAlphaSel sel) {
+static FIFO_COLD void tev_kasel_old(GXTevStageID stage, GXTevKAlphaSel sel) {
     REC(SetTevKAlphaSel, stage, sel);
     if ((u32)stage < GX_MAX_TEV) {
         SAME(gx.tev[stage].ka_sel == (u8)sel);
@@ -867,8 +1428,14 @@ void GXSetTevKAlphaSel(GXTevStageID stage, GXTevKAlphaSel sel) {
         touch(GXD_TEV);
     }
 }
+static inline void tev_kasel_fast(GXTevStageID stage, GXTevKAlphaSel sel) { TEV_FAST(stage, ka_sel, 1, FB(sel), 0); }
+FIFO_VER(tev_kasel, (GXTevStageID stage, GXTevKAlphaSel sel), (stage, sel), TEV_VER_REGION(stage))
+FIFO_HOT void GXSetTevKAlphaSel(GXTevStageID stage, GXTevKAlphaSel sel) {
+    FIFO_DISPATCH(tev_kasel, (stage, sel));
+    tev_kasel_fast(stage, sel);
+}
 
-void GXSetTevSwapMode(GXTevStageID stage, GXTevSwapSel ras_sel, GXTevSwapSel tex_sel) {
+static FIFO_COLD void tev_swap_old(GXTevStageID stage, GXTevSwapSel ras_sel, GXTevSwapSel tex_sel) {
     REC(SetTevSwapMode, stage, ras_sel, tex_sel);
     if ((u32)stage < GX_MAX_TEV) {
         SAME(gx.tev[stage].ras_swap == (u8)ras_sel && gx.tev[stage].tex_swap == (u8)tex_sel);
@@ -877,9 +1444,18 @@ void GXSetTevSwapMode(GXTevStageID stage, GXTevSwapSel ras_sel, GXTevSwapSel tex
         touch(GXD_TEV);
     }
 }
+static inline void tev_swap_fast(GXTevStageID stage, GXTevSwapSel ras_sel, GXTevSwapSel tex_sel) {
+    TEV_FAST(stage, ras_swap, 2, FB(ras_sel) | FB(tex_sel) << 8, 0);
+}
+FIFO_VER(tev_swap, (GXTevStageID stage, GXTevSwapSel ras_sel, GXTevSwapSel tex_sel), (stage, ras_sel, tex_sel),
+         TEV_VER_REGION(stage))
+FIFO_HOT void GXSetTevSwapMode(GXTevStageID stage, GXTevSwapSel ras_sel, GXTevSwapSel tex_sel) {
+    FIFO_DISPATCH(tev_swap, (stage, ras_sel, tex_sel));
+    tev_swap_fast(stage, ras_sel, tex_sel);
+}
 
-void GXSetTevSwapModeTable(GXTevSwapSel table, GXTevColorChan red, GXTevColorChan green, GXTevColorChan blue,
-                           GXTevColorChan alpha) {
+static FIFO_COLD void tev_swap_table_old(GXTevSwapSel table, GXTevColorChan red, GXTevColorChan green,
+                                         GXTevColorChan blue, GXTevColorChan alpha) {
     REC(SetTevSwapModeTable, table, red, green, blue, alpha);
     if ((u32)table < 4) {
         SAME(gx.swap_table[table][0] == (u8)red && gx.swap_table[table][1] == (u8)green &&
@@ -891,14 +1467,38 @@ void GXSetTevSwapModeTable(GXTevSwapSel table, GXTevColorChan red, GXTevColorCha
         touch(GXD_TEV);
     }
 }
+static inline void tev_swap_table_fast(GXTevSwapSel table, GXTevColorChan red, GXTevColorChan green,
+                                       GXTevColorChan blue, GXTevColorChan alpha) {
+    const u32 v = pk4(red, green, blue, alpha);
+    if ((u32)table >= 4 || ld32(gx.swap_table[table]) == v) {
+        return;
+    }
+    st32(gx.swap_table[table], v);
+    fifo_touch(GXD_TEV);
+}
+FIFO_VER(tev_swap_table,
+         (GXTevSwapSel table, GXTevColorChan red, GXTevColorChan green, GXTevColorChan blue, GXTevColorChan alpha),
+         (table, red, green, blue, alpha), (u32)table < 4 ? (void*)gx.swap_table[table] : NULL,
+         sizeof(gx.swap_table[0]), NULL, 0)
+FIFO_HOT void GXSetTevSwapModeTable(GXTevSwapSel table, GXTevColorChan red, GXTevColorChan green, GXTevColorChan blue,
+                                    GXTevColorChan alpha) {
+    FIFO_DISPATCH(tev_swap_table, (table, red, green, blue, alpha));
+    tev_swap_table_fast(table, red, green, blue, alpha);
+}
 
-void GXSetTevDirect(GXTevStageID tev_stage) {
+static FIFO_COLD void tev_direct_old(GXTevStageID tev_stage) {
     REC(SetTevDirect, tev_stage);
     if ((u32)tev_stage < GX_MAX_TEV) {
         SAME(gx.tev[tev_stage].ind_enabled == 0);
         gx.tev[tev_stage].ind_enabled = 0;
         touch(GXD_TEV);
     }
+}
+static inline void tev_direct_fast(GXTevStageID tev_stage) { TEV_FAST(tev_stage, ind_enabled, 1, 0, 0); }
+FIFO_VER(tev_direct, (GXTevStageID tev_stage), (tev_stage), TEV_VER_REGION(tev_stage))
+FIFO_HOT void GXSetTevDirect(GXTevStageID tev_stage) {
+    FIFO_DISPATCH(tev_direct, (tev_stage));
+    tev_direct_fast(tev_stage);
 }
 
 void GXSetTevIndWarp(GXTevStageID tev_stage, GXIndTexStageID ind_stage, u8 signed_offset, u8 replace_mode,
@@ -923,12 +1523,7 @@ void GXSetTevIndWarp(GXTevStageID tev_stage, GXIndTexStageID ind_stage, u8 signe
     touch(GXD_TEV);
 }
 
-void GXSetNumIndStages(u8 nIndStages) {
-    REC(SetNumIndStages, nIndStages);
-    SAME(gx.num_ind == nIndStages);
-    gx.num_ind = nIndStages;
-    touch(GXD_TEV);
-}
+FIFO_BYTE_SETTER(GXSetNumIndStages, num_ind, SetNumIndStages, u8, num_ind, GXD_TEV)
 
 void GXSetIndTexOrder(GXIndTexStageID ind_stage, GXTexCoordID tex_coord, GXTexMapID tex_map) {
     GX_CLOSE_PRIMITIVE();
@@ -969,7 +1564,22 @@ void __GXSetIndirectMask(u32 mask) { (void)mask; }
 
 /* ---- Pixel engine ---- */
 
-void GXSetAlphaCompare(GXCompare comp0, u8 ref0, GXAlphaOp op, GXCompare comp1, u8 ref1) {
+/* `n` bytes of GxState from `first` (n of 1..5), compared with the packed lo (bytes 0-3) and hi (byte 4) */
+static inline void pix_put(u8* p, u32 n, u32 lo, u32 hi, u32 cls) {
+    const u32 m_lo = n >= 4 ? 0xFFFFFFFFu : (1u << (8 * n)) - 1;
+    if (((ld32(p) ^ lo) & m_lo) == 0 && (n <= 4 || p[4] == hi)) {
+        return;
+    }
+    for (u32 k = 0; k < n && k < 4; k++) {
+        p[k] = (u8)(lo >> (8 * k));
+    }
+    if (n > 4) {
+        p[4] = (u8)hi;
+    }
+    fifo_touch(cls);
+}
+
+static FIFO_COLD void alpha_compare_old(GXCompare comp0, u8 ref0, GXAlphaOp op, GXCompare comp1, u8 ref1) {
     REC(SetAlphaCompare, comp0, ref0, op, comp1, ref1);
     SAME(gx.alpha_comp0 == (u8)comp0 && gx.alpha_ref0 == ref0 && gx.alpha_op == (u8)op && gx.alpha_comp1 == (u8)comp1 &&
          gx.alpha_ref1 == ref1);
@@ -980,8 +1590,22 @@ void GXSetAlphaCompare(GXCompare comp0, u8 ref0, GXAlphaOp op, GXCompare comp1, 
     gx.alpha_ref1 = ref1;
     touch(GXD_PIX);
 }
+_Static_assert(offsetof(GxState, alpha_ref1) == offsetof(GxState, alpha_comp0) + 4 &&
+                   offsetof(GxState, blend_logic) == offsetof(GxState, blend_type) + 3 &&
+                   offsetof(GxState, z_update) == offsetof(GxState, z_enable) + 2,
+               "gxfifo: pixel-engine bytes");
+static inline void alpha_compare_fast(GXCompare comp0, u8 ref0, GXAlphaOp op, GXCompare comp1, u8 ref1) {
+    pix_put(&gx.alpha_comp0, 5, pk4(comp0, ref0, op, comp1), ref1, GXD_PIX);
+}
+FIFO_VER(alpha_compare, (GXCompare comp0, u8 ref0, GXAlphaOp op, GXCompare comp1, u8 ref1),
+         (comp0, ref0, op, comp1, ref1), &gx.alpha_comp0, 5, NULL, 0)
+FIFO_HOT void GXSetAlphaCompare(GXCompare comp0, u8 ref0, GXAlphaOp op, GXCompare comp1, u8 ref1) {
+    FIFO_DISPATCH(alpha_compare, (comp0, ref0, op, comp1, ref1));
+    alpha_compare_fast(comp0, ref0, op, comp1, ref1);
+}
 
-void GXSetBlendMode(GXBlendMode type, GXBlendFactor src_factor, GXBlendFactor dst_factor, GXLogicOp op) {
+static FIFO_COLD void blend_mode_old(GXBlendMode type, GXBlendFactor src_factor, GXBlendFactor dst_factor,
+                                     GXLogicOp op) {
     REC(SetBlendMode, type, src_factor, dst_factor, op);
     SAME(gx.blend_type == (u8)type && gx.blend_src == (u8)src_factor && gx.blend_dst == (u8)dst_factor &&
          gx.blend_logic == (u8)op);
@@ -991,8 +1615,18 @@ void GXSetBlendMode(GXBlendMode type, GXBlendFactor src_factor, GXBlendFactor ds
     gx.blend_logic = (u8)op;
     touch(GXD_PIX);
 }
+static inline void blend_mode_fast(GXBlendMode type, GXBlendFactor src_factor, GXBlendFactor dst_factor,
+                                   GXLogicOp op) {
+    pix_put(&gx.blend_type, 4, pk4(type, src_factor, dst_factor, op), 0, GXD_PIX);
+}
+FIFO_VER(blend_mode, (GXBlendMode type, GXBlendFactor src_factor, GXBlendFactor dst_factor, GXLogicOp op),
+         (type, src_factor, dst_factor, op), &gx.blend_type, 4, NULL, 0)
+FIFO_HOT void GXSetBlendMode(GXBlendMode type, GXBlendFactor src_factor, GXBlendFactor dst_factor, GXLogicOp op) {
+    FIFO_DISPATCH(blend_mode, (type, src_factor, dst_factor, op));
+    blend_mode_fast(type, src_factor, dst_factor, op);
+}
 
-void GXSetZMode(GXBool compare_enable, GXCompare func, GXBool update_enable) {
+static FIFO_COLD void z_mode_old(GXBool compare_enable, GXCompare func, GXBool update_enable) {
     REC(SetZMode, compare_enable, func, update_enable);
     SAME(gx.z_enable == (u8)compare_enable && gx.z_func == (u8)func && gx.z_update == (u8)update_enable);
     gx.z_enable = compare_enable;
@@ -1000,27 +1634,19 @@ void GXSetZMode(GXBool compare_enable, GXCompare func, GXBool update_enable) {
     gx.z_update = update_enable;
     touch(GXD_PIX);
 }
-
-void GXSetZCompLoc(GXBool before_tex) {
-    REC(SetZCompLoc, before_tex);
-    SAME(gx.z_before_tex == (u8)before_tex);
-    gx.z_before_tex = before_tex;
-    touch(GXD_PIX);
+static inline void z_mode_fast(GXBool compare_enable, GXCompare func, GXBool update_enable) {
+    pix_put(&gx.z_enable, 3, pk4(compare_enable, func, update_enable, 0), 0, GXD_PIX);
+}
+FIFO_VER(z_mode, (GXBool compare_enable, GXCompare func, GXBool update_enable), (compare_enable, func, update_enable),
+         &gx.z_enable, 3, NULL, 0)
+FIFO_HOT void GXSetZMode(GXBool compare_enable, GXCompare func, GXBool update_enable) {
+    FIFO_DISPATCH(z_mode, (compare_enable, func, update_enable));
+    z_mode_fast(compare_enable, func, update_enable);
 }
 
-void GXSetColorUpdate(GXBool update_enable) {
-    REC(SetColorUpdate, update_enable);
-    SAME(gx.color_update == (u8)update_enable);
-    gx.color_update = update_enable;
-    touch(GXD_PIX);
-}
-
-void GXSetAlphaUpdate(GXBool update_enable) {
-    REC(SetAlphaUpdate, update_enable);
-    SAME(gx.alpha_update == (u8)update_enable);
-    gx.alpha_update = update_enable;
-    touch(GXD_PIX);
-}
+FIFO_BYTE_SETTER(GXSetZCompLoc, z_comp_loc, SetZCompLoc, GXBool, z_before_tex, GXD_PIX)
+FIFO_BYTE_SETTER(GXSetColorUpdate, color_update, SetColorUpdate, GXBool, color_update, GXD_PIX)
+FIFO_BYTE_SETTER(GXSetAlphaUpdate, alpha_update, SetAlphaUpdate, GXBool, alpha_update, GXD_PIX)
 
 void GXSetDstAlpha(GXBool enable, u8 alpha) {
     GX_CLOSE_PRIMITIVE();
@@ -1031,12 +1657,7 @@ void GXSetDstAlpha(GXBool enable, u8 alpha) {
     touch(GXD_PIX);
 }
 
-void GXSetCullMode(GXCullMode mode) {
-    REC(SetCullMode, mode);
-    SAME(gx.cull == (u8)mode);
-    gx.cull = (u8)mode;
-    touch(GXD_PIX);
-}
+FIFO_BYTE_SETTER(GXSetCullMode, cull_mode, SetCullMode, GXCullMode, cull, GXD_PIX)
 
 void GXGetCullMode(GXCullMode* mode) {
     gx_rec_getter(GXG_CULL);
@@ -1084,7 +1705,25 @@ void GXSetLineWidth(u8 width, GXTexOffset texOffsets) {
 
 /* ---- Textures (objects live in gx_tex.c; loading a map is state) ---- */
 
-void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
+/* never initialised by GXInitTexObj; logged once per caller */
+static FIFO_COLD void tex_obj_warn(const GXTexObj* obj, void* ra) {
+    const GxTexObj* t = (const GxTexObj*)obj;
+    static void* seen[16];
+    int i;
+    for (i = 0; i < 16 && seen[i] != NULL && seen[i] != ra; i++) {
+    }
+    if (i < 16 && seen[i] == NULL) {
+        seen[i] = ra;
+        PLOG_W("GX: GXLoadTexObj(%p) from %p: not a texture object (image %p, format %u)", obj, ra, t->image,
+               t->format);
+    }
+}
+static inline int tex_obj_ok(const GxTexObj* t) {
+    const int fmt_ok =
+        t->format <= GX_TF_CMPR || t->format == GX_TF_Z8 || t->format == GX_TF_Z16 || t->format == GX_TF_Z24X8;
+    return PORT_IS_ADDR(t->image) && fmt_ok;
+}
+static FIFO_COLD void load_tex_obj_old(GXTexObj* obj, GXTexMapID id, void* ra) {
     GX_CLOSE_PRIMITIVE();
     if (gx_dl_recording()) {
         u32 words[1 + sizeof(GxTexObj) / 4];
@@ -1095,21 +1734,9 @@ void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
     }
     if ((u32)id < GX_MAX_TEXMAP) {
         const GxTexObj* t = (const GxTexObj*)obj;
-        const int fmt_ok = t->format <= GX_TF_CMPR || t->format == GX_TF_Z8 || t->format == GX_TF_Z16 ||
-                           t->format == GX_TF_Z24X8;
         /* checked where the game calls it (a translator replays an object already checked) */
-        if (!gx_tls_translator && (!PORT_IS_ADDR(t->image) || !fmt_ok)) {
-            /* never initialised by GXInitTexObj; logged once per caller */
-            static void* seen[16];
-            void* ra = __builtin_return_address(0);
-            int i;
-            for (i = 0; i < 16 && seen[i] != NULL && seen[i] != ra; i++) {
-            }
-            if (i < 16 && seen[i] == NULL) {
-                seen[i] = ra;
-                PLOG_W("GX: GXLoadTexObj(%p) from %p: not a texture object (image %p, format %u)", obj, ra, t->image,
-                       t->format);
-            }
+        if (!gx_tls_translator && !tex_obj_ok(t)) {
+            tex_obj_warn(obj, ra);
         }
         if (gx_rec_on()) {
             u32 words[1 + sizeof(GxTexObj) / 4];
@@ -1131,6 +1758,30 @@ void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
         gx.tex_map_valid[id] = 1;
         touch(GXD_TEX);
     }
+}
+_Static_assert(sizeof(GxTexObj) % 4 == 0, "gxfifo: texture object words");
+static inline void load_tex_obj_fast(GXTexObj* obj, GXTexMapID id, void* ra) {
+    if ((u32)id >= GX_MAX_TEXMAP) {
+        return;
+    }
+    const GxTexObj* t = (const GxTexObj*)obj;
+    if (__builtin_expect(!tex_obj_ok(t), 0)) {
+        tex_obj_warn(obj, ra);
+    }
+    if (gx.tex_map_valid[id] && words_equal(&gx.tex_map[id], obj, sizeof(GxTexObj) / 4)) {
+        return;
+    }
+    gx.tex_map[id] = *t;
+    gx.tex_map_valid[id] = 1;
+    fifo_touch(GXD_TEX);
+}
+FIFO_VER(load_tex_obj, (GXTexObj * obj, GXTexMapID id, void* ra), (obj, id, ra),
+         (u32)id < GX_MAX_TEXMAP ? (void*)&gx.tex_map[id] : NULL, sizeof(GxTexObj),
+         (u32)id < GX_MAX_TEXMAP ? (void*)&gx.tex_map_valid[id] : NULL, 1)
+FIFO_HOT void GXLoadTexObj(GXTexObj* obj, GXTexMapID id) {
+    void* ra = __builtin_return_address(0);
+    FIFO_DISPATCH(load_tex_obj, (obj, id, ra));
+    load_tex_obj_fast(obj, id, ra);
 }
 
 void GXLoadTlut(GXTlutObj* tlut_obj, u32 tlut_name) {

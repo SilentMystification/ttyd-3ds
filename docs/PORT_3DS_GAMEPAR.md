@@ -16,6 +16,7 @@ Status: 2026-11-27, Azahar only. Owner decision of 2026-11-27: run self-containe
 | `mapdispjob=1` | Step 3. mapDisp in phases with the per-object outcomes in parallel (`src/driver/mapdrv.c`) |
 | `mapdispjob=2` | As 1, and the original loop also runs; its dispEntry records and screen rectangles are compared with phase B's (`[MAPDISPJOB]` lines) |
 | `mapdispgrain=N` | Smallest chunk of objects (default 32; rounded up to a power of two, at most 64 chunks) |
+| `dlcjob=1` | GX layer, not game logic: display-list cache entry builds as ring jobs on worker 0 (core 2), joined one frame later; `dlcjob=2` compares each with the old build (PORT_3DS_GX_PERF.md, "`dlcjob`"). With `gxthread=2` the translator holds core 2, so the jobs run stolen at the join |
 
 ## Step 0: counters
 

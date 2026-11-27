@@ -381,8 +381,9 @@ static inline void put_s16(u8* p, f32 v, f32 sc) {
     memcpy(p, &x, 2);
 }
 
-GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, u32 nd, const u8* vtx_desc,
-                                 const GxAttrFmt (*vat)[GX_VA_MAX_ATTR], u8 fmt_mask, u32* reason) {
+/* The stream's layout (pure: no allocation, no counters; any thread). 0 when buildable, else the reasons. */
+u32 gx_vsh_stream_prep(const GxVertex* v, u32 nv, const GxDlcDraw* d, u32 nd, const u8* vtx_desc,
+                       const GxAttrFmt (*vat)[GX_VA_MAX_ATTR], u8 fmt_mask, GxVshPrep* p) {
     u32 why = 0;
     if (vtx_desc[GX_VA_PNMTXIDX] != GX_NONE) {
         why |= GXV_R_PNMTXIDX;
@@ -403,49 +404,99 @@ GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, 
         }
         ntri += tri_count(d[i].prim, d[i].count);
     }
-    u8 slot_attr[3];
     u32 nslots = 0;
-    u8 attr_slot[8];
-    memset(attr_slot, 0xFF, sizeof(attr_slot));
+    memset(p->attr_slot, 0xFF, sizeof(p->attr_slot));
     for (int t = 0; t < 8; t++) {
         if (vtx_desc[GX_VA_TEX0 + t] != GX_NONE) {
             if (nslots == 3) {
                 why |= GXV_R_SLOTS;
                 break;
             }
-            attr_slot[t] = (u8)nslots;
-            slot_attr[nslots++] = (u8)t;
+            p->attr_slot[t] = (u8)nslots;
+            p->slot_attr[nslots++] = (u8)t;
         }
     }
     if (ntri == 0 || nv > SEG_VERTS) {
         why |= GXV_R_PRIM;
     }
+    p->why = why;
     if (why != 0) {
-        *reason = why;
-        s_st.build_fail++;
-        for (u32 b = 0; b < GXV_R_COUNT; b++) {
-            s_st.build_reason[b] += (why >> b) & 1;
-        }
-        return NULL;
+        return why;
     }
+    p->nslots = nslots;
     /* exactness */
-    int posk = exact_k(v, nv, offsetof(GxVertex, pos), 3, source_frac(vat, fmt_mask, GX_VA_POS));
-    int sk[3];
+    p->posk = exact_k(v, nv, offsetof(GxVertex, pos), 3, source_frac(vat, fmt_mask, GX_VA_POS));
     u32 s16mask = 0;
     for (u32 i = 0; i < nslots; i++) {
-        sk[i] = exact_k(v, nv, offsetof(GxVertex, tex) + slot_attr[i] * 2 * sizeof(f32), 2,
-                        source_frac(vat, fmt_mask, GX_VA_TEX0 + slot_attr[i]));
-        if (sk[i] >= 0) {
+        p->sk[i] = exact_k(v, nv, offsetof(GxVertex, tex) + p->slot_attr[i] * 2 * sizeof(f32), 2,
+                           source_frac(vat, fmt_mask, GX_VA_TEX0 + p->slot_attr[i]));
+        if (p->sk[i] >= 0) {
             s16mask |= 1u << i;
         }
     }
     /* the normal (float, as decoded) when the list has one: GX lighting in the shader reads it */
-    u32 nrm = vtx_desc[GX_VA_NRM] != GX_NONE || vtx_desc[GX_VA_NBT] != GX_NONE;
-    int32_t off[6];
-    u32 stride = plat_vsh_layout_n(posk >= 0, nslots, s16mask, nrm, off);
-    u32 layout = plat_vsh_layout_word_n(posk >= 0, nslots, s16mask, nrm);
-    u32 nidx = ntri * 3;
-    u32 sbytes = GXV_STREAM_BYTES + nidx * sizeof(u16); /* the cache budget counts the indices wherever they live */
+    p->nrm = vtx_desc[GX_VA_NRM] != GX_NONE || vtx_desc[GX_VA_NBT] != GX_NONE;
+    p->stride = plat_vsh_layout_n(p->posk >= 0, nslots, s16mask, p->nrm, p->off);
+    p->layout = plat_vsh_layout_word_n(p->posk >= 0, nslots, s16mask, p->nrm);
+    p->nidx = ntri * 3;
+    return 0;
+}
+
+/* The stream's vertex bytes (nv x p->stride at out) and triangle indices (p->nidx at ix, from vertex `first`), in
+ * gx_draw_vertices' triangle order. Pure (any thread). */
+void gx_vsh_stream_fill(const GxVshPrep* p, const GxVertex* v, u32 nv, const GxDlcDraw* d, u32 nd, u8* out, u16* ix,
+                        u32 first) {
+    const u32 stride = p->stride, nslots = p->nslots;
+    const int32_t* off = p->off;
+    int posk = p->posk;
+    f32 psc = pow2(posk >= 0 ? posk : 0);
+    for (u32 i = 0; i < nv; i++) {
+        u8* o = out + i * stride;
+        if (posk >= 0) {
+            for (int j = 0; j < 3; j++) {
+                put_s16(o + off[0] + 2 * j, v[i].pos[j], psc);
+            }
+        } else {
+            memcpy(o + off[0], v[i].pos, 12);
+        }
+        for (u32 k = 0; k < nslots; k++) {
+            const f32* tc = v[i].tex[p->slot_attr[k]];
+            if (p->sk[k] >= 0) {
+                f32 sc = pow2(p->sk[k]);
+                put_s16(o + off[2 + k], tc[0], sc);
+                put_s16(o + off[2 + k] + 2, tc[1], sc);
+            } else {
+                memcpy(o + off[2 + k], tc, 8);
+            }
+        }
+        if (p->nrm) {
+            memcpy(o + off[5], v[i].nrm, 12);
+        }
+        const GXColor* c = &v[i].clr[0];
+        o[off[1] + 0] = c->r;
+        o[off[1] + 1] = c->g;
+        o[off[1] + 2] = c->b;
+        o[off[1] + 3] = c->a;
+        for (u32 b = (u32)off[1] + 4; b < stride; b++) {
+            o[b] = 0;
+        }
+    }
+    for (u32 i = 0; i < nd; i++) {
+        ix = emit_tris(d[i].prim, first + d[i].first, d[i].count, ix);
+    }
+}
+
+static void build_failed(u32 why) {
+    s_st.build_fail++;
+    for (u32 b = 0; b < GXV_R_COUNT; b++) {
+        s_st.build_reason[b] += (why >> b) & 1;
+    }
+}
+
+/* The stream's memory for a prepared layout (game thread): the index segment, the struct, the vertex segment, in
+ * that order. NULL with *reason = GXV_R_POOL. */
+static GxVshStream* stream_alloc(const GxVshPrep* p, u32 nv, u32* reason) {
+    u32 nidx = p->nidx;
     u32 ifirst = 0;
     int iseg = seg_alloc(2, nidx, &ifirst); /* the triangle list in linear memory, drawn in place; -1: heap copy */
     GxVshStream* s = malloc(sizeof(GxVshStream) + (iseg < 0 ? nidx * sizeof(u16) : 0));
@@ -459,7 +510,7 @@ GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, 
         return NULL;
     }
     u32 first;
-    int seg = seg_alloc(stride, nv, &first);
+    int seg = seg_alloc(p->stride, nv, &first);
     if (seg < 0) {
         if (iseg >= 0) {
             seg_release(&s_seg[iseg], ifirst, nidx);
@@ -473,65 +524,78 @@ GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, 
     s->seg = (u32)seg;
     s->first = first;
     s->nverts = nv;
-    s->layout = layout;
-    s->posk = (u8)(posk >= 0 ? posk : 0);
-    memcpy(s->attr_slot, attr_slot, sizeof(attr_slot));
+    s->layout = p->layout;
+    s->posk = (u8)(p->posk >= 0 ? p->posk : 0);
+    memcpy(s->attr_slot, p->attr_slot, sizeof(p->attr_slot));
     for (u32 i = 0; i < 3; i++) {
-        s->slot_k[i] = (u8)(i < nslots && sk[i] >= 0 ? sk[i] : 0);
+        s->slot_k[i] = (u8)(i < p->nslots && p->sk[i] >= 0 ? p->sk[i] : 0);
     }
     s->nidx = nidx;
     s->lidx = iseg >= 0 ? (const u16*)s_seg[iseg].base + ifirst : NULL;
     s->iseg = iseg >= 0 ? (u32)iseg : 0;
     s->ifirst = ifirst;
-    s->bytes = sbytes + nv * stride;
-    /* vertices */
-    u8* out = s_seg[seg].base + first * stride;
-    f32 psc = pow2(posk >= 0 ? posk : 0);
-    for (u32 i = 0; i < nv; i++) {
-        u8* p = out + i * stride;
-        if (posk >= 0) {
-            for (int j = 0; j < 3; j++) {
-                put_s16(p + off[0] + 2 * j, v[i].pos[j], psc);
-            }
-        } else {
-            memcpy(p + off[0], v[i].pos, 12);
-        }
-        for (u32 k = 0; k < nslots; k++) {
-            const f32* tc = v[i].tex[slot_attr[k]];
-            if (sk[k] >= 0) {
-                f32 sc = pow2(sk[k]);
-                put_s16(p + off[2 + k], tc[0], sc);
-                put_s16(p + off[2 + k] + 2, tc[1], sc);
-            } else {
-                memcpy(p + off[2 + k], tc, 8);
-            }
-        }
-        if (nrm) {
-            memcpy(p + off[5], v[i].nrm, 12);
-        }
-        const GXColor* c = &v[i].clr[0];
-        p[off[1] + 0] = c->r;
-        p[off[1] + 1] = c->g;
-        p[off[1] + 2] = c->b;
-        p[off[1] + 3] = c->a;
-        for (u32 b = (u32)off[1] + 4; b < stride; b++) {
-            p[b] = 0;
-        }
-    }
-    plat_gpu_stream_commit(out, nv * stride);
-    /* indices, in gx_draw_vertices' triangle order */
-    u16* ix0 = s->lidx != NULL ? (u16*)(uintptr_t)s->lidx : s->idx;
-    u16* ix = ix0;
-    for (u32 i = 0; i < nd; i++) {
-        ix = emit_tris(d[i].prim, first + d[i].first, d[i].count, ix);
-    }
-    if (s->lidx != NULL) {
-        plat_gpu_stream_commit(ix0, nidx * sizeof(u16));
-    }
+    /* the cache budget counts the indices wherever they live */
+    s->bytes = GXV_STREAM_BYTES + nidx * sizeof(u16) + nv * p->stride;
+    return s;
+}
+
+static void stream_done(u32 nv, int pos_s16, u32* reason) {
     s_st.built++;
     s_st.built_verts += nv;
-    s_st.built_s16_pos += posk >= 0;
+    s_st.built_s16_pos += pos_s16;
     *reason = 0;
+}
+
+GxVshStream* gx_vsh_stream_build(const GxVertex* v, u32 nv, const GxDlcDraw* d, u32 nd, const u8* vtx_desc,
+                                 const GxAttrFmt (*vat)[GX_VA_MAX_ATTR], u8 fmt_mask, u32* reason) {
+    GxVshPrep p;
+    u32 why = gx_vsh_stream_prep(v, nv, d, nd, vtx_desc, vat, fmt_mask, &p);
+    if (why != 0) {
+        *reason = why;
+        build_failed(why);
+        return NULL;
+    }
+    GxVshStream* s = stream_alloc(&p, nv, reason);
+    if (s == NULL) {
+        return NULL;
+    }
+    u8* out = s_seg[s->seg].base + s->first * p.stride;
+    u16* ix0 = s->lidx != NULL ? (u16*)(uintptr_t)s->lidx : s->idx;
+    gx_vsh_stream_fill(&p, v, nv, d, nd, out, ix0, s->first);
+    plat_gpu_stream_commit(out, nv * p.stride);
+    if (s->lidx != NULL) {
+        plat_gpu_stream_commit(ix0, p.nidx * sizeof(u16));
+    }
+    stream_done(nv, p.posk >= 0, reason);
+    return s;
+}
+
+/* dlcjob: a stream prepared and filled elsewhere (gx_vsh_stream_prep, then gx_vsh_stream_fill with first 0 into
+ * `bytes` and `ix`) placed into stream memory on the game thread: the same allocation order and counters as
+ * gx_vsh_stream_build, the vertex bytes copied, the indices moved to the segment's first vertex. why: the prep's
+ * reasons (0: buildable). */
+GxVshStream* gx_vsh_stream_place(const GxVshPrep* p, u32 why, u32 nv, const u8* bytes, const u16* ix, u32* reason) {
+    if (why != 0) {
+        *reason = why;
+        build_failed(why);
+        return NULL;
+    }
+    GxVshStream* s = stream_alloc(p, nv, reason);
+    if (s == NULL) {
+        return NULL;
+    }
+    u8* out = s_seg[s->seg].base + s->first * p->stride;
+    memcpy(out, bytes, nv * p->stride);
+    u16* ix0 = s->lidx != NULL ? (u16*)(uintptr_t)s->lidx : s->idx;
+    u32 first = s->first;
+    for (u32 i = 0; i < p->nidx; i++) {
+        ix0[i] = (u16)(ix[i] + first);
+    }
+    plat_gpu_stream_commit(out, nv * p->stride);
+    if (s->lidx != NULL) {
+        plat_gpu_stream_commit(ix0, p->nidx * sizeof(u16));
+    }
+    stream_done(nv, p->posk >= 0, reason);
     return s;
 }
 

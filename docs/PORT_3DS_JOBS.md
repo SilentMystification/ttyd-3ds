@@ -87,6 +87,8 @@ The pointer walks themselves (the relocation pass, the joint tree, the material 
 
 The saving per load is real but small (about 20 ms on the biggest map), because conversion is a small part of a load. The queue is ready for bigger loops: texture conversion at load and display-list decode (MULTICORE B), which belong to the GX layer.
 
+**Display-list cache entry builds (`dlcjob`, 2026-11-28):** the bulk of a new cache entry (vertex copy into the blob, the stream's layout and bytes) runs as ring jobs submitted at a frame's end and joined at the next frame's end; the frame draws the pending lists through the plain decode meanwhile. Static job arguments (a record table per staging half), no allocation, GPU call or game memory in the jobs. Design, verify mode and the runs: PORT_3DS_GX_PERF.md, "`dlcjob`".
+
 ## Waits that aren't work (check E)
 
 `pc_sample.py --interval 200` on Azahar, `map=gor_01`: 45 s from boot (boot and map load), then 90 s of steady play.

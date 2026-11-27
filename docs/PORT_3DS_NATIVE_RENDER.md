@@ -65,3 +65,28 @@ GX instructions per frame in gor_01 (est.): map ~3.5 M -> 0.16 M; characters ~1.
 Reused: gxone intern tables and `pica_enc.c` encoders, the chunk store and frame-list writer, `oh_state_one`, the stream builder and layout blocks, `gx.v.pica`, `vsh_const` row maths, the light block, `pica_model`/`gxfldig`/gxchunk=2 verify, gxsdlx's delta builder, gximmfl (effects), the texture tier, `texdt`, `plat_job`, memplace placements, mapdispjob's outcome table.
 
 Fallback-only from here (stop optimising): the gx_rec ring, dedup, gxrecfuse/gxreclgroup/gxsdl, batch forming and `bat_open` validation, route/group keys for map and character draws; most of gxbopen/gxlcall/gxrows/gxtexkey's gain goes away with `nmap`.
+
+## Owner decisions (2026-11-28)
+
+- Identity for `nanim`/`nspr`: pass = GPU register file equal except buffer addresses and index counts, decoded triangle lists bit-equal, determ shots byte-identical.
+- First frames after a load: native items use the shader path from frame 1 (no K=30 hysteresis); the first ~30 frames after a load may differ, identical afterwards.
+
+## Fallback coverage (addendum, est.)
+
+Estimated GX CPU share by subsystem (K layout; baseline GX CPU gor_01 ~26.6 ms, pik_00 ~31, usu_00 ~23, battle ~17):
+
+| Subsystem | gor_01 | pik_00 | usu_00 | battle |
+|---|---|---|---|---|
+| Map | 62% | 47% | ~60% | 47% |
+| Characters (animdrv via npc/mobj/item/mario/party/battle units) | 23% | ~40% | 26% | 30% |
+| Everything else (effects, shadows, windows/HUD/fonts/icons, battle UI, fades, bg, env, camera) | 15% | 13% | 14% | 23% |
+
+usu_00's map is mostly lit / non-display-list parts (`mapSetMaterial` every frame), so `nmap` stage 2 (lit and non-DL parts) follows stage 1 directly.
+
+Residual fallback share after each step (est.): `nmap` stage 1: 38% / 53% / ~95% / 53%; stage 2: 38% / 53% / 40% / 53%; `nanim`: 15% / 13% / 14% / 23%; shadows + `nspr` + battle UI: 6-12%; trace replay on the rest: 2-5%.
+
+Target: fallback GX CPU <= 10% of today's GX CPU in every census scene and <= 3,000 GX events per frame. Any subsystem above 3% of today's GX time (~0.8 ms) or 1,000 events per frame gets its own native path. The census reruns after every step; fallback-reason counters must explain every native-eligible item sent to GX.
+
+Making the fallback non-interpreting: trace replay per owner (record the event sequence between draw boundaries once; next frame each call is one compare against the trace's next member, and a full match takes the stored class ids, route and plan; mismatch drops to the interpreter and re-records; verify runs both), static fallback lists stay retained (ListObj + chunk), constant-argument setters fold to compare + store with gxfifo. Only immediate vertex conversion remains.
+
+Revised order: 0 `gxown` census -> 1 `nmap` stage 1 -> 2 `nmap` stage 2 (lit/non-DL) -> 3 `nanim` -> 4 shadows / `nspr` / battle UI per the threshold -> 5 trace replay for the fallback -> 6 bake jobs, CALL mode, QTM.

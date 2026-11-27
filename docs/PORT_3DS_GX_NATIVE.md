@@ -81,6 +81,7 @@ Gates for every step: `determ_ab.py` (10 scenes, 6 of 6), `gw_diff.py` (1600 fra
    Built 2026-11-27 (`gximmfl`, default 0; the separate switch is `gximmnow`, default 0; section "Step 4 as built" below).
 5. **`gxchunk=call` (CALL mode)**, gated on the step-0 console results.
 6. **Stereo:** per-eye tail lists with per-eye rows on the CPU (byte-identical; planner default). A shader shear would be cheaper but not identical (open owner question).
+   Built 2026-11-28 (`gxstereo`, default 0; section "Step 6 as built" below).
 7. **Chunk/stream builds as core-2 jobs at map load** (frame draws uncached meanwhile, the `dlspread` rule), targeting the ~345 ms first-frame build cost in gor_01.
 
 ### Step 2 as built: `gxone` (2026-11-27)
@@ -129,6 +130,19 @@ Switch `gximmfl` (default 0; 2 is the verify mode). It needs `gxchunk=1` or `2` 
 - **Not changed:** `gximmfl=0` (no change in the words or the route), the CPU path of an immediate draw (decoded as before), the old path for draws `gx_draw_imm_route` does not take (matrix indices, bounding box, dump, `gxvsh=0`), lists, chunks, clears, copies, stereo (the same marks), the GPU-hang reset.
 
 Gates (not run; Azahar was busy): the PERF doc section "Step 4 of the native plan: `gximmfl`".
+
+### Step 6 as built: `gxstereo` (2026-11-28)
+
+Switch `gxstereo` (default 0; 2 is the verify mode). It needs `gxonehop=1` (gxone, gxchunk, gximmfl build on it). Files: `port3ds/plat/gpu.c` (`oh_mark`, `oh_record_start`, `render_record`, switch parse), `port3ds/plat/stereo.c/.h` (`stereo_maybe`, `stereo_tail_cost`).
+
+- **The scene is shared, the tail is per eye, as before.** Stereo is depth reprojection (stereo.c): the 3D part is drawn once, warped per eye, and the 2D tail after the last stereo mark is drawn on each eye. Under K and I the tail's runs are already command lists in the frame list; the render thread submits the same lists for both eyes after each eye's warp, with the mark's words (all uniform rows, the fog LUT) first. The C1 reference draws both eyes' tails with the same rows, so the per-eye rows are the mono rows and the two eye lists share their words. Composing an eye offset (x' = x + b w) with b = 0 would change -0 rows to +0, so no row is composed; a non-zero layer offset (a HUD depth) would be the place to write a second eye list, and is not wanted now.
+- **What changes: no marks in mono.** `stereo_maybe()` (the `stereo3d` option, `stereoforce`, the slider; no side effects, any thread) is asked once at each record's start. A record started with 3D off writes no mark: no mark words, no full state, layout and citro3d flush again after it, no list split. In mono the render thread did nothing at a mark, so the register values at every draw are the same. With 3D on the words are those of `gxstereo=0`. A record started in mono and drawn after 3D came on is drawn in mono (one frame late; a frame with no scene draw is mono today too).
+- **`gxstereo=2`:** marks as 0; counts the marks 1 would leave out and the stereo frames 1 would draw in mono. Log: `gxstereo=N, 600 frames:` every 600 presented frames.
+- **Stereostats per eye:** `stereostats=N` adds `stereostats per eye:` (split, left tail, right warp, right tail in render-thread us, and the tail's commands by kind), for every configuration.
+- **Not changed:** the stereo tail's words and order, the warp, the snapshot, `gxstereo=0`, `gxonehop=2`, the record path.
+- **Follow-up (not built):** marks also cost in stereo frames (every mark before the last one is written for nothing, and each forces a full state send). A tail prologue built at the record's end from the ids, layout and rows held at the last mark would remove both; it needs the held class blocks by id (gxone) and a verify against the mark path.
+
+Gates (not run; owner rule 2026-11-28): the PERF doc section "Step 6 of the native plan: stereo with the frame list".
 
 ## 4b. QTM (2 MiB extra RAM, separate bus) budget
 

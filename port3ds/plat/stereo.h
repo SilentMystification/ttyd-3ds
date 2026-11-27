@@ -28,6 +28,9 @@ void stereo_init(const StereoInit* in);
 /* Before C3D_FrameBegin of a presented record: 1 when this frame is drawn in
  * stereo (option on, slider or stereoforce above 0, resources available). */
 int stereo_wanted(void);
+/* Any thread: stereo_wanted's answer without its side effects (the game thread's guess at a record's start;
+ * gpu.c switch gxstereo). */
+int stereo_maybe(void);
 /* Still before C3D_FrameBegin: creates what a stereo frame needs (once);
  * 0 when it cannot (no memory), then the frame is mono. */
 int stereo_begin(void);
@@ -45,6 +48,18 @@ C3D_RenderTarget* stereo_eye_target(int eye);
 void stereo_relink(void);
 /* GX queue entries a stereo frame adds (frame splits and transfers). */
 #define STEREO_GX_ENTRIES 4
+/* The render thread's cost of a stereo frame's split and 2D tail per eye (ticks), and the tail's record
+ * commands by kind (counted while the right eye replays it). */
+enum { STC_WORDS, STC_FLUSH, STC_UNIF, STC_MARK, STC_OTHER, STC_N };
+typedef struct {
+    u32 split_ticks;   /* snapshot + left warp */
+    u32 tail_ticks[2]; /* the tail per eye (eye 1 without its warp) */
+    u32 warp1_ticks;   /* the right eye's warp and state restore */
+    u32 kinds[STC_N];
+} StereoTailCost;
+static inline void stereo_tail_count(StereoTailCost* c, int kind) { c->kinds[kind]++; }
+/* Before stereo_frame_done of a stereo frame. */
+void stereo_tail_cost(const StereoTailCost* c);
 /* After C3D_FrameEnd: cost statistics (switch stereostats). */
 void stereo_frame_done(int stereo, u32 render_us, u32 gpu_us, u32 tail_cmds, u32 tail_zwrites);
 /* After a shot of the EFB: the screen targets too (eye shots in stereo, the

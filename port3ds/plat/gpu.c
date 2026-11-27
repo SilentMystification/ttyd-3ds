@@ -109,6 +109,7 @@ typedef struct {
     u32 side_used;
     s32 oh_split;              /* byte offset in data of the last stereo mark (gxonehop=1), -1: none */
     u32 oh_tail_draws, oh_tail_z; /* draws after that mark, and those of them writing depth (stereostats) */
+    int oh_st;                 /* gxstereo: the game thread saw 3D on at the record's start (marks written) */
     void* caps[256];           /* the CMD_OH_CAPTURE bodies the render thread fills (imported at reuse) */
     u32 ncaps;
     /* gxchunk=2: the per-draw words beside each batch chunk (ckref), the chunks' places in ow and ckref, and per draw
@@ -332,6 +333,15 @@ static int s_oh_state_pending; /* the state changed since the words last sent it
 static int s_one; /* switch gxone (GX native step 2; the gxone section after oh_import) */
 static int s_chunk; /* switch gxchunk (GX native step 3; the gxchunk section after the gxone section) */
 static int s_immfl; /* switch gximmfl (GX native step 4; the gximmfl section after plat_gpu_chunk_draw) */
+/* switch gxstereo (GX native step 6; gxonehop=1, so gxone/gxchunk/gximmfl): 1 writes the stereo marks only in a
+ * record whose start saw 3D on (stereo_maybe); a mono record then has no mark, no full state sent again after it,
+ * no citro3d flush and no list split at it. 2: marks as 0, and counts what 1 would change (see oh_stereo_log). */
+static int s_gxstereo;
+static struct {
+    u32 marks, skipped, mono_recs;   /* game thread: marks written, marks 1 leaves out, records started in mono */
+    u32 st_frames, late, mono_frames; /* render thread: stereo frames, of them from a mono-started record (2: what 1
+                                        * shows in mono), 3D wanted but no split (1: the frame after 3D went on) */
+} s_gst;
 static int s_ck_tier_linear = 1; /* the frame list is in linear memory (C3D_FrameEnd(0) flushes it) */
 static void ck_verify(Record* r);
 static void ck_log(u32 frames);
@@ -3108,6 +3118,7 @@ static struct {
     PlatGpuState given;      /* the last CMD_STATE (gxonehop=1) */
     int given_valid;
     int after_scene, scene_seen;
+    int st_off; /* gxstereo=1: this record writes no stereo mark */
     u32 gdraw, seq;
     u32 held[3], held_ep; /* gxone: the class block ids the GPU holds (valid with gpu_valid), the texture epoch */
 } s_om;
@@ -3241,6 +3252,9 @@ static void oh_record_start(void) {
     s_om.lit = -1;
     s_om.lcount = -1;
     s_om.seq = s_submit_seq + 1;
+    r->oh_st = !s_gxstereo || stereo_maybe();
+    s_om.st_off = s_gxstereo == 1 && !r->oh_st;
+    s_gst.mono_recs += !r->oh_st;
     vunif_reset_u(&s_vg);
     s_vg.pend[0] = s_vg.pend[1] = s_vg.pend[2] = 0;
     s_oh_state_pending = 0;
@@ -3282,6 +3296,15 @@ static u32* oh_rows_u(u32* w, const u32* mask, const VUnif* u) {
 }
 
 static void oh_mark(void) {
+    if (s_om.st_off) {
+        s_gst.skipped++; /* gxstereo=1, a mono record: the mark would do nothing at the replay */
+        s_om.after_scene = 0;
+        return;
+    }
+    if (s_gxstereo == 2 && !oh_rec()->oh_st) {
+        s_gst.skipped++;
+    }
+    s_gst.marks++;
     oh_close();
     Record* r = oh_rec();
     u32* w0 = r->ow + r->now;
@@ -5140,6 +5163,9 @@ static void render_record(Record* r) {
             split = stereo_split(r, &tail_cmds, &tail_zwrites);
         }
     }
+    if (s_gxstereo && r->present && s_onehop == 1 && split == NULL && stereo_wanted()) {
+        s_gst.mono_frames++; /* 3D on, but the record has no split (gxstereo=1: it started in mono) */
+    }
     int stereo = split != NULL && stereo_begin();
     s_ohv_on = s_onehop == 2 && !stereo; /* gxonehop=2: compare mono records */
     s_ohv_gn = 0;
@@ -5282,9 +5308,12 @@ static void render_record(Record* r) {
     const PlatGpuVshLight *vl_now = NULL, *split_vl = NULL;
     u8* tail = NULL;
     int eye = 0;
+    StereoTailCost stc = {0}; /* stereostats: the tail's cost per eye */
+    u64 st_t = 0;
 #define STEREO_SPLIT()                       \
     do {                                     \
         LEAVE_VSH();                         \
+        st_t = svcGetSystemTick();           \
         stereo_snapshot();                   \
         stereo_warp(0);                      \
         C3D_SetAttrInfo(&s_attr);            \
@@ -5292,6 +5321,8 @@ static void render_record(Record* r) {
         rot_uniforms();                      \
         restore = 1;                         \
         tail = split;                        \
+        stc.split_ticks = (u32)(svcGetSystemTick() - st_t); \
+        st_t = svcGetSystemTick();           \
         split_state = cur_state;             \
         if (cur_state != NULL) {             \
             split_rstate = s_rstate;         \
@@ -5309,6 +5340,13 @@ eye_again:
         CmdHead* h = (CmdHead*)p;
         u8* body = p + sizeof(CmdHead);
         p = body + h->size;
+        if (eye == 1) {
+            stereo_tail_count(&stc, h->type == CMD_OH_WORDS   ? STC_WORDS
+                                    : h->type == CMD_OH_FLUSH ? STC_FLUSH
+                                    : h->type == CMD_OH_UNIF  ? STC_UNIF
+                                    : h->type == CMD_OH_MARK  ? STC_MARK
+                                                              : STC_OTHER);
+        }
         switch (h->type) {
         case CMD_STATE_DELTA: {
             if (cur_state == NULL) {
@@ -5566,10 +5604,12 @@ eye_again:
         if (split != NULL) {
             STEREO_SPLIT(); /* the record ends with its 3D part */
         }
+        stc.tail_ticks[eye] = (u32)(svcGetSystemTick() - st_t);
         present(stereo_eye_target(eye));
         if (eye == 0) {
             /* the right eye: its warp, then the same 2D tail from the same state */
             eye = 1;
+            st_t = svcGetSystemTick();
             stereo_warp(1);
             C3D_SetAttrInfo(&s_attr);
             C3D_SetBufInfo(&bi);
@@ -5599,6 +5639,8 @@ eye_again:
                 vsh_apply_const(split_vc);
             }
             p = tail;
+            stc.warp1_ticks = (u32)(svcGetSystemTick() - st_t);
+            st_t = svcGetSystemTick();
             goto eye_again;
         }
     } else if (r->present) {
@@ -5629,6 +5671,23 @@ eye_again:
         s_begin_records = 0;
     }
     if (r->present) {
+        if (stereo) {
+            stereo_tail_cost(&stc);
+        }
+        if (s_gxstereo) {
+            s_gst.st_frames += stereo;
+            s_gst.late += stereo && !r->oh_st;
+            static u32 s_gst_n;
+            if (++s_gst_n == 600) {
+                s_gst_n = 0;
+                PLOG_I("gxstereo=%d, 600 frames: stereo %lu (from records started in mono %lu), 3D on but mono %lu; "
+                       "records started in mono %lu; marks written %lu, left out%s %lu",
+                       s_gxstereo, (unsigned long)s_gst.st_frames, (unsigned long)s_gst.late,
+                       (unsigned long)s_gst.mono_frames, (unsigned long)s_gst.mono_recs, (unsigned long)s_gst.marks,
+                       s_gxstereo == 2 ? " by gxstereo=1" : "", (unsigned long)s_gst.skipped);
+                memset(&s_gst, 0, sizeof(s_gst));
+            }
+        }
         stereo_frame_done(stereo, s_stats.render_us, s_stats.gpu_us, tail_cmds, tail_zwrites);
     }
     if (r->present && s_shots_every) {
@@ -6280,6 +6339,18 @@ void plat_gpu_init(void) {
     if (s_chunk && (!s_one || !ck_init())) {
         s_chunk = 0;
         s_immfl = 0;
+    }
+    s_gxstereo = plat_switch_int("gxstereo", 0);
+    if (s_gxstereo < 0 || s_gxstereo > 2) {
+        s_gxstereo = 0;
+    }
+    if (s_gxstereo && s_onehop != 1) {
+        PLOG_W("gxstereo: off (it needs gxonehop=1, gxone=1 or gxchunk)");
+        s_gxstereo = 0;
+    }
+    if (s_gxstereo) {
+        PLOG_I("gxstereo=%d: stereo marks %s", s_gxstereo,
+               s_gxstereo == 1 ? "only in records started with 3D on" : "as gxstereo=0, counting what gxstereo=1 leaves out");
     }
     if (s_immfl) {
         PLOG_I("gximmfl=%d: immediate draws straight into the frame list%s", s_immfl,

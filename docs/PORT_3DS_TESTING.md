@@ -191,7 +191,7 @@ Switches the game reads (space-separated words in `--switches`):
 | `stereosep=<px>` | Total parallax at infinity at the full slider, in top-screen pixels (default 6, max 20) |
 | `stereoconv=<1..99>` | Convergence: that percentile of the depth grid (default 50, the median) |
 | `stereogrid=<W>x<H>` | Depth grid and warp mesh size (default 40x24, up to 80x48) |
-| `stereostats=N` | Every N frames, a `stereostats` line: stereo and mono render-thread and GPU time, mesh time, 2D tail size and its depth writes, convergence |
+| `stereostats=N` | Every N frames, a `stereostats` line: stereo and mono render-thread and GPU time, mesh time, 2D tail size and its depth writes, convergence; and a `stereostats per eye` line: render-thread us for the split (snapshot and left warp), the left tail, the right warp, the right tail, and the tail's record commands by kind |
 | `stereolog=N` | Logs the draw order of stereo frames N and N+300 (S/s scene draw on the CPU/shader path, L/l screen-layer draw, C copy, X clear) and where the 2D tail starts |
 | `scrshot` | Mono shots also save the top screen target as `shots/N.M.ppm` (400x240), for comparing against stereo eye shots |
 | `gxthread=0/1/2/3` | Where GX is translated (`port3ds/game/gx/gx_rec.c`). 0 (default): on the game thread as each call is made. 1: recorded by value into a ring and translated by the game thread at fences (draw sync, `GXDrawDone`, read-backs, a memory release while translation is pending, a full ring). 2: a translator thread on core 2 follows the ring; the game thread translates the first part of each frame itself (see `gxthreadsplit`). 3: verify, as 1 plus getter, list-byte and late-read checks (`gxthread verify` warnings, `verify (total)` line). See PORT_3DS_MULTICORE.md "A, built" |

@@ -67,6 +67,12 @@ void mapGetBoundingBox(Vec* min, Vec* max);
 static void mapGetJointsSub(MapFileJoint* joint, s32* numJoints);
 static void mapObjGetPosSub(MapObject* obj, Vec* sum, s32* count, BOOL doNext);
 static void mapReCalcMatrix(MapObject* obj, Mtx mtx, BOOL force);
+#ifdef TARGET_PORT
+static void portMapReCalc(MapObject* root, Mtx mtx); // mapmtxjob: mapReCalcMatrix(root, mtx, 0), subtrees in parallel
+#define MAP_RECALC_ROOT(root, mtx) portMapReCalc(root, mtx)
+#else
+#define MAP_RECALC_ROOT(root, mtx) mapReCalcMatrix(root, mtx, 0)
+#endif
 MapFileJoint* mapSearchDmdJoint(MapFileJoint* joint, const char* name);
 static MapFileJoint* mapSearchDmdJointSub(MapFileJoint* joint, const char* name);
 static MapFileJoint* mapSearchDmdJointSub2(MapFileJoint* joint, const char* name, const char* prefix);
@@ -1694,6 +1700,227 @@ static void mapReCalcMatrix(MapObject* obj, Mtx mtx, BOOL force) {
     }
 }
 
+#ifdef TARGET_PORT
+// mapmtxjob (port3ds/include/port3ds/gamepar.h): mapReCalcMatrix(root, mtx, 0) with the subtrees below the
+// roots in parallel. Serial pre-pass: each root's own matrix (and its next siblings'), then its child chain is cut
+// into segments of mapmtxseg siblings; a job computes a segment's nodes and everything below them. Operations on a
+// node are the original's, in the original's order. A job clears a node's dirty flag after its whole subtree is
+// done (not before, as the original does) so that a chunk the caller takes over from a worker is computed again
+// correctly: every node already finished has its flag clear and its matrices final, every other node is computed
+// again with the same inputs and writes the same values (same code, same FPSCR). A takeover is followed by a
+// quiesce so no worker can clear a flag the game sets later.
+typedef struct {
+    MapObject* first;     // first sibling of the segment
+    MapObject* mtxParent; // their parent
+    u32 count;            // siblings in the segment
+    BOOL force;
+} PortMtxTask;
+
+static int s_mmj = -1; // mapmtxjob: 0 off, 1 on, 2 on + compare with the serial result
+static int s_mmj_seg;
+static PortMtxTask* s_mmj_tasks;
+static u32 s_mmj_cap, s_mmj_n;
+static struct {
+    u32 calls, pre, tasks, inl, takeovers, compared, mismatches;
+} s_mmj_stats;
+
+static void portMtxNode(MapObject* obj, Mtx mtx, BOOL force) {
+    BOOL dirty = (obj->flags & MAPOBJ_FLAG_MTX_DIRTY) != 0 || force;
+    MapObject* c;
+
+    if (dirty) {
+        if (obj->flags & MAPOBJ_FLAG_ANIM_MTX) {
+            PSMTXConcat(mtx, obj->animMtx, obj->modelWorldMtx);
+        } else {
+            PSMTXConcat(mtx, obj->localMtx, obj->modelWorldMtx);
+        }
+        if (obj->flags & MAPOBJ_FLAG_TRANSFORM_MTX) {
+            PSMTXConcat(obj->modelWorldMtx, obj->transformMtx, obj->modelWorldMtx);
+        }
+    }
+    for (c = obj->child; c != NULL; c = c->next) {
+        portMtxNode(c, obj->modelWorldMtx, dirty);
+    }
+    if (dirty) {
+        obj->flags &= ~MAPOBJ_FLAG_MTX_DIRTY;
+    }
+}
+
+static void portMtxTaskRun(const PortMtxTask* t) {
+    MapObject* o = t->first;
+    for (u32 k = 0; k < t->count && o != NULL; k++, o = o->next) {
+        portMtxNode(o, t->mtxParent->modelWorldMtx, t->force);
+    }
+}
+
+typedef struct {
+    PortMtxTask* tasks;
+} PortMtxArg;
+
+static void portMtxRange(void* arg, u32 begin, u32 end, int alt) {
+    const PortMtxArg* a = arg;
+    (void)alt; // in place: a repeated task writes the same values
+    for (u32 i = begin; i < end; i++) {
+        portMtxTaskRun(&a->tasks[i]);
+    }
+}
+
+// the child chain of parent in segments
+static void portMtxCut(MapObject* parent, BOOL force) {
+    MapObject* c = parent->child;
+    while (c != NULL) {
+        PortMtxTask t;
+        MapObject* o = c;
+        u32 n = 0;
+        while (o != NULL && n < (u32)s_mmj_seg) {
+            o = o->next;
+            n++;
+        }
+        t.first = c;
+        t.mtxParent = parent;
+        t.count = n;
+        t.force = force;
+        c = o;
+        if (s_mmj_n < s_mmj_cap) {
+            s_mmj_tasks[s_mmj_n++] = t;
+        } else {
+            portMtxTaskRun(&t);
+            s_mmj_stats.inl++;
+        }
+    }
+}
+
+static void portMapReCalcJob(MapObject* root, Mtx mtx) {
+    static PortMtxArg arg;
+    MapObject* s;
+
+    if (s_mmj_cap == 0) {
+        s_mmj_tasks = malloc(512 * sizeof(PortMtxTask));
+        if (s_mmj_tasks == NULL) {
+            mapReCalcMatrix(root, mtx, 0);
+            return;
+        }
+        s_mmj_cap = 512;
+    }
+    plat_job_pfor_quiesce(); // no worker may still read the task table
+    s_mmj_n = 0;
+    s_mmj_stats.calls++;
+    for (s = root; s != NULL; s = s->next) {
+        BOOL dirty = (s->flags & MAPOBJ_FLAG_MTX_DIRTY) != 0;
+        if (dirty) {
+            if (s->flags & MAPOBJ_FLAG_ANIM_MTX) {
+                PSMTXConcat(mtx, s->animMtx, s->modelWorldMtx);
+            } else {
+                PSMTXConcat(mtx, s->localMtx, s->modelWorldMtx);
+            }
+            if (s->flags & MAPOBJ_FLAG_TRANSFORM_MTX) {
+                PSMTXConcat(s->modelWorldMtx, s->transformMtx, s->modelWorldMtx);
+            }
+            s->flags &= ~MAPOBJ_FLAG_MTX_DIRTY;
+        }
+        s_mmj_stats.pre++;
+        portMtxCut(s, dirty);
+    }
+    s_mmj_stats.tasks += s_mmj_n;
+    if (s_mmj_n == 1) {
+        portMtxTaskRun(&s_mmj_tasks[0]);
+    } else if (s_mmj_n > 1) {
+        u32 shift = 0;
+        arg.tasks = s_mmj_tasks;
+        u64 alt = plat_job_pfor_dyn(portMtxRange, &arg, s_mmj_n, 1, &shift);
+        if (alt != 0) {
+            s_mmj_stats.takeovers++;
+            plat_job_pfor_quiesce();
+        }
+    }
+}
+
+typedef struct {
+    MapObject* o;
+    u32 flags;
+    u32 flags1;
+    Mtx m0;
+    Mtx m1;
+} PortMtxSave;
+static PortMtxSave* s_mmj_save;
+static u32 s_mmj_save_n, s_mmj_save_cap;
+
+static void portMtxCollect(MapObject* o) {
+    for (; o != NULL; o = o->next) {
+        if (s_mmj_save_n == s_mmj_save_cap) {
+            u32 cap = s_mmj_save_cap ? s_mmj_save_cap * 2 : 1024;
+            PortMtxSave* p = realloc(s_mmj_save, cap * sizeof(PortMtxSave));
+            if (p == NULL) {
+                return;
+            }
+            s_mmj_save = p;
+            s_mmj_save_cap = cap;
+        }
+        PortMtxSave* e = &s_mmj_save[s_mmj_save_n++];
+        e->o = o;
+        e->flags = o->flags;
+        memcpy(e->m0, o->modelWorldMtx, sizeof(Mtx));
+        portMtxCollect(o->child);
+    }
+}
+
+static void portMapReCalc(MapObject* root, Mtx mtx) {
+    if (s_mmj < 0) {
+        s_mmj = plat_switch_int("mapmtxjob", 0);
+        s_mmj_seg = plat_switch_int("mapmtxseg", 8);
+        if (s_mmj_seg < 1) {
+            s_mmj_seg = 1;
+        }
+        if (s_mmj != 0) {
+            PLOG_I("mapmtxjob=%d: mapReCalcMatrix subtrees in parallel, segments of %d siblings%s", s_mmj, s_mmj_seg,
+                   s_mmj == 2 ? ", compared with the serial result" : "");
+        }
+    }
+    if (s_mmj <= 0) {
+        mapReCalcMatrix(root, mtx, 0);
+        return;
+    }
+    if (s_mmj == 2) {
+        s_mmj_save_n = 0;
+        portMtxCollect(root);
+        portMapReCalcJob(root, mtx);
+        for (u32 i = 0; i < s_mmj_save_n; i++) { // the job's result, then the original state back
+            PortMtxSave* e = &s_mmj_save[i];
+            e->flags1 = e->o->flags;
+            memcpy(e->m1, e->o->modelWorldMtx, sizeof(Mtx));
+            e->o->flags = e->flags;
+            memcpy(e->o->modelWorldMtx, e->m0, sizeof(Mtx));
+        }
+        mapReCalcMatrix(root, mtx, 0);
+        for (u32 i = 0; i < s_mmj_save_n; i++) {
+            PortMtxSave* e = &s_mmj_save[i];
+            s_mmj_stats.compared++;
+            if (e->flags1 != e->o->flags || memcmp(e->m1, e->o->modelWorldMtx, sizeof(Mtx)) != 0) {
+                if (s_mmj_stats.mismatches++ < 8) {
+                    PLOG_W("mapmtxjob: object %p differs from the serial result (flags %08lx / %08lx)", (void*)e->o,
+                           (unsigned long)e->flags1, (unsigned long)e->o->flags);
+                }
+            }
+        }
+        return;
+    }
+    portMapReCalcJob(root, mtx);
+}
+
+void portMapMtxJobFrame(u32 frame) {
+    static u32 s_last;
+    if (s_mmj <= 0 || frame % 120 != 0 || s_mmj_stats.calls == s_last) {
+        return;
+    }
+    s_last = s_mmj_stats.calls;
+    PLOG_I("[MAPMTXJOB] frame %lu: %lu calls, %lu roots serial, %lu tasks, %lu run inline (table full), %lu takeovers; "
+           "compared %lu, mismatches %lu",
+           (unsigned long)frame, (unsigned long)s_mmj_stats.calls, (unsigned long)s_mmj_stats.pre,
+           (unsigned long)s_mmj_stats.tasks, (unsigned long)s_mmj_stats.inl, (unsigned long)s_mmj_stats.takeovers,
+           (unsigned long)s_mmj_stats.compared, (unsigned long)s_mmj_stats.mismatches);
+}
+#endif
+
 typedef struct MapAnimNm {
     const char** name; // 0x0
     u8* data;          // 0x4
@@ -2061,7 +2288,7 @@ void mapMain(void) {
         }
         if (changed) {
             PSMTXScale(scale, 10.0f, 10.0f, 10.0f);
-            mapReCalcMatrix(entry->rootMapObj, scale, 0);
+            MAP_RECALC_ROOT(entry->rootMapObj, scale);
         }
     }
 }
@@ -2651,7 +2878,7 @@ static int portMapDispJob(MapWork* wp, CameraEntry* camera, s32* n_before, u32* 
         for (s32 i = 0; i < count; entry++, i++) {
             if (entry->rootMapObj != NULL) {
                 PSMTXScale(scale, 10.0f, 10.0f, 10.0f);
-                mapReCalcMatrix(entry->rootMapObj, scale, 0);
+                MAP_RECALC_ROOT(entry->rootMapObj, scale);
             }
         }
     }
@@ -2816,7 +3043,7 @@ void mapDisp(void) {
     for (i = 0; i < wp->entries[0].count; entry++, i++) {
         if (entry->rootMapObj != NULL) {
             PSMTXScale(scale, 10.0f, 10.0f, 10.0f);
-            mapReCalcMatrix(entry->rootMapObj, scale, 0);
+            MAP_RECALC_ROOT(entry->rootMapObj, scale);
         }
         obj = entry->objects;
         for (j = 0; j < entry->numJoints; j++, obj++) {

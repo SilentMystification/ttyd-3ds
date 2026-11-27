@@ -44,6 +44,7 @@
  * the memory reports the game thread made after recording it.
  *
  * Game-agnostic: no TTYD knowledge. */
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,6 +61,7 @@ __thread int gx_tls_translator;
 int gx_rec_direct;
 struct GxRecFast gx_rec_fast;
 GxState gx_game;
+static int s_ev_on; /* s_ev, for gx_rec_fast_update (set with it) */
 
 /* game thread (the only one that changes what it reads, with its own gx_tls_translator) */
 void gx_rec_fast_update(void) {
@@ -67,6 +69,9 @@ void gx_rec_fast_update(void) {
     gx_rec_fast.w = gx_rec_mode == 0 && quiet && !gx_tls_translator ? 0 : gx_rec_on() && quiet ? 1 : 2;
     const int fifo_ok = gx_rec_fast.w == 0 && gx_opt_dirty != 0 && !gx_opt_statededup;
     gx_rec_fast.fifo = fifo_ok && gx_opt_fifo == 1 ? 0 : fifo_ok && gx_opt_fifo == 2 ? 2 : 1;
+    if (s_ev_on && gx_rec_fast.w == 1 && gx_opt_dirty != 0 && !gx_opt_statededup) {
+        gx_rec_fast.fifo = 3; /* gxsplit stage 2: the hot setters' fast bodies on gx_game */
+    }
 }
 
 static __thread int t_game; /* the thread that called GXInit */
@@ -74,6 +79,8 @@ static __thread int t_game; /* the thread that called GXInit */
 enum { GXR_WRAP = 0xF0, GXR_LIST, GXR_PRIM, GXR_RAW, GXR_PRIMD };
 enum { GXR_FCHK_LIST = 0xE0, GXR_FCHK_VD }; /* gxrecfuse=2's checks */
 enum { GXR_SHOT = 0xE8 }; /* plat_gpu_shot from the game thread: asked again when translated, in order */
+enum { GXR_STATE = 0xE9 }; /* gxsplit stage 2: EV_STATE (ev_state_apply) */
+static void ev_state_apply(const u32* w);
 #define SHOT_WORDS 12u /* the path, 48 bytes */
 /* gxrecfuse counters (game thread; the checks' on the translator) */
 static struct {
@@ -97,6 +104,7 @@ static int s_sleeping, s_want_done;
 static int s_fence_release = 1;
 static int s_excl;
 static int s_gxsplit; /* switch gxsplit (gx_rec_init): K on the translator thread */
+static int s_ev;      /* gxsplit stage 2 (switch gxsplitev, default 1 under gxsplit): the compact event ring */
 static int s_list_hash; /* gxthread=3, gxsplit=2: a list call carries the hash of its bytes, checked at translation */
 
 /* counters: the game thread's (gs), the translator's (ts) */
@@ -276,8 +284,13 @@ static void check_textures(void) {
 
 static inline __attribute__((always_inline)) void run_one(u32 type, const u32* w, u32 n) {
     switch (type) {
+    case GXR_STATE: ev_state_apply(w); break;
     case GXR_LIST: {
         const void* list = (const void*)w[0];
+        if (n == 2) {
+            gx_call_list(list, w[1], NULL); /* gxsplit stage 2: EV_LIST */
+            break;
+        }
         if (n > 4) {
             /* a group (gxreclgroup): 3 words a call */
             for (u32 i = 0; i < n; i += 3) {
@@ -1091,7 +1104,473 @@ check:
     }
 }
 
+/* ---- gxsplit stage 2: the compact event ring (docs/PORT_3DS_GX_NATIVE.md, "Stage 2 as built") ----
+ * The game thread's state is gx_game itself: the hot setters run gxfifo's fast bodies on it (gx_state.c, fifo word
+ * 3) and mark the bytes they changed (gx_gs_bm). No per-call record. At each draw boundary (a list call, GXEnd, raw
+ * pipe commands, any other recorded call, a fence) the marked bytes go to core 2 as one GXR_STATE event (EV_STATE):
+ *   word 0: number of runs | 1 << 31 when the verify hashes follow;
+ *   per run: offset << 16 | bytes, then the bytes (as words);
+ *   gxsplit=2: GS_VCLS hashes of the game thread's state, by class.
+ * Core 2 copies the runs into `gx`, bumps the versions and ORs the gxdirty classes the setters would have (a table
+ * per 16 bytes of GxState), then runs the next event. Other calls (cold setters, copies, syncs) go as before, as
+ * their id and words (EV_CALL), after the state before them, and into gx_game through gx_shadow_call. A display
+ * list the game built with state calls (is_state_list): its calls are applied to gx_game as the list is walked;
+ * a list of state calls only is not sent (its changes go with the next EV_STATE, its cold calls as EV_CALL in
+ * order); any other is sent (EV_LIST) and its changes are not marked (core 2 applies them itself). EV_LIST is two
+ * words (address, size), four with gxsplit=2 (caller, byte hash). EV_PRIM is GXR_PRIM (pipe writes and array
+ * snapshots); a primitive or raw command too large for the ring is drawn on the game thread inside an exclusive
+ * section. */
+enum { EF_VER = 1u << 8, EF_XF = 1u << 9, EF_VTX = 1u << 10, EF_VDESC = 1u << 11 };
+#define EFF_LINES ((sizeof(GxState) + 15) / 16)
+static u16 s_eff[EFF_LINES];
+#define GS_RUNS 256
+static u32 s_runs[GS_RUNS];
+#define GS_VCLS 8
+static u16 s_vc_a[GS_VCLS], s_vc_b[GS_VCLS];
+static const char* const k_vc_name[GS_VCLS] = {"vertex", "matrices", "projection+viewport", "texgen+channels",
+                                               "tev", "textures", "pixel", "scissor"};
+static struct {
+    u32 states, runs, bytes, calls, lists, sl_pure, sl_pure_calls, sl_sent, sl_fail, big;
+} s_evs;
+static u32 s_ev_vchk, s_ev_vbad, s_ev_vbad_cls[GS_VCLS]; /* core 2 (verify) */
+
+static void eff_range(size_t a, size_t b, u32 e) {
+    for (size_t l = a >> 4; l <= (b - 1) >> 4 && l < EFF_LINES; l++) {
+        s_eff[l] |= (u16)e;
+    }
+}
+#define EFR(f0, f1, e) eff_range(offsetof(GxState, f0), offsetof(GxState, f1), (e))
+#define VCR(i, f0, f1)                             \
+    do {                                           \
+        s_vc_a[i] = (u16)offsetof(GxState, f0);    \
+        s_vc_b[i] = (u16)offsetof(GxState, f1);    \
+    } while (0)
+_Static_assert(sizeof(GxState) < 0x10000, "gxsplit: run offsets are 16 bits");
+/* what a change of these bytes does in the setters (gx_state.c's fast bodies): versions and gxdirty classes */
+static void ev_tables_init(void) {
+    EFR(vtx_desc, array_base, EF_VDESC | EF_VTX);
+    EFR(array_base, pos_mtx, EF_VTX);
+    EFR(pos_mtx, tex_mtx, EF_XF | GXD_CLIP);
+    EFR(tex_mtx, cur_pnmtx, EF_XF | GXD_TEXROW);
+    EFR(cur_pnmtx, cur_texmtx, EF_XF | EF_VTX);
+    EFR(cur_texmtx, proj, EF_VTX | EF_VER | GXD_CHAN);
+    EFR(proj, vp, EF_XF | GXD_CLIP);
+    EFR(vp, zscale, EF_VER | GXD_SCI);
+    EFR(zscale, num_texgens, EF_XF);
+    EFR(num_texgens, num_tev, EF_VTX | EF_VER | GXD_CHAN);
+    EFR(num_tev, tex_map, EF_VER | GXD_TEV);
+    EFR(tex_map, alpha_comp0, EF_VER | GXD_TEX);
+    EFR(alpha_comp0, scissor, EF_VER | GXD_PIX);
+    EFR(fog_type, ztex_op, EF_VER | GXD_PIX | GXD_TEV);
+    EFR(scissor, line_width, EF_VER | GXD_SCI);
+    EFR(line_width, copy_src, EF_VER | GXD_PIX);
+    /* the verify classes: the bytes both threads keep the same (hot setters' state, and what the shadow keeps) */
+    VCR(0, vtx_desc, pos_mtx);
+    VCR(1, pos_mtx, proj);
+    VCR(2, proj, zscale);
+    VCR(3, num_texgens, light);
+    VCR(4, num_tev, ind);
+    VCR(5, tex_map, tlut);
+    VCR(6, alpha_comp0, dst_alpha_enable);
+    VCR(7, scissor, scissor_off);
+}
+
+static void ev_hashes(const GxState* g, u32* h) {
+    for (u32 i = 0; i < GS_VCLS; i++) {
+        h[i] = gx_hash32((const u8*)g + s_vc_a[i], (u32)(s_vc_b[i] - s_vc_a[i]), 0x6E50u + i);
+    }
+    h[6] ^= (u32)g->cull * 0x9E3779B1u; /* the cull byte sits apart from the other pixel bytes */
+}
+
+static void gs_clear_all(void) {
+    memset(gx_gs_bm, 0, sizeof(gx_gs_bm));
+    memset(gx_gs_sum, 0, sizeof(gx_gs_sum));
+    gx_gs_any = 0;
+}
+
+/* one EV_STATE of runs s_runs[0..nr) (the bytes are gx_game's now) */
+static void ev_put_state(u32 nr, int hashes) {
+    u32 n = 1;
+    for (u32 i = 0; i < nr; i++) {
+        n += 1 + (((s_runs[i] & 0xFFFFu) + 3) >> 2);
+    }
+    n += hashes ? GS_VCLS : 0;
+    u32* c = put(GXR_STATE, n);
+    c[0] = nr | (hashes ? 1u << 31 : 0);
+    u32* q = c + 1;
+    for (u32 i = 0; i < nr; i++) {
+        const u32 off = s_runs[i] >> 16, len = s_runs[i] & 0xFFFFu;
+        q[0] = s_runs[i];
+        q[((len + 3) >> 2)] = 0; /* the last word's unused bytes */
+        memcpy(q + 1, (const u8*)&gx_game + off, len);
+        q += 1 + ((len + 3) >> 2);
+        s_evs.bytes += len;
+    }
+    if (hashes) {
+        ev_hashes(&gx_game, q);
+    }
+    s_evs.runs += nr;
+    s_evs.states++;
+    commit(n, 0);
+}
+
+/* The marked bytes as runs, in order; the bitmap words read are cleared. */
+static __attribute__((noinline)) void gs_flush_slow(void) {
+    u32 nr = 0, cur_off = 0, cur_end = 0;
+    int open = 0;
+    for (u32 si = 0; si < GX_GS_SUM_WORDS; si++) {
+        u32 sm = gx_gs_sum[si];
+        gx_gs_sum[si] = 0;
+        while (sm != 0) {
+            const u32 k = si * 32 + (u32)__builtin_ctz(sm);
+            sm &= sm - 1;
+            u32 b = gx_gs_bm[k];
+            gx_gs_bm[k] = 0;
+            while (b != 0) {
+                const u32 tz = (u32)__builtin_ctz(b);
+                const u32 rest = b >> tz;
+                const u32 ones = rest == 0xFFFFFFFFu ? 32 : (u32)__builtin_ctz(~rest);
+                const u32 start = k * 32 + tz, end = start + ones;
+                b = ones + tz >= 32 ? 0 : b & ~(((1u << ones) - 1) << tz);
+                if (open && start == cur_end) {
+                    cur_end = end;
+                    continue;
+                }
+                if (open) {
+                    if (nr == GS_RUNS) {
+                        ev_put_state(nr, 0);
+                        nr = 0;
+                    }
+                    s_runs[nr++] = cur_off << 16 | (cur_end - cur_off);
+                }
+                open = 1;
+                cur_off = start;
+                cur_end = end;
+            }
+        }
+    }
+    if (open) {
+        if (nr == GS_RUNS) {
+            ev_put_state(nr, 0);
+            nr = 0;
+        }
+        s_runs[nr++] = cur_off << 16 | (cur_end - cur_off);
+    }
+    gx_gs_any = 0;
+    ev_put_state(nr, s_gxsplit == 2);
+}
+static inline void gs_flush(void) {
+    if (__builtin_expect(gx_gs_any != 0, 0)) {
+        gs_flush_slow();
+    }
+}
+
+/* core 2: an EV_STATE */
+static void ev_state_apply(const u32* w) {
+    const u32 nr = w[0] & 0xFFFFu;
+    u32 eff = 0;
+    const u32* q = w + 1;
+    for (u32 i = 0; i < nr; i++) {
+        const u32 off = q[0] >> 16, len = q[0] & 0xFFFFu;
+        memcpy((u8*)&gx + off, q + 1, len);
+        for (u32 l = off >> 4; l <= (off + len - 1) >> 4; l++) {
+            eff |= s_eff[l];
+        }
+        q += 1 + ((len + 3) >> 2);
+    }
+    if (eff & EF_VER) {
+        gx.version++;
+    }
+    if (eff & EF_XF) {
+        gx_xf_version++;
+        if (!gx_opt_statever) {
+            gx.version++;
+        }
+    }
+    if (eff & EF_VTX) {
+        gx_vtx_version++;
+    }
+    if (eff & EF_VDESC) {
+        gx_vdesc_ver[0]++;
+    }
+    gx_dirty |= eff & GXD_ALL;
+    if (w[0] >> 31) {
+        /* gxsplit=2: every class of `gx` equals the game thread's state when it sent this event */
+        u32 h[GS_VCLS];
+        ev_hashes(&gx, h);
+        s_ev_vchk++;
+        for (u32 i = 0; i < GS_VCLS; i++) {
+            if (h[i] != q[i]) {
+                s_ev_vbad_cls[i]++;
+                if (s_ev_vbad++ < 16) {
+                    PLOG_W("gxsplit verify: class %s of the translated state differs from the game thread's after "
+                           "EV_STATE %lu (%lu runs)", k_vc_name[i], (unsigned long)s_ev_vchk, (unsigned long)nr);
+                }
+            }
+        }
+    }
+}
+
+/* a call that is not a hot setter's: after the state before it, then into the game thread's state */
+static void ev_cold(u32 id, const u32* w, u32 n) {
+    gs_flush();
+    u32* c = put(id, n);
+    for (u32 i = 0; i < n; i++) {
+        c[i] = w[i];
+    }
+    commit(n, 0);
+    s_evs.calls++;
+    gx_shadow_call(id, w);
+}
+
+static u32 comp_bytes(u8 type);
+static inline u32 be32(const u8* p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }
+
+/* The bytes of one vertex of format `fmt` in a display list (GameCube encoding, as gx_pipe.c's encode_vertex writes
+ * and its readers read), from state g. */
+static u32 list_vtx_bytes(const GxState* g, u32 fmt) {
+    const u8* d = g->vtx_desc;
+    const GxAttrFmt* f = g->vat[fmt & 7];
+    u32 b = 0;
+    for (int a = GX_VA_PNMTXIDX; a <= GX_VA_TEX7MTXIDX; a++) {
+        b += d[a] != GX_NONE;
+    }
+    for (int a = GX_VA_POS; a <= GX_VA_TEX7; a++) {
+        u8 da = d[a];
+        if (a == GX_VA_NRM && da == GX_NONE) {
+            da = d[GX_VA_NBT];
+        }
+        if (da == GX_NONE) {
+            continue;
+        }
+        const GxAttrFmt* fa = &f[a];
+        if (da != GX_DIRECT) {
+            const u32 reps = a == GX_VA_NRM && fa->cnt == GX_NRM_NBT3 ? 3 : 1;
+            b += reps * (da == GX_INDEX8 ? 1 : 2);
+            continue;
+        }
+        if (a == GX_VA_CLR0 || a == GX_VA_CLR1) {
+            b += fa->type == GX_RGB565 || fa->type == GX_RGBA4 ? 2 : fa->type == GX_RGB8 || fa->type == GX_RGBA6 ? 3 : 4;
+            continue;
+        }
+        const u32 n = a == GX_VA_POS ? (fa->cnt == GX_POS_XY ? 2 : 3)
+                      : a == GX_VA_NRM ? (fa->cnt == GX_NRM_XYZ ? 3 : 9)
+                                       : (fa->cnt == GX_TEX_S ? 1 : 2);
+        b += n * comp_bytes(fa->type);
+    }
+    return b;
+}
+
+/* One port opcode at p (p[0] the opcode): its id, words and the byte after it; 0 when it does not parse. */
+static int port_op(const u8* p, const u8* end, u32* id, u32* w, u32* n, const u8** next) {
+    if (end - p < 3 || p[2] > 32) {
+        return 0;
+    }
+    *id = p[1];
+    *n = p[2];
+    p += 3;
+    for (u32 i = 0; i < *n; i++) {
+        u32 v = 0;
+        for (u32 shift = 0;; shift += 7) {
+            if (p >= end || shift > 28) {
+                return 0;
+            }
+            const u8 b = *p++;
+            v |= (u32)(b & 0x7F) << shift;
+            if (!(b & 0x80)) {
+                break;
+            }
+        }
+        w[i] = v;
+    }
+    *next = p;
+    return 1;
+}
+
+/* 1 when the list holds only NOPs and port opcodes that parse */
+static int list_pure(const u8* p, u32 nbytes) {
+    const u8* end = p + nbytes;
+    while (p < end) {
+        const u32 op = *p;
+        if (op == 0x00 || op == 0x48 || op == 0x44) {
+            p++;
+            continue;
+        }
+        if (op < GXDL_OP_PORT || op == GXDL_OP_RAW_PRIM || end - p < 3 || p[2] > 32) {
+            return 0;
+        }
+        u32 n = p[2];
+        p += 3;
+        for (u32 i = 0; i < n; i++) {
+            u32 k = 0;
+            while (p < end && (*p & 0x80) && k < 4) {
+                p++;
+                k++;
+            }
+            if (p >= end || (*p & 0x80)) {
+                return 0;
+            }
+            p++;
+        }
+    }
+    return 1;
+}
+
+/* A state list core 2 will run itself: its state calls into gx_game in order, the primitives and commands between
+ * them skipped with gx_game's vertex state (as core 2 will read them); nothing marked. 0 when it does not parse. */
+static int list_walk_silent(const u8* p, u32 nbytes) {
+    const u8* end = p + nbytes;
+    u32 w[32];
+    while (p < end) {
+        const u32 op = *p;
+        if (op == 0x00 || op == 0x48 || op == 0x44) {
+            p++;
+        } else if (op >= 0x80 && op < 0xC0) {
+            if (end - p < 3) {
+                return 1; /* the reader stops at the end */
+            }
+            const u32 n = (u32)p[1] << 8 | p[2];
+            const u32 vb = list_vtx_bytes(&gx_game, op & 7);
+            p += 3;
+            if ((u32)(end - p) / (vb ? vb : 1) < n) {
+                return 1;
+            }
+            p += n * vb;
+        } else if (op == GXDL_OP_RAW_PRIM) {
+            if (end - p < 8) {
+                return 1;
+            }
+            const u32 count = be32(p + 4);
+            p += 8;
+            if (count > 64u * 1024u || (u32)(end - p) / 4 < count) {
+                return 1; /* the reader stops here too (gx_pipe.c) */
+            }
+            p += count * 4;
+        } else if (op >= GXDL_OP_PORT) {
+            u32 id, n;
+            if (!port_op(p, end, &id, w, &n, &p)) {
+                return 0;
+            }
+            if (!gx_gs_call(id, w)) {
+                gx_shadow_call(id, w);
+            }
+        } else if (op == 0x08) {
+            p += 6;
+        } else if (op == 0x10) {
+            if (end - p < 5) {
+                return 1;
+            }
+            const u32 count = (be32(p + 1) >> 16) + 1;
+            if ((u32)(end - p - 5) / 4 < count) {
+                return 1;
+            }
+            p += 5 + count * 4;
+        } else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38 || op == 0x61) {
+            p += 5;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* gx_rec_list under gxsplit stage 2 */
+static void ev_list(const void* list, u32 nbytes, const void* caller) {
+    s_evs.lists++;
+    if (s_state_lists != NULL && is_state_list(list, nbytes)) {
+        const u8* p = (const u8*)list;
+        if (list_pure(p, nbytes)) {
+            /* state calls only: applied here, in order; the list is not sent */
+            const u8* end = p + nbytes;
+            u32 w[32];
+            while (p < end) {
+                if (*p == 0x00 || *p == 0x48 || *p == 0x44) {
+                    p++;
+                    continue;
+                }
+                u32 id, n;
+                port_op(p, end, &id, w, &n, &p); /* parses: list_pure said so */
+                s_evs.sl_pure_calls++;
+                if (!gx_gs_call(id, w)) {
+                    ev_cold(id, w, n);
+                }
+            }
+            s_evs.sl_pure++;
+            return;
+        }
+        gs_flush(); /* the state before the list, then the list's own calls are not marked */
+        if (!list_walk_silent(p, nbytes) && s_evs.sl_fail++ < 4) {
+            PLOG_W("gxsplit: display list %p (%lu bytes, called from %p) does not parse on the game thread: its state "
+                   "calls after that point are not in the game thread's state", list, (unsigned long)nbytes, caller);
+        }
+        if (gx_gs_any) {
+            gs_clear_all();
+        }
+        s_evs.sl_sent++;
+    } else {
+        gs_flush();
+    }
+    const u32 n = s_list_hash ? 4 : 2;
+    u32* c = put(GXR_LIST, n);
+    c[0] = (u32)list;
+    c[1] = nbytes;
+    if (n == 4) {
+        c[2] = (u32)caller;
+        c[3] = gx_hash32(list, nbytes, 0x5EC0u);
+    }
+    s_gs.lists++;
+    s_lists_rec++;
+    commit(n, 0);
+}
+
+/* a primitive or raw command larger than a quarter of the ring: the state before it, then translated here, inside an
+ * exclusive section (core 2 idle) */
+static u32* s_big;
+static u32 s_big_cap;
+static int ev_big_words(const PPCWGPipe* slots, u32 nslots) {
+    if (nslots > s_big_cap) {
+        u32* nb = realloc(s_big, nslots * sizeof(u32));
+        if (nb == NULL) {
+            return 0;
+        }
+        s_big = nb;
+        s_big_cap = nslots;
+    }
+    for (u32 i = 0; i < nslots; i++) {
+        s_big[i] = slots[i].u32;
+    }
+    return 1;
+}
+static int ev_big_prim(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* slots, u32 nslots) {
+    if (!ev_big_words(slots, nslots)) {
+        return 0;
+    }
+    gs_flush();
+    s_evs.big++;
+    gx_rec_excl_begin(GXF_FULL);
+    gx_draw_prim(primfmt, nverts, caller, s_big, nslots);
+    gx_rec_excl_end();
+    return 1;
+}
+static int ev_big_raw(const PPCWGPipe* slots, u32 nslots) {
+    if (!ev_big_words(slots, nslots)) {
+        return 0;
+    }
+    gs_flush();
+    s_evs.big++;
+    gx_rec_excl_begin(GXF_FULL);
+    gx_run_raw(s_big, nslots);
+    gx_rec_excl_end();
+    return 1;
+}
+
 void gx_rec_call(u32 id, const u32* w, u32 n) {
+    if (s_ev) {
+        if (!gx_gs_call(id, w)) {
+            ev_cold(id, w, n);
+        }
+        return;
+    }
     if (s_fuse && (s_fuse_parts & 2) && (id == REC_SetVtxDesc || id == REC_ClearVtxDesc)) {
         u32 attr = id == REC_ClearVtxDesc ? 0xFF : (w[0] < 0xFF ? w[0] : 0xFE);
         u32 type = id == REC_ClearVtxDesc ? 0 : w[1];
@@ -1469,6 +1948,10 @@ static int is_state_list_lobj(const void* list, u32 nbytes, u16** fl_hint) {
 }
 
 void gx_rec_list(const void* list, u32 nbytes, const void* caller) {
+    if (s_ev) {
+        ev_list(list, nbytes, caller);
+        return;
+    }
     if (s_glo_on && s_dedup) {
         u16* fl_hint;
         if (is_state_list_lobj(list, nbytes, &fl_hint)) {
@@ -1618,6 +2101,7 @@ static int snap_ranges(const GxState* g, u32 fmt, u32 nverts, const PPCWGPipe* s
 static u32 s_snap_bytes, s_snap_live;
 
 void gx_rec_prim(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* slots, u32 nslots) {
+    gs_flush(); /* gxsplit stage 2: the state before the primitive */
     SnapRange r[GX_VA_MAX_ATTR];
     u32 fmt = primfmt & 7;
     int ok = snap_ranges(&gx_game, fmt, nverts, slots, nslots, r);
@@ -1638,6 +2122,9 @@ void gx_rec_prim(u8 primfmt, u16 nverts, const void* caller, const PPCWGPipe* sl
         }
     }
     u32 n = 6 + nslots + snap_words;
+    if (s_ev && n + 1 > s_ring_words / 4 && ev_big_prim(primfmt, nverts, caller, slots, nslots)) {
+        return;
+    }
     u32* c = put(GXR_PRIM, n);
     c[0] = primfmt;
     c[1] = nverts;
@@ -1713,6 +2200,10 @@ void gx_rec_raw(const PPCWGPipe* slots, u32 nslots) {
     if (nslots == 0) {
         return;
     }
+    gs_flush();
+    if (s_ev && nslots + 1 > s_ring_words / 4 && ev_big_raw(slots, nslots)) {
+        return;
+    }
     u32* c = put(GXR_RAW, nslots);
     for (u32 i = 0; i < nslots; i++) {
         c[i] = slots[i].u32;
@@ -1730,6 +2221,7 @@ static int shot_hook(const char* path) {
     if (s_vd_n != 0) {
         fuse_vd_flush();
     }
+    gs_flush();
     u32* c = put(GXR_SHOT, SHOT_WORDS);
     memset(c, 0, SHOT_WORDS * 4);
     strncpy((char*)c, path, SHOT_WORDS * 4 - 1);
@@ -1783,6 +2275,9 @@ void gx_rec_fence(int why) {
     }
     if (s_vd_n != 0 && why != GXF_FULL) {
         fuse_vd_flush(); /* the translation the fence waits for includes the logged vertex description */
+    }
+    if (why != GXF_FULL) {
+        gs_flush(); /* gxsplit stage 2: and the state not sent yet (a full ring's fence comes from inside a put) */
     }
     u64 t0 = plat_ticks();
     if (why == GXF_SYNC && s_pipeline && s_after_copydisp) {
@@ -1891,6 +2386,13 @@ void gx_rec_excl_begin(int why) {
 void gx_rec_excl_end(void) {
     if (s_excl) {
         s_excl = 0;
+        if (s_ev) {
+            /* the game thread translated directly (GXInit, read-backs, a primitive too large for the ring) with core 2
+             * idle: its state starts again from the translated one */
+            memcpy(&gx_game, &gx, sizeof(gx));
+            gx_vdesc_ver[1]++;
+            gs_clear_all();
+        }
         gx_tls_translator = 0;
         gx_rec_fast_update();
         dd_forget();
@@ -2055,6 +2557,23 @@ void gx_rec_frame(void) {
         PLOG_I("gxsplit verify frame %lu: lists changed between call and translation %lu, array snapshots not used "
                "%lu (total)", (unsigned long)s_frame_no, (unsigned long)s_list_changed, (unsigned long)s_snap_mism);
     }
+    if (s_ev) {
+        PLOG_I("gxsplit events frame %lu: per frame EV_STATE %lu (%lu runs, %lu bytes), calls %lu, lists %lu; state "
+               "lists: %lu applied here (%lu calls), %lu sent; %lu translated here (too large) | totals: lists not "
+               "parsed %lu, verify %lu checks, %lu mismatches (vtx %lu mtx %lu projvp %lu chan %lu tev %lu tex %lu "
+               "pix %lu sci %lu)",
+               (unsigned long)s_frame_no, (unsigned long)(s_evs.states / f), (unsigned long)(s_evs.runs / f),
+               (unsigned long)(s_evs.bytes / f), (unsigned long)(s_evs.calls / f), (unsigned long)(s_evs.lists / f),
+               (unsigned long)(s_evs.sl_pure / f), (unsigned long)(s_evs.sl_pure_calls / f),
+               (unsigned long)(s_evs.sl_sent / f), (unsigned long)(s_evs.big / f), (unsigned long)s_evs.sl_fail,
+               (unsigned long)s_ev_vchk, (unsigned long)s_ev_vbad, (unsigned long)s_ev_vbad_cls[0],
+               (unsigned long)s_ev_vbad_cls[1], (unsigned long)s_ev_vbad_cls[2], (unsigned long)s_ev_vbad_cls[3],
+               (unsigned long)s_ev_vbad_cls[4], (unsigned long)s_ev_vbad_cls[5], (unsigned long)s_ev_vbad_cls[6],
+               (unsigned long)s_ev_vbad_cls[7]);
+        const u32 fail = s_evs.sl_fail;
+        memset(&s_evs, 0, sizeof(s_evs));
+        s_evs.sl_fail = fail;
+    }
     if (s_pipeline) {
         PLOG_I("gxthread   pipeline: %lu of %lu frame ends waited for the frame before", (unsigned long)s_pipe_waits,
                (unsigned long)f);
@@ -2172,14 +2691,25 @@ void gx_rec_init(void) {
     if (mode == 0) {
         return;
     }
+    /* gxsplit stage 2 (switch gxsplitev, default 1; 0: stage 1's per-call ring): the compact event ring */
+    s_ev = s_gxsplit && plat_switch_int("gxsplitev", 1) != 0;
     u32 kb = (u32)plat_switch_int("gxthreadkb", 4096);
     u32 words = 1u << 16;
+    if (s_ev) {
+        /* switch gxsplitkb (default 80), rounded up to a power of two (the ring is addressed by a mask) */
+        kb = (u32)plat_switch_int("gxsplitkb", 80);
+        words = 1u << 12;
+    }
     while (words < kb * 256u && words < (1u << 22)) {
         words <<= 1;
     }
     /* a placement, so that place=gx_ring:qtm can move it (heap by default; QTM holds it only with a small
-     * gxthreadkb): the game thread writes it, the translator on core 2 reads it */
-    int ring_place = plat_place_register("gx ring", words * 4u, 64, PLAT_PREFS(PLAT_TIER_HEAP), PLAT_PF_CPU_SHARED);
+     * gxthreadkb): the game thread writes it, the translator on core 2 reads it. gxsplit stage 2: "gx events",
+     * linear memory first (heap when it does not fit) */
+    int ring_place = s_ev ? plat_place_register("gx events", words * 4u, 64,
+                                                PLAT_PREFS(PLAT_TIER_LINEAR, PLAT_TIER_HEAP), PLAT_PF_CPU_SHARED)
+                          : plat_place_register("gx ring", words * 4u, 64, PLAT_PREFS(PLAT_TIER_HEAP),
+                                                PLAT_PF_CPU_SHARED);
     s_ring = plat_place_alloc(ring_place, words * 4u, 64);
     if (s_ring == NULL) {
         PLOG_W("gxthread: no memory for a %lu KB ring: GX translates on the game thread", (unsigned long)(words / 256u));
@@ -2190,6 +2720,17 @@ void gx_rec_init(void) {
     s_state_content = calloc(SC_SLOTS, sizeof(*s_state_content));
     if (s_dd == NULL || s_state_lists == NULL || s_state_content == NULL) {
         s_dedup = 0;
+        if (s_ev) {
+            PLOG_W("gxsplitev: no memory for the state-list tables: stage 1's ring");
+            s_ev = 0;
+        }
+    }
+    if (s_ev) {
+        /* the dedup table and gxrecfuse compare with what was recorded, but EV_STATE and the lists core 2 runs
+         * change core 2's state too; the game thread's own state does their work */
+        s_dedup = 0;
+        ev_tables_init();
+        gs_clear_all();
     }
     s_fuse = s_dedup ? plat_switch_int("gxrecfuse", 1) : 0;
     if (s_fuse < 0 || s_fuse > 2) {
@@ -2205,7 +2746,7 @@ void gx_rec_init(void) {
                    1u << GLO_BITS);
         }
     }
-    s_lgroup = plat_switch_int("gxreclgroup", 1) != 0;
+    s_lgroup = !s_ev && plat_switch_int("gxreclgroup", 1) != 0;
     gx_ph_on = plat_switch_int("gxphase", 0);
     if (gx_ph_on < 0) {
         gx_ph_on = 0;
@@ -2232,6 +2773,8 @@ void gx_rec_init(void) {
         }
     }
     gx_rec_mode = mode;
+    s_ev = s_ev && s_gxsplit; /* the translator thread may not have started */
+    s_ev_on = s_ev;
     s_list_hash = mode == 3 || s_gxsplit == 2;
     gx_rec_fast_update();
     plat_memstable_set_hook(mem_hook);
@@ -2239,4 +2782,9 @@ void gx_rec_init(void) {
     PLOG_I("gxthread=%d: GX calls recorded into a %lu KB ring, translated %s%s%s", mode,
            (unsigned long)(words / 256u), mode == 2 ? "on core 2" : "on the game thread at each fence",
            mode == 3 ? " (verify)" : "", s_gxsplit ? " (gxsplit: K on the translator, pipelined)" : "");
+    if (s_ev) {
+        PLOG_I("gxsplit stage 2: the game thread's setters write its own state; EV_STATE at draw boundaries into the "
+               "%lu KB event ring (gxsplitkb, linear or heap)%s", (unsigned long)(words / 256u),
+               s_gxsplit == 2 ? ", class hashes checked on core 2 (verify)" : "");
+    }
 }

@@ -1666,3 +1666,25 @@ C1 = `gxdirty=1 gxdirect=1 gximmdirect=1 texfast=1 texasync=1`; C3 = C1 + `gxthr
 7. Stereo: `stereo_ab.py` with A = I, B = S (as for gxchunk): equal.
 8. GPU hang: `gpuhangtest=N gpuhangrecover=1` with S in gor_01: the hang is detected, the GPU reset runs, the game goes on drawing (as for K).
 9. Timing, release: `gx_perf_ab.py --a "C3" --b "S" --scenes gor_01,pik_00,usu_00,battle --repeat 2`, then `--a "I" --b "S"`. Per core: core 0 = `busy` (game thread), core 2 = `transl` (S, C3) or none (I: K's GX is in `busy`), core 1 = `render` (S; under C3 and I the render thread is on core 2). Report frame, busy, fence, translator, render for each.
+
+## Step 10 stage 2: `gxsplitev` (compact event ring, 2026-11-28)
+
+Design: docs/PORT_3DS_GX_NATIVE.md, "Stage 2 as built". On by default under gxsplit (`gxsplitev=0`: stage 1). Not measured (owner rule 2026-11-28).
+
+### Checks done without the emulator
+
+- One dev build (`--dev --no-cia`) as the compile check. No `src/` change.
+- Host test of the byte bitmap and run extraction (`gs_mark`, `gs_flush_slow`, copied): 200 000 random mark sets against a byte reference, runs split over several events: equal, bitmap cleared.
+- Disassembly (dev build): `GXSetTevKColorSel`'s fast path unchanged in shape; `tev_ksel_gs` writes only `gx_game`, `gx_gs_chg` and the marks (the state-pointer tests fold).
+
+### Gates (integration build, release CIA)
+
+S2 = I + `gxsplit=1` (gxsplitev=1 by default); S2V = I + `gxsplit=2`; S1 = S2 + `gxsplitev=0`.
+
+1. Start line: `gxsplit stage 2: ... into the 128 KB event ring`; `[MEM]` shows `gx events` in linear (or heap).
+2. Verify, 4 scenes: `run_azahar.py --frames 841 --switches "<scene> S2V gxthreadstats=60"`. Pass: `gxsplit events` lines with `verify N checks, 0 mismatches` (N > 0), `lists not parsed 0`; `gxsplit verify frame` line with lists changed 0; no `gxsplit verify: class`, `gxthread verify`, `gxchunk verify`, `gximmfl verify` warnings.
+3. Frame lists: as stage 1 step 3 with `S2V` in place of `SV`: `gxfldig_cmp.py <I log> <S2V log>` exit 0.
+4. Sweep: `map_sweep.py --area tik --story 30 --switches "S2V gxthreadstats=60"`: every map ok, 0 mismatches in every log.
+5. Images: `determ_ab.py --a "I" --b "S2" --scenes gor_01,pik_00,usu_00,battle` (shots 780-785): 6 of 6 per scene.
+6. Game state: `gw_diff.py` as stage 1 step 6 with B = S2: 160 records equal.
+7. Timing, release: `gx_perf_ab.py --a "S1" --b "S2" --scenes gor_01,pik_00,usu_00,battle --repeat 2`, then `--a "I" --b "S2"`; per core as stage 1 step 9. With `gxthreadstats=60` also note the `full` fences per frame and `rec ... words` per frame; repeat S2 with `gxsplitkb=512` and `gxsplitkb=1024` when `full` fences are above about 1 per frame.

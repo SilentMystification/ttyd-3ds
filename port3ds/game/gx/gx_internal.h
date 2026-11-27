@@ -291,6 +291,14 @@ enum {
 void gx_apply_call(u32 id, const u32* w);
 /* The game thread's shadow of what it reads back (gx_rec.c's gx_game). */
 void gx_shadow_call(u32 id, const u32* w);
+/* gxsplit stage 2 (gx_rec.c): the game thread's state is gx_game itself. The hot setters run gxfifo's fast bodies on
+ * it (gx_rec_fast.fifo 3) and mark the bytes they changed in a byte bitmap of GxState (gx_gs_bm, one bit a byte;
+ * gx_gs_sum: one bit per bitmap word; gx_gs_any: something is marked). gx_gs_call: a hot setter's call by its
+ * words on that state, 0 for any other call. */
+#define GX_GS_BM_WORDS ((sizeof(GxState) + 31) / 32)
+#define GX_GS_SUM_WORDS ((GX_GS_BM_WORDS + 31) / 32)
+extern u32 gx_gs_bm[GX_GS_BM_WORDS], gx_gs_sum[GX_GS_SUM_WORDS], gx_gs_any, gx_gs_chg;
+int gx_gs_call(u32 id, const u32* w);
 
 /* ---- gx_rec.c: recording GX calls for a translator (switch gxthread) ----
  *   0 (default): every GX call is translated where it is made (the game thread);
@@ -323,7 +331,8 @@ static inline int gx_rec_on(void) { return gx_rec_mode != 0 && !gx_tls_translato
 extern struct GxRecFast {
     uintptr_t w, tr_lo, tr_len;
     /* switch gxfifo (gx_state.c): the hot setters' one word. 0: their fast body (gxfifo=1, `w` 0, gxdirty on, no
-     * gxstatededup); 2: gxfifo=2's check (same conditions); 1: the old body */
+     * gxstatededup); 2: gxfifo=2's check (same conditions); 3: gxsplit stage 2, `w` 1: the fast body on gx_game
+     * (the translator thread takes the old body); 1: the old body */
     uintptr_t fifo;
 } gx_rec_fast;
 void gx_rec_fast_update(void);

@@ -7,6 +7,7 @@
  * and GXCallDisplayList replays it through the same setter, as the GameCube
  * replays the register writes the SDK put in the list.
  */
+#include <stddef.h>
 #include <string.h>
 
 #include "gx_bigmem.h"
@@ -1277,6 +1278,285 @@ static u32 sdl_sig(const u8* list, u32 nbytes) {
     return s;
 }
 
+/* ---- A state list as its net delta (switch gxsdlx, default 0) ----
+ * The decoded calls of a gxsdl entry are run once, at the entry's first hit, on two scratch copies of `gx` (the state
+ * in force and its bitwise complement), one call at a time. A bit that ends equal in both runs is written by the
+ * list (an untouched bit keeps its two different starting values); its value is the list's. Each GxState word the
+ * list writes becomes an entry: the word index with the side effects of the calls that changed it (gxdirty
+ * classes, gx.version, gx_vtx_version, gx_xf_version, gx_vdesc_ver), the bits written and their value. Applying
+ * the list is then, per entry, a word compare and, when it differs, a store and an OR of the side bits; the side
+ * effects are made once at the end: no gx_apply_call, no setter. Only setters that write `gx` from their arguments
+ * (every id a display list can hold, gx_apply_call) take part; the bytes are still compared first (gx_sdl_run).
+ * Differences from the call-by-call replay: a call that changes nothing (a matrix load with the values in force:
+ * those setters have no SAME) no longer bumps the versions or sets its dirty class, and the versions move once a
+ * list, not once a call (their readers compare them for equality only). Needs gxdirty (the setters' SAME), and is
+ * off with gxstatededup (its table would miss the calls) and while a primitive is open or the calls record.
+ * gxsdlx=2: each delta is applied, the state kept, then the old calls are applied to the state from before; the
+ * two must be equal (GxState but gx.version, and the delta's dirty classes within the old ones); the old
+ * result stays. */
+int gx_opt_sdlx;
+#define SDX_POOL_WORDS (128 * 1024)
+#define SDX_NWORDS (sizeof(GxState) / 4)
+#define SDX_VER_WORD (offsetof(GxState, version) / 4)
+_Static_assert(SDX_NWORDS < 0x10000, "a GxState word index fits 16 bits");
+enum { SDX_S_VER = 1u << 8, SDX_S_VTX = 1u << 9, SDX_S_XF = 1u << 10, SDX_S_VDESC = 1u << 11 };
+typedef struct {
+    u32 gen;    /* s_sdx_gen when built; anything else: not built */
+    u32 pos;    /* pool word of the entries: nf of (index << 16 | side, value), then nm of (.., ~bits, value) */
+    u16 nf, nm; /* nf == 0xFFFF: the list has a call that does not take part (the calls are applied) */
+} SdxEntry;
+static SdxEntry* s_sdx; /* SDL_SLOTS, by gxsdl slot */
+static u32* s_sdx_pool;
+static u32 s_sdx_used, s_sdx_cap, s_sdx_gen = 1;
+static GxState *s_sdx_s0, *s_sdx_prev, *s_sdx_a; /* scratch */
+static u16* s_sdx_side;
+static u32 s_sdx_applied, s_sdx_built, s_sdx_none, s_sdx_words, s_sdx_chk, s_sdx_bad, s_sdx_dirty_less;
+
+static inline int sdx_ok(void) {
+    return gx_opt_dirty && !gx_opt_statededup && !gx_prim_is_open() && (gx_rec_fast.w == 0 || gx_on_translator());
+}
+
+typedef struct {
+    u32 dirty, vtx, xf;
+    u64 vdesc;
+} SdxGlobals;
+static inline void sdx_save(SdxGlobals* s) {
+    s->dirty = gx_dirty;
+    s->vtx = gx_vtx_version;
+    s->xf = gx_xf_version;
+    s->vdesc = gx_vdesc_ver[0];
+}
+static inline void sdx_restore(const SdxGlobals* s) {
+    gx_dirty = s->dirty;
+    gx_vtx_version = s->vtx;
+    gx_xf_version = s->xf;
+    gx_vdesc_ver[0] = s->vdesc;
+}
+
+static inline void sdx_calls(const u32* c, const u32* ce) {
+    while (c < ce) {
+        u32 hd = *c++;
+        gx_apply_call(hd & 0xFF, c);
+        c += hd >> 8;
+    }
+}
+
+/* Builds slot `i`'s delta from its calls; 0 when the list does not take part. */
+static __attribute__((noinline, cold)) int sdx_build(SdxEntry* x, const u32* c0, const u32* ce) {
+    x->gen = s_sdx_gen;
+    x->nf = 0xFFFF;
+    x->nm = 0;
+    for (const u32* c = c0; c < ce; c += 1 + (*c >> 8)) {
+        u32 id = *c & 0xFF;
+        if (id == 0 || id > REC_SetTevIndirect) {
+            s_sdx_none++;
+            return 0;
+        }
+    }
+    if (s_sdx_s0 == NULL) {
+        s_sdx_s0 = malloc(sizeof(GxState));
+        s_sdx_prev = malloc(sizeof(GxState));
+        s_sdx_a = malloc(sizeof(GxState));
+        s_sdx_side = malloc(SDX_NWORDS * sizeof(u16));
+        if (s_sdx_s0 == NULL || s_sdx_prev == NULL || s_sdx_a == NULL || s_sdx_side == NULL) {
+            gx_opt_sdlx = 0;
+            PLOG_W("gxsdlx: no memory for the scratch state: off");
+            return 0;
+        }
+    }
+    u32* g = (u32*)&gx;
+    u32* s0 = (u32*)s_sdx_s0;
+    u32* pv = (u32*)s_sdx_prev;
+    SdxGlobals keep;
+    sdx_save(&keep);
+    memcpy(s_sdx_s0, &gx, sizeof(GxState));
+    memset(s_sdx_side, 0, SDX_NWORDS * sizeof(u16));
+    int silent = 0;
+    for (int run = 0; run < 2; run++) {
+        for (u32 w = 0; w < SDX_NWORDS; w++) {
+            g[w] = run ? ~s0[w] : s0[w];
+        }
+        for (const u32* c = c0; c < ce; c += 1 + (*c >> 8)) {
+            memcpy(pv, g, sizeof(GxState));
+            gx_dirty = 0;
+            u32 vtx = gx_vtx_version, xf = gx_xf_version, ver = g[SDX_VER_WORD];
+            u64 vd = gx_vdesc_ver[0];
+            gx_apply_call(*c & 0xFF, c + 1);
+            u32 side = (gx_dirty & GXD_ALL) | (g[SDX_VER_WORD] != ver ? SDX_S_VER : 0) |
+                       (gx_vtx_version != vtx ? SDX_S_VTX : 0) | (gx_xf_version != xf ? SDX_S_XF : 0) |
+                       (gx_vdesc_ver[0] != vd ? SDX_S_VDESC : 0);
+            for (u32 w = 0; w < SDX_NWORDS; w++) {
+                if (g[w] != pv[w] && w != SDX_VER_WORD) {
+                    s_sdx_side[w] |= (u16)side;
+                    silent |= side == 0;
+                }
+            }
+        }
+        if (run == 0) {
+            memcpy(s_sdx_a, g, sizeof(GxState));
+        }
+    }
+    const u32* a = (const u32*)s_sdx_a; /* run 0's end; g holds run 1's */
+    u32 nf = 0, nm = 0;
+    for (u32 w = 0; w < SDX_NWORDS; w++) {
+        u32 m = ~(a[w] ^ g[w]);
+        if (w != SDX_VER_WORD && m != 0) {
+            if (s_sdx_side[w] == 0) {
+                silent = 1; /* written, but no call changed it in either run: not understood */
+            }
+            if (m == ~0u) {
+                nf++;
+            } else {
+                nm++;
+            }
+        }
+    }
+    u32 need = nf * 2 + nm * 3;
+    int ok = !silent && need != 0;
+    if (ok && s_sdx_used + need > SDX_POOL_WORDS) {
+        s_sdx_used = 0; /* start again: every delta built before is built again at its next hit */
+        if (++s_sdx_gen == 0) {
+            s_sdx_gen = 1;
+            memset(s_sdx, 0, sizeof(SdxEntry) * SDL_SLOTS);
+        }
+        x->gen = s_sdx_gen;
+    }
+    if (ok && s_sdx_used + need > s_sdx_cap) {
+        u32 ncap = s_sdx_cap ? s_sdx_cap * 2 : 8 * 1024;
+        while (ncap < s_sdx_used + need) {
+            ncap *= 2;
+        }
+        ncap = ncap < SDX_POOL_WORDS ? ncap : SDX_POOL_WORDS;
+        u32* np = realloc(s_sdx_pool, ncap * sizeof(u32));
+        if (np == NULL) {
+            ok = 0;
+        } else {
+            s_sdx_pool = np;
+            s_sdx_cap = ncap;
+        }
+    }
+    if (ok) {
+        u32* f = s_sdx_pool + s_sdx_used;
+        u32* mk = f + nf * 2;
+        for (u32 w = 0; w < SDX_NWORDS; w++) {
+            u32 m = ~(a[w] ^ g[w]);
+            if (w == SDX_VER_WORD || m == 0) {
+                continue;
+            }
+            u32 hd = w << 16 | s_sdx_side[w];
+            if (m == ~0u) {
+                f[0] = hd;
+                f[1] = a[w];
+                f += 2;
+            } else {
+                mk[0] = hd;
+                mk[1] = ~m;
+                mk[2] = a[w] & m;
+                mk += 3;
+            }
+        }
+        x->pos = s_sdx_used;
+        x->nf = (u16)nf;
+        x->nm = (u16)nm;
+        s_sdx_used += need;
+        s_sdx_built++;
+        s_sdx_words += nf + nm;
+    } else {
+        s_sdx_none++;
+    }
+    memcpy(&gx, s_sdx_s0, sizeof(GxState));
+    sdx_restore(&keep);
+    return ok;
+}
+
+static inline void sdx_apply(const SdxEntry* x) {
+    u32* g = (u32*)&gx;
+    const u32* d = s_sdx_pool + x->pos;
+    u32 side = 0;
+    for (u32 i = x->nf; i != 0; i--, d += 2) {
+        u32 hd = d[0], v = d[1], o = hd >> 16;
+        if (g[o] != v) {
+            g[o] = v;
+            side |= hd;
+        }
+    }
+    for (u32 i = x->nm; i != 0; i--, d += 3) {
+        u32 hd = d[0], o = hd >> 16, cur = g[o], nv = (cur & d[1]) | d[2];
+        if (nv != cur) {
+            g[o] = nv;
+            side |= hd;
+        }
+    }
+    if (side & 0xFFFF) {
+        gx_dirty |= side & GXD_ALL;
+        gx.version += (side & SDX_S_VER) != 0;
+        gx_vtx_version += (side & SDX_S_VTX) != 0;
+        gx_xf_version += (side & SDX_S_XF) != 0;
+        gx_vdesc_ver[0] += (side & SDX_S_VDESC) != 0;
+    }
+}
+
+/* gxsdlx=2: the delta against the calls, from the same state; the calls' result stays. */
+static __attribute__((noinline, cold)) void sdx_verify(const SdxEntry* x, const u32* c, const u32* ce, u32 slot) {
+    SdxGlobals before, after_d;
+    sdx_save(&before);
+    memcpy(s_sdx_s0, &gx, sizeof(GxState));
+    sdx_apply(x);
+    sdx_save(&after_d);
+    memcpy(s_sdx_a, &gx, sizeof(GxState));
+    memcpy(&gx, s_sdx_s0, sizeof(GxState));
+    sdx_restore(&before);
+    sdx_calls(c, ce);
+    s_sdx_chk++;
+    const u32* a = (const u32*)s_sdx_a;
+    const u32* g = (const u32*)&gx;
+    u32 bad_w = SDX_NWORDS;
+    for (u32 w = 0; w < SDX_NWORDS; w++) {
+        if (w != SDX_VER_WORD && a[w] != g[w]) {
+            bad_w = w;
+            break;
+        }
+    }
+    u32 extra = (after_d.dirty & ~before.dirty) & ~(gx_dirty & ~before.dirty);
+    if (bad_w != SDX_NWORDS || extra != 0) {
+        if (s_sdx_bad++ < 8) {
+            PLOG_W("gxsdlx verify: list %p (slot %lu) word %lu delta %08lx calls %08lx, dirty delta %02lx calls %02lx",
+                   s_sdl[slot].list, (unsigned long)slot, (unsigned long)bad_w,
+                   (unsigned long)(bad_w < SDX_NWORDS ? a[bad_w] : 0),
+                   (unsigned long)(bad_w < SDX_NWORDS ? g[bad_w] : 0), (unsigned long)(after_d.dirty & ~before.dirty),
+                   (unsigned long)(gx_dirty & ~before.dirty));
+        }
+    } else if (((gx_dirty & ~before.dirty) & ~(after_d.dirty & ~before.dirty)) != 0) {
+        s_sdx_dirty_less++; /* the calls set a class for a write of the value in force (no SAME): not a mismatch */
+    }
+}
+
+/* Applies slot `i`'s calls (c .. ce) as its delta; 0 when the caller applies the calls. */
+static inline __attribute__((always_inline)) int sdx_run(u32 i, const u32* c, const u32* ce) {
+    if (__builtin_expect(s_sdx == NULL, 0)) {
+        s_sdx = malloc(sizeof(SdxEntry) * SDL_SLOTS);
+        if (s_sdx == NULL) {
+            gx_opt_sdlx = 0;
+            return 0;
+        }
+        memset(s_sdx, 0, sizeof(SdxEntry) * SDL_SLOTS);
+    }
+    SdxEntry* x = &s_sdx[i];
+    if (__builtin_expect(x->gen != s_sdx_gen, 0) && !sdx_build(x, c, ce)) {
+        return 0;
+    }
+    if (x->nf == 0xFFFF) {
+        return 0;
+    }
+    s_sdx_applied++;
+    if (gx_opt_sdlx == 2) {
+        sdx_verify(x, c, ce, i);
+    } else {
+        sdx_apply(x);
+    }
+    return 1;
+}
+
 /* Applies the state calls at the start of the list; returns the bytes they covered (the caller runs the rest). */
 u32 gx_sdl_run(const u8* list, u32 nbytes, u16* hint) {
     if (nbytes < 4) {
@@ -1291,6 +1571,13 @@ u32 gx_sdl_run(const u8* list, u32 nbytes, u16* hint) {
         PLOG_I("gxsdl: %lu lookups: %lu hit, %lu decoded, %lu stale, %lu resets", (unsigned long)s_sdl_lookups,
                (unsigned long)s_sdl_hit, (unsigned long)s_sdl_miss, (unsigned long)s_sdl_stale,
                (unsigned long)s_sdl_reset);
+        if (gx_opt_sdlx || s_sdx != NULL) {
+            PLOG_I("gxsdlx: %lu lists applied as a delta, %lu deltas built (%lu entries), %lu lists not taking part, "
+                   "verify %lu checks, %lu mismatches, %lu with fewer dirty classes",
+                   (unsigned long)s_sdx_applied, (unsigned long)s_sdx_built, (unsigned long)s_sdx_words,
+                   (unsigned long)s_sdx_none, (unsigned long)s_sdx_chk, (unsigned long)s_sdx_bad,
+                   (unsigned long)s_sdx_dirty_less);
+        }
     }
     u32 h = ((u32)(uintptr_t)list >> 5 ^ nbytes * 0x9E3779B1u) * 2654435761u >> 20;
     SdlEntry* e = NULL;
@@ -1329,6 +1616,9 @@ u32 gx_sdl_run(const u8* list, u32 nbytes, u16* hint) {
             }
             const u32* c = s_sdl_pool + e->pos + ((e->pbytes + 3) >> 2);
             const u32* ce = c + e->words;
+            if (gx_opt_sdlx && sdx_ok() && sdx_run((u32)(e - s_sdl), c, ce)) {
+                return e->pbytes;
+            }
             while (c < ce) {
                 u32 hd = *c++;
                 gx_apply_call(hd & 0xFF, c);
@@ -1380,6 +1670,9 @@ u32 gx_sdl_run(const u8* list, u32 nbytes, u16* hint) {
     e->list = list;
     e->nbytes = nbytes;
     e->sig = sdl_sig(list, nbytes);
+    if (s_sdx != NULL) {
+        s_sdx[e - s_sdl].gen = 0; /* the delta of what the slot held is gone: built again at the next hit */
+    }
     if (nw == 0) {
         e->pbytes = 0; /* nothing to apply here (no port opcode in the prefix): run it all as before */
         e->pos = e->words = 0;

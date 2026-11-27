@@ -1155,6 +1155,33 @@ static inline __attribute__((always_inline)) FlEntry* fl_get(const void* list, u
     return e;
 }
 
+/* gxsdlx on the record (game thread): the list's net calls. A call with a dedup slot is dropped when a later call of
+ * the list has the same id and slot: the later one writes every field it writes (same setter, same object), and
+ * the calls of other slots write other fields, so the translator's state after the list is the same; the dedup
+ * slot ends with the later call's words either way. Calls that compare their own way (bit 31: channels and their
+ * colours, whose selectors overlap) are kept. Returns the words left. */
+static u32 s_fl_net_dropped;
+static __attribute__((noinline, cold)) u32 fl_net(u32* calls, u32 nw) {
+    u32 out = 0;
+    for (u32 k = 0; k < nw;) {
+        u32 hd = calls[k], n = hd >> 8 & 0xFF, next = k + 1 + n;
+        int drop = 0;
+        if ((s32)hd >= 0 && (hd >> 16 & 0xFFF) != 0) {
+            for (u32 j = next; j < nw && !drop; j += 1 + (calls[j] >> 8 & 0xFF)) {
+                drop = (calls[j] & 0x7FFF00FFu) == (hd & 0x7FFF00FFu);
+            }
+        }
+        if (drop) {
+            s_fl_net_dropped++;
+        } else {
+            memmove(calls + out, calls + k, (1 + n) * sizeof(u32));
+            out += 1 + n;
+        }
+        k = next;
+    }
+    return out;
+}
+
 static inline __attribute__((always_inline)) FlEntry* fl_get_body(const void* list, u32 nbytes, u16* hint) {
     u32 h = ((u32)(uintptr_t)list >> 5 ^ nbytes * 0x9E3779B1u) * 2654435761u >> 21;
     FlEntry* e = NULL;
@@ -1250,6 +1277,9 @@ static inline __attribute__((always_inline)) FlEntry* fl_get_body(const void* li
             int sl = n != 0 && n <= DD_WORDS ? dd_slot(id, calls + k + 1) : -1;
             calls[k] |= (u32)(sl + 1) << 16;
         }
+    }
+    if (pure && gx_opt_sdlx) {
+        nw = fl_net(calls, nw);
     }
     e->words = pure ? nw : 0;
     s_fl_used += cw + (pure ? nw : 0);
@@ -2065,6 +2095,10 @@ void gx_rec_frame(void) {
                (unsigned long)(s_fst.list_decoded / f),
                (unsigned long)s_fst.chk_list, (unsigned long)s_fst.chk_vd, (unsigned long)s_fst.chk_list_bad,
                (unsigned long)s_fst.chk_vd_bad);
+        if (gx_opt_sdlx) {
+            PLOG_I("gxsdlx record: %lu list calls dropped at decode (a later call of the list writes the same slot; "
+                   "total)", (unsigned long)s_fl_net_dropped);
+        }
         s_fst.vd_calls = s_fst.vd_flushes = s_fst.vd_sent = s_fst.lists = s_fst.list_calls = s_fst.list_sent = 0;
         s_fst.list_other = s_fst.list_decoded = 0;
         memset(s_fst.other_why, 0, sizeof(s_fst.other_why));
@@ -2101,6 +2135,14 @@ void gx_rec_frame(void) {
 void gx_rec_init(void) {
     t_game = 1;
     gx_opt_sdl = plat_switch_int("gxsdl", 1) != 0;
+    gx_opt_sdlx = gx_opt_sdl ? plat_switch_int("gxsdlx", 0) : 0;
+    if (gx_opt_sdlx < 0 || gx_opt_sdlx > 2) {
+        gx_opt_sdlx = 0;
+    }
+    if (gx_opt_sdlx) {
+        PLOG_I("gxsdlx=%d: state lists applied as their net delta%s", gx_opt_sdlx,
+               gx_opt_sdlx == 2 ? " (verify)" : "");
+    }
     if (s_dda == NULL) {
         int sc = plat_switch_int("gxstatecache", 1);
         s_dda = sc >= 1 && sc <= 2 ? calloc(DD_SLOTS, sizeof(DdSlot)) : NULL;

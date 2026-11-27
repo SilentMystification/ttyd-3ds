@@ -211,8 +211,9 @@ void* plat_gpu_stream_alloc(uint32_t bytes);            /* linear memory, 16-byt
 void plat_gpu_stream_commit(const void* p, uint32_t bytes); /* the CPU wrote it: flushed before the record goes to the GPU */
 void plat_gpu_stream_free(void* p);                     /* freed once no frame in flight can read it */
 
-enum { PLAT_VSH_ORTHO = 1u, PLAT_VSH_LIT = 2u }; /* PlatGpuVshConst.flags: orthographic projection; GX lighting
-                                                   (the last plat_gpu_vsh_light block applies) */
+enum { PLAT_VSH_ORTHO = 1u, PLAT_VSH_LIT = 2u }; /* PlatGpuVshConst.flags: orthographic projection; the light
+                                                   block applies: GX lighting, or the matrix palette (the last
+                                                   plat_gpu_vsh_light block, its lsel.w) */
 
 typedef struct {
     float clip[4][4];   /* clip x, y, z, w = row . (x, y, z, 1), GX clip space (unrotated) */
@@ -220,6 +221,10 @@ typedef struct {
     float tgsrc[3][4];  /* texture unit u's source weights: x position, y normal, z the slot (s, t, 1, 1); w 1: divide by q */
     float clrmix[4];    /* per component: 1 takes the vertex colour, 0 takes matclr */
     float matclr[4];    /* 0..255 */
+    float post[9][4];   /* switch gxvshpost: unit u's post-transform rows 3u..3u + 2 on (s, t, q, 1); identity rows
+                           for a unit without one */
+    float postf[4];     /* x, y, z: unit 0-2 normalises (s, t, q) before its post rows (1) or not (0); w: 1 when the
+                           post rows apply (else they are not uploaded and the shader skips them) */
     uint32_t flags;
     uint32_t pad[3];
 } PlatGpuVshConst;
@@ -292,13 +297,18 @@ typedef struct {
     float nrm[3][4];   /* eye normal = row . (nx, ny, nz, 0); identity rows when the vertex has no normal */
     float amb[4];      /* ambient colour 0..255 (rgb), w unused */
     float dmode[4];    /* diffuse: x floor (0 clamp, -1e30 sign), y weight of n.l, z = 1 - y (GX_DF_NONE) */
-    float amode[4];    /* attenuation: x weight of the spot term (1 spot, 0 none), y = 1 - x */
+    float amode[4];    /* attenuation: x weight of the spot or specular term (1 spot or specular, 0 none), y = 1 - x */
+    float ambmix[4];   /* per component: 1 adds the vertex colour as the ambient (amb is 0 there; switch gxvshlit2) */
+    float lsel[4];     /* x 1: specular attenuation (gxvshlit2); y 1: the colour is lit; z 1: the alpha is lit
+                          (gxvshlit2); w 1: not lighting but the matrix palette of an unlit draw (gxvshpal): the rows
+                          of position matrices 0-9 lie in light[].pos, .dir, .color, .a, palette row k = 3 m + r at
+                          light[k].pos (k < 8), light[k - 8].dir, light[k - 16].color, light[k - 24].a; count 8 */
     uint32_t count;    /* lights used */
     uint32_t pad[3];
     struct {
-        float pos[4];
+        float pos[4];   /* every w is uploaded as given: 0 for lights, except color[3] */
         float dir[4];
-        float color[4]; /* 0..255 */
+        float color[4]; /* 0..255; w the light's alpha when the alpha is lit (gxvshlit2) */
         float a[4];     /* a0, a1, a2 */
         float k[4];     /* k0, k1, k2 */
     } light[PLAT_VSH_LIGHTS];

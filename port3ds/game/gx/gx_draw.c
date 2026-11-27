@@ -98,6 +98,7 @@ static u8 s_unlit[2], s_mat_vtx_rgb[2], s_mat_vtx_a[2];
 u32 gx_stat_draws, gx_stat_vertices, gx_stat_copies;
 int gx_bbox_active;
 int gx_opt_statever = 0, gx_opt_fogcache = 1, gx_opt_unlit = 1;
+static int s_vsh_emu; /* gxvshlit2/gxvshpost/gxvshpal = 2: vsh_emu_check (shader path) */
 
 static void out_alloc(void); /* s_out, below */
 static void one_init(void);  /* switch gxone, below */
@@ -116,6 +117,13 @@ void gx_opts_init(void) {
     gx_bbx_init();
     gx_opt_vshlit = plat_switch_int("gxvshlit", 1) != 0;
     gx_opt_vshtg = plat_switch_int("gxvshtg", 1) != 0;
+    gx_opt_vshlit2 = plat_switch_int("gxvshlit2", 0);
+    gx_opt_vshpost = plat_switch_int("gxvshpost", 0);
+    gx_opt_vshpal = plat_switch_int("gxvshpal", 0);
+    gx_opt_vshlit2 = gx_opt_vshlit2 < 0 || gx_opt_vshlit2 > 2 ? 0 : gx_opt_vshlit2;
+    gx_opt_vshpost = gx_opt_vshpost < 0 || gx_opt_vshpost > 2 ? 0 : gx_opt_vshpost;
+    gx_opt_vshpal = gx_opt_vshpal < 0 || gx_opt_vshpal > 2 ? 0 : gx_opt_vshpal;
+    s_vsh_emu = gx_opt_vshlit2 == 2 || gx_opt_vshpost == 2 || gx_opt_vshpal == 2;
     gx_opt_dirty = plat_switch_int("gxdirty", 1);
     if (gx_opt_dirty < 0 || gx_opt_dirty > 2) {
         gx_opt_dirty = 1;
@@ -2117,12 +2125,41 @@ static int s_vsh_lit;
 static PlatGpuVshLight s_vsh_light;
 static u32 s_vsh_light_id;
 
+/* switches gxvshlit2, gxvshpost, gxvshpal (default 0; 2: also the per-vertex check vsh_emu, below):
+ * gxvshlit2: besides gxvshlit's case, colour channel 1, lit alpha (with the colour's lights and functions when both
+ *   are lit), ambient from the vertex (channel 0) and specular attenuation in the shader;
+ * gxvshpost: post-transform texture matrices (texgen()'s normalise, rows and divide) in the shader;
+ * gxvshpal: per-vertex position matrices (PNMTXIDX) of unlit immediate draws and decoded lists in the shader: the
+ *   rows of matrices 0-9 as uniforms over the light block, the index in the ring's normal slot. */
+int gx_opt_vshlit2, gx_opt_vshpost, gx_opt_vshpal;
+
 /* Whether the lit colour channel `ch` can be lit in the shader; fills the light block. */
 static int vsh_light_block(int ch, PlatGpuVshLight* L) {
     const typeof(gx.chan[0])* c = &gx.chan[ch];
-    if (!gx_opt_vshlit || ch != 0 || !c->enable || gx.chan[ch + 2].enable || c->amb_src != GX_SRC_REG ||
-        (c->diff_fn != GX_DF_NONE && c->diff_fn != GX_DF_CLAMP && c->diff_fn != GX_DF_SIGN) ||
-        (c->attn_fn != GX_AF_NONE && c->attn_fn != GX_AF_SPOT)) {
+    const typeof(gx.chan[0])* ca = &gx.chan[ch + 2];
+    int lit_c = c->enable != 0, lit_a = ca->enable != 0;
+    if (!gx_opt_vshlit) {
+        return 0;
+    }
+    if (!gx_opt_vshlit2) {
+        if (ch != 0 || !lit_c || lit_a || c->amb_src != GX_SRC_REG ||
+            (c->attn_fn != GX_AF_NONE && c->attn_fn != GX_AF_SPOT)) {
+            return 0;
+        }
+    } else {
+        /* one light loop: colour and alpha lit together need the same lights and functions */
+        if (lit_c && lit_a &&
+            (c->light_mask != ca->light_mask || c->diff_fn != ca->diff_fn || c->attn_fn != ca->attn_fn)) {
+            return 0;
+        }
+        /* the stream carries colour 0 only */
+        if (ch == 1 && ((lit_c && c->amb_src == GX_SRC_VTX) || (lit_a && ca->amb_src == GX_SRC_VTX))) {
+            return 0;
+        }
+    }
+    const typeof(gx.chan[0])* f = lit_c ? c : ca; /* the lights and functions */
+    if ((f->diff_fn != GX_DF_NONE && f->diff_fn != GX_DF_CLAMP && f->diff_fn != GX_DF_SIGN) ||
+        (f->attn_fn != GX_AF_NONE && f->attn_fn != GX_AF_SPOT && f->attn_fn != GX_AF_SPEC)) {
         return 0;
     }
     memset(L, 0, sizeof(*L));
@@ -2135,17 +2172,33 @@ static int vsh_light_block(int ch, PlatGpuVshLight* L) {
             L->nrm[r][k] = has_nrm ? gx.nrm_mtx[gx.cur_pnmtx % GX_POS_MTX_COUNT][r][k] : (r == k ? 1.0f : 0.0f);
         }
     }
-    L->amb[0] = gx.amb[ch].r;
-    L->amb[1] = gx.amb[ch].g;
-    L->amb[2] = gx.amb[ch].b;
-    L->dmode[0] = c->diff_fn == GX_DF_CLAMP ? 0.0f : -1e15f;
-    L->dmode[1] = c->diff_fn == GX_DF_NONE ? 0.0f : 1.0f;
-    L->dmode[2] = c->diff_fn == GX_DF_NONE ? 1.0f : 0.0f;
-    L->amode[0] = c->attn_fn == GX_AF_SPOT ? 1.0f : 0.0f;
-    L->amode[1] = c->attn_fn == GX_AF_SPOT ? 0.0f : 1.0f;
+    if (lit_c) {
+        for (int k = 0; k < 3; k++) {
+            if (c->amb_src == GX_SRC_VTX) {
+                L->ambmix[k] = 1.0f;
+            } else {
+                L->amb[k] = (f32)(&gx.amb[ch].r)[k];
+            }
+        }
+    }
+    if (lit_a) {
+        if (ca->amb_src == GX_SRC_VTX) {
+            L->ambmix[3] = 1.0f;
+        } else {
+            L->amb[3] = (f32)gx.amb[ch].a;
+        }
+    }
+    L->dmode[0] = f->diff_fn == GX_DF_CLAMP ? 0.0f : -1e15f;
+    L->dmode[1] = f->diff_fn == GX_DF_NONE ? 0.0f : 1.0f;
+    L->dmode[2] = f->diff_fn == GX_DF_NONE ? 1.0f : 0.0f;
+    L->amode[0] = f->attn_fn != GX_AF_NONE ? 1.0f : 0.0f;
+    L->amode[1] = f->attn_fn != GX_AF_NONE ? 0.0f : 1.0f;
+    L->lsel[0] = f->attn_fn == GX_AF_SPEC ? 1.0f : 0.0f;
+    L->lsel[1] = lit_c ? 1.0f : 0.0f;
+    L->lsel[2] = lit_a ? 1.0f : 0.0f;
     u32 n = 0;
     for (int l = 0; l < GX_MAX_LIGHT; l++) {
-        if (!(c->light_mask & (1u << l))) {
+        if (!(f->light_mask & (1u << l))) {
             continue;
         }
         const GxLightObj* lt = &gx.light[l];
@@ -2158,6 +2211,7 @@ static int vsh_light_block(int ch, PlatGpuVshLight* L) {
         L->light[n].color[0] = lt->color.r;
         L->light[n].color[1] = lt->color.g;
         L->light[n].color[2] = lt->color.b;
+        L->light[n].color[3] = lit_a ? (f32)lt->color.a : 0.0f;
         n++;
     }
     if (n == 0) {
@@ -2167,6 +2221,37 @@ static int vsh_light_block(int ch, PlatGpuVshLight* L) {
     }
     L->count = n;
     return 1;
+}
+
+/* The identity post-transform rows (gxvshpost off, or a unit without one). */
+static void vsh_post_identity(PlatGpuVshConst* c) {
+    memset(c->post, 0, sizeof(c->post));
+    memset(c->postf, 0, sizeof(c->postf));
+    for (int i = 0; i < 9; i++) {
+        c->post[i][i % 3] = 1.0f;
+    }
+}
+
+/* Unit u's post-transform matrix (gxvshpost), as texgen() applies it: normalise (s, t, q), the rows on
+ * (s, t, q, 1), the divide by the new q; else the reason. */
+static void vsh_unit_post(PlatGpuVshConst* c, int u, const typeof(gx.texgen[0])* tg, int proj, u32* why) {
+    if (tg->pt_mtx == GX_PTIDENTITY || tg->pt_mtx < GX_PTTEXMTX0) {
+        return;
+    }
+    const f32* p = &gx.pttex_mtx[((tg->pt_mtx - GX_PTTEXMTX0) / 3) % GX_PTTEX_MTX_COUNT][0][0];
+    /* the new q is 1 exactly (no divide) when the first stage gives q = 1, nothing is normalised and the q row is
+     * (0, 0, 1, 0) (a 2x4 post matrix) */
+    int q1 = !proj && !tg->normalize && p[8] == 0.0f && p[9] == 0.0f && p[10] == 1.0f && p[11] == 0.0f;
+    if (!gx_opt_vshpost || (u == 0 && !proj && !q1)) {
+        *why |= GXV_R_TGPOST; /* unit 0 divides per pixel, which needs its projective lookup (MTX3x4) */
+        return;
+    }
+    memcpy(c->post[3 * u], p, 48);
+    c->postf[u] = tg->normalize ? 1.0f : 0.0f;
+    c->postf[3] = 1.0f;
+    if (!q1) {
+        c->tgsrc[u][3] = 1.0f;
+    }
 }
 
 /* The fog ramp's unit on the shader path: s = a * z_eye + b is a row of the position matrix applied to the position
@@ -2186,6 +2271,7 @@ static void vsh_prepare(void) {
     PlatGpuVshConst cb;
     PlatGpuVshConst* c = &cb;
     memset(c, 0, sizeof(*c));
+    vsh_post_identity(c);
     if (s_need_both) {
         why |= GXV_R_TWOCHAN;
     }
@@ -2241,9 +2327,6 @@ static void vsh_prepare(void) {
         } else {
             why |= GXV_R_TGSRC;
         }
-        if (tg->pt_mtx != GX_PTIDENTITY && tg->pt_mtx >= GX_PTTEXMTX0) {
-            why |= GXV_R_TGPOST;
-        }
         const f32* m = matrix_rows(tg->mtx);
         memcpy(c->tex[3 * u], m, 16);
         memcpy(c->tex[3 * u + 1], m + 4, 16);
@@ -2251,6 +2334,7 @@ static void vsh_prepare(void) {
             memcpy(c->tex[3 * u + 2], m + 8, 16);
             c->tgsrc[u][3] = 1.0f;
         }
+        vsh_unit_post(c, u, tg, proj, &why);
     }
     if (s_fog_unit >= 0) {
         c->tex[3 * s_fog_unit + 2][3] = 1.0f;
@@ -2334,6 +2418,7 @@ static void vsh_part_tex(PlatGpuVshConst* c, u32* why, int has_nrm) {
     s_vw_tex_pos = 0;
     memset(c->tex, 0, sizeof(c->tex));
     memset(c->tgsrc, 0, sizeof(c->tgsrc));
+    vsh_post_identity(c);
     for (int u = 0; u < 3; u++) {
         s_vsh_unit_attr[u] = 0xFF;
         c->tex[3 * u + 2][3] = 1.0f;
@@ -2355,9 +2440,6 @@ static void vsh_part_tex(PlatGpuVshConst* c, u32* why, int has_nrm) {
         } else {
             *why |= GXV_R_TGSRC;
         }
-        if (tg->pt_mtx != GX_PTIDENTITY && tg->pt_mtx >= GX_PTTEXMTX0) {
-            *why |= GXV_R_TGPOST;
-        }
         s_vw_tex_pos |= tg->mtx < 30;
         const f32* m = matrix_rows(tg->mtx);
         memcpy(c->tex[3 * u], m, 16);
@@ -2366,6 +2448,7 @@ static void vsh_part_tex(PlatGpuVshConst* c, u32* why, int has_nrm) {
             memcpy(c->tex[3 * u + 2], m + 8, 16);
             c->tgsrc[u][3] = 1.0f;
         }
+        vsh_unit_post(c, u, tg, proj, why);
     }
     if (s_fog_unit >= 0) {
         c->tex[3 * s_fog_unit + 2][3] = 1.0f;
@@ -2522,6 +2605,9 @@ void gx_dirty_log(u32 frames) {
 static u32 vsh_cull(void) { return gx.cull == GX_CULL_FRONT ? 1u : gx.cull == GX_CULL_BACK ? 2u : 0u; }
 
 int gx_vsh_imm_on = 1; /* switch gxvshimm (default 1): immediate-mode draws may take the shader path */
+static void vsh_emu_check(const PlatGpuVshConst* c, const PlatGpuVshLight* L, int lit, const GxVertex* v, u32 n,
+                          int fresh);
+static int vsh_emu_fresh(void);
 
 /* An immediate-mode draw (GXBegin/GXEnd) on the shader path, when its group
  * takes it: the vertices go to this frame's ring. 0: draw it on the CPU (it
@@ -2562,6 +2648,344 @@ static int draw_vsh_imm(u8 prim, const GxVertex* v, u32 n, const void* ident, u3
     }
     plat_gpu_vsh_const(&s_vsh_const, s_vsh_const_id);
     plat_gpu_vsh_draw(im->base, im->layout, scales, vsh_cull(), im->idx, im->nidx);
+    if (s_vsh_emu) {
+        vsh_emu_check(&s_vsh_const, &s_vsh_light, s_vsh_lit, v, n, vsh_emu_fresh());
+    }
+    gx_vsh_count_shader(n, im->nidx);
+    gx_stat_draws++;
+    return 1;
+}
+
+/* ---- gxvshlit2=2, gxvshpost=2, gxvshpal=2: the shader path's arithmetic on the CPU, against transform() ----
+ * vsh_emu_vertex follows gx.v.pica's shader path step by step in 32-bit float, from the uniform blocks the draw
+ * sends (so it checks what the front end packed: light rows, post rows, palette rows, flags); the draw itself
+ * still goes to the shader. The PICA computes in 24-bit floats, so the images are not expected to be identical; a
+ * mismatch here (beyond float rounding) is a packing or ordering error. Checked: every shader draw that has its
+ * assembled vertices (the ring's, and cached lists'); "new" draws use a feature the three switches moved. */
+static struct {
+    u32 draws, draws_new, verts, bad_pos, bad_clr, bad_tc, bad_draws_new, logged;
+} s_emu;
+
+static f32 emu_dp4(const f32* a, const f32* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]; }
+static f32 emu_dp3(const f32* a, const f32* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+
+static f32* pal_row(PlatGpuVshLight* P, u32 k);
+
+static void vsh_emu_vertex(const PlatGpuVshConst* c, const PlatGpuVshLight* L, int lit, const GxVertex* v,
+                           f32 clip[4], f32 clr[4], f32 tc[3][2]) {
+    f32 r2[4] = {v->pos[0], v->pos[1], v->pos[2], 1.0f};
+    f32 nrm[4] = {0.0f, 0.0f, 1.0f, 0.0f};
+    if (v->has_nrm) {
+        nrm[0] = v->nrm[0];
+        nrm[1] = v->nrm[1];
+        nrm[2] = v->nrm[2];
+    }
+    int pal = lit && L->lsel[3] != 0.0f;
+    if (pal) {
+        PlatGpuVshLight* P = (PlatGpuVshLight*)L;
+        u32 m = v->pnmtx % GX_POS_MTX_COUNT;
+        f32 e[4] = {emu_dp4(pal_row(P, 3 * m), r2), emu_dp4(pal_row(P, 3 * m + 1), r2),
+                    emu_dp4(pal_row(P, 3 * m + 2), r2), 1.0f};
+        for (int k = 0; k < 4; k++) {
+            clip[k] = emu_dp4(c->clip[k], e);
+        }
+        nrm[0] = nrm[1] = nrm[2] = 0.0f; /* the index's slot; no texgen reads it */
+    } else {
+        for (int k = 0; k < 4; k++) {
+            clip[k] = emu_dp4(c->clip[k], r2);
+        }
+    }
+    f32 in[4] = {v->clr[0].r, v->clr[0].g, v->clr[0].b, v->clr[0].a};
+    for (int k = 0; k < 4; k++) {
+        clr[k] = c->matclr[k] + c->clrmix[k] * in[k];
+    }
+    if (lit && !pal) {
+        f32 e[4] = {emu_dp4(L->eye[0], r2), emu_dp4(L->eye[1], r2), emu_dp4(L->eye[2], r2), 0.0f};
+        f32 n[4] = {emu_dp4(L->nrm[0], nrm), emu_dp4(L->nrm[1], nrm), emu_dp4(L->nrm[2], nrm), 0.0f};
+        f32 inv = 1.0f / sqrtf(emu_dp3(n, n));
+        for (int k = 0; k < 3; k++) {
+            n[k] *= inv;
+        }
+        f32 acc[4];
+        for (int k = 0; k < 4; k++) {
+            acc[k] = L->amb[k] + L->ambmix[k] * in[k];
+        }
+        u32 cnt = L->count > PLAT_VSH_LIGHTS ? PLAT_VSH_LIGHTS : L->count;
+        for (u32 i = 0; i < (cnt ? cnt : 1); i++) {
+            f32 l[4] = {L->light[i].pos[0] - e[0], L->light[i].pos[1] - e[1], L->light[i].pos[2] - e[2], 0.0f};
+            f32 d2 = emu_dp3(l, l);
+            f32 rs = 1.0f / sqrtf(d2);
+            for (int k = 0; k < 3; k++) {
+                l[k] *= rs;
+            }
+            f32 d = d2 * rs;
+            f32 df = emu_dp3(n, l);
+            df = df > L->dmode[0] ? df : L->dmode[0];
+            df = L->dmode[1] * df + L->dmode[2];
+            f32 cs, vv = d;
+            if (L->lsel[0] != 0.0f) {
+                f32 a = emu_dp3(L->light[i].dir, n);
+                cs = emu_dp3(n, l) >= 0.0f ? (a > 0.0f ? a : 0.0f) : 0.0f;
+                vv = cs;
+            } else {
+                cs = emu_dp3(L->light[i].dir, l);
+                cs = cs > 0.0f ? cs : 0.0f;
+            }
+            f32 num = (L->light[i].a[2] * cs + L->light[i].a[1]) * cs + L->light[i].a[0];
+            num = num > 0.0f ? num : 0.0f;
+            f32 den = (L->light[i].k[2] * vv + L->light[i].k[1]) * vv + L->light[i].k[0];
+            f32 at = num / den * L->amode[0] + L->amode[1];
+            for (int k = 0; k < 4; k++) {
+                acc[k] += L->light[i].color[k] * at * df;
+            }
+        }
+        for (int k = 0; k < 4; k++) {
+            f32 a = acc[k] < 0.0f ? 0.0f : acc[k] > 255.0f ? 255.0f : acc[k];
+            f32 r = floorf(clr[k] * a * (1.0f / 255.0f));
+            if (k < 3 ? L->lsel[1] != 0.0f : L->lsel[2] != 0.0f) {
+                clr[k] = r;
+            }
+        }
+    }
+    for (int u = 0; u < 3; u++) {
+        u8 at = s_vsh_unit_attr[u];
+        f32 r4[4] = {0.0f, 0.0f, c->tgsrc[u][2], 1.0f};
+        if (at < 8 && c->tgsrc[u][2] != 0.0f) {
+            r4[0] = v->tex[at][0];
+            r4[1] = v->tex[at][1];
+        }
+        for (int k = 0; k < 3; k++) {
+            r4[k] += r2[k] * c->tgsrc[u][0] + nrm[k] * c->tgsrc[u][1];
+        }
+        f32 q[4] = {emu_dp4(c->tex[3 * u], r4), emu_dp4(c->tex[3 * u + 1], r4), emu_dp4(c->tex[3 * u + 2], r4), 1.0f};
+        if (c->postf[3] != 0.0f) {
+            f32 l2 = emu_dp3(q, q);
+            f32 f = 1.0f + c->postf[u] * (1.0f / sqrtf(l2 > 1e-18f ? l2 : 1e-18f) - 1.0f);
+            for (int k = 0; k < 3; k++) {
+                q[k] *= f;
+            }
+            f32 p0 = emu_dp4(c->post[3 * u], q), p1 = emu_dp4(c->post[3 * u + 1], q), p2 = emu_dp4(c->post[3 * u + 2], q);
+            q[0] = p0;
+            q[1] = p1;
+            q[2] = p2;
+        }
+        f32 qq = q[2] == 0.0f ? 1.0f : q[2];
+        f32 f = c->tgsrc[u][3] != 0.0f ? 1.0f / qq : 1.0f; /* unit 0: the per-pixel divide by w */
+        tc[u][0] = q[0] * f;
+        tc[u][1] = q[1] * f;
+    }
+}
+
+static int emu_far(f32 a, f32 b, f32 scale) {
+    f32 d = a - b;
+    d = d < 0.0f ? -d : d;
+    return !(d <= scale); /* NaN counts */
+}
+
+/* Checks a shader draw's vertices; `fresh`: it uses a feature the switches moved. */
+static void vsh_emu_check(const PlatGpuVshConst* c, const PlatGpuVshLight* L, int lit, const GxVertex* v, u32 n,
+                          int fresh) {
+    if (v == NULL || n == 0) {
+        return;
+    }
+    s_emu.draws++;
+    s_emu.draws_new += fresh != 0;
+    u32 bad0 = s_emu.bad_pos + s_emu.bad_clr + s_emu.bad_tc;
+    Out o;
+    for (u32 i = 0; i < n; i++) {
+        f32 clip[4], clr[4], tc[3][2];
+        vsh_emu_vertex(c, L, lit, &v[i], clip, clr, tc);
+        transform(&v[i], &o);
+        s_emu.verts++;
+        f32 w = o.v.pos[3] < 0.0f ? -o.v.pos[3] : o.v.pos[3];
+        int bp = 0, bc = 0, bt = 0;
+        for (int k = 0; k < 4; k++) {
+            f32 a = o.v.pos[k] < 0.0f ? -o.v.pos[k] : o.v.pos[k];
+            bp |= emu_far(clip[k], o.v.pos[k], 1e-4f * (a + w) + 1e-6f);
+        }
+        if (gx.num_chans != 0) {
+            for (int k = 0; k < 4; k++) {
+                bc |= emu_far(clr[k], (f32)o.v.color[k], 1.0f);
+            }
+        }
+        const f32* ct[3] = {o.v.tc0, o.v.tc1, o.v.tc2};
+        for (int u = 0; u < s_units && u < 3; u++) {
+            for (int k = 0; k < 2; k++) {
+                f32 a = ct[u][k] < 0.0f ? -ct[u][k] : ct[u][k];
+                bt |= emu_far(tc[u][k], ct[u][k], 1e-3f * (1.0f + a));
+            }
+        }
+        s_emu.bad_pos += bp;
+        s_emu.bad_clr += bc;
+        s_emu.bad_tc += bt;
+        if ((bp | bc | bt) && s_emu.logged < 16) {
+            s_emu.logged++;
+            PLOG_W("gxvsh emu: frame %lu vertex %lu/%lu (%s, pal %d, lit %d, lsel %g %g %g, postf %g): clip %g %g %g %g "
+                   "cpu %g %g %g %g | colour %g %g %g %g cpu %u %u %u %u | tc0 %g %g cpu %g %g tc1 %g %g cpu %g %g",
+                   (unsigned long)gx_perf_frame_no(), (unsigned long)i, (unsigned long)n, fresh ? "new" : "base",
+                   lit && L->lsel[3] != 0.0f, lit, lit ? (double)L->lsel[0] : 0.0, lit ? (double)L->lsel[1] : 0.0,
+                   lit ? (double)L->lsel[2] : 0.0, (double)c->postf[3], (double)clip[0], (double)clip[1],
+                   (double)clip[2], (double)clip[3], (double)o.v.pos[0], (double)o.v.pos[1], (double)o.v.pos[2],
+                   (double)o.v.pos[3], (double)clr[0], (double)clr[1], (double)clr[2], (double)clr[3],
+                   o.v.color[0], o.v.color[1], o.v.color[2], o.v.color[3], (double)tc[0][0], (double)tc[0][1],
+                   (double)o.v.tc0[0], (double)o.v.tc0[1], (double)tc[1][0], (double)tc[1][1], (double)o.v.tc1[0],
+                   (double)o.v.tc1[1]);
+        }
+    }
+    if (fresh && s_emu.bad_pos + s_emu.bad_clr + s_emu.bad_tc != bad0) {
+        s_emu.bad_draws_new++;
+    }
+}
+
+/* Whether the draw uses what gxvshlit2 or gxvshpost moved (the palette is passed in). */
+static int vsh_emu_fresh(void) {
+    if (s_vsh_const.postf[3] != 0.0f) {
+        return 1;
+    }
+    const PlatGpuVshLight* L = &s_vsh_light;
+    return s_vsh_lit && (L->lsel[0] != 0.0f || L->lsel[1] == 0.0f || L->lsel[2] != 0.0f || L->ambmix[0] != 0.0f ||
+                         L->ambmix[3] != 0.0f || s_color_chan == 1);
+}
+
+void gx_vsh_emu_log(void) {
+    if (!s_vsh_emu) {
+        return;
+    }
+    PLOG_I("gxstats   vsh emu (gxvshlit2/post/pal=2, total): draws %lu (new %lu, %lu of them off), vertices %lu, "
+           "off: position %lu colour %lu texcoord %lu",
+           (unsigned long)s_emu.draws, (unsigned long)s_emu.draws_new, (unsigned long)s_emu.bad_draws_new,
+           (unsigned long)s_emu.verts, (unsigned long)s_emu.bad_pos, (unsigned long)s_emu.bad_clr,
+           (unsigned long)s_emu.bad_tc);
+}
+
+/* ---- gxvshpal: the matrix palette of an unlit draw ----
+ * The light block carries the rows of position matrices 0-9 (lsel.w = 1; PlatGpuVshLight) and the uniform block
+ * the projection alone as its clip rows (the shader: clip = projection . (palette rows . position)). Both get ids
+ * from their own counter with the top bit set, so they never equal a light or uniform block's id. */
+static PlatGpuVshLight s_pal_blk;
+static PlatGpuVshConst s_pal_const;
+static u32 s_pal_blk_id, s_pal_const_id, s_pal_ctr;
+static u32 pal_id(void) { return 0x80000000u | (++s_pal_ctr & 0x7FFFFFFFu); }
+
+static f32* pal_row(PlatGpuVshLight* P, u32 k) {
+    if (k < 8) {
+        return P->light[k].pos;
+    }
+    if (k < 16) {
+        return P->light[k - 8].dir;
+    }
+    if (k < 24) {
+        return P->light[k - 16].color;
+    }
+    return P->light[k - 24].a;
+}
+
+static void vsh_pal_blocks(void) {
+    PlatGpuVshLight P;
+    memset(&P, 0, sizeof(P));
+    for (u32 m = 0; m < GX_POS_MTX_COUNT; m++) {
+        for (u32 r = 0; r < 3; r++) {
+            memcpy(pal_row(&P, 3 * m + r), gx.pos_mtx[m][r], 16);
+        }
+    }
+    P.lsel[3] = 1.0f;
+    P.count = PLAT_VSH_LIGHTS; /* every row uploaded */
+    if (s_pal_blk_id == 0 || !gx_mem_equal(&P, &s_pal_blk, sizeof(P))) {
+        s_pal_blk = P;
+        s_pal_blk_id = pal_id();
+    }
+    PlatGpuVshConst c = s_vsh_const;
+    const f32* p = gx.proj;
+    memset(c.clip, 0, sizeof(c.clip));
+    c.clip[0][0] = p[1];
+    c.clip[1][1] = p[3];
+    c.clip[2][2] = p[5];
+    c.clip[2][3] = p[6];
+    if (p[0] == (f32)GX_PERSPECTIVE) {
+        c.clip[0][2] = p[2];
+        c.clip[1][2] = p[4];
+        c.clip[3][2] = -1.0f;
+    } else {
+        c.clip[0][3] = p[2];
+        c.clip[1][3] = p[4];
+        c.clip[3][3] = 1.0f;
+    }
+    c.flags |= PLAT_VSH_LIT;
+    if (s_pal_const_id == 0 || !gx_mem_equal(&c, &s_pal_const, sizeof(c))) {
+        s_pal_const = c;
+        s_pal_const_id = pal_id();
+    }
+}
+
+/* A draw with per-vertex position matrices (PNMTXIDX) from the ring, when gxvshpal is on and every group of its
+ * matrices takes the shader path. 0: draw it on the CPU (routed already: every matrix's group). */
+static int draw_vsh_pal(u8 prim, const GxVertex* v, u32 n, const void* ident, u32 ident_n, int imm) {
+    vsh_state();
+    u32 why = gx_vsh_imm_on ? (s_vsh_reasons | gx_vsh_imm_reasons(prim, n)) & ~(u32)GXV_R_PNMTXIDX : GXV_R_IMM;
+    /* unlit only (the palette lies over the light block), no fog ramp (a row of the current matrix), no texgen
+     * from the normal (the index lies in its slot) */
+    int nrm_tg = 0;
+    for (int u = 0; u < s_units && u < 3; u++) {
+        nrm_tg |= gx.texgen[s_unit_coord[u]].src == GX_TG_NRM;
+    }
+    if (s_vsh_lit || s_fog_unit >= 0 || nrm_tg) {
+        why |= GXV_R_PNMTXIDX;
+    }
+    if (gx_bbox_active && gx_opt_vshbbox == 0) {
+        why |= GXV_R_BBOX;
+    }
+    if (why == 0 && !gx_vsh_imm_room(n)) {
+        why = GXV_R_POOL;
+    }
+    u32 seen = 0;
+    for (u32 i = 0; i < n; i++) {
+        seen |= 1u << (v[i].pnmtx % GX_POS_MTX_COUNT);
+    }
+    int all = 1, any = 0;
+    for (u32 m = 0; m < GX_POS_MTX_COUNT; m++) {
+        if (seen >> m & 1) {
+            int path = gx_vsh_route(m, why, ident, ident_n, n, imm);
+            all &= path;
+            any |= path;
+        }
+    }
+    if (!all) {
+        if (any) {
+            /* the groups disagree this frame: the ones on the shader take the rest of the frame on the CPU */
+            for (u32 m = 0; m < GX_POS_MTX_COUNT; m++) {
+                if (seen >> m & 1) {
+                    gx_vsh_route(m, GXV_R_PNMTXIDX, NULL, 0, n, imm);
+                }
+            }
+        }
+        return 0;
+    }
+    if (gx_bbox_active) {
+        u64 t0 = plat_ticks();
+        bbox_shader_draw(v, n);
+        s_bx.t += plat_ticks() - t0;
+        s_bx.draws[BX_IMM]++;
+        s_bx.verts[BX_IMM] += n;
+    } else {
+        bbox_shader_draw(v, n);
+    }
+    if (gx.cull == GX_CULL_ALL) {
+        return 1;
+    }
+    vsh_pal_blocks();
+    const GxVshImm* im = gx_vsh_imm_build_pal(prim, v, n);
+    u32 scales = 0;
+    for (int u = 0; u < 3; u++) {
+        u8 a = s_vsh_unit_attr[u];
+        u32 slot = a < 8 ? im->attr_slot[a] : 0xFF;
+        scales |= (slot < 3 ? PLAT_VSH_UNIT(slot, 0) : PLAT_VSH_UNIT(3, 0)) << (8 + 8 * u);
+    }
+    plat_gpu_vsh_light(&s_pal_blk, s_pal_blk_id);
+    plat_gpu_vsh_const(&s_pal_const, s_pal_const_id);
+    plat_gpu_vsh_draw(im->base, im->layout, scales, vsh_cull(), im->idx, im->nidx);
+    if (s_vsh_emu) {
+        vsh_emu_check(&s_pal_const, &s_pal_blk, 1, v, n, 1);
+    }
     gx_vsh_count_shader(n, im->nidx);
     gx_stat_draws++;
     return 1;
@@ -2580,8 +3004,8 @@ int gx_draw_imm_route(u8 prim, u32 n, const void* caller, int ring_given) {
         return GXI_NONE;
     }
     if (!gx_vsh_on || gx_vsh_noted || gx.vtx_desc[GX_VA_PNMTXIDX] != GX_NONE || gx_bbox_active || s_bref_on ||
-        s_dump) {
-        return GXI_OLD; /* the bounding box and the dump need the assembled vertices */
+        s_dump || s_vsh_emu) {
+        return GXI_OLD; /* the bounding box, the dump and vsh_emu need the assembled vertices */
     }
     gx_batch_flush(); /* an open batch's draws come before this one */
     ensure_state();
@@ -2633,7 +3057,7 @@ int gx_draw_imm_fl(u8 prim, u8 fmt, const PPCWGPipe* sl, u32 n) {
         return GXI_NONE;
     }
     if (!gx_vsh_on || gx_vsh_noted || gx.vtx_desc[GX_VA_PNMTXIDX] != GX_NONE || gx_bbox_active || s_bref_on ||
-        s_dump) {
+        s_dump || s_vsh_emu) {
         return GXI_OLD;
     }
     gx_batch_flush();
@@ -2786,6 +3210,12 @@ int gx_draw_vsh(const GxVshStream* s, u32 entry_reason, const void* list, u32 nb
     } else {
         plat_gpu_vsh_draw(gx_vsh_stream_base(s), s->layout, scales, vsh_cull(), s->idx, s->nidx);
     }
+    if (s_vsh_emu && v != NULL) {
+        int fresh = vsh_emu_fresh();
+        for (u32 i = 0; i < nd; i++) {
+            vsh_emu_check(&s_vsh_const, &s_vsh_light, s_vsh_lit, v + d[i].first, d[i].count, fresh);
+        }
+    }
     gx_vsh_last = (GxVshLast){(u8)(!gx_bbox_active && !s_bref_on && !s_dump),
                               {s_vsh_unit_attr[0], s_vsh_unit_attr[1], s_vsh_unit_attr[2]},
                               gx_vsh_stream_base(s), s->layout, scales, vsh_cull()};
@@ -2802,10 +3232,12 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
     ensure_state();
     if (gx_vsh_on && !gx_vsh_noted) {
         int in_list = gx_pipe_in_list();
-        if (gx.vtx_desc[GX_VA_PNMTXIDX] == GX_NONE) {
+        int pal = gx.vtx_desc[GX_VA_PNMTXIDX] != GX_NONE;
+        if (!pal || gx_opt_vshpal) {
             /* immediate mode, or a display list being decoded (first call, changed, uncached): the shader
              * path from this frame's ring when the draw and its group can take it. Known across frames by
-             * the code that began it, or by the list (as its cached hits are). */
+             * the code that began it, or by the list (as its cached hits are). With per-vertex matrices
+             * (gxvshpal), when the groups of all its matrices take it. */
             if (empty_target()) {
                 return;
             }
@@ -2814,7 +3246,8 @@ void gx_draw_vertices(u8 prim, const GxVertex* v, u32 n) {
             if (in_list) {
                 gx_pipe_cur_list(&ident, &ident_n);
             }
-            if (draw_vsh_imm(prim, v, n, ident, ident_n, !in_list)) {
+            if (pal ? draw_vsh_pal(prim, v, n, ident, ident_n, !in_list)
+                    : draw_vsh_imm(prim, v, n, ident, ident_n, !in_list)) {
                 return;
             }
             gx_draw_vertices_cpu(prim, v, n);

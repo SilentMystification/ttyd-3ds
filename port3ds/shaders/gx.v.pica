@@ -30,20 +30,29 @@
 .fvec vscale            ; shader path: position scale (s, s, s, 1)
 .fvec clrmix            ; shader path: per component 1 = vertex colour, 0 = constant
 .fvec matclr            ; shader path: constant colour (0..255), 0 where clrmix is 1
+; post-transform texture matrices (switch gxvshpost): unit u's (s, t, q) -> rows 3u..3u + 2 . (s, t, q, 1)
+.fvec post[9]
+.fvec postf             ; x, y, z: unit 0-2 normalises (s, t, q) first (weight 0 or 1); w nonzero: the rows apply
 
-; GX lighting of colour channel 0 (bool lit, switch gxvshlit): the CPU path's light_channel per vertex
+; The light block (bool lit): GX lighting of the colour used (switches gxvshlit, gxvshlit2), the CPU path's
+; light_channel per vertex; or, with lsel.w, the matrix palette of an unlit draw (switch gxvshpal)
 .fvec eyerow[3]         ; eye-space position rows (the position matrix)
 .fvec nrmrow[3]         ; eye-space normal rows (the normal matrix; identity when the vertex has no normal)
 .fvec amb               ; ambient colour 0..255
 .fvec dmode             ; diffuse: x floor, y weight of n.l, z 1 - y
-.fvec amode             ; attenuation: x weight of the spot term, y 1 - x
-.fvec lpos[8], ldir[8], lcol[8], lka[8], lkk[8] ; per light: eye position, direction, colour, a0-a2, k0-k2
+.fvec amode             ; attenuation: x weight of the spot or specular term, y 1 - x
+.fvec ambmix            ; gxvshlit2: per component 1 = ambient from the vertex colour (added to amb, which is 0 there)
+.fvec lsel              ; x specular attenuation (gxvshlit2), y colour lit, z alpha lit (gxvshlit2), w matrix palette
+; per light: eye position, direction, colour (w alpha), a0-a2, k0-k2. Must stay in this order, contiguous (gpu.c
+; checks): the matrix palette (gxvshpal, unlit draws only, lsel.w) puts 10 position matrices x 3 rows over
+; lpos[0]..lka[5] and indexes them from lpos.
+.fvec lpos[8], ldir[8], lcol[8], lka[8], lkk[8]
 
 .bool vsh
 .bool lit
 .ivec lcount            ; (lights - 1, 0, 1)
 
-.constf consts(0.0039215686, 1.0, 0.0, 0.0)
+.constf consts(0.0039215686, 1.0, 0.0, 0.000000000000000001) ; w: floor of a squared length (normalise)
 .constf c255(255.0, 255.0, 255.0, 255.0)
 .alias inv255 consts.xxxx
 
@@ -74,63 +83,100 @@
         mul r5, clrmix, inclr
         add r5, matclr, r5
 
-        ; GX lighting, colour only (the alpha stays the material's, as with the channel's alpha unlit)
+        ; light block (bool lit): GX lighting of the colour used, or (lsel.w) the matrix palette of an unlit draw
         ifu lit
-            dp4 r7.x, eyerow[0], r2
-            dp4 r7.y, eyerow[1], r2
-            dp4 r7.z, eyerow[2], r2
-            mov r7.w, consts.z
-            mov r8, innrm
-            mov r8.w, consts.z
-            dp4 r9.x, nrmrow[0], r8
-            dp4 r9.y, nrmrow[1], r8
-            dp4 r9.z, nrmrow[2], r8
-            mov r9.w, consts.z
-            dp3 r10, r9, r9
-            rsq r10, r10
-            mul r9, r9, r10
-            mov r11, amb
-            for lcount
-                add r12, lpos[aL], -r7
-                dp3 r13, r12, r12
-                rsq r14, r13
-                mul r12, r12, r14
-                mul r15, r13, r14
-                ; diffuse: n . l, floored (clamp or sign), or 1
-                dp3 r10, r9, r12
-                max r10, dmode.xxxx, r10
-                mul r10, dmode.yyyy, r10
-                add r10, dmode.zzzz, r10
-                ; spot attenuation: max(a0 + a1 c + a2 c^2, 0) / (k0 + k1 d + k2 d^2), c = max(l . dir, 0)
-                dp3 r14, ldir[aL], r12
-                max r14, consts.zzzz, r14
-                mul r13, lka[aL].zzzz, r14
-                add r13, lka[aL].yyyy, r13
-                mul r13, r13, r14
-                add r13, lka[aL].xxxx, r13
-                max r13, consts.zzzz, r13
-                mul r12, lkk[aL].zzzz, r15
-                add r12, lkk[aL].yyyy, r12
-                mul r12, r12, r15
-                add r12, lkk[aL].xxxx, r12
-                rcp r12, r12
-                mul r13, r13, r12
-                mul r13, amode.xxxx, r13
-                add r13, amode.yyyy, r13
-                mul r13, r13, r10
-                mul r12, lcol[aL], r13
+            mov r1, consts.zzzz
+            cmp lsel.wx, ne, ne, r1.xx      ; cmp.x matrix palette, cmp.y specular
+            ifc cmp.x
+                ; matrix palette (gxvshpal): v5.x = 3 x the vertex's matrix index; eye = its rows . position,
+                ; then clip = the clip rows (the projection alone for these draws) . eye
+                mova a0.x, innrm.x
+                dp4 r7.x, lpos[a0.x], r2
+                dp4 r7.y, lpos[a0.x+1], r2
+                dp4 r7.z, lpos[a0.x+2], r2
+                mov r7.w, consts.y
+                dp4 r0.x, clip[0], r7
+                dp4 r0.y, clip[1], r7
+                dp4 r0.z, clip[2], r7
+                dp4 r0.w, clip[3], r7
+            .else
+                dp4 r7.x, eyerow[0], r2
+                dp4 r7.y, eyerow[1], r2
+                dp4 r7.z, eyerow[2], r2
+                mov r7.w, consts.z
+                mov r8, innrm
+                mov r8.w, consts.z
+                dp4 r9.x, nrmrow[0], r8
+                dp4 r9.y, nrmrow[1], r8
+                dp4 r9.z, nrmrow[2], r8
+                mov r9.w, consts.z
+                dp3 r10, r9, r9
+                rsq r10, r10
+                mul r9, r9, r10
+                mov r11, amb
+                mul r12, ambmix, inclr
                 add r11, r11, r12
+                for lcount
+                    add r12, lpos[aL], -r7
+                    dp3 r13, r12, r12
+                    rsq r14, r13
+                    mul r12, r12, r14
+                    mul r15, r13, r14
+                    ; diffuse: n . l, floored (clamp or sign), or 1
+                    dp3 r10, r9, r12
+                    max r10, dmode.xxxx, r10
+                    mul r10, dmode.yyyy, r10
+                    add r10, dmode.zzzz, r10
+                    ifc cmp.y
+                        ; specular: c = n . dir where n . l >= 0 (else 0), floored at 0; the denominator takes c
+                        dp3 r3, r9, r12
+                        sge r3, r3, r1
+                        dp3 r14, ldir[aL], r9
+                        max r14, consts.zzzz, r14
+                        mul r14, r3, r14
+                        mov r15, r14
+                    .else
+                        ; spot: c = max(l . dir, 0); the denominator takes the distance d
+                        dp3 r14, ldir[aL], r12
+                        max r14, consts.zzzz, r14
+                    .end
+                    ; attenuation: max(a0 + a1 c + a2 c^2, 0) / (k0 + k1 v + k2 v^2)
+                    mul r13, lka[aL].zzzz, r14
+                    add r13, lka[aL].yyyy, r13
+                    mul r13, r13, r14
+                    add r13, lka[aL].xxxx, r13
+                    max r13, consts.zzzz, r13
+                    mul r12, lkk[aL].zzzz, r15
+                    add r12, lkk[aL].yyyy, r12
+                    mul r12, r12, r15
+                    add r12, lkk[aL].xxxx, r12
+                    rcp r12, r12
+                    mul r13, r13, r12
+                    mul r13, amode.xxxx, r13
+                    add r13, amode.yyyy, r13
+                    mul r13, r13, r10
+                    mul r12, lcol[aL], r13
+                    add r11, r11, r12
+                .end
+                max r11, consts.zzzz, r11
+                min r11, c255, r11
+                mul r12, r5, r11
+                mul r12, inv255, r12
+                flr r12, r12
+                cmp lsel.yz, ne, ne, r1.xx  ; cmp.x colour lit, cmp.y alpha lit
+                ifc cmp.x
+                    mov r5.xyz, r12
+                .end
+                ifc cmp.y
+                    mov r5.w, r12.w
+                .end
             .end
-            max r11, consts.zzzz, r11
-            min r11, c255, r11
-            mul r12, r5, r11
-            mul r12, inv255, r12
-            flr r12, r12
-            mov r5.xyz, r12
         .end
 
         mov r8, innrm
         mov r8.w, consts.z
+        mov r13, consts.zzzz
+        cmp postf.ww, ne, ne, r13.xx    ; cmp.x: the post-transform rows apply (units without one: identity rows)
         ; unit 0: source (slot x weight, wtex, 1) + wpos x position + wnrm x normal, then (s, t, q) rows;
         ; unit 0 is the PICA unit with a projective lookup: texcoord0.w = 1 + w (q - 1), and the unit divides by it
         ; per pixel (w = 1: MTX3x4, q = 0 is left undivided, as the CPU path does; w = 0: w = 1, a plain lookup)
@@ -145,6 +191,22 @@
         dp4 r1.x, texrow[0], r4
         dp4 r1.y, texrow[1], r4
         dp4 r15.x, texrow[2], r4
+        ifc cmp.x
+            ; post-transform matrix: (s, t, q) normalised (weight postf.x), then the rows . (s, t, q, 1)
+            mov r13.xy, r1.xy
+            mov r13.z, r15.x
+            mov r13.w, consts.y
+            dp3 r14.x, r13, r13
+            max r14.x, consts.wwww, r14.x
+            rsq r14.x, r14.x
+            add r14.x, -consts.y, r14.x
+            mul r14.x, postf.xxxx, r14.x
+            add r14.x, consts.y, r14.x
+            mul r13.xyz, r14.xxx, r13.xyz
+            dp4 r1.x, post[0], r13
+            dp4 r1.y, post[1], r13
+            dp4 r15.x, post[2], r13
+        .end
         max r14.x, r15.x, -r15.x
         sge r14.x, consts.z, r14.x
         add r15.x, r15.x, r14.x
@@ -166,6 +228,22 @@
         dp4 r3.x, texrow[3], r4
         dp4 r3.y, texrow[4], r4
         dp4 r15.x, texrow[5], r4
+        ifc cmp.x
+            ; post-transform matrix: (s, t, q) normalised (weight postf.y), then the rows . (s, t, q, 1)
+            mov r13.xy, r3.xy
+            mov r13.z, r15.x
+            mov r13.w, consts.y
+            dp3 r14.x, r13, r13
+            max r14.x, consts.wwww, r14.x
+            rsq r14.x, r14.x
+            add r14.x, -consts.y, r14.x
+            mul r14.x, postf.yyyy, r14.x
+            add r14.x, consts.y, r14.x
+            mul r13.xyz, r14.xxx, r13.xyz
+            dp4 r3.x, post[3], r13
+            dp4 r3.y, post[4], r13
+            dp4 r15.x, post[5], r13
+        .end
         max r14.x, r15.x, -r15.x
         sge r14.x, consts.z, r14.x
         add r15.x, r15.x, r14.x
@@ -189,6 +267,22 @@
         dp4 r6.x, texrow[6], r4
         dp4 r6.y, texrow[7], r4
         dp4 r15.x, texrow[8], r4
+        ifc cmp.x
+            ; post-transform matrix: (s, t, q) normalised (weight postf.z), then the rows . (s, t, q, 1)
+            mov r13.xy, r6.xy
+            mov r13.z, r15.x
+            mov r13.w, consts.y
+            dp3 r14.x, r13, r13
+            max r14.x, consts.wwww, r14.x
+            rsq r14.x, r14.x
+            add r14.x, -consts.y, r14.x
+            mul r14.x, postf.zzzz, r14.x
+            add r14.x, consts.y, r14.x
+            mul r13.xyz, r14.xxx, r13.xyz
+            dp4 r6.x, post[6], r13
+            dp4 r6.y, post[7], r13
+            dp4 r15.x, post[8], r13
+        .end
         max r14.x, r15.x, -r15.x
         sge r14.x, consts.z, r14.x
         add r15.x, r15.x, r14.x

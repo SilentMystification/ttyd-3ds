@@ -16,7 +16,7 @@ int gx_lobj_switch(void) {
 }
 
 void gx_lobj_init(GxLobjTab* t, const char* what, uint32_t bits) {
-    t->hot = gx_big_alloc(what, sizeof(GxLobjHot) << bits);
+    t->hot = gx_big_place(what, sizeof(GxLobjHot) << bits); /* place=gxlobj_index:qtm (game side: gxlobj_game_index) */
     t->bits = bits;
     t->mask = (1u << bits) - 1;
     t->cap = 1u << (bits - 1);

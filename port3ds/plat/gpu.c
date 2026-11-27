@@ -4182,13 +4182,26 @@ static int one_init(void) {
     static const u16 k_stride[ONE_CLS] = {44, 32, 48};
     u32 kb = 0;
     int heap = 0;
+    /* one placement for the three stores ("gx class blocks": linear as before; QTM only by place=gx_class_blocks:qtm;
+     * the CPU copies the blocks into the frame list, the GPU does not read them here) */
+    size_t all = 0;
+    for (int c = 0; c < ONE_CLS; c++) {
+        all += (size_t)k_cap[c] * k_stride[c] * 4;
+    }
+    int cbp = plat_place_register("gx class blocks", all, 16, PLAT_PREFS(PLAT_TIER_QTM, PLAT_TIER_LINEAR, PLAT_TIER_HEAP),
+                                  PLAT_PF_QTM_ASK);
+    const char* cbt = "none";
+    if (cbp >= 0) {
+        plat_place_info(cbp, NULL, NULL, NULL, &cbt);
+    }
     for (int c = 0; c < ONE_CLS; c++) {
         OneStore* s = &s_one_st[c];
         s->cap = k_cap[c];
         s->stride = k_stride[c];
         size_t bytes = (size_t)s->cap * s->stride * 4;
-        s->mem = linearMemAlign(bytes, 16);
-        s->linear = s->mem != NULL;
+        s->mem = cbp >= 0 ? plat_place_alloc(cbp, bytes, 16) : linearMemAlign(bytes, 16);
+        s->linear = s->mem != NULL && (cbp < 0 || strcmp(cbt, "HEAP") != 0);
+        heap |= s->mem != NULL && !s->linear;
         if (s->mem == NULL) {
             s->mem = memalign(16, bytes); /* COPY mode reads them with the CPU only */
             heap = 1;
@@ -4201,9 +4214,9 @@ static int one_init(void) {
         }
         kb += (u32)(bytes >> 10);
     }
-    PLOG_I("gxone=%d: class blocks by id, own encoders (%lu KB of blocks%s); fixed: texenv %08lx texcfg %08lx shadow %08lx "
-           "fragop %08lx %08lx early %lu %lu %lu stencil %08lx %08lx blend colour %08lx",
-           s_one, (unsigned long)kb, heap ? ", some in the heap" : ", linear memory",
+    PLOG_I("gxone=%d: class blocks by id, own encoders (%lu KB of blocks in %s%s); fixed: texenv %08lx texcfg %08lx "
+           "shadow %08lx fragop %08lx %08lx early %lu %lu %lu stencil %08lx %08lx blend colour %08lx",
+           s_one, (unsigned long)kb, cbt, heap ? ", some in the heap" : "",
            (unsigned long)s_one_fx.texenv_buf_hi, (unsigned long)s_one_fx.tex_cfg_hi, (unsigned long)s_one_fx.tex_shadow,
            (unsigned long)s_one_fx.fragop_lo, (unsigned long)s_one_fx.fragop_shadow, (unsigned long)s_one_fx.early_depth,
            (unsigned long)s_one_fx.early_func, (unsigned long)s_one_fx.early_ref, (unsigned long)s_one_fx.stencil_test,
@@ -4221,7 +4234,8 @@ static int one_init(void) {
  *    plat_gpu_chunk_draw checks it with one compare; a full store starts again (every id becomes invalid, each batch
  *    builds again at its next use).
  *  - Frame list: the record's word arena (the gxonehop words) is a placement too ("gx frame list", 2 x gxonehopkb,
- *    linear memory by default; QTM only with place=gx_frame_list:qtm and qtmgpu, which needs the cb_qtm probe).
+ *    linear memory by default; QTM only with place=gx_frame_list:qtm and qtmgpu, which needs the cb_qtm probe; there each run is reached by a
+ *    jump from a small linear list, ck_qtm_init).
  *    At a chunk use the game thread does what oh_draw does before the first draw (stereo mark, flush, the class
  *    blocks whose ids the GPU does not hold), writes the pending uniform rows, then copies the chunk's words (COPY
  *    mode; the last draw's count patched for a batch called in part). No gx_rec record for these draws.
@@ -4711,6 +4725,45 @@ void plat_gpu_imm_end(const void* stream, uint32_t layout, uint32_t scales, uint
     s_imst.draws++;
 }
 
+/* The frame list in QTM (place=gx_frame_list:qtm qtmgpu). Switch qtmlistgsp (default 0):
+ *  0: each run goes to GSP as a 32-byte list in linear memory that jumps (CMDBUF_SIZE0/ADDR0/JUMP0, the address
+ *     is the physical one >> 3: QTM 0x1E800000 + n is 0x1F000000 + n, osConvertVirtToPhys) to the run in QTM; the
+ *     run ends with its own FINALIZE. The probe cases cb_jump0 and cb_qtm test both halves.
+ *  1: the run's QTM address goes to GSP as it is (GX_ProcessCommandList); works only if GSP accepts QTM lists.
+ * Flushes: the trampolines are linear memory (C3D_FrameEnd(0)'s flush covers them); the frame list is flushed once
+ * per record (GSPGPU_FlushDataCache on the QTM range, s_ck_tier_linear 0). */
+#define CK_TRAMP_N 64u /* 32 bytes each; the queue holds 32 entries and runs at C3D_FrameEnd: reuse after 2 frames */
+static u32* s_ck_tramp;
+static u32 s_ck_tramp_i, s_ck_tramp_bad;
+static void ck_qtm_init(void) {
+    int gsp = plat_switch_int("qtmlistgsp", 0) != 0;
+    if (!gsp) {
+        s_ck_tramp = linearMemAlign(CK_TRAMP_N * 32u, 16);
+    }
+    PLOG_I("gxchunk: frame list in QTM (physical %08lx), runs %s", (unsigned long)osConvertVirtToPhys(s_rec[0].ow),
+           gsp ? "handed to GSP as QTM lists (qtmlistgsp=1)"
+               : (s_ck_tramp != NULL ? "reached by a jump from linear memory" : "handed to GSP (no linear memory)"));
+}
+
+/* The 32-byte linear list that jumps to run c in QTM, or NULL (the run is handed over as it is). */
+static const u32* ck_tramp(const OhWords* c) {
+    u32 pa = osConvertVirtToPhys(c->w), bytes = (c->n + c->tail) * 4u;
+    if (pa == 0 || ((pa | bytes) & 7u) != 0) {
+        s_ck_tramp_bad++;
+        return NULL;
+    }
+    u32* t = s_ck_tramp + (s_ck_tramp_i++ & (CK_TRAMP_N - 1u)) * 8u;
+    t[0] = bytes >> 3;
+    t[1] = GPUREG_CMDBUF_SIZE0 | 0x000F0000u;
+    t[2] = bytes >> 3; /* written twice: JUMP0 is the last command of the 16-byte block */
+    t[3] = GPUREG_CMDBUF_SIZE0 | 0x000F0000u;
+    t[4] = pa >> 3;
+    t[5] = GPUREG_CMDBUF_ADDR0 | 0x000F0000u;
+    t[6] = 1;
+    t[7] = GPUREG_CMDBUF_JUMP0 | 0x000F0000u;
+    return t;
+}
+
 /* Render thread: a run of words as a command list of its own (1), or 0 when the GX queue has no room for it (the
  * caller copies the words into citro3d's buffer). citro3d's words since its last split go first. */
 static int ck_submit(const OhWords* c) {
@@ -4725,7 +4778,12 @@ static int ck_submit(const OhWords* c) {
         s_gx_entries++;
         s_ckst.splits++;
     }
-    GX_ProcessCommandList((u32*)c->w, (c->n + c->tail) * 4u, 0);
+    const u32* t = s_ck_tramp != NULL ? ck_tramp(c) : NULL;
+    if (t != NULL) {
+        GX_ProcessCommandList((u32*)t, 32u, 0);
+    } else {
+        GX_ProcessCommandList((u32*)c->w, (c->n + c->tail) * 4u, 0);
+    }
     s_gx_entries++;
     s_ckst.subs++;
     return 1;
@@ -4833,6 +4891,10 @@ static void ck_log(u32 f) {
            (unsigned long)s_frame_counter, (unsigned long)(s_ckst.subs / f), (unsigned long)(s_ckst.splits / f),
            (unsigned long)(s_ckst.subcopy / f), (unsigned long)s_ckst.vchecks, (unsigned long)s_ckst.vdiffer,
            (unsigned long)s_ckst.vone, (unsigned long)s_ckst.vunres, (unsigned long)s_ckst.vover);
+    if (s_ck_tramp != NULL) {
+        PLOG_I("gxchunk frame %lu: QTM frame list, %lu jumps made, %lu runs not aligned (handed to GSP as they are)",
+               (unsigned long)s_frame_counter, (unsigned long)s_ck_tramp_i, (unsigned long)s_ck_tramp_bad);
+    }
     if (s_immfl) {
         /* with gxchunk=1 the verify counts of the line above are the immediate draws' alone */
         PLOG_I("gximmfl frame %lu: per frame draws %lu merged %lu none %lu; front-end checks %lu route differ %lu "
@@ -5032,6 +5094,17 @@ static int oh_init(void) {
         if (s_one == 1 && c != DC_LAY) {
             continue; /* gxone=1: the three state classes go by id; only the layout keeps its table */
         }
+        if (c == DC_LAY) {
+            /* the layout blocks (keys and kept words; CPU only): heap as before, QTM by place=gx_layout_blocks:qtm */
+            size_t lb = (size_t)t->slots * t->stride * 4;
+            int h = plat_place_register("gx layout blocks", lb, 16, PLAT_PREFS(PLAT_TIER_QTM, PLAT_TIER_HEAP),
+                                        PLAT_PF_QTM_ASK);
+            t->mem = h >= 0 ? plat_place_alloc(h, lb, 16) : NULL;
+            if (t->mem != NULL) {
+                memset(t->mem, 0, lb);
+                continue;
+            }
+        }
         t->mem = calloc((size_t)t->slots * t->stride, 4);
         if (t->mem == NULL) {
             PLOG_W("gxonehop: no memory for the tables: off");
@@ -5045,8 +5118,10 @@ static int oh_init(void) {
     s_oh_words = kb * 256u;
     int fl = -1; /* gxchunk: the frame list placement (the GPU reads the words) */
     if (s_chunk) {
-        fl = plat_place_register("gx frame list", 2u * s_oh_words * 4u, 16, PLAT_PREFS(PLAT_TIER_LINEAR, PLAT_TIER_HEAP),
-                                 PLAT_PF_GPU_READ);
+        /* QTM only by place=gx_frame_list:qtm with qtmgpu (and room: gxonehopkb=128 gives 2 x 128 KiB) */
+        fl = plat_place_register("gx frame list", 2u * s_oh_words * 4u, 16,
+                                 PLAT_PREFS(PLAT_TIER_QTM, PLAT_TIER_LINEAR, PLAT_TIER_HEAP),
+                                 PLAT_PF_GPU_READ | PLAT_PF_QTM_ASK);
         const char* tier = "none";
         if (fl >= 0) {
             plat_place_info(fl, NULL, NULL, NULL, &tier);
@@ -5064,6 +5139,9 @@ static int oh_init(void) {
             PLOG_W("gxonehop: no memory for two %lu KB word arenas: off", (unsigned long)kb);
             return 0;
         }
+    }
+    if (s_chunk && !s_ck_tier_linear) {
+        ck_qtm_init(); /* the frame list is in QTM (a heap tier turned gxchunk off above) */
     }
     if (s_onehop == 2) {
         s_ohv_gcap = s_oh_words;

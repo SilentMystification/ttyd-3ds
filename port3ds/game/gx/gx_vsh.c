@@ -552,6 +552,7 @@ static struct {
     u8* base;
     u32 used;
     u32 last_frame; /* presented-frame count when it was last written */
+    u32 cap;        /* vertices (IMM_CHUNK_VERTS, or less in the gx imm ring placement) */
 } s_imm[IMM_CHUNKS];
 static int s_imm_cur = -1;
 static u32 s_imm_stride, s_imm_layout;
@@ -612,10 +613,45 @@ u32 gx_vsh_imm_nidx(u8 prim, u32 n) {
     }
 }
 
+/* The "gx imm ring" placement (docs/PORT_3DS_QTM.md): only when place=gx_imm_ring:<tier> names it (QTM also needs
+ * qtmgpu); without it the chunks are linear stream memory made on first use, as before. The placement holds
+ * IMM_RING_CHUNKS chunks of gximmringkb / IMM_RING_CHUNKS bytes (default 768 KiB: 3 x 256 KiB, 5041 vertices each);
+ * they are tried first, the other chunk slots stay the overflow (linear, IMM_CHUNK_VERTS). Not identical to the
+ * default: a draw that does not fit starts a new chunk, so merges at chunk ends differ (the picture does not). */
+#define IMM_RING_CHUNKS 3
+static void imm_ring_place(void) {
+    if (plat_place_forced("gx imm ring") < 0) {
+        return;
+    }
+    u32 kb = (u32)plat_switch_int("gximmringkb", 768);
+    u32 verts = kb * 1024u / IMM_RING_CHUNKS / s_imm_stride; /* once, at start-up */
+    if (verts < IMM_MAX_VERTS || verts > IMM_CHUNK_VERTS) {
+        PLOG_W("gx imm ring: gximmringkb=%lu gives %lu vertices a chunk (%u to %u): not placed", (unsigned long)kb,
+               (unsigned long)verts, IMM_MAX_VERTS, IMM_CHUNK_VERTS);
+        return;
+    }
+    u32 bytes = verts * s_imm_stride;
+    int h = plat_place_register("gx imm ring", (size_t)bytes * IMM_RING_CHUNKS, 16,
+                                PLAT_PREFS(PLAT_TIER_QTM, PLAT_TIER_LINEAR), PLAT_PF_GPU_READ | PLAT_PF_QTM_ASK);
+    const char* tier = "none";
+    if (h >= 0) {
+        plat_place_info(h, NULL, NULL, NULL, &tier);
+    }
+    u32 now = plat_gpu_present_count();
+    for (int i = 0; i < IMM_RING_CHUNKS && h >= 0; i++) {
+        s_imm[i].base = plat_place_alloc(h, bytes, 16);
+        s_imm[i].cap = verts;
+        s_imm[i].last_frame = now - 3;
+    }
+    PLOG_I("gx imm ring: %d chunks of %lu vertices (%lu bytes) in %s, then linear chunks of %u", IMM_RING_CHUNKS,
+           (unsigned long)verts, (unsigned long)bytes, tier, IMM_CHUNK_VERTS);
+}
+
 static void imm_layout_init(void) {
     if (s_imm_stride == 0) {
         s_imm_stride = plat_vsh_layout_n(0, 3, 0, 1, s_imm_off); /* with the normal, for lit draws */
         s_imm_layout = plat_vsh_layout_word_n(0, 3, 0, 1);
+        imm_ring_place();
     }
 }
 
@@ -627,7 +663,7 @@ u32 gx_vsh_imm_layout(int32_t off[6]) {
 
 /* Room for n vertices in the ring (a fresh chunk when the current one is full). */
 int gx_vsh_imm_room(u32 n) {
-    if (s_imm_cur >= 0 && s_imm[s_imm_cur].used + n <= IMM_CHUNK_VERTS) {
+    if (s_imm_cur >= 0 && s_imm[s_imm_cur].used + n <= s_imm[s_imm_cur].cap) {
         return 1;
     }
     imm_layout_init();
@@ -641,6 +677,7 @@ int gx_vsh_imm_room(u32 n) {
             if (s_imm[i].base == NULL) {
                 break;
             }
+            s_imm[i].cap = IMM_CHUNK_VERTS;
             s_imm[i].last_frame = now - 3;
         }
         if ((s32)(now - s_imm[i].last_frame) >= 3) {

@@ -322,10 +322,29 @@ Skip every row whose probe failed. The method and test numbers are PORT_3DS_QTM.
 | 4 the log alone | `place=log:heap` | - | expected: no difference |
 | 5, 6 textures in VRAM | `vramtex=1 vramstats=60`; then `vramtexreserve=256`, `vramtexmax=512` | - | render, the `vramstats` line (bound KB from VRAM against linear, pressure 0), picture |
 | 7 copy targets under the tier | `vramtex=1 fx=indirect` and the START menu in gor_01 | - | no `gpu: no VRAM` line after the first; `target pressure` count |
-| 8 index arenas in QTM | `qtmgpu place=log:heap,gx_state:heap,audio_state:heap,gx_index:qtm` | `ib_qtm` OK | the picture first (`shots=300 shotmax=2`), then busy and render |
+| 8 index arenas in QTM | `qtmgpu place=log:heap,gx_index:qtm` | `ib_qtm` OK | the picture first (`shots=300 shotmax=2`), then busy and render |
 | 9 the GX ring in QTM | `gxthread=2 gxpipeline=1 gxthreadkb=256`, against the same with `place=gx_ring:qtm` | - (CPU only) | busy, translator |
-| native frame list | `gxone=1 gxchunk=1 qtmgpu place=gx_frame_list:qtm` against `K` | `cb_qtm` OK (GSP's address check of a QTM list) | picture, hang lines, busy |
-| native chunks/immediate ring | placements of PORT_3DS_GX_NATIVE.md section 4b rows 1-3 (frame list, immediate ring, class blocks) | `cb_qtm`, `vb_qtm` | as above; priority rows 1-2 |
+
+### G2. GX-native placements (PORT_3DS_GX_NATIVE.md 4b; PORT_3DS_QTM.md section 11)
+
+Base `N` = `gxone=1 gxchunk=1 gximmfl=1 gxonehopkb=128` (config I with a 2 x 128 KiB frame list). Each row adds its switches to `N`; the reference is `N` alone (row G2.0, twice: the noise). Scenes `gor_01`, `pik_00` (busy scene), battle. In every run first check the boot log: `[MEM] placed <name> ... in QTM (forced)` for each name asked; a `QTM has no room` line makes the run void. Stop a row at the first hang (`gpu: hang` lines, the B reset path) and note it.
+
+| # | Switches added to `N` | Needs (A2) | Pass condition / read |
+|---|---|---|---|
+| G2.0 | none (twice) | - | reference: busy, render, GPU time; picture |
+| G2.1 | `qtmgpu place=gx_frame_list:qtm` (jump from linear, `qtmlistgsp=0`) | `cb_jump0`, `cb_qtm` | `gxchunk: frame list in QTM ... reached by a jump`; `QTM frame list, J jumps made, 0 runs not aligned`; picture equal to G2.0 (`shots=300 shotmax=2`); then busy/render against G2.0 |
+| G2.1b | G2.1 + `qtmlistgsp=1` (QTM list straight to GSP) | `cb_qtm` | only if G2.1 passes: does GSP take a QTM list (picture, no hang)? If it does and costs less, the trampoline can go |
+| G2.2 | `qtmgpu place=gx_record:heap,gx_imm_ring:qtm` against `place=gx_record:heap,gx_imm_ring:linear` (not against G2.0: the ring's chunks differ) | `vb_qtm` | `gx imm ring: 3 chunks of ... vertices ... in QTM`; picture equal; `gximmfl frame N` draw counts equal to the linear run; then render/GPU time |
+| G2.3 | `qtmgpu place=gx_record:heap,gx_frame_list:qtm,gx_imm_ring:qtm` | G2.1, G2.2 pass | rows 1-2 together (priority of section 4b); busy, render, GPU time |
+| G2.4 | `place=gx_class_blocks:qtm` | - (CPU only) | `gxone=1: class blocks ... in QTM`; busy |
+| G2.5 | `place=gx_layout_blocks:qtm` | - (CPU only) | busy |
+| G2.6 | `gxlobj=1 place=gxlobj_index:qtm` against `gxlobj=1` | - (CPU only) | busy (ListObj index in QTM: L2-miss latency) |
+| G2.7 | `place=gx_class_intern:qtm` | - (CPU only) | busy |
+| G2.8 | the best of G2.1-G2.7 together, with `place=gx_record:heap` if needed for room | the rows used | busy, render; the `[MEM]` lines show what fit |
+
+Keep a row only if it is outside the G2.0 noise in at least two scenes. Fill: PORT_3DS_QTM.md section 11 (a result column) and PORT_3DS_GX_NATIVE.md section 4b (`Depends on`).
+
+Azahar pre-check (the measurement agent, on the integration build; correctness only, Azahar's GPU access to QTM is no evidence): `determ` shots 780-785 of `N` against port3ds's `N` must be identical 6/6 in gor_01 (defaults unchanged); each row G2.1-G2.7 must boot to frame 785 in gor_01 and print its `[MEM] placed ... (forced)` line. A wrong picture or a hang in Azahar for G2.1-G2.3 is recorded, not a failure.
 
 Also the CPU side: from A3, QTM rows (`memcpy_qtm_*`, `memset_qtm_*`) against heap and linear tell whether QTM is faster or slower for the CPU. Fill: PORT_3DS_QTM.md section 9 (a result column) and section 7 budget; PORT_3DS_GX_NATIVE.md section 4b (the `Depends on` column).
 

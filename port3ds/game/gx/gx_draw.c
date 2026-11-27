@@ -746,15 +746,41 @@ static u32 one_hash(const u32* k, u32 n) {
     return h;
 }
 
+/* The class intern tables: one placement "gx class intern" (heap as before; QTM only by place=gx_class_intern:qtm),
+ * carved in order; NULL arena: malloc as before. */
+static u8* s_ot_arena;
+static size_t s_ot_left;
+static int s_ot_placed;
+
+#define OT_R16(n) (((size_t)(n) + 15u) & ~(size_t)15u)
+static size_t one_tab_bytes(u32 cap, u32 kcap, u32 outw) {
+    return OT_R16((size_t)cap * 16u) + OT_R16((size_t)kcap * 4u) + OT_R16((size_t)cap * 4u) +
+           OT_R16((size_t)cap * outw * 4u);
+}
+
+static void* one_tab_take(size_t bytes, int zero) {
+    if (s_ot_arena == NULL) {
+        return zero ? calloc(bytes, 1) : malloc(bytes);
+    }
+    bytes = (bytes + 15u) & ~(size_t)15u;
+    if (bytes > s_ot_left) {
+        return NULL;
+    }
+    void* p = s_ot_arena;
+    s_ot_arena += bytes;
+    s_ot_left -= bytes;
+    return p; /* the placement was zeroed */
+}
+
 static int one_tab_init(OneTab* t, u32 cap, u32 kcap, u32 outw) {
     t->cap = cap;
     t->smask = cap * 2 - 1;
     t->kcap = kcap;
     t->outw = outw;
-    t->slot = calloc((size_t)(t->smask + 1) * 2, 4);
-    t->keys = malloc((size_t)kcap * 4);
-    t->kref = malloc((size_t)cap * 4);
-    t->out = malloc((size_t)cap * outw * 4);
+    t->slot = one_tab_take((size_t)(t->smask + 1) * 2 * 4, 1);
+    t->keys = one_tab_take((size_t)kcap * 4, 0);
+    t->kref = one_tab_take((size_t)cap * 4, 0);
+    t->out = one_tab_take((size_t)cap * outw * 4, 0);
     return t->slot != NULL && t->keys != NULL && t->kref != NULL && t->out != NULL;
 }
 
@@ -1034,18 +1060,30 @@ static void one_init(void) {
     if (!gx_opt_one || s_ot[OT_TEV].slot != NULL) {
         return;
     }
-    if (!one_tab_init(&s_ot[OT_TEV], 512, 16384, offsetof(PlatGpuState, tex) / 4 + 1) ||
-        !one_tab_init(&s_ot[OT_TEVB], plat_gpu_one_capacity(PLAT_GPU_C_TEV), plat_gpu_one_capacity(PLAT_GPU_C_TEV) * 2, 1) ||
-        !one_tab_init(&s_ot[OT_TEX], plat_gpu_one_capacity(PLAT_GPU_C_TEX), plat_gpu_one_capacity(PLAT_GPU_C_TEX) * 12, 1) ||
-        !one_tab_init(&s_ot[OT_PIX], plat_gpu_one_capacity(PLAT_GPU_C_PIX), plat_gpu_one_capacity(PLAT_GPU_C_PIX) * 17,
-                      OT_PIX_OUTW)) {
+    const u32 ctev = plat_gpu_one_capacity(PLAT_GPU_C_TEV), ctex = plat_gpu_one_capacity(PLAT_GPU_C_TEX),
+              cpix = plat_gpu_one_capacity(PLAT_GPU_C_PIX), otev = offsetof(PlatGpuState, tex) / 4 + 1;
+    size_t all = one_tab_bytes(512, 16384, otev) + one_tab_bytes(ctev, ctev * 2, 1) + one_tab_bytes(ctex, ctex * 12, 1) +
+                 one_tab_bytes(cpix, cpix * 17, OT_PIX_OUTW);
+    int h = plat_place_register("gx class intern", all, 64, PLAT_PREFS(PLAT_TIER_QTM, PLAT_TIER_HEAP), PLAT_PF_QTM_ASK);
+    s_ot_arena = h >= 0 ? plat_place_alloc(h, all, 64) : NULL;
+    s_ot_left = s_ot_arena != NULL ? all : 0;
+    s_ot_placed = s_ot_arena != NULL;
+    if (s_ot_arena != NULL) {
+        memset(s_ot_arena, 0, all);
+    }
+    int ok = one_tab_init(&s_ot[OT_TEV], 512, 16384, otev) && one_tab_init(&s_ot[OT_TEVB], ctev, ctev * 2, 1) &&
+             one_tab_init(&s_ot[OT_TEX], ctex, ctex * 12, 1) && one_tab_init(&s_ot[OT_PIX], cpix, cpix * 17, OT_PIX_OUTW);
+    s_ot_arena = NULL;
+    if (!ok) {
         PLOG_W("gxone: no memory for the class tables: off (the back end encodes the classes from the state)");
         gx_opt_one = 0;
         for (int i = 0; i < OT_N; i++) {
-            free(s_ot[i].slot);
-            free(s_ot[i].keys);
-            free(s_ot[i].kref);
-            free(s_ot[i].out);
+            if (!s_ot_placed) {
+                free(s_ot[i].slot);
+                free(s_ot[i].keys);
+                free(s_ot[i].kref);
+                free(s_ot[i].out);
+            }
             memset(&s_ot[i], 0, sizeof(s_ot[i]));
         }
     }

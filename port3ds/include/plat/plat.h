@@ -173,7 +173,8 @@ enum {
     PLAT_PF_CPU_SHARED = 1, /* several cores touch it every frame */
     PLAT_PF_GPU_READ = 2,
     PLAT_PF_GPU_WRITE = 4,
-    PLAT_PF_DSP = 8
+    PLAT_PF_DSP = 8,
+    PLAT_PF_QTM_ASK = 16 /* QTM is a candidate only when place=<name>:qtm asks for it (the GPU rule still applies) */
 };
 /* PLAT_PREFS(PLAT_TIER_QTM, PLAT_TIER_HEAP): an ordered tier list, best first. */
 #define PLAT_PREFS(...) ((const uint8_t[]){__VA_ARGS__, PLAT_TIER_NONE})
@@ -183,12 +184,13 @@ int plat_place_register(const char* name, size_t bytes, size_t align, const uint
 void plat_place_priority(int handle, int priority); /* before packing; lower packs first */
 void plat_place_set_manifest(void (*fn)(void));     /* called by plat_memplace_init before packing */
 void* plat_place_alloc(int handle, size_t size, size_t align);
+/* The tier that place= forces for this placement name (PLAT_TIER_*), or -1. Valid after plat_memplace_init. For
+ * code that keeps today's allocation unless a placement is asked for (the gx imm ring). */
+int plat_place_forced(const char* name);
 /* Compatibility ids: the platform's own placements, registered at init in
  * this order, so an id is also its handle. */
 enum {
     PLAT_PLACE_GX_RECORD = 0,  /* GX record buffers, core 0 writes, core 2 reads */
-    PLAT_PLACE_GX_STATE,       /* GX state tracker and caches */
-    PLAT_PLACE_AUDIO_STATE,    /* MusyX voice state and aux working buffers */
     PLAT_PLACE_LOG,            /* log queue and profiler counters */
     PLAT_PLACE_GX_INDEX,       /* index arenas of the frame records: CPU writes, GPU reads (linear by default) */
     PLAT_PLACE_COUNT

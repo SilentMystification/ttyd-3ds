@@ -66,7 +66,11 @@ void gx_rec_fast_update(void) {
     int quiet = !gx_dl_recording() && !gx_prim_is_open();
     gx_rec_fast.w = gx_rec_mode == 0 && quiet && !gx_tls_translator ? 0 : gx_rec_on() && quiet ? 1 : 2;
     const int fifo_ok = gx_rec_fast.w == 0 && gx_opt_dirty != 0 && !gx_opt_statededup;
-    gx_rec_fast.fifo = fifo_ok && gx_opt_fifo == 1 ? 0 : fifo_ok && gx_opt_fifo == 2 ? 2 : 1;
+    /* `w` when not 0 (the record path reads the same values); -1 gxfifo=1's fast body, 3 gxfifo=2's check, 0 */
+    gx_rec_fast.fifo = gx_rec_fast.w != 0                ? gx_rec_fast.w
+                       : fifo_ok && gx_opt_fifo == 1 ? (uintptr_t)-1
+                       : fifo_ok && gx_opt_fifo == 2 ? 3
+                                                     : 0;
 }
 
 static __thread int t_game; /* the thread that called GXInit */

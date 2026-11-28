@@ -322,8 +322,9 @@ static inline int gx_rec_on(void) { return gx_rec_mode != 0 && !gx_tls_translato
  * gx_tls_translator. */
 extern struct GxRecFast {
     uintptr_t w, tr_lo, tr_len;
-    /* switch gxfifo (gx_state.c): the hot setters' one word. 0: their fast body (gxfifo=1, `w` 0, gxdirty on, no
-     * gxstatededup); 2: gxfifo=2's check (same conditions); 1: the old body */
+    /* switch gxfifo (gx_state.c, RECF): the hot setters' word in place of `w`. `w` when `w` is not 0; else -1
+     * (as intptr_t): their fast body (gxfifo=1, gxdirty on, no gxstatededup); 3: gxfifo=2's check (same
+     * conditions); 0: the old body applies the call */
     uintptr_t fifo;
 } gx_rec_fast;
 void gx_rec_fast_update(void);

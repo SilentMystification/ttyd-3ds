@@ -13,6 +13,92 @@ Written 2026-11-27 for the first console session after the unattended work. One 
 - A crash or hang that stops the game: the updater's recovery mode still answers. `$D report --out build/devupdate-last/report.txt`, then `$D restart "<next switches>"`. A frozen console: hold POWER, start the dev CIA from the HOME Menu (a dev build starts the server by itself), then go on. The probe journal and the hang files survive on the SD card.
 - Time estimates are wall time on the console including boot and warp (about 1.5-2 min per game run).
 
+## Unattended session (one-time setup, then one command)
+
+Everything in sections A to G, the R block (retail) and most of E is also written as a manifest that a program runs without the owner at the console. Sections A to G below stay as the manual reference: each step of the manifest has the id of its section (A2a, B2, D1, D3v1, R1, H4 ...), and the commands there are the ones the program runs.
+
+Files, all under `tools/port3ds/console_session/`:
+
+| File | Job |
+|---|---|
+| `manifest.json` | The session as data: every step, its switches, `until` pattern, timeout, expected and forbidden log lines, retries, gates, files to fetch. `session.py export-loop OUT.json` writes the static run steps as a plain `devupdate.py loop` manifest. |
+| `session.py` | The driver. One `devupdate.py loop` entry per step (the supervisor pushes, launches, watches the heartbeat, fetches files), plus retries, the recovery policy, result checks, the hang bisect (binary search on `gpudrawcut`), gates (QTM rows only after `cb_qtm`/`ib_qtm` are OK), resume, and the call of the collector. |
+| `collect.py` | Parses the fetched files and logs; writes `results/report.md`, `results.json`, `baseline.md` and `results/patches/*.patch` (GPU_RULES "New 3DS" column, 60FPS calib columns, "Console session" blocks for GX_PERF, TESTING, QTM, CTR_DEVKIT_PLAN). The docs are not changed; apply a patch with `git apply results/patches/<name>.patch` after reading it. |
+| `azsv.py`, `fakegame.py`, `dryrun.py` | The dry run (below): a supervisor stand-in for Azahar, a host-only fake game, and the driver that runs the manifest against them. |
+
+Commands (PC, no console contact until `run`):
+
+```sh
+python3 tools/port3ds/console_session/session.py prep                    # the builds the session needs (add --build to run them)
+python3 tools/port3ds/console_session/session.py plan                    # every step, in order, with its switches
+python3 tools/port3ds/console_session/session.py run --ip 192.168.8.221 --owner-go    # the session; refuses a non-loopback address without --owner-go
+python3 tools/port3ds/console_session/session.py run --ip ... --owner-go --only A,B,C # a part: phases A B C D G E R Z or step ids
+python3 tools/port3ds/console_session/session.py run --resume --out build/console-session/<folder> --ip ... --owner-go
+python3 tools/port3ds/console_session/collect.py build/console-session/<folder>       # redo the report from a folder
+```
+
+The session folder is `build/console-session/<time>/`: `session.log`, `steps.json` (one record per step: status, attempts, why), `steps/<id>/attempt<N>/` (the loop's files, `latest.log`), `fetched/` (`gpuprobe.txt`, `calib.txt`, `calib_pmu.txt`, probe `.bin`, `gpuhang/*`) and `results/`. Run order in the manifest is phase A, B, C, D, G, E, R (retail: cell 3 last), Z (supervisor reboot, only with `--with-destructive`). Total about 5 h 30 min as in the table at the end.
+
+### What the program does by itself
+
+| Runbook part | Manifest step | Automated | Pass test the program applies |
+|---|---|---|---|
+| A1 install dev CIA | `A1` | push through the supervisor (retry, then devupdate with its `--stage` fallback), launch, first heartbeat | boot line of this push (`hwb=A1-n`) in `latest.log` |
+| A2 gpuprobe 3 stages | `A2a` `A2b` `A2c` | probesafe run, QTM run, the rest; a died process is relaunched without `probefresh` (the journal resumes, up to 3 retries); the table and the `.bin` files are fetched | `GPUPROBE DONE` |
+| A3 calib, calibpmu | `A3a` `A3b` | both passes, `calib.txt`, `calib_pmu.txt` | `CALIB DONE`; the collector warns when the read rows are flat or `branch_random` is not slower than `branch_sorted` |
+| A4 baseline | `A4` (10 scenes) | restart per scene, windows parsed with `hw_baseline.parse` | 3 windows (frames 781, 841, 901) |
+| B hang survival | `B2` `B3` `B3r` | the pretend hang, the give-up path, the report from recovery mode | `reset #1 done`, `citro3d state marked dirty ...`; `no more resets` and the crash path |
+| C hang bisect | `C` | C1 repro, the two suspects (535, 207), else the binary search over 0..585 with `gpudrawcut`, then the confirmation with `gpudrawskip`; every run is a hang or no hang by the log; the table and the `gpuhang/` files are kept | culprit draw confirmed, or "no repro" / "not monotone" in the report |
+| D1 A/B pairs | `D1` (S4 x 9 configs, D twice) | all runs, the pair table with the D-repeat noise | windows parsed |
+| D1 verify, job round trip | `D1v` `D1j` | `gxchunk=2 gximmfl=2`, `jobprobe` | `differ 0 records over 0`, `mismatches 0 missed 0 stale 0` |
+| D2 old/noqtm/recheap, C3 ten scenes | `D2a` `D2b` | baseline runs | windows parsed |
+| D3 texdt | `D3v1..4` `D3e0` `D3e1` | verify in four scenes, load-cost pair | no `BAD n>0`, no `verify MISMATCH` |
+| D4 heap | `D4a` `D4b` | pik_00 with `heaplog` | no crash; the `heap` lines are quoted in the report |
+| D5 retail | `R1..R3d` | cells 1-3 for four scenes, then the release CIA is pushed back (`Z1`) | `bench 721-841:` line |
+| G QTM | `G0` `G4` `G8` `G9a` `G9b` `G10` | baseline pairs; `G8` runs only when `ib_qtm` is OK in the fetched probe table, `G10` only when `cb_qtm` is OK | gates read `fetched/gpuprobe.txt` |
+| E1 updater | `E1a` `E1b` | bad-CRC refusal, normal push | refusal text, `updated from` in the log |
+| E2 deterministic CIA | `E2` `E2b` `E2c` | three pushes, only if `build/ttyd_det_a.cia` exists | boots each time |
+| E3 supervisor H1-H4c | `H1` `H2` `H2p` `H4` `H4l` `H3` `H3p` `H4b` `H4bl` `H4c` | status, ping on a hang and on the crash screen, terminate, launch, the watchdog relaunch, supervisor push | `heartbeat=N`, `pm=0`, frame 61 of the next game |
+| H5 reboot | `H5` | only with `--with-destructive`; waits 150 s for the supervisor | ping after the reboot |
+
+Recovery policy (also in the manifest note and in `session.py --help`):
+
+1. A step attempt fails when the loop reports `push failed`, `launch failed`, `no start`, `timeout`, `crash` or `ended`, or when a required line is missing or a forbidden line shows.
+2. The program calls `supervisor terminate --gpureset 2` (PM terminate and the GPU reset before the relaunch), then the next attempt launches the game again. `retries` per step is in the manifest (probe steps 3, A1/A4push/calib 2, most others 1, E2 none). `retry_drop` removes switch words on a retry (`probefresh`).
+3. After the last attempt the step is recorded FAIL with the reason, the console is terminated into a known state, and the session goes on with the next step. A GPU hang, a crash screen and a silent game never stop the session.
+4. When the supervisor itself stops answering (loop exit 2), the program waits up to `--sv-wait` seconds (default 240), asks for a reboot once, and stops with exit 2 and a resume state only if it never comes back. `run --resume` then continues at the first step without a result.
+5. `loop` itself does the in-step recovery (no heartbeat 60 s after the launch: terminate and launch once, then reboot).
+
+### One-time owner setup (before the first unattended session)
+
+1. **Builds on the PC** (`session.py prep`): the dev CIA, the release CIA, the retail CIA, the supervisor CIA; for E2 also the deterministic CIA. The game CIAs are built from the commit the numbers belong to.
+2. **Console on a charger, lid open, Wi-Fi on** with a fixed address (router reservation for `192.168.8.221`). Turn the sleep timers off in the HOME Menu settings: nothing here wakes a sleeping console, and a closed lid changes the Wi-Fi state (CTR_DEVKIT_PLAN F9). The 3DS must not go to sleep for about 5 h 30 min.
+3. **SD card files**: `sdmc:/3ds/ttyd/game.iso` (the disc image), `sdmc:/3ds/dspfirm.cdc`, and `sdmc:/3ds/ttyd/debug3ds.txt` containing `devupdate` (so a HOME start of the release CIA has the server). No game assets in any CIA.
+4. **Luma3DS**: no option change is needed for the supervisor (it is a NAND title, CTR_DEVKIT_PLAN F1). The usual settings stay (game patching on if the owner already uses it). Check once that Rosalina's "Enable loading external FIRMs and modules" is not needed: it is not.
+5. **Install the supervisor** (CTR_DEVKIT_PLAN "One-time console install"): push a dev or release CIA with the Select-menu row; `devupdate.py --ip $N3DS_IP files put build/3ds/supervisor/ctrdk-supervisor.cia`; on the console ZL+SELECT, R for the Debug tab, row "Supervisor: off", A. The row shows `running ok 00000000`. From the PC: `devupdate.py --ip $N3DS_IP supervisor ping` must answer `pong supervisor ... state=running`. This is also test H1 and the first real proof that PM starts the module.
+6. **Start state**: the game runs once from the HOME Menu with the server on (so the first `ping` and `loop` have something to talk to). After any console reboot or power cycle the supervisor is gone until the game starts again (it starts the supervisor in `main()`): start the game from the HOME Menu once.
+7. Give the go: `session.py run --ip 192.168.8.221 --owner-go`. One go covers the whole manifest; the destructive reboot (H5) needs `--with-destructive`.
+
+### Manual points that stay (the program cannot do or see these)
+
+- **The pictures.** The manifest checks logs. B2 "no black or garbage after the reset", E1 "Updater screen: build line, 30-block bar, the refused push repaints the old screen, the top screen greyed during the pause" and E2 "one ttyd title in the HOME Menu" need a person's eyes. Those steps carry a `manual` text and the report lists them under "Still manual". `shots=300 shotmax=2` runs (D6, `--with-optional`) save screenshots that the owner compares afterwards.
+- **A frozen console that the supervisor cannot free**: hold POWER, start the game from HOME (the supervisor starts with it). Then `run --resume`.
+- **A console reboot by H5 (`--with-destructive`)** and H6 (uninstall through the Select menu, then `supervisor ping` must fail): last; H6 is menu-only.
+- **Retail cell 3** (the `TTYD_RETAIL` CIA): a HOME start of a retail build has no server. The manifest passes `devupdate` and pushes the release CIA back (`Z1`); if the session dies in between, recover with FBI (`tools/port3ds/fbi_install.py`).
+- **Retail `latest.log`**: whether retail mode writes a fresh `latest.log` is not checked on hardware; the collector marks a `bench` line that carries no tag of its run as "may be the previous run's".
+- **Deterministic CIA (E2)** needs two PC builds without ccache before the session; the steps skip themselves when `build/ttyd_det_a.cia` is missing.
+- **The `PROBE_RULES` / `TEX_ALIGN_PROBE` functions** in `gpu_cmd_diff.py` for each probe row that differs from Azahar and from "Expected", and the decisions each result feeds (`gxthread=2` as default, `texdt` as default, `tex16`, QTM placements, owner-questions) stay with the planner: the report gives the numbers and the doc patches, not the decisions.
+- **Anything the manifest marks FAIL** with a reason of "hang with no repro" or "not monotone" needs a person to read the table.
+
+### The dry run (no console) and what it cannot show
+
+`tools/port3ds/console_session/dryrun.py fake|azahar` runs the manifest (profile `dry`: short scenes, windows at frames 61 and 121, a cut-down list with the same step ids) against stand-ins, with `--ip 127.0.0.1` only:
+
+- `fake`: `fakegame.py` (devupdate protocol, log and SD file formats of the real game, made-up numbers, a hang with a known culprit draw, faults injected into three launches) behind `azsv.py`. Host only, about 3-4 minutes. It proves the pipeline and the failure paths.
+- `azahar`: one headless Azahar (`devupdate.py azahar-session start --supervise`, a slot of `AZAHAR_MAX`) with the real dev CIA behind `azsv.py`.
+
+Cannot be simulated in Azahar (or by the fake): the supervisor sysmodule (PM start beside the game, `PMAPP_TerminateTitle`, the heartbeat service `ctrdk:sv`, `NS_RebootToTitle`: `azsv.py` answers the same protocol and `terminate`/`reboot` do nothing); a real GPU hang and `GSPGPU_ResetGpuCore` (Azahar's GPU does not hang; the reset is a logged no-op); the QTM cases and QTM placements (a 3dsx has none, and Azahar's reads of QTM are not the PICA's); any timing (all numbers on the hardware only); a process that dies in the probe (`rt_deleted` svcBreak ends the Azahar instance, so `A2c` runs in the fake only); the bisect finds no hang in Azahar (`no repro`), the search itself is proven against the fake's known culprit; the Select menu, the screens, the HOME Menu, Wi-Fi, sleep and the console's reboot.
+
 ## 0. Preparation on the PC (no console, no go needed)
 
 ```sh

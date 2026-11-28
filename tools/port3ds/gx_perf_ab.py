@@ -36,6 +36,7 @@ SCENES = {
     "eki_00": "map=eki_00 story=30",
     "usu_00": "map=usu_00 story=30",
     "pik_00": "map=pik_00 story=30",
+    "win_00": "map=win_00 story=30",
     "pause": "map=gor_01 story=30 padscript=wait*700,start*3",
 }
 TEN = "gor_01,gon_02,aaa_00,tik_01,hei_01,jin_00,battle,eki_00,usu_00,pik_00"

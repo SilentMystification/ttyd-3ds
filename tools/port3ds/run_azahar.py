@@ -211,6 +211,12 @@ def write_profile(gdb, gdb_port, lle_audio=False, realtime=False, api=1):
     sdmc.mkdir(parents=True, exist_ok=True)
     cfg = QT_CONFIG.format(gdb="true" if gdb else "false", gdb_port=gdb_port, audio=2 if lle_audio else 0,
                            frame_limit=100 if realtime else 0, vsync="true" if realtime else "false", api=api)
+    # TTYD_AZAHAR_CPU_CLOCK=N: Azahar's cpu_clock_percentage (default 100). Azahar charges one tick (3.73 ns
+    # of guest time) per instruction at 100: a 268 MHz CPU at one cycle per instruction. N=150 is a New 3DS
+    # core at 804 MHz and 2.0 cycles per instruction, N=120 at 2.5 (docs/PORT_3DS_WHYSLOW.md).
+    clock = os.environ.get("TTYD_AZAHAR_CPU_CLOCK")
+    if clock:
+        cfg += f"\n[Core]\ncpu_clock_percentage={int(clock)}\ncpu_clock_percentage\\default=false\n"
     (config / "azahar-emu" / "qt-config.ini").write_text(cfg)
     return sdmc
 

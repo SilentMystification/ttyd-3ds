@@ -1567,7 +1567,7 @@ u32 gx_sdl_run(const u8* list, u32 nbytes, u16* hint) {
         s_sdl_pool = gx_big_alloc("gxsdl calls", sizeof(u32) * SDL_POOL_FIRST);
         s_sdl_cap = SDL_POOL_FIRST;
     }
-    if ((++s_sdl_lookups & 0x3FFFF) == 0) {
+    if ((++s_sdl_lookups & 0xFFFF) == 0) {
         PLOG_I("gxsdl: %lu lookups: %lu hit, %lu decoded, %lu stale, %lu resets", (unsigned long)s_sdl_lookups,
                (unsigned long)s_sdl_hit, (unsigned long)s_sdl_miss, (unsigned long)s_sdl_stale,
                (unsigned long)s_sdl_reset);
